@@ -1,0 +1,30 @@
+[Unit]
+Description=Dalan external heartbeat dead-man monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=dot-deadman
+Group=dot-deadman
+WorkingDirectory=/opt/dot-bridge
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=DOT_DEADMAN_DB=/var/lib/dot-deadman/deadman.sqlite
+Environment=DOT_DEADMAN_HOST=127.0.0.1
+Environment=DOT_DEADMAN_PORT=8788
+EnvironmentFile=/etc/dot-deadman.env
+StateDirectory=dot-deadman
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/bin/env node /opt/dot-bridge/bin/dot-deadman.mjs serve
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dot-deadman
+
+[Install]
+WantedBy=multi-user.target

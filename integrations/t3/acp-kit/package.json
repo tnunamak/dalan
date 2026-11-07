@@ -1,0 +1,18 @@
+{
+  "name": "@dalan/t3-acp-kit",
+  "version": "0.1.0",
+  "description": "Small shared kit for ACP adapters fronting a background job service for T3 Code",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./capability": "./src/capability.mjs",
+    "./session-store": "./src/session-store.mjs",
+    "./lock": "./src/lock.mjs",
+    "./t3-envelope": "./src/t3-envelope.mjs",
+    "./errors": "./src/errors.mjs"
+  },
+  "scripts": { "test": "node --test test/*.test.mjs" }
+}

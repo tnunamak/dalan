@@ -1,0 +1,45 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { AsStore } from '../src/as-store.mjs';
+
+const root = fs.mkdtempSync(path.join(process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp'), 'as-crypt-'));
+const file = path.join(root, 'as.sqlite'), keyFile = path.join(root, 'as-storage.key');
+const secret = 'private-' + 'fixture-' + 'canary';
+let store;
+try {
+  store = new AsStore(file); store.close(); store = null;
+  fs.unlinkSync(keyFile);
+  const db = new DatabaseSync(file);
+  db.exec('DELETE FROM as_storage_meta');
+  db.prepare('INSERT INTO oidc VALUES(?,?,?,?,?,?,?,?,?)').run('RefreshToken', secret, JSON.stringify({ grantId: 'grant', aud: secret, uid: 'uid', userCode: 'user' }), 'grant', 'uid', 'user', null, Date.now(), null);
+  db.prepare('INSERT INTO connections VALUES(?,?,?,?,?,?,?,?,?,?)').run('connection', 'worker', 'grant', 'client', 'https://example.test/cb', secret, 'scope', Date.now(), null, null);
+  db.close();
+  store = new AsStore(file);
+  assert.equal(store.find('RefreshToken', secret).aud, secret);
+  assert.equal(store.findBy('RefreshToken', 'uid', 'uid').aud, secret);
+  assert.equal(store.findBy('RefreshToken', 'user_code', 'user').aud, secret);
+  assert.equal(store.connectionByGrant('grant').resource, secret);
+  store.close(); store = null;
+  for (const suffix of ['', '-wal', '-shm']) if (fs.existsSync(file + suffix)) assert.equal(fs.readFileSync(file + suffix).includes(secret), false);
+  const read = new DatabaseSync(file, { readOnly: true });
+  assert.equal(JSON.stringify(read.prepare('SELECT * FROM oidc').all()).includes(secret), false);
+  read.close();
+  const interrupted = new DatabaseSync(file); interrupted.prepare("UPDATE as_storage_meta SET state='cleanup'").run(); interrupted.close();
+  store = new AsStore(file); assert.equal(store.find('RefreshToken', secret).aud, secret); store.close(); store = null;
+  const resumed = new DatabaseSync(file, { readOnly: true }); assert.equal(resumed.prepare('SELECT state FROM as_storage_meta').get().state, 'ready'); resumed.close();
+  const key = fs.readFileSync(keyFile); fs.unlinkSync(keyFile);
+  assert.throws(() => new AsStore(file), /encrypted storage could not be opened/);
+  fs.writeFileSync(keyFile, Buffer.alloc(32), { mode: 0o600 });
+  assert.throws(() => new AsStore(file), /encrypted storage could not be opened/);
+  fs.writeFileSync(keyFile, key, { mode: 0o600 });
+  const moved = new DatabaseSync(file);
+  moved.exec("INSERT INTO connections SELECT 'other','other-worker','other-grant',client_id,redirect_uri,resource,scopes,created_at,revoked_at,revoked_reason FROM connections WHERE connection_id='connection'");
+  moved.close();
+  assert.throws(() => new AsStore(file), /encrypted storage could not be opened/);
+  const corrupt = new DatabaseSync(file); corrupt.exec("DELETE FROM connections WHERE connection_id='other'"); corrupt.prepare("UPDATE oidc SET payload='broken'").run(); corrupt.close();
+  assert.throws(() => new AsStore(file), /encrypted storage could not be opened/);
+  console.log('PASS legacy migration, restart, raw database scrubbing, key loss and ciphertext corruption');
+} finally { store?.close(); fs.rmSync(root, { recursive: true, force: true }); }

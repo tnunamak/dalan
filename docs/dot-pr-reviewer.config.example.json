@@ -1,0 +1,9 @@
+{
+  "report_thread_id": "mcp:00000000-0000-0000-0000-000000000000",
+  "owners": ["example-org"],
+  "repos": ["example-org/example-repo", "example-org/example-docs"],
+  "exclude_owners": ["example-user", "example-bot"],
+  "exclude_repos": [],
+  "headroom": 6,
+  "max_submits_per_run": 10
+}

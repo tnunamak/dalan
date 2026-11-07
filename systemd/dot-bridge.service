@@ -1,0 +1,17 @@
+[Unit]
+Description=Dalan bridge (MCP server)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/ABSOLUTE/PATH/TO/DALAN
+ExecStart=/usr/bin/env node src/server.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
+Environment=NODE_ENV=production
+Environment=PATH=/ABSOLUTE/PATH/TO/NODE/BIN:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+UnsetEnvironment=OPENAI_API_KEY ANTHROPIC_API_KEY
+
+[Install]
+WantedBy=default.target

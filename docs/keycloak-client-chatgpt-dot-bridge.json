@@ -1,0 +1,59 @@
+{
+  "client": {
+    "attributes": {
+      "access.token.lifespan": "300",
+      "backchannel.logout.revoke.offline.tokens": "false",
+      "backchannel.logout.session.required": "true",
+      "pkce.code.challenge.method": "S256",
+      "realm_client": "false"
+    },
+    "clientId": "chatgpt-dot-bridge",
+    "description": "Example public OAuth client for Dalan",
+    "directAccessGrantsEnabled": false,
+    "enabled": true,
+    "fullScopeAllowed": false,
+    "implicitFlowEnabled": false,
+    "name": "Dalan worker",
+    "protocol": "openid-connect",
+    "publicClient": true,
+    "redirectUris": [
+      "https://chatgpt.com/connector_platform_oauth_redirect"
+    ],
+    "serviceAccountsEnabled": false,
+    "standardFlowEnabled": true,
+    "webOrigins": []
+  },
+  "defaultClientScopes": [],
+  "optionalClientScopes": [
+    {
+      "attributes": {
+        "display.on.consent.screen": "true",
+        "include.in.token.scope": "true"
+      },
+      "name": "dot-bridge.read"
+    },
+    {
+      "attributes": {
+        "display.on.consent.screen": "true",
+        "include.in.token.scope": "true"
+      },
+      "name": "dot-bridge.work"
+    }
+  ],
+  "protocolMappers": [
+    {
+      "config": {
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "included.custom.audience": "https://dalan.example.com/<bridge-path-secret>/mcp",
+        "introspection.token.claim": "true",
+        "userinfo.token.claim": "false"
+      },
+      "consentRequired": false,
+      "name": "dot-bridge audience",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-audience-mapper"
+    }
+  ],
+  "realm": "agents"
+}

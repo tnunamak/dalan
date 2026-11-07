@@ -1,0 +1,608 @@
+[
+ {
+  "name": "list_pending",
+  "description": "List up to 50 queued assignment IDs and titles.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "required": [],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "claim",
+  "description": "Claim one immutable assignment and see available_checks before choosing run_check.check_id. lease_ms sets this grant’s duration, up to the owner-configured maximum. An exact live retry retains the grant and its stored duration.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claimant": {
+     "type": "string"
+    },
+    "acquisition_id": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 128,
+     "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "lease_ms": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 3600000
+    }
+   },
+   "required": [
+    "request_id",
+    "claimant"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "get",
+  "description": "Read assignment, available_checks, cancellation, progress, report and delivery facts.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "request_id"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "ack_message",
+  "description": "Acknowledge a lightweight message after reading it; no claim or finish is needed.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "message_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_id"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "progress",
+  "description": "Append progress. Set blocker:true or start note with BLOCKED: or QUESTION: to forward a question to the owner thread.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "note": {
+     "type": "string",
+     "maxLength": 4096
+    },
+    "blocker": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "note"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "finish",
+  "description": "Store a terminal worker report; completion is not owner acceptance.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "outcome": {
+     "type": "string",
+     "enum": [
+      "completed",
+      "blocked",
+      "failed"
+     ]
+    },
+    "summary": {
+     "type": "string",
+     "maxLength": 4096
+    },
+    "result": {
+     "type": "string",
+     "maxLength": 262144
+    },
+    "artifact_ids": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 8
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "outcome",
+    "summary",
+    "result"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "list_files",
+  "description": "List files in this assignment's checked-out repository workspace. Read-only; scoped to the assignment.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "path": {
+     "type": "string"
+    },
+    "limit": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 200
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "read_file",
+  "description": "Read a file from this assignment's checked-out repository workspace. Read-only; scoped to the assignment. The result has end_line (the last line included) and truncated (true when the 32 KiB cap cut the requested window).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "path": {
+     "type": "string"
+    },
+    "start_line": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "max_lines": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 200
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "path"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "apply_patch",
+  "description": "Apply a unified diff to this assignment's private workspace copy. Changes stay local until the owner reviews them; nothing is pushed.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "patch": {
+     "type": "string",
+     "maxLength": 262144
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "patch"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "run_check",
+  "description": "Start a listed repository check. Returns immediately for long checks; poll workspace_result for status and result. Fast checks may return a completed receipt. Unknown check_id returns available IDs.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "check_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "check_id"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "workspace_result",
+  "description": "Read the current diff, available_checks, check receipts, and artifact references.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "artifact_chunk",
+  "description": "Upload a sealed artifact for any claimed assignment, including read-only assignments.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "artifact_id": {
+     "type": "string"
+    },
+    "offset": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "data_base64": {
+     "type": "string"
+    },
+    "final": {
+     "type": "boolean"
+    },
+    "sha256": {
+     "type": "string",
+     "pattern": "^[a-fA-F0-9]{64}$"
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "artifact_id",
+    "offset",
+    "data_base64"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "t3_thread_list",
+  "description": "List T3 threads across projects or filter by project/cwd and status.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "projectId": {
+     "type": "string",
+     "maxLength": 128
+    },
+    "cwd": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "workspaceMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "status": {
+     "type": "string",
+     "enum": [
+      "active",
+      "settled",
+      "all"
+     ]
+    }
+   },
+   "required": [],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "t3_thread_read",
+  "description": "Read a bounded T3 thread transcript.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "threadId": {
+     "type": "string",
+     "maxLength": 128
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "answers",
+      "messages",
+      "full"
+     ]
+    },
+    "turns": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 100
+    },
+    "firstTurn": {
+     "type": "boolean"
+    },
+    "maxChars": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 20000
+    }
+   },
+   "required": [
+    "threadId"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "t3_thread_create",
+  "description": "Create a T3 thread in any project or directory and start its first turn.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "projectId": {
+     "type": "string",
+     "maxLength": 128
+    },
+    "cwd": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "prompt": {
+     "type": "string",
+     "maxLength": 262144
+    },
+    "workspaceMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "projectPolicy": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "provider": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "model": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "thinkingEffort": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "permission": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "interactionMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "environmentMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "speedMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "open": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "options": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 16
+    }
+   },
+   "required": [
+    "prompt"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "t3_thread_send",
+  "description": "Send to any T3 thread, including settled threads when wakeSettled is true.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "threadId": {
+     "type": "string",
+     "maxLength": 128
+    },
+    "message": {
+     "type": "string",
+     "maxLength": 262144
+    },
+    "mode": {
+     "type": "string",
+     "enum": [
+      "refuse",
+      "queue",
+      "steer",
+      "restart"
+     ]
+    },
+    "wakeSettled": {
+     "type": "boolean"
+    },
+    "provider": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "model": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "thinkingEffort": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "permission": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "interactionMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "speedMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "options": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 16
+    }
+   },
+   "required": [
+    "threadId",
+    "message"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "t3_thread_wait",
+  "description": "Wait at most 120 seconds for a T3 turn; returns partial state on timeout.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "threadId": {
+     "type": "string",
+     "maxLength": 128
+    },
+    "timeoutMs": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 120000
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "answers",
+      "messages",
+      "full"
+     ]
+    },
+    "maxChars": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 20000
+    }
+   },
+   "required": [
+    "threadId"
+   ],
+   "additionalProperties": false
+  }
+ },
+ {
+  "name": "t3_thread_set",
+  "description": "Change a T3 thread provider, model, effort, permission, or mode.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "threadId": {
+     "type": "string",
+     "maxLength": 128
+    },
+    "provider": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "model": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "thinkingEffort": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "permission": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "interactionMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "speedMode": {
+     "type": "string",
+     "maxLength": 512
+    },
+    "options": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 16
+    }
+   },
+   "required": [
+    "threadId"
+   ],
+   "additionalProperties": false
+  }
+ }
+]

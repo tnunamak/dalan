@@ -1,0 +1,33 @@
+{
+  "checks": {
+    "patch-apply": {
+      "install_argv": ["/runtime/node", "/runtime/npm/bin/npm-cli.js", "install", "--ignore-scripts", "--package-lock=false"],
+      "argv": ["/runtime/node", "scripts/apply-test.mjs"],
+      "timeout_ms": 60000,
+      "output_bytes": 65536,
+      "prerequisites": {"binaries": ["git"], "runtime": "node>=24"},
+      "test_paths": ["scripts/apply-test.mjs"]
+    },
+    "decision": {
+      "install_argv": ["/runtime/node", "/runtime/npm/bin/npm-cli.js", "install", "--ignore-scripts", "--package-lock=false"],
+      "argv": ["/runtime/node", "scripts/decision-test.mjs"],
+      "timeout_ms": 60000,
+      "output_bytes": 65536,
+      "prerequisites": {"binaries": [], "runtime": "node>=24"},
+      "test_paths": ["scripts/decision-test.mjs"]
+    },
+    "default": {
+      "install_argv": ["/runtime/node", "/runtime/npm/bin/npm-cli.js", "install", "--ignore-scripts", "--package-lock=false"],
+      "argv": ["/runtime/node", "/runtime/npm/bin/npm-cli.js", "run", "test:sandbox"],
+      "timeout_ms": 300000,
+      "output_bytes": 262144,
+      "prerequisites": {"binaries": [], "runtime": "node>=24"},
+      "test_paths": ["scripts"]
+    },
+    "server-syntax": {
+      "argv": ["/runtime/node", "--check", "src/server.mjs"],
+      "timeout_ms": 5000,
+      "output_bytes": 16384
+    }
+  }
+}

@@ -1,0 +1,410 @@
+[
+ {
+  "name": "list_pending",
+  "description": "List up to 50 queued assignment IDs and titles.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "required": [],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.read"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "claim",
+  "description": "Claim one immutable assignment and see available_checks before choosing run_check.check_id. With resume wake enabled, only a retry with the same claimant and acquisition_id receives the same active claim.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claimant": {
+     "type": "string"
+    },
+    "acquisition_id": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 128,
+     "pattern": "^[A-Za-z0-9_-]+$"
+    }
+   },
+   "required": [
+    "request_id",
+    "claimant"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.work"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "get",
+  "description": "Read assignment, available_checks, cancellation, progress, report and delivery facts.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "request_id"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.read"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "ack_message",
+  "description": "Acknowledge a lightweight message after reading it; no claim or finish is needed.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "message_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_id"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.work"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "progress",
+  "description": "Append progress. Set blocker:true or start note with BLOCKED: or QUESTION: to forward a question to the owner thread.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "note": {
+     "type": "string",
+     "maxLength": 4096
+    },
+    "blocker": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "note"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.work"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "finish",
+  "description": "Store a terminal worker report; completion is not owner acceptance.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "outcome": {
+     "type": "string",
+     "enum": [
+      "completed",
+      "blocked",
+      "failed"
+     ]
+    },
+    "summary": {
+     "type": "string",
+     "maxLength": 4096
+    },
+    "result": {
+     "type": "string",
+     "maxLength": 262144
+    },
+    "artifact_ids": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "maxItems": 8
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "outcome",
+    "summary",
+    "result"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.work"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "list_files",
+  "description": "List files in this assignment's checked-out repository workspace. Read-only; scoped to the assignment.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "path": {
+     "type": "string"
+    },
+    "limit": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 200
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.read"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "read_file",
+  "description": "Read a file from this assignment's checked-out repository workspace. Read-only; scoped to the assignment.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "path": {
+     "type": "string"
+    },
+    "start_line": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "max_lines": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 200
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "path"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.read"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "apply_patch",
+  "description": "Apply a unified diff to this assignment's private workspace copy. Changes stay local until the owner reviews them; nothing is pushed.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "patch": {
+     "type": "string",
+     "maxLength": 262144
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "patch"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.work"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "run_check",
+  "description": "Start a listed repository check. Returns immediately for long checks; poll workspace_result for status and result. Fast checks may return a completed receipt. Unknown check_id returns available IDs.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "check_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "check_id"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.work"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "workspace_result",
+  "description": "Read the current diff, available_checks, check receipts, and artifact references.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.read"
+    ]
+   }
+  ]
+ },
+ {
+  "name": "artifact_chunk",
+  "description": "Upload a sealed artifact for any claimed assignment, including read-only assignments.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string"
+    },
+    "claim_id": {
+     "type": "string"
+    },
+    "artifact_id": {
+     "type": "string"
+    },
+    "offset": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "data_base64": {
+     "type": "string"
+    },
+    "final": {
+     "type": "boolean"
+    },
+    "sha256": {
+     "type": "string",
+     "pattern": "^[a-fA-F0-9]{64}$"
+    }
+   },
+   "required": [
+    "request_id",
+    "claim_id",
+    "artifact_id",
+    "offset",
+    "data_base64"
+   ],
+   "additionalProperties": false
+  },
+  "securitySchemes": [
+   {
+    "type": "oauth2",
+    "scopes": [
+     "dot-bridge.work"
+    ]
+   }
+  ]
+ }
+]

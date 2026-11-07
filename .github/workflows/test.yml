@@ -1,0 +1,22 @@
+name: Tests
+
+# The full suite runs locally before every merge (see CONTRIBUTING.md).
+# This hosted run starts by hand until it is confirmed green on a hosted runner;
+# then pull_request and push triggers return.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm test

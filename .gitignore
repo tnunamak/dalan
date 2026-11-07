@@ -1,0 +1,35 @@
+node_modules/
+.test-home/
+*.db
+*.db-wal
+*.db-shm
+
+__pycache__/
+
+# Local environment and trial files (commit only explicitly sanitized templates)
+.env
+.env.*
+!.env.example
+!.env.sample
+/trial-env.sh
+/first-job.json
+/repository-job.json
+
+# Local bridge state when HOME is pointed inside the checkout
+/.config/dalan/
+/.local/share/dalan/
+/.local/state/dalan/
+/.cache/dalan/
+/.config/dot-bridge/
+/.local/share/dot-bridge/
+/.local/state/dot-bridge/
+/.cache/dot-bridge/
+*.db-journal
+
+# Private keys and exported credential containers
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519

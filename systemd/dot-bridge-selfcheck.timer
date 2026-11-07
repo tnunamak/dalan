@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Dalan external health check daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+Unit=dot-bridge-selfcheck.service
+
+[Install]
+WantedBy=timers.target

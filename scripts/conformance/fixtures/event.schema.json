@@ -1,0 +1,77 @@
+{
+ "type": "object",
+ "properties": {
+  "v": {
+   "const": 0
+  },
+  "source": {
+   "const": "urn:fixture:job-store"
+  },
+  "id": {
+   "type": "string",
+   "minLength": 1,
+   "maxLength": 256
+  },
+  "job": {
+   "type": "string",
+   "minLength": 1,
+   "maxLength": 256
+  },
+  "seq": {
+   "type": "integer",
+   "minimum": 1,
+   "maximum": 9007199254740991
+  },
+  "revision": {
+   "type": "integer",
+   "minimum": 1,
+   "maximum": 9007199254740991
+  },
+  "epoch": {
+   "type": "integer",
+   "minimum": 0,
+   "maximum": 9007199254740991
+  },
+  "type": {
+   "enum": [
+    "submitted",
+    "claimed",
+    "renewed",
+    "progressed",
+    "questioned",
+    "answered",
+    "consumed",
+    "uploaded",
+    "sealed",
+    "finished",
+    "cancelled",
+    "expired",
+    "waiter_registered",
+    "stop_observed"
+   ]
+  },
+  "state": {
+   "enum": [
+    "queued",
+    "leased",
+    "running",
+    "awaiting_input",
+    "result_staged",
+    "finished",
+    "cancelled"
+   ]
+  }
+ },
+ "required": [
+  "v",
+  "source",
+  "id",
+  "job",
+  "seq",
+  "revision",
+  "epoch",
+  "type",
+  "state"
+ ],
+ "additionalProperties": false
+}

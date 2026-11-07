@@ -1,0 +1,252 @@
+{
+ "id": "T39",
+ "name": "Cancel does not claim physical stop",
+ "invariant": "R5 R11",
+ "steps": [
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "submit",
+     "job": "J",
+     "key": "k1",
+     "body": {
+      "source": "git:BASE",
+      "scope": "read:fixture",
+      "policy": "P0",
+      "destination": "owner-inbox",
+      "retainUntil": 1000
+     }
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 1
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:1",
+      "job": "J",
+      "seq": 1,
+      "revision": 1,
+      "epoch": 0,
+      "type": "submitted",
+      "state": "queued"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "W1",
+    "command": {
+     "v": 0,
+     "op": "claim",
+     "job": "J",
+     "key": "k2",
+     "body": {
+      "leaseMs": 100
+     },
+     "revision": 1
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 2,
+      "epoch": 1,
+      "claim": "C1",
+      "leaseUntil": 100
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:2",
+      "job": "J",
+      "seq": 2,
+      "revision": 2,
+      "epoch": 1,
+      "type": "claimed",
+      "state": "leased"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "cancel",
+     "job": "J",
+     "key": "k3",
+     "body": {
+      "reason": "stop"
+     },
+     "revision": 2
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 3,
+      "stop": "unverified"
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:3",
+      "job": "J",
+      "seq": 3,
+      "revision": 3,
+      "epoch": 1,
+      "type": "cancelled",
+      "state": "cancelled"
+     }
+    ]
+   }
+  },
+  {
+   "control": {
+    "op": "restart"
+   },
+   "expect": {
+    "recovered": true
+   }
+  },
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "get",
+     "job": "J",
+     "key": "k4",
+     "body": {}
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "snapshot": {
+       "id": "J",
+       "revision": 3,
+       "seq": 3,
+       "epoch": 1,
+       "state": "cancelled",
+       "claim": "C1",
+       "worker": "W1",
+       "leaseUntil": 100,
+       "binding": {
+        "source": "git:BASE",
+        "scope": "read:fixture",
+        "policy": "P0",
+        "destination": "owner-inbox",
+        "retainUntil": 1000
+       },
+       "questions": {},
+       "artifacts": {},
+       "result": null,
+       "stop": "unverified",
+       "revoked": true
+      }
+     }
+    },
+    "events": []
+   }
+  },
+  {
+   "input": {
+    "principal": "service",
+    "command": {
+     "v": 0,
+     "op": "observe_stop",
+     "job": "J",
+     "key": "k5",
+     "body": {
+      "stop": "confirmed",
+      "evidence": "executor receipt E1"
+     },
+     "revision": 3
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 4,
+      "stop": "confirmed"
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:4",
+      "job": "J",
+      "seq": 4,
+      "revision": 4,
+      "epoch": 1,
+      "type": "stop_observed",
+      "state": "cancelled"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "get",
+     "job": "J",
+     "key": "k6",
+     "body": {}
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "snapshot": {
+       "id": "J",
+       "revision": 4,
+       "seq": 4,
+       "epoch": 1,
+       "state": "cancelled",
+       "claim": "C1",
+       "worker": "W1",
+       "leaseUntil": 100,
+       "binding": {
+        "source": "git:BASE",
+        "scope": "read:fixture",
+        "policy": "P0",
+        "destination": "owner-inbox",
+        "retainUntil": 1000
+       },
+       "questions": {},
+       "artifacts": {},
+       "result": null,
+       "stop": "confirmed",
+       "revoked": true
+      }
+     }
+    },
+    "events": []
+   }
+  }
+ ]
+}

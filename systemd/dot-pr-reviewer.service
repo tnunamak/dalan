@@ -1,0 +1,11 @@
+[Unit]
+Description=Submit one read-only worker review per open PR head that has none (no LLM calls)
+After=dot-bridge.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/ABSOLUTE/PATH/TO/DALAN
+Environment=PATH=/ABSOLUTE/PATH/TO/NODE/BIN:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node /ABSOLUTE/PATH/TO/DALAN/bin/dot-pr-reviewer.mjs
+TimeoutStartSec=900
+NoNewPrivileges=true

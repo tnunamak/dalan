@@ -1,0 +1,184 @@
+{
+ "id": "T19",
+ "name": "Answer after cancel rejected",
+ "invariant": "R4 R5",
+ "steps": [
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "submit",
+     "job": "J",
+     "key": "k1",
+     "body": {
+      "source": "git:BASE",
+      "scope": "read:fixture",
+      "policy": "P0",
+      "destination": "owner-inbox",
+      "retainUntil": 1000
+     }
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 1
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:1",
+      "job": "J",
+      "seq": 1,
+      "revision": 1,
+      "epoch": 0,
+      "type": "submitted",
+      "state": "queued"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "W1",
+    "command": {
+     "v": 0,
+     "op": "claim",
+     "job": "J",
+     "key": "k2",
+     "body": {
+      "leaseMs": 100
+     },
+     "revision": 1
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 2,
+      "epoch": 1,
+      "claim": "C1",
+      "leaseUntil": 100
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:2",
+      "job": "J",
+      "seq": 2,
+      "revision": 2,
+      "epoch": 1,
+      "type": "claimed",
+      "state": "leased"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "W1",
+    "command": {
+     "v": 0,
+     "op": "ask",
+     "job": "J",
+     "key": "k3",
+     "body": {
+      "question": "Q",
+      "text": "which?"
+     },
+     "revision": 2,
+     "epoch": 1,
+     "claim": "C1"
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 3
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:3",
+      "job": "J",
+      "seq": 3,
+      "revision": 3,
+      "epoch": 1,
+      "type": "questioned",
+      "state": "awaiting_input"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "cancel",
+     "job": "J",
+     "key": "k4",
+     "body": {
+      "reason": "stop"
+     },
+     "revision": 3
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 4,
+      "stop": "unverified"
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:4",
+      "job": "J",
+      "seq": 4,
+      "revision": 4,
+      "epoch": 1,
+      "type": "cancelled",
+      "state": "cancelled"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "answer",
+     "job": "J",
+     "key": "k5",
+     "body": {
+      "question": "Q",
+      "text": "one"
+     },
+     "revision": 4
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": false,
+     "code": "TERMINAL"
+    },
+    "events": []
+   }
+  }
+ ]
+}

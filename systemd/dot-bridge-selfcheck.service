@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Dalan external health check
+After=network-online.target dot-bridge.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/ABSOLUTE/PATH/TO/DALAN
+ExecStart=/usr/bin/env node scripts/daily-selfcheck.mjs
+TimeoutStartSec=60
+UMask=0077
+Environment=PATH=/ABSOLUTE/PATH/TO/NODE/BIN:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+UnsetEnvironment=OPENAI_API_KEY ANTHROPIC_API_KEY

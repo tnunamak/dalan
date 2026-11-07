@@ -1,0 +1,152 @@
+TAP version 13
+# Subtest: ReadAdmitted/get known limit: B can read the brief approved for A but changes nothing
+ok 1 - ReadAdmitted/get known limit: B can read the brief approved for A but changes nothing
+  ---
+  duration_ms: 2840.173681
+  type: 'test'
+  ...
+# Subtest: ReadAdmitted/list_pending known limit: B lists the job approved for A but changes nothing
+ok 2 - ReadAdmitted/list_pending known limit: B lists the job approved for A but changes nothing
+  ---
+  duration_ms: 2907.860252
+  type: 'test'
+  ...
+# Subtest: GrantAdmitted/http: live B cannot recover A claim with same run identifiers
+ok 3 - GrantAdmitted/http: live B cannot recover A claim with same run identifiers
+  ---
+  duration_ms: 3801.317455
+  type: 'test'
+  ...
+# Subtest: RevokedCannotCommit/http control: live finish through makeRoom
+ok 4 - RevokedCannotCommit/http control: live finish through makeRoom
+  ---
+  duration_ms: 2619.691417
+  type: 'test'
+  ...
+# Subtest: RevokedCannotCommit/http: revoke while finish waits in makeRoom
+    # Subtest: desired contract
+    ok 1 - desired contract
+      ---
+      duration_ms: 0.708263
+      type: 'test'
+      ...
+    1..1
+ok 5 - RevokedCannotCommit/http: revoke while finish waits in makeRoom
+  ---
+  duration_ms: 2858.830324
+  type: 'test'
+  ...
+# Subtest: HTTP authentication refuses revoked A; other worker cannot get A job
+ok 6 - HTTP authentication refuses revoked A; other worker cannot get A job
+  ---
+  duration_ms: 2688.866048
+  type: 'test'
+  ...
+# Subtest: GrantAdmitted: replacement B cannot repeat A claimant/acquisition to renew A grant
+ok 7 - GrantAdmitted: replacement B cannot repeat A claimant/acquisition to renew A grant
+  ---
+  duration_ms: 1619.788129
+  type: 'test'
+  ...
+# Subtest: RevokedCannotCommit: revoke between finish admission and commit fences result
+    # Subtest: desired contract
+    ok 1 - desired contract
+      ---
+      duration_ms: 0.314296
+      type: 'test'
+      ...
+    1..1
+ok 8 - RevokedCannotCommit: revoke between finish admission and commit fences result
+  ---
+  duration_ms: 1513.916308
+  type: 'test'
+  ...
+# Subtest: RevokedCannotCommit: replace between finish admission and commit fences result
+    # Subtest: desired contract
+    ok 1 - desired contract
+      ---
+      duration_ms: 0.603301
+      type: 'test'
+      ...
+    1..1
+ok 9 - RevokedCannotCommit: replace between finish admission and commit fences result
+  ---
+  duration_ms: 1798.599736
+  type: 'test'
+  ...
+# Subtest: RevokedCannotCommit control: a live connection commits one finish with these arguments
+ok 10 - RevokedCannotCommit control: a live connection commits one finish with these arguments
+  ---
+  duration_ms: 1395.779467
+  type: 'test'
+  ...
+# Subtest: NoStuck: expired dead holder is swept during a usage break
+    # Subtest: desired contract
+    ok 1 - desired contract
+      ---
+      duration_ms: 0.662072
+      type: 'test'
+      ...
+    1..1
+ok 11 - NoStuck: expired dead holder is swept during a usage break
+  ---
+  duration_ms: 2557.776647
+  type: 'test'
+  ...
+# Subtest: NoStuck control: the same dead holder is swept with no usage break
+ok 12 - NoStuck control: the same dead holder is swept with no usage break
+  ---
+  duration_ms: 1533.625753
+  type: 'test'
+  ...
+# Subtest: QueueProgress known limit: drifted undated job stays queued, refuses every claim, and the owner can cancel it
+ok 13 - QueueProgress known limit: drifted undated job stays queued, refuses every claim, and the owner can cancel it
+  ---
+  duration_ms: 1598.992172
+  type: 'test'
+  ...
+# Subtest: one lost submit reply survives one restart without extra jobs or reports
+ok 14 - one lost submit reply survives one restart without extra jobs or reports
+  ---
+  duration_ms: 1685.268745
+  type: 'test'
+  ...
+# Subtest: one lost finish reply survives one restart without extra jobs or reports
+ok 15 - one lost finish reply survives one restart without extra jobs or reports
+  ---
+  duration_ms: 1374.869367
+  type: 'test'
+  ...
+# Subtest: CancelWins: cancelled finish keeps audit evidence, no result
+ok 16 - CancelWins: cancelled finish keeps audit evidence, no result
+  ---
+  duration_ms: 1344.725208
+  type: 'test'
+  ...
+# Subtest: fresh, idle rotation and takeover refuse drift; ordinary expiry frees dead claim
+ok 17 - fresh, idle rotation and takeover refuse drift; ordinary expiry frees dead claim
+  ---
+  duration_ms: 1504.922893
+  type: 'test'
+  ...
+# Subtest: PROTOCOL v5: fixed lease retry and renew receipt do not slide; expired grant cannot renew
+ok 18 - PROTOCOL v5: fixed lease retry and renew receipt do not slide; expired grant cannot renew
+  ---
+  duration_ms: 1369.731406
+  type: 'test'
+  ...
+# Subtest: assertion guards: HTTP 500, invalid token, wrong claim ID and wrong code never pass as a refusal
+ok 19 - assertion guards: HTTP 500, invalid token, wrong claim ID and wrong code never pass as a refusal
+  ---
+  duration_ms: 2.610466
+  type: 'test'
+  ...
+1..19
+# tests 23
+# suites 0
+# pass 23
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 19603.336532

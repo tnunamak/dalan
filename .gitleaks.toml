@@ -1,0 +1,31 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic request-log redaction fixture"
+condition = "AND"
+paths = ['''^scripts/request-log-test\.mjs$''']
+regexes = ['''(?:ABCsDEF123456|ABCDEF123456|ABCDEF1234|4/0ABCDEF123456)''']
+
+[[allowlists]]
+description = "Synthetic request-log material redaction fixture"
+condition = "AND"
+paths = ['''^scripts/request-log-material-test\.mjs$''']
+regexes = ['''ABCDEF123456''']
+
+[[allowlists]]
+description = "Synthetic ACP prose-check token fixture"
+condition = "AND"
+paths = ['''^scripts/acp-prose-check-test\.mjs$''']
+regexes = ['''ghp_SYNTHETIC[A-Za-z0-9]+''']
+
+[[allowlists]]
+description = "Synthetic secret-sink redaction fixtures: idempotency keys, cache keys and a throwaway public key"
+condition = "AND"
+paths = ['''^scripts/secret-sinks-redaction-test\.mjs$''']
+regexes = ['''idempotency_key|idem-0123456789abcdef|cache-|MCowBQYDK2VwAyEA''']
+
+[[allowlists]]
+description = "Synthetic private-key block built from fake body lines in the redaction test"
+paths = ['''^scripts/secret-sinks-redaction-test\.mjs$''']
+regexes = ['''-----BEGIN PRIVATE KEY-----''']

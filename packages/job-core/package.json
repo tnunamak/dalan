@@ -1,0 +1,8 @@
+{
+  "name": "job-core",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "exports": {".": "./index.mjs", "./protocol/v0/*": "./protocol/v0/*"},
+  "scripts": {"test": "node --test test/*.test.mjs"}
+}

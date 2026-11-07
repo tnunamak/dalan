@@ -1,0 +1,26 @@
+{
+  "note": "Synthetic queue replay fixture for pass-over detection.",
+  "items": [
+    { "id": "synthetic-stuck-item", "priority": "background", "created_at": "2000-01-01T00:00:00.000Z" },
+    { "id": "synthetic-work-a", "priority": "background", "created_at": "2000-01-01T00:01:00.000Z" },
+    { "id": "synthetic-work-b", "priority": "background", "created_at": "2000-01-01T00:02:00.000Z" },
+    { "id": "synthetic-work-c", "priority": "background", "created_at": "2000-01-01T00:03:00.000Z" },
+    { "id": "synthetic-background-peer", "priority": "background", "created_at": "2000-01-01T00:04:00.000Z" }
+  ],
+  "events": [
+    { "at": "2000-01-01T00:00:00.000Z", "id": "synthetic-stuck-item", "type": "queued" },
+    { "at": "2000-01-01T00:01:00.000Z", "id": "synthetic-work-a", "type": "queued" },
+    { "at": "2000-01-01T00:01:30.000Z", "id": "synthetic-work-a", "type": "claimed" },
+    { "at": "2000-01-01T00:02:00.000Z", "id": "synthetic-work-b", "type": "queued" },
+    { "at": "2000-01-01T00:02:30.000Z", "id": "synthetic-work-b", "type": "claimed" },
+    { "at": "2000-01-01T00:03:00.000Z", "id": "synthetic-work-c", "type": "queued" },
+    { "at": "2000-01-01T00:03:30.000Z", "id": "synthetic-work-c", "type": "claimed" },
+    { "at": "2000-01-01T00:04:00.000Z", "id": "synthetic-background-peer", "type": "queued" }
+  ],
+  "polls": [
+    "2000-01-01T00:00:15.000Z",
+    "2000-01-01T00:01:15.000Z",
+    "2000-01-01T00:02:15.000Z",
+    "2000-01-01T00:03:15.000Z"
+  ]
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Send a health-gated Dalan heartbeat to the dead-man monitor
+After=dot-bridge.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/ABSOLUTE/PATH/TO/DALAN
+Environment=PATH=/ABSOLUTE/PATH/TO/NODE/BIN:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DOT_DEADMAN_ENV=%h/.config/dot-bridge/deadman.env
+# UPGRADING installs that relied on the drainer gate: uncomment this line before restarting,
+# or the heartbeat pings on bridge health alone. Fresh installs leave it commented.
+# Use the actual data root from dalan paths --json; the value must be an absolute path.
+# Environment=DALAN_DRAINER_HEALTH_FILE=%h/.local/share/dalan/drainer-health.json
+ExecStart=/usr/bin/env node /ABSOLUTE/PATH/TO/DALAN/bin/dot-heartbeat.mjs
+TimeoutStartSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

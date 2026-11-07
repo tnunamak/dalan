@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {execFileSync,spawnSync} from 'node:child_process';
+import {prepareGithubRepo,mirrorPath} from '../src/projects.mjs';
+import {fetchMirror} from '../src/mirror-fetch.mjs';
+const root=fs.mkdtempSync(path.join(os.homedir(),'.tmp','pinned-fetch-'));
+const git=(...args)=>execFileSync('git',args,{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+try {
+ const src=path.join(root,'src');git('init','-q','-b','main',src);
+ git('-C',src,'config','user.name','Fixture');git('-C',src,'config','user.email','fixture@example.invalid');
+ fs.writeFileSync(path.join(src,'file'),'base\n');git('-C',src,'add','.');git('-C',src,'commit','-qm','base');
+ const base=git('-C',src,'rev-parse','HEAD');
+ fs.writeFileSync(path.join(src,'file'),'head\n');git('-C',src,'commit','-qam','head');const head=git('-C',src,'rev-parse','HEAD');
+ git('-C',src,'checkout','--orphan','unrelated');git('-C',src,'rm','-rf','.');
+ fs.writeFileSync(path.join(src,'noise'),'unrelated PR contents\n');git('-C',src,'add','.');git('-C',src,'commit','-qm','unrelated');const noise=git('-C',src,'rev-parse','HEAD');
+ for(let i=0;i<40;i++)for(const namespace of ['heads/noise','tags/noise','pull'])git('-C',src,'update-ref',`refs/${namespace}/${i}${namespace==='pull'?'/head':''}`,noise);
+ git('-C',src,'checkout','main');const fixture=path.join(root,'fixture.git');git('clone','--mirror',src,fixture);
+ assert.equal(git('-C',fixture,'rev-parse','--is-bare-repository'),'true','the fetch source is a local bare repository');
+ process.env.DOT_BRIDGE_WORKSPACE_ROOT=path.join(root,'workspace');process.env.DOT_BRIDGE_GITHUB_URL_FIXTURE_REPO='file://'+fixture;
+ const input={github_repo:'fixture/repo',base_sha:base,head_sha:head};const mirror=prepareGithubRepo(input,{worker:'test'});
+ const refs=()=>git('-C',mirror,'for-each-ref','--format=%(refname) %(objectname)');
+ assert.equal(spawnSync('git',['-C',mirror,'cat-file','-e',noise],{stdio:'ignore'}).status,1,'admission must not fetch unrelated PR history');
+ assert.deepEqual(refs().split('\n').map(x=>x.split(' ')[0]).sort(),[base,head].map(sha=>`refs/dot-bridge/pins/${sha}`).sort());
+ assert.match(git('-C',mirror,'diff',base,head),/\+head/);git('-C',mirror,'fsck','--full');
+ console.log('PASS base/head closure and diff without any of122 advertised refs');
+ // Legacy full-ref callers retain their contract; later pin fetches must not prune those refs.
+ fetchMirror(mirror,'file://'+fixture,process.env,10000);const prior=refs();
+ prepareGithubRepo({github_repo:'fixture/repo',base_sha:head},{worker:'test'});assert.equal(refs(),prior);
+ const missing='f'.repeat(40);
+ const invalidPin=label=>error=>error.code==='DOT_BRIDGE_INVALID_INPUT'&&error.message.includes(`${label} SHA`);
+ assert.throws(()=>prepareGithubRepo({github_repo:'fixture/repo',base_sha:missing},{worker:'test'}),invalidPin('base'));
+ assert.equal(refs(),prior);assert(!fs.existsSync(mirror+'.fetch-lock'));
+ assert.throws(()=>prepareGithubRepo({github_repo:'fixture/repo',base_sha:base,head_sha:missing},{worker:'test'}),invalidPin('head'));
+ assert.equal(refs(),prior);assert(!fs.existsSync(mirror+'.fetch-lock'));
+ process.env.DOT_BRIDGE_GITHUB_URL_FIXTURE_OFFLINE='file://'+path.join(root,'unavailable.git');
+ assert.throws(()=>prepareGithubRepo({github_repo:'fixture/offline',base_sha:base},{worker:'test'}),error=>error.code!=='DOT_BRIDGE_INVALID_INPUT');
+ git('-C',mirror,'fsck','--full');
+ console.log('PASS legacy refs and existing pins survive repeat and failed pinned fetch; settled failure cleans attempt');
+}finally{fs.rmSync(root,{recursive:true,force:true});}

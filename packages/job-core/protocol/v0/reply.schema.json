@@ -1,0 +1,59 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "oneOf": [
+  {
+   "type": "object",
+   "properties": {
+    "ok": {
+     "const": true
+    },
+    "value": {
+     "type": "object"
+    }
+   },
+   "required": [
+    "ok",
+    "value"
+   ],
+   "additionalProperties": false
+  },
+  {
+   "type": "object",
+   "properties": {
+    "ok": {
+     "const": false
+    },
+    "code": {
+     "enum": [
+      "INVALID",
+      "FORBIDDEN",
+      "NOT_FOUND",
+      "KEY_CONFLICT",
+      "TOMBSTONE",
+      "EXISTS",
+      "TERMINAL",
+      "STALE_EPOCH",
+      "LEASE_EXPIRED",
+      "REVISION",
+      "BUSY",
+      "NO_QUESTION",
+      "ALREADY_ANSWERED",
+      "NO_ANSWER",
+      "UNSEALED",
+      "DIGEST",
+      "BINDING",
+      "QUESTION_OPEN",
+      "DELIVERY_STATE",
+      "NOT_DUE",
+      "DELIVERY_UNKNOWN"
+     ]
+    }
+   },
+   "required": [
+    "ok",
+    "code"
+   ],
+   "additionalProperties": false
+  }
+ ]
+}

@@ -1,0 +1,93 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 99 and seed -4710364727282328255 with 1 worker on 1 cores with 981MB heap and 64MB offheap memory [pid: 193617] (Linux 7.0.0-38-generic amd64, Ubuntu 17.0.20.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <repo>/spec/tla/Claims.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/TLC.tla
+Parsing file /tmp/Sequences.tla
+Parsing file /tmp/FiniteSets.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Claims
+Starting... (2026-11-06 17:26:54)
+Computing initial states...
+Finished computing initial states: 2 distinct states generated at 2026-11-06 17:26:54.
+Error: Invariant ReadAdmitted is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ epoch = 0
+/\ liveAtCommit = "none"
+/\ job = "new"
+/\ restarted = FALSE
+/\ pending = "none"
+/\ holder = "none"
+/\ lease = 0
+/\ fixed = FALSE
+/\ onBreak = FALSE
+/\ grantTo = "none"
+/\ readBy = "none"
+/\ lost = FALSE
+/\ live = "A"
+/\ commits = 0
+/\ reason = ""
+/\ jobCount = 0
+
+State 2: <ApproveSubmit line 12, col 18 to line 13, col 137 of module Claims>
+/\ epoch = 0
+/\ liveAtCommit = "none"
+/\ job = "queued"
+/\ restarted = FALSE
+/\ pending = "none"
+/\ holder = "none"
+/\ lease = 0
+/\ fixed = FALSE
+/\ onBreak = FALSE
+/\ grantTo = "none"
+/\ readBy = "none"
+/\ lost = FALSE
+/\ live = "A"
+/\ commits = 0
+/\ reason = ""
+/\ jobCount = 1
+
+State 3: <Replace line 14, col 12 to line 15, col 139 of module Claims>
+/\ epoch = 0
+/\ liveAtCommit = "none"
+/\ job = "queued"
+/\ restarted = FALSE
+/\ pending = "none"
+/\ holder = "none"
+/\ lease = 0
+/\ fixed = FALSE
+/\ onBreak = FALSE
+/\ grantTo = "none"
+/\ readBy = "none"
+/\ lost = FALSE
+/\ live = "B"
+/\ commits = 0
+/\ reason = ""
+/\ jobCount = 1
+
+State 4: <ReadAssignment line 39, col 19 to line 42, col 132 of module Claims>
+/\ epoch = 0
+/\ liveAtCommit = "none"
+/\ job = "queued"
+/\ restarted = FALSE
+/\ pending = "none"
+/\ holder = "none"
+/\ lease = 0
+/\ fixed = FALSE
+/\ onBreak = FALSE
+/\ grantTo = "none"
+/\ readBy = "B"
+/\ lost = FALSE
+/\ live = "B"
+/\ commits = 0
+/\ reason = ""
+/\ jobCount = 1
+
+46 states generated, 25 distinct states found, 15 states left on queue.
+The depth of the complete state graph search is 4.
+The average outdegree of the complete state graph is 3 (minimum is 0, the maximum 7 and the 95th percentile is 7).
+Finished in 00s at (2026-11-06 17:26:54)

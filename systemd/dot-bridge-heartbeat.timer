@@ -1,0 +1,10 @@
+[Unit]
+Description=Send a Dalan health heartbeat every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

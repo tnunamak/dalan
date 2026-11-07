@@ -1,0 +1,24 @@
+---
+title: "Dalan connection and job authority"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the QueueProgress bug
+    lg1: Repeats forever, so QueueProgress breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: new#59; connection A#59; lease 0#59; returned none#59; read none#59; finish none/none#59; break false#59; fixed lease false
+  s1: queued#59; connection A#59; lease 0#59; returned none#59; read none#59; finish none/none#59; break false#59; fixed lease false
+  s2: cancelled#59; connection A#59; lease 0#59; returned none#59; read none#59; finish none/none#59; break false#59; fixed lease false
+  s3: queued#59; connection B#59; lease 0#59; returned none#59; read none#59; finish none/none#59; break false#59; fixed lease false
+  s4: cancelled#59; connection B#59; lease 0#59; returned none#59; read none#59; finish none/none#59; break false#59; fixed lease false
+  [*] --> s0
+  s0 --> s1: owner approves A and requester submits
+  s1 --> s2: owner or requester cancels
+  s1 --> s3: owner replaces A with B
+  s2 --> s4: owner replaces A with B
+  s3 --> s4: owner or requester cancels
+  class s0 bugPath
+  class s1 bugPath
+  class s3 repeats

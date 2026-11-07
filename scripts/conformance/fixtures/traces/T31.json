@@ -1,0 +1,210 @@
+{
+ "id": "T31",
+ "name": "Waiter finish crash recovery",
+ "invariant": "R8",
+ "steps": [
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "submit",
+     "job": "J",
+     "key": "k1",
+     "body": {
+      "source": "git:BASE",
+      "scope": "read:fixture",
+      "policy": "P0",
+      "destination": "owner-inbox",
+      "retainUntil": 1000
+     }
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 1
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:1",
+      "job": "J",
+      "seq": 1,
+      "revision": 1,
+      "epoch": 0,
+      "type": "submitted",
+      "state": "queued"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "W1",
+    "command": {
+     "v": 0,
+     "op": "claim",
+     "job": "J",
+     "key": "k2",
+     "body": {
+      "leaseMs": 100
+     },
+     "revision": 1
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 2,
+      "epoch": 1,
+      "claim": "C1",
+      "leaseUntil": 100
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:2",
+      "job": "J",
+      "seq": 2,
+      "revision": 2,
+      "epoch": 1,
+      "type": "claimed",
+      "state": "leased"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "wait",
+     "job": "J",
+     "key": "k3",
+     "body": {
+      "waiter": "W",
+      "predicate": "terminal",
+      "afterSeq": 0,
+      "expiresAt": 900
+     },
+     "revision": 2
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 3,
+      "waiter": "W",
+      "delivery": null
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:3",
+      "job": "J",
+      "seq": 3,
+      "revision": 3,
+      "epoch": 1,
+      "type": "waiter_registered",
+      "state": "leased"
+     }
+    ]
+   }
+  },
+  {
+   "input": {
+    "principal": "W1",
+    "command": {
+     "v": 0,
+     "op": "finish",
+     "job": "J",
+     "key": "k4",
+     "body": {
+      "outcome": "completed",
+      "summary": "done",
+      "artifacts": [],
+      "source": "git:BASE",
+      "policy": "P0"
+     },
+     "revision": 3,
+     "epoch": 1,
+     "claim": "C1"
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "revision": 4,
+      "receipt": "R:J:1",
+      "acceptance": "unreviewed"
+     }
+    },
+    "events": [
+     {
+      "v": 0,
+      "source": "urn:fixture:job-store",
+      "id": "J:4",
+      "job": "J",
+      "seq": 4,
+      "revision": 4,
+      "epoch": 1,
+      "type": "finished",
+      "state": "finished"
+     }
+    ]
+   }
+  },
+  {
+   "control": {
+    "op": "restart"
+   },
+   "expect": {
+    "recovered": true
+   }
+  },
+  {
+   "input": {
+    "principal": "owner",
+    "command": {
+     "v": 0,
+     "op": "inbox",
+     "job": "J",
+     "key": "k5",
+     "body": {
+      "waiter": "W"
+     }
+    }
+   },
+   "expect": {
+    "reply": {
+     "ok": true,
+     "value": {
+      "deliveries": [
+       {
+        "delivery": "D:W",
+        "waiter": "W",
+        "job": "J",
+        "event": "J:4",
+        "state": "pending",
+        "receipt": null
+       }
+      ]
+     }
+    },
+    "events": []
+   }
+  }
+ ]
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Dalan PR head reviewer every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+Unit=dot-pr-reviewer.service
+
+[Install]
+WantedBy=timers.target

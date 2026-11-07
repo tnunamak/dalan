@@ -1,0 +1,22 @@
+[
+  {"rule": "person", "path": "^LICENSE$", "token": "^Tim$", "reason": "Copyright holder line of the license."},
+  {"rule": "person", "line": "tnunamak(?:/|\\\\/)dalan", "reason": "The public repository path (clone URL, release URL, package metadata)."},
+  {"rule": "internal-role", "path": "^src/legacy-names\\.mjs$", "token": "lead_thread_id", "reason": "Config key that releases before 0.4.0 wrote for the reviewer report thread. The reviewer still reads it."},
+  {"rule": "internal-role", "path": "^docs/dalan-upgrade\\.md$", "token": "lead_thread_id", "reason": "Upgrade note for the legacy reviewer config key."},
+  {"rule": "job-code", "path": "^(src/store\\.mjs|scripts/worker-isolation-test\\.mjs|docs/operations\\.md)$", "token": "^s1v2-worker-facts-20261022$", "reason": "Schema marker row that existing databases hold. The upgrade check looks for it by this exact name."},
+
+  {"rule": "worker-nickname", "token": "dot-bridge|dot-worker|dot-deadman|dot-heartbeat|dot-alert|dot-acp|dot-pr-reviewer|dot-launcher", "reason": "Legacy install paths, systemd units, executable aliases, environment-file names, OAuth scope names and stored format labels that existing installs depend on."},
+  {"rule": "worker-nickname", "token": "dot-(decision|build|context|fix|apply|host)", "reason": "Literal protocol markers and stored labels that older clients and databases use."},
+  {"rule": "worker-nickname", "path": "^src/workspace\\.mjs$", "token": "dot-last-used", "reason": "Marker file inside repository mirrors that existing installs already hold; mirror eviction reads it by this name."},
+  {"rule": "worker-nickname", "path": "\\.(mjs|py|json)$", "line": "['\"`]dot['\"`]", "reason": "The legacy first-worker name `dot`. Databases made before 0.4.0 store it and the bridge maps it; code and tests name it literally."},
+  {"rule": "worker-nickname", "path": "\\.md$", "line": "['\"`]dot['\"`]", "reason": "Docs name the legacy first-worker value `dot`: the default worker of an install with no workers.json, the value older databases store, and the value in rollback SQL."},
+  {"rule": "worker-nickname", "path": "^docs/operations\\.md$", "line": "older rows may carry `dot:<subject>`|`dot_breaks`|skipped_by_dot_at", "reason": "Migration notes name the legacy actor prefix and the table and column names that schema 65 renamed."},
+  {"rule": "worker-nickname", "path": "^src/lifecycle\\.mjs$", "line": "startsWith\\('dot:'\\)", "reason": "Older lifecycle rows carry the actor prefix `dot:`; the metrics must still count them."},
+  {"rule": "worker-nickname", "path": "^(bin/dot-acp-agent\\.mjs|src/work-order\\.mjs)$", "line": "\\(\\?:worker\\|dot\\) queue is full", "reason": "Also accepts the refusal text of bridges older than 0.4.0."},
+  {"rule": "worker-nickname", "path": "^src/submission-policy\\.mjs$", "line": "\\(\\?:we\\|you\\|dot\\)", "reason": "The brief linter also matches briefs written for the legacy worker name."},
+  {"rule": "worker-nickname", "path": "^(scripts|integrations)/.*\\.mjs$", "line": "\\bdot\\s*:\\s*[{']|\\.dot\\b|\\bworker:dot\\b|workers/dot/|sub-dot-|\\\\\\\\\"dot\\\\\\\\\"", "reason": "Test fixtures: object keys, member names and paths for the legacy first-worker name `dot` (profile key, `subs.dot`, `T.dot`, `by_worker.dot`, mirror directory, actor value)."},
+  {"rule": "worker-nickname", "path": "^scripts/.*\\.mjs$", "line": "ALLOWED_SUBJECTS=dot", "reason": "Test fixture: the OAuth allowed-subject value equals the legacy first-worker name."},
+  {"rule": "worker-nickname", "path": "^scripts/worker-isolation-test\\.mjs$", "line": ".", "reason": "This file tests the legacy first-worker name `dot` against named workers; its fixtures use the literal name throughout."},
+  {"rule": "worker-nickname", "path": "^scripts/neutral-worker-e2e\\.mjs$", "line": ".", "reason": "This test asserts that a fresh install never shows the legacy worker name, so it searches output for the literal name."},
+  {"rule": "worker-nickname", "path": "^(src/test-support/worker-history/|spec/tla/results/|scripts/fixtures/)", "line": ".", "reason": "Recorded historical schema, model-check output and served-catalog golden files. They must stay byte-identical, and tools/list must not change."}
+]

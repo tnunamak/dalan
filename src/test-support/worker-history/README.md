@@ -1,0 +1,3 @@
+`5697c20.sql` and `48f1a26.sql` are schema-only fixtures at user versions 35 and 36. They contain no application rows. `worker-isolation-test` checks that the current Store refuses both abandoned schemas; it needs only their schemas and user-version values, because SQLite recreates its internal `sqlite_sequence` table from the `AUTOINCREMENT` declarations. Tests verify the SHA-256 of each file in `manifest.json` before loading it. Production never loads these files.
+
+Some upgrade and rollback checks also run against the source of releases from before Dalan was public. Those archives are not in this repository; see `prepublic-fixtures.mjs` and CONTRIBUTING.md.

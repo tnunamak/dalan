@@ -1,0 +1,14 @@
+{
+  "5697c20": {
+    "commit": "5697c20ea2ea8b48a33351909a5f0e696e160a05",
+    "sha256": "4ae3ed824d231bd1e2e920671614fc9673e2f8f445a4036a7ab8fb6d888ed249",
+    "format": "schema-sql",
+    "user_version": 35
+  },
+  "48f1a26": {
+    "commit": "48f1a26d15d70093377ef646d56592c72a0f0a9e",
+    "sha256": "7845955c573d1fd874f3042a1086d1f137c7567be6b1d16fba0a7dd190a2a3bb",
+    "format": "schema-sql",
+    "user_version": 36
+  }
+}
