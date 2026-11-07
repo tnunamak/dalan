@@ -35,7 +35,7 @@ To run from a checkout instead, see [Install from source](#from-source).
 ```text
 $ npx @tnunamak/dalan try
 Need to install the following packages:
-@tnunamak/dalan@0.5.1
+@tnunamak/dalan@0.5.2
 Ok to proceed? (y) y
 npm notice run npx
 npm notice run 'dalan' try
@@ -47,7 +47,7 @@ Connect your worker as an HTTP MCP server with OAuth:
   MCP URL file: /home/you/.local/share/dalan-trial/resource-url
   MCP URL (secret hidden): http://127.0.0.1:8799/<secret>/mcp
   Keep the URL private.
-  How to connect Claude Code, Codex or another client: https://github.com/tnunamak/dalan/blob/v0.5.1/README.md#connect-your-own-worker
+  How to connect Claude Code, Codex or another client: https://github.com/tnunamak/dalan/blob/v0.5.2/README.md#connect-your-own-worker
   Callbacks: http://127.0.0.1/callback, http://localhost/callback. To add one, restart with:
   npx @tnunamak/dalan try --home '/home/you/.local/share/dalan-trial' --callback PATTERN
 Job req_01234567… is queued for your worker. When it is connected, send it:

@@ -2,6 +2,10 @@
 
 This file lists user-visible changes, newest first. Check the section for your target release before you upgrade.
 
+## 0.5.2
+
+- Fix: a queued job that a worker had skipped is no longer marked skipped again as soon as it expires and is requeued. A job is marked skipped, and lists behind newer jobs, after it has been claimable for 10 minutes without a claim. The expiry requeue cleared the skip mark but kept the time the job first became claimable, so the next listing marked it skipped again at once and it stayed behind every newer job. The requeue now also restarts that time and the job's listing count.
+
 ## 0.5.1
 
 - Packaging: the npm package is `@tnunamak/dalan`. npm refused the name `dalan` as too close to an existing package, so 0.5.0 was not published to npm. Install with `npm install -g @tnunamak/dalan`, or try it with `npx @tnunamak/dalan try`. The command is still `dalan`. 0.5.1 has no other changes from 0.5.0.

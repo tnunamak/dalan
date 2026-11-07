@@ -143,6 +143,26 @@ try {
     s.db.close();log('F3 expiry requeue resets skips before same-tick skip sweep');
   }
 
+  // F3b. A requeue starts a new claimable window: the next listing with a free lane does not mark the job skipped again,
+  // and it lists ahead of a newer job. Before, the old eligible_since survived the requeue and re-marked it at once.
+  {
+    const s=fresh('window');seed(s,5);
+    s.submit(payload('window_job',iso(now+HOUR)),{mode:'none'},'','owner');asLearned(s,'window_job');
+    s.recordListed(s.listPending('dot'),6);
+    now+=11*MIN; s.recordListed(s.listPending('dot'),6);
+    assert(s.db.prepare('SELECT skipped_at FROM assignments WHERE request_id=?').get('window_job').skipped_at!==null,'F3b fixture: not skipped after the window');
+    s.db.prepare('UPDATE assignments SET valid_until=? WHERE request_id=?').run(iso(now-MIN),'window_job');
+    assert(s.sweepExpired().requeued.includes('window_job'),'F3b did not requeue');
+    s.submit(payload('newer_job',iso(now+HOUR)),{mode:'none'},'','owner');
+    now+=MIN; s.recordListed(s.listPending('dot'),6);
+    const row=s.db.prepare('SELECT skipped_at,eligible_since,listed_count FROM assignments WHERE request_id=?').get('window_job');
+    assert(row.skipped_at===null,'F3b re-marked skipped right after the requeue: '+JSON.stringify(row));
+    assert(row.eligible_since===iso(now),'F3b window did not restart: '+JSON.stringify(row));
+    const order=s.listPending('dot').filter(x=>x.kind==='assignment').map(x=>x.request_id);
+    assert(order.indexOf('window_job')<order.indexOf('newer_job'),'F3b order: '+JSON.stringify(order));
+    s.db.close();log('F3b expiry requeue restarts the claimable window');
+  }
+
   // F6. Requeue preserves pending notifications and legacy armed watches; final cancel suppresses them.
   {
     const s=fresh('delivery');seed(s,5);

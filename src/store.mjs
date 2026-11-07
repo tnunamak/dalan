@@ -2714,7 +2714,7 @@ export class Store {
         const fresh=this.defaultValidUntil(row.target_worker,row.kind), capMs=Date.parse(row.created_at)+QUEUE_WINDOW.maxMs;
         if(fresh.valid_until&&capMs-nowMs>=QUEUE_WINDOW.minMs) {
           const next=iso(Math.min(Date.parse(fresh.valid_until),capMs));
-          this.db.prepare("UPDATE assignments SET valid_until=?,expiry_requeues=COALESCE(expiry_requeues,0)+1,skipped_at=NULL,passed_over=0 WHERE request_id=? AND status='queued'").run(next,row.request_id);
+          this.db.prepare("UPDATE assignments SET valid_until=?,expiry_requeues=COALESCE(expiry_requeues,0)+1,skipped_at=NULL,passed_over=0,eligible_since=NULL,listed_count=0,last_listed_at=NULL WHERE request_id=? AND status='queued'").run(next,row.request_id);
           this.lifecycle(row.request_id,'queued','system','expired_requeued',null);
           requeued.push(row.request_id);
           continue;
