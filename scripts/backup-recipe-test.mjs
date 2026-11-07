@@ -22,7 +22,7 @@ const block = marker => {
   return operations.slice(open, operations.indexOf('```', open));
 };
 const recipe = block('**Worked backup recipe.**');
-const restoreCheck = block('**Check a restore.**').replace('"$(npm root -g)/dalan/src/restore-check.mjs"', JSON.stringify(path.join(repo, 'src/restore-check.mjs')));
+const restoreCheck = block('**Check a restore.**').replace('"$(npm root -g)/@tnunamak/dalan/src/restore-check.mjs"', JSON.stringify(path.join(repo, 'src/restore-check.mjs')));
 const haveSqlite3 = spawnSync('sqlite3', ['-version']).status === 0;
 const skip = !haveSqlite3 && 'sqlite3 is not installed';
 const root0 = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');

@@ -57,7 +57,7 @@ function option(name) { const i = args.indexOf(name); return i < 0 ? null : args
 const shellQuote=value=>`'${String(value).replaceAll("'","'\\''")}'`;
 // first-job.json, a complete valid job, and the full submit walk-through live in the manual setup.
 const FIRST_JOB_URL=docsUrl('docs/manual-setup.md','submit-finish-and-read-the-result'), JOB_EXAMPLE_URL=FIRST_JOB_URL;
-// The commands that plain output tells the user to run next use the form they ran: `npx dalan`, `dalan` or node and a path.
+// The commands that plain output tells the user to run next use the form they ran: `npx @tnunamak/dalan`, `dalan` or node and a path.
 // --json output keeps `dalan`, so scripts see the same text as before.
 const cli=json?'dalan':cliCommand(process.argv[1]);
 // Every option a command reads. An option it does not know is refused, so a typo is not ignored in silence.
@@ -700,11 +700,11 @@ async function main() {
       // A home with no bridge configuration has no worker profile: the legacy default worker it would imply is not shown.
       const hasProfile=!!readEnv('DALAN_WORKERS_FILE')||fs.existsSync(defaultPath(home,'.config/dot-bridge'));
       const homeSelected=!!process.env.DALAN_HOME||hasProfile;
-      const noHomeYet='no bridge home here yet. To try Dalan, run: npx dalan try';
+      const noHomeYet='no bridge home here yet. To try Dalan, run: npx @tnunamak/dalan try';
       const bridgeHome=homeSelected?{selected:true}:{selected:false,warning:'no bridge home selected: DALAN_HOME is not set, so this checked the host and your home directory, not a bridge home',
         fix:fs.existsSync(path.join(trialHome,'.dalan-trial'))?`to check the trial bridge, run: export DALAN_HOME=${shellQuote(trialHome)}`:`${noHomeYet} (or export DALAN_HOME=DIR for a bridge home made with dalan init)`};
       const running=hasProfile?await socketListening(socket):false;
-      const homeLine=!homeSelected?(fs.existsSync(path.join(trialHome,'.dalan-trial'))?`WARNING: ${bridgeHome.warning}. Fix: ${bridgeHome.fix}`:'No bridge home here yet. To try Dalan, run: npx dalan try. For a bridge home made with dalan init, export DALAN_HOME=DIR first.')
+      const homeLine=!homeSelected?(fs.existsSync(path.join(trialHome,'.dalan-trial'))?`WARNING: ${bridgeHome.warning}. Fix: ${bridgeHome.fix}`:'No bridge home here yet. To try Dalan, run: npx @tnunamak/dalan try. For a bridge home made with dalan init, export DALAN_HOME=DIR first.')
         :hasProfile?`bridge home: ${home} (${fs.existsSync(path.join(home,'.dalan-trial'))?'trial bridge':'bridge'}, ${running?'running':'not running'})`:`bridge home: ${home}: ${noHomeYet}`;
       // A trial bridge lives only while `dalan try` runs, so a stopped one is the usual state after the terminal closed.
       if(homeSelected&&hasProfile&&!running&&fs.existsSync(path.join(home,'.dalan-trial'))) bridgeHome.fix=stoppedTrialFix(cli,home,os.userInfo().homedir);

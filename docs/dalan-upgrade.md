@@ -56,31 +56,31 @@ Releases before 0.4.0 were published as `dot-bridge`. The old package installs t
 1. Drain, while the old service still runs. Put the new release in a scratch directory, so the old install stays in place, and run the drain from there with the service's own HOME and environment (see the drain paragraph in the [checklist](#pre-upgrade-checklist)):
 
    ```sh
-   npm install --prefix "$HOME/dalan-new" dalan@VERSION
-   cd "$HOME/dalan-new/node_modules/dalan" && env -u DALAN_HOME -u DALAN_LOOPBACK HOME=BRIDGE_HOME NODE_ENV=production DALAN_AUTH_MODE=builtin DALAN_PORT=PORT node scripts/upgrade-drain.mjs
+   npm install --prefix "$HOME/dalan-new" @tnunamak/dalan@VERSION
+   cd "$HOME/dalan-new/node_modules/@tnunamak/dalan" && env -u DALAN_HOME -u DALAN_LOOPBACK HOME=BRIDGE_HOME NODE_ENV=production DALAN_AUTH_MODE=builtin DALAN_PORT=PORT node scripts/upgrade-drain.mjs
    ```
 
-   Replace `VERSION` with the release you want (`npm view dalan versions` lists them). The command is `dalan@VERSION` here and in step 3, so both steps use the same release. The script is in the package; an installed `dalan` of a release that ships `scripts/upgrade-drain.mjs` can run it from `"$(npm root -g)/dalan"` the same way. `BRIDGE_HOME` and `PORT` come from [Run a command in the service's environment](#pre-upgrade-checklist).
+   Replace `VERSION` with the release you want (`npm view @tnunamak/dalan versions` lists them). The command is `@tnunamak/dalan@VERSION` here and in step 3, so both steps use the same release. The script is in the package; an installed `dalan` of a release that ships `scripts/upgrade-drain.mjs` can run it from `"$(npm root -g)/@tnunamak/dalan"` the same way. `BRIDGE_HOME` and `PORT` come from [Run a command in the service's environment](#pre-upgrade-checklist).
 
 2. Stop the service. Linux: `systemctl --user stop dot-bridge-NAME.service`. macOS: `launchctl bootout user/$(id -u) ~/Library/LaunchAgents/LABEL.plist`; for an agent that an earlier release loaded, use `gui/$(id -u)` instead of `user/$(id -u)`. `LABEL` is `org.dalan.dot-bridge-NAME`. An install made by a release before 0.4.0 has a different label; find its file with `ls ~/Library/LaunchAgents | grep dot-bridge`.
 3. Take the [backup](operations.md#upgrade-and-rollback), then replace the package and check which build the shell now runs:
 
    ```sh
    npm uninstall -g dot-bridge
-   npm install -g dalan@VERSION
+   npm install -g @tnunamak/dalan@VERSION
    command -v dalan
    dalan --version
-   ls "$(npm root -g)/dalan/src/server.mjs"
+   ls "$(npm root -g)/@tnunamak/dalan/src/server.mjs"
    ```
 
    `dalan --version` must print `VERSION`, and the last command must find the file: that path is what step 4 writes into the service. If you installed with `--prefix DIR`, add the same `--prefix DIR` to the npm commands and run `DIR/bin/dalan`.
 4. Point the service at the new code. The command changes only the code directory in the unit or plist; the port, bridge home and environment stay as they are:
 
    ```sh
-   node "$(npm root -g)/dalan/scripts/worker-bridge-setup.mjs" --repoint --worker NAME
+   node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --repoint --worker NAME
    ```
 
-   `--repoint` finds only the label `org.dalan.dot-bridge-NAME`. For a macOS service made by a release before 0.4.0, delete the old plist by hand after step 2, then write a new one for the same home and start it as in step 5: `node "$(npm root -g)/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --public-url URL --port PORT --home HOME_PATH --write-units-only` (use the URL, port and home of the old service).
+   `--repoint` finds only the label `org.dalan.dot-bridge-NAME`. For a macOS service made by a release before 0.4.0, delete the old plist by hand after step 2, then write a new one for the same home and start it as in step 5: `node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --public-url URL --port PORT --home HOME_PATH --write-units-only` (use the URL, port and home of the old service).
 
    Before you start the service, run the review from [checklist](#pre-upgrade-checklist) item 2 with the new build, under the service's own HOME and environment, as in [Run a command in the service's environment](#pre-upgrade-checklist): `dalan worker migrate-repos --json` (it converts an old repository policy and needs the service stopped; check that its `database` and `workers_file` belong to this bridge), then `dalan doctor --json` and `dalan worker list --json` (each worker's repository access).
 5. Start the service. Linux: `systemctl --user daemon-reload && systemctl --user start dot-bridge-NAME.service`, then `systemctl --user is-active dot-bridge-NAME.service` must print `active`. macOS: the agent is unloaded, so load it before you start it:
@@ -207,7 +207,7 @@ For an existing identity profile, startup fills only omitted lists and leaves ex
 
 The private journal commits each seed and one audit event together, with `before: legacy-any` and `after: exact`. Interrupted profile publication reuses that committed seed. Doctor and `worker list --json` show the resulting lists and audit events. Back up `workers-repos.json` with the rest of the private configuration. Preserve `bridge.db.secrets/storage.key` with the encrypted database too; a new data sibling missing that key cannot replace the legacy root, even when all its other data files exist.
 
-Before upgrading a built-in-auth installation, run `node scripts/upgrade-drain.mjs` from the new release while the old service is still running, with the old HOME and environment. From a checkout, run it in a checkout of the new tag (`git worktree add`). For an npm install, run it from a scratch copy of the new package (`npm install --prefix "$HOME/dalan-new" dalan`, then `cd "$HOME/dalan-new/node_modules/dalan"`): it uses the `bin/dot-worker.mjs` in the current directory. It pauses new claims but does not pause submissions, so jobs can still be queued while it waits. It prints each active job ID and lease expiry. The default timeout is five minutes; set `DALAN_UPGRADE_DRAIN_TIMEOUT_MS` for another bounded wait. If a command times out, returns an HTTP error, or prints invalid JSON, the drain prints the same recovery step: keep the old service running, let workers finish or wait for leases to expire, run `dalan resume` under the old HOME, then retry the drain. After a successful drain, stop the old service, replace only the code, start the new service with the same HOME and configuration, then run `dalan resume` to release the persisted pause. An expired lease revokes the old claim ID but does not prove its process stopped; the new service sweeps the row back to the queue, where the claimant can resume the work only with a fresh claim epoch after stopping the old run. Pre-upgrade claims have no authenticated connection binding and cannot be safely assigned one during migration.
+Before upgrading a built-in-auth installation, run `node scripts/upgrade-drain.mjs` from the new release while the old service is still running, with the old HOME and environment. From a checkout, run it in a checkout of the new tag (`git worktree add`). For an npm install, run it from a scratch copy of the new package (`npm install --prefix "$HOME/dalan-new" @tnunamak/dalan`, then `cd "$HOME/dalan-new/node_modules/@tnunamak/dalan"`): it uses the `bin/dot-worker.mjs` in the current directory. It pauses new claims but does not pause submissions, so jobs can still be queued while it waits. It prints each active job ID and lease expiry. The default timeout is five minutes; set `DALAN_UPGRADE_DRAIN_TIMEOUT_MS` for another bounded wait. If a command times out, returns an HTTP error, or prints invalid JSON, the drain prints the same recovery step: keep the old service running, let workers finish or wait for leases to expire, run `dalan resume` under the old HOME, then retry the drain. After a successful drain, stop the old service, replace only the code, start the new service with the same HOME and configuration, then run `dalan resume` to release the persisted pause. An expired lease revokes the old claim ID but does not prove its process stopped; the new service sweeps the row back to the queue, where the claimant can resume the work only with a fresh claim epoch after stopping the old run. Pre-upgrade claims have no authenticated connection binding and cannot be safely assigned one during migration.
 
 To inspect and finish the migration before restarting the service, stop the service and run the new build with its HOME, PATH and environment:
 

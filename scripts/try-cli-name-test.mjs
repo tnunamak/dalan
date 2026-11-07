@@ -29,12 +29,12 @@ test('another dalan on PATH is not taken for this one', () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('under npx the CLI is named npx dalan, because npx puts its temporary bin on PATH only for that run', () => {
+test('under npx the CLI is named npx @tnunamak/dalan, because npx puts its temporary bin on PATH only for that run', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'try-cli-'));
   try {
     fs.symlinkSync(bin, path.join(dir, 'dalan'));
-    // npm sets npm_command=exec for both `npx dalan` and `npm exec dalan`.
-    assert.equal(cliCommand(path.join(dir, 'dalan'), { PATH: dir, npm_command: 'exec' }), 'npx dalan');
+    // npm sets npm_command=exec for both `npx @tnunamak/dalan` and `npm exec @tnunamak/dalan`.
+    assert.equal(cliCommand(path.join(dir, 'dalan'), { PATH: dir, npm_command: 'exec' }), 'npx @tnunamak/dalan');
     assert.equal(cliCommand(path.join(dir, 'dalan'), { PATH: dir, npm_command: 'run-script' }), 'dalan');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

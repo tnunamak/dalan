@@ -88,7 +88,7 @@ function packedMarkdownLinks() {
 
 test('the package names the commands it installs', () => {
   assert.notEqual(pkg.private, true, 'the package can be published');
-  assert.equal(pkg.name, 'dalan');
+  assert.equal(pkg.name, '@tnunamak/dalan');
   assert.ok(Array.isArray(pkg.files) && pkg.files.length, 'an allow-list, not "everything not ignored"');
   assert.equal(pkg.bin.dalan, 'bin/dalan.mjs');
   for (const target of Object.values(pkg.bin)) assert.ok(files.has(target), `${target} ships`);
@@ -99,7 +99,7 @@ test('the scripts that the installed-package setup, upgrade and removal document
   for (const script of ['scripts/worker-bridge-setup.mjs', 'scripts/upgrade-drain.mjs']) assert.ok(files.has(script), `${script} ships`);
   for (const doc of ['docs/service-setup.md', 'docs/dalan-upgrade.md', 'docs/operations.md']) {
     const source = fs.readFileSync(path.join(repo, doc), 'utf8');
-    for (const [, script] of source.matchAll(/(?:\$\(npm root -g\)\/dalan\/|\bnode )(scripts\/(?:worker-bridge-setup|upgrade-drain)\.mjs)/g)) assert.ok(files.has(script), `${doc} runs ${script}`);
+    for (const [, script] of source.matchAll(/(?:\$\(npm root -g\)\/@tnunamak\/dalan\/|\bnode )(scripts\/(?:worker-bridge-setup|upgrade-drain)\.mjs)/g)) assert.ok(files.has(script), `${doc} runs ${script}`);
   }
 });
 

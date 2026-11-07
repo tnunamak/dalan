@@ -27,7 +27,7 @@ If you want only a bridge on this computer that stays up, run the server in a te
 
 ## Owner setup
 
-You need the installed package (from `npm install -g dalan`) or a checkout, a stable Node.js 24 LTS or newer executable, a fresh private bridge home, and a free port from 1024 through 65535. Use short, space-free paths without symlinks; on Linux, starting the service needs a running systemd user manager; on macOS, it needs the user's launchd domain (`user/UID`), which exists while that user has a login session. The script checks those before writing a service with `--start`.
+You need the installed package (from `npm install -g @tnunamak/dalan`) or a checkout, a stable Node.js 24 LTS or newer executable, a fresh private bridge home, and a free port from 1024 through 65535. Use short, space-free paths without symlinks; on Linux, starting the service needs a running systemd user manager; on macOS, it needs the user's launchd domain (`user/UID`), which exists while that user has a login session. The script checks those before writing a service with `--start`.
 
 On macOS the service is a LaunchAgent. A LaunchAgent starts when you log in to the Mac and stops when you log out, so it does not run after a reboot until someone logs in and you cannot rely on it for unattended availability.
 
@@ -84,7 +84,7 @@ Choose a worker name of up to 32 characters, starting with a lowercase letter an
    From an npm install (`scripts/worker-bridge-setup.mjs` ships in the package), use the installed copy with the same options:
 
    ```sh
-   node "$(npm root -g)/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --public-url https://bridge.example.com --port PORT --home HOME_PATH --start
+   node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --public-url https://bridge.example.com --port PORT --home HOME_PATH --start
    ```
 
    Setup reports the private home and service definition. With an explicit `--public-url` it does not verify public DNS or HTTPS: before pairing, check that an unauthenticated request to `/admin` on the public origin returns 404. It enables repository tools unless you pass `--no-repo-tools`; it does not enable host checks or grant repositories. A reverse proxy on another Linux LAN computer can reach a generated forwarder by adding `--lan-forward ADDR:PORT`. Anything on that network can reach this forwarder, so retain HTTPS and OAuth at the public origin.
@@ -131,7 +131,7 @@ node scripts/worker-bridge-setup.mjs --worker NAME --port PORT --home HOME_PATH 
 From an npm install:
 
 ```sh
-node "$(npm root -g)/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --port PORT --home HOME_PATH --expose tailscale --start
+node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --port PORT --home HOME_PATH --expose tailscale --start
 ```
 
 Setup should report the derived HTTPS origin, generated service and exposure verification. It chooses the first free Funnel port from 443, 8443 and 10000, and the origin it prints includes that port when it is not 443. Pass `--funnel-port N` only to choose one; setup refuses a port that another Funnel or Serve rule already uses and never replaces that rule. Verify the selected port with the target client.
@@ -161,6 +161,6 @@ Use the same worker and home that created it. The full list of things an uninsta
 node scripts/worker-bridge-setup.mjs --remove --worker NAME --home HOME_PATH
 ```
 
-From an npm install, run `node "$(npm root -g)/dalan/scripts/worker-bridge-setup.mjs"` with the same options.
+From an npm install, run `node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs"` with the same options.
 
 The script stops and removes its generated service and any unchanged recorded Funnel rule. It checks generated markers before removal and refuses to disable a Funnel rule that has changed. It retains the private home, keys and state. Add `--purge-home` only when you intend to delete those too. An interrupted copy or a modified service may require inspection instead of automatic removal.

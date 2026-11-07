@@ -31,7 +31,7 @@ function workerLine(name, w, { now, oldestMs }) {
 }
 
 // status: the /status document. home: the bridge home. url: the bridge's public origin, or null. trial: a `dalan try` home.
-// cli: how to name this CLI in the commands it prints (`dalan`, `npx dalan` or node and a path).
+// cli: how to name this CLI in the commands it prints (`dalan`, `npx @tnunamak/dalan` or node and a path).
 export function formatStatusSummary(status, { home, url = null, trial = false, now = Date.now(), cli = 'dalan', envHome = null } = {}) {
   const byWorker = Object.entries(status?.by_worker ?? {}).sort(([a], [b]) => a.localeCompare(b));
   // The bridge reports the oldest queued age for all workers together, so it is shown only when one worker has queued work.

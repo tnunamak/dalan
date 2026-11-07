@@ -25,7 +25,7 @@ You need:
 The demo needs no AI account and no MCP client. The shell examples in this README use POSIX shell syntax (bash or zsh). Start the demo with one command:
 
 ```sh
-npx dalan try
+npx @tnunamak/dalan try
 ```
 
 To run from a checkout instead, see [Install from source](#from-source).
@@ -33,9 +33,9 @@ To run from a checkout instead, see [Install from source](#from-source).
 `try` starts a bridge on `127.0.0.1` and runs a built-in demo worker against it. The first run takes about half a minute. npx asks once to install the package; answer `y`. A first run prints this (the request ID is shortened):
 
 ```text
-$ npx dalan try
+$ npx @tnunamak/dalan try
 Need to install the following packages:
-dalan@0.5.0
+@tnunamak/dalan@0.5.1
 Ok to proceed? (y) y
 npm notice run npx
 npm notice run 'dalan' try
@@ -47,9 +47,9 @@ Connect your worker as an HTTP MCP server with OAuth:
   MCP URL file: /home/you/.local/share/dalan-trial/resource-url
   MCP URL (secret hidden): http://127.0.0.1:8799/<secret>/mcp
   Keep the URL private.
-  How to connect Claude Code, Codex or another client: https://github.com/tnunamak/dalan/blob/v0.5.0/README.md#connect-your-own-worker
+  How to connect Claude Code, Codex or another client: https://github.com/tnunamak/dalan/blob/v0.5.1/README.md#connect-your-own-worker
   Callbacks: http://127.0.0.1/callback, http://localhost/callback. To add one, restart with:
-  npx dalan try --home '/home/you/.local/share/dalan-trial' --callback PATTERN
+  npx @tnunamak/dalan try --home '/home/you/.local/share/dalan-trial' --callback PATTERN
 Job req_01234567… is queued for your worker. When it is connected, send it:
   "Request req_01234567… is your only job: claim it with Dalan, do what its brief asks, report progress and finish it with the claim_id. Stop if it is missing or cancelled. Claim no other job."
 Waiting for your worker. Ctrl-C stops the bridge.
@@ -102,7 +102,7 @@ If a step fails, look for its message here:
 
 - **The browser shows `Connection attempt invalid or expired`.** Each visit to the sign-in URL starts a new attempt with a new code, and only a live attempt can be approved. Start the sign-in again in the client and approve the new code.
 - **No approval block appears in the `try` terminal.** After a while, `try` prints the `dalan connect pending` and `dalan status` commands to run in another terminal, and it shows each new attempt as it arrives.
-- **`npx dalan try` fails with an npm error such as `ECONNREFUSED`, `ETIMEDOUT` or `ENOTFOUND`.** npm cannot reach the registry. Check the network or proxy with `npm config get registry` and `npm config get proxy`, then run the command again.
+- **`npx @tnunamak/dalan try` fails with an npm error such as `ECONNREFUSED`, `ETIMEDOUT` or `ENOTFOUND`.** npm cannot reach the registry. Check the network or proxy with `npm config get registry` and `npm config get proxy`, then run the command again.
 - **Your client uses a different callback.** `try` allows `http://127.0.0.1/callback` and `http://localhost/callback` on any port. Stop `try` and start it again with `--callback PATTERN` ([pattern rules](docs/setup-reference.md#callback-patterns)).
 
 <a id="still-stuck"></a>
@@ -117,7 +117,7 @@ Each row starts from a working trial.
 
 | To do this | Go to |
 |---|---|
-| Run `dalan` commands against the trial bridge | Run `npm install -g dalan`, then `export DALAN_HOME=~/.local/share/dalan-trial` in each shell. Try `dalan status` and `dalan inbox --all`. |
+| Run `dalan` commands against the trial bridge | Run `npm install -g @tnunamak/dalan`, then `export DALAN_HOME=~/.local/share/dalan-trial` in each shell. Try `dalan status` and `dalan inbox --all`. |
 | Give your worker a task of your own, with no file to write | [Your own first job](#your-own-first-job) |
 | Give your worker a job on a real repository | [Give a worker a repository job](#separate-repository-assignment) |
 | Let a coding agent submit and read jobs as tool calls | [`dalan mcp`](docs/local-agent-mcp.md) |
@@ -133,12 +133,12 @@ Each row starts from a working trial.
 This gives your connected worker a task of your own, with no file to write and no JSON. Leave `try` running, and use a second shell. First install the CLI, select the trial home and type your task:
 
 ```sh
-npm install -g dalan
+npm install -g @tnunamak/dalan
 export DALAN_HOME=~/.local/share/dalan-trial
 printf 'Your task, on one line: '; IFS= read -r task
 ```
 
-If `npm install -g dalan` fails with `EACCES`, your global npm directory belongs to root. Do not use `sudo`; [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally), or skip the install and write `npx dalan` wherever this section says `dalan`.
+If `npm install -g @tnunamak/dalan` fails with `EACCES`, your global npm directory belongs to root. Do not use `sudo`; [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally), or skip the install and write `npx @tnunamak/dalan` wherever this section says `dalan`.
 
 Type the task and press Enter. The shell stores it as plain text, so quotes, `$` and backticks in it are safe. Then submit it:
 
@@ -182,7 +182,7 @@ The repository can come from GitHub or from a clone on this computer:
 - **A clone on this computer (no GitHub login).** Pick a name `OWNER/REPO` for it, for example `local/my-project`. Start the bridge with a variable named `DALAN_GITHUB_URL_` plus that name in capitals, with every other character replaced by `_`, set to the clone's absolute path. For `local/my-project` the variable is `DALAN_GITHUB_URL_LOCAL_MY_PROJECT`. To use the trial bridge, stop `try` with Ctrl-C and start it again with the variable:
 
   ```sh
-  DALAN_GITHUB_URL_LOCAL_MY_PROJECT=/path/to/my-project npx dalan try
+  DALAN_GITHUB_URL_LOCAL_MY_PROJECT=/path/to/my-project npx @tnunamak/dalan try
   ```
 
   The restart replaces your worker's connection with the demo worker again, so sign your worker in again as in [Connect your own worker](#connect-your-own-worker). For a bridge you started by hand, add the same variable to the server command instead. Use `local/my-project` wherever the steps below say `OWNER/REPO`. The clone needs at least one commit.
@@ -245,10 +245,10 @@ A worker connects from wherever its MCP client runs. `127.0.0.1` reaches only th
 For this, set up a separate, long-running bridge with a stable HTTPS address. The setup script writes a systemd user service (Linux) or a launchd agent (macOS). The default route is [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), which needs no reverse proxy and no domain of your own:
 
 1. Complete the [Tailscale Funnel prerequisites](docs/service-setup.md#with-tailscale-funnel).
-2. Run the setup script from the installed package (`npm install -g dalan`):
+2. Run the setup script from the installed package (`npm install -g @tnunamak/dalan`):
 
    ```sh
-   node "$(npm root -g)/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --port PORT --home HOME_PATH --expose tailscale --start
+   node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --port PORT --home HOME_PATH --expose tailscale --start
    ```
 
    From a checkout, run `node scripts/worker-bridge-setup.mjs` with the same options.
@@ -284,7 +284,7 @@ Start each new worker by hand for its first job. Dalan never starts a worker, in
 
 - **What `try` refuses.** It refuses your real home directory and any non-empty directory without a `.dalan-trial` marker file, so it cannot take over an existing bridge home.
 - **Keep it dedicated.** A directory that has the marker is reused without checking its other files. On exit, `try` deletes `demo/` and every `req_*.json` request file in the home, revokes the demo grant and deletes the demo repository. A run that was killed is cleaned up at the next start.
-- **Use a short path on a local disk.** The bridge's admin socket path has a length limit, and network or FUSE file systems are not supported. If a home is too long or not on a local disk, use a new short directory: `npx dalan try --home /short/local/path`. Do not use an existing bridge home.
+- **Use a short path on a local disk.** The bridge's admin socket path has a length limit, and network or FUSE file systems are not supported. If a home is too long or not on a local disk, use a new short directory: `npx @tnunamak/dalan try --home /short/local/path`. Do not use an existing bridge home.
 - **A second run reuses the home**, its worker profile, job history and port. It first replaces the worker's connection with the demo worker, so sign in again in your client and approve it again after the demo.
 - **To start over**, stop `try` and delete the trial home.
 - **For scripts**, run `dalan try < /dev/null`: with standard input closed, `try` runs the self-check and stops.
@@ -342,7 +342,7 @@ npm ci
 node bin/dalan.mjs try
 ```
 
-To put `dalan` on your PATH from the checkout, run `npm link` once (undo it with `npm unlink -g dalan`). Without it, write `node bin/dalan.mjs` wherever this README says `dalan`. Installing from npm instead: `npm install -g dalan` (remove it with `npm uninstall -g dalan`).
+To put `dalan` on your PATH from the checkout, run `npm link` once (undo it with `npm unlink -g @tnunamak/dalan`). Without it, write `node bin/dalan.mjs` wherever this README says `dalan`. Installing from npm instead: `npm install -g @tnunamak/dalan` (remove it with `npm uninstall -g @tnunamak/dalan`).
 
 Read the [contributing guide](CONTRIBUTING.md) before you open a pull request, and the [security policy](SECURITY.md) to report a vulnerability.
 

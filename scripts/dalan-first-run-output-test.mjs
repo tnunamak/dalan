@@ -101,7 +101,7 @@ test('doctor in a clean home says there is no bridge home yet and never shows th
   const home = fresh('doctor-clean');
   const out = dalan(['doctor'], home);
   assert.equal(out.status, 0, out.stderr);
-  assert.match(out.stdout, /no bridge home here yet\. To try Dalan, run: npx dalan try/i);
+  assert.match(out.stdout, /no bridge home here yet\. To try Dalan, run: npx @tnunamak\/dalan try/i);
   assert.doesNotMatch(out.stdout, /"dot"|\bdot:|t3 capability|repository access/);
   assert.doesNotMatch(out.stdout, /sandbox-probe-e2e|measured v1/);
 });
@@ -109,7 +109,7 @@ test('doctor in a clean home says there is no bridge home yet and never shows th
 test('doctor names the selected bridge home on its first line and whether its bridge runs', () => {
   const empty = fresh('doctor-empty');
   const first = dalan(['doctor'], fresh('doctor-real'), { DALAN_HOME: empty }).stdout.split('\n')[0];
-  assert.equal(first, `bridge home: ${empty}: no bridge home here yet. To try Dalan, run: npx dalan try`);
+  assert.equal(first, `bridge home: ${empty}: no bridge home here yet. To try Dalan, run: npx @tnunamak/dalan try`);
   const made = fresh('doctor-made');
   const init = dalan(['init', '--worker', 'local', '--public-url', 'http://127.0.0.1:8799'], fresh('doctor-real'), { DALAN_HOME: made, DALAN_LOOPBACK: '1' });
   assert.equal(init.status, 0, init.stderr);
@@ -201,8 +201,8 @@ test('plain status prints the summary; --json keeps the full status document', a
     assert.match(plain.stdout, new RegExp(`^Full detail: ${escape(byPath)} status --json$`, 'm'));
     assert.doesNotMatch(plain.stdout, /^\{/);
     const npx = await run(['status'], fresh('status-real'), { DALAN_HOME: home, ...underNpx });
-    assert.match(npx.stdout, /^Next: .*; list your jobs: npx dalan inbox --all$/m);
-    assert.match(npx.stdout, /^Full detail: npx dalan status --json$/m);
+    assert.match(npx.stdout, /^Next: .*; list your jobs: npx @tnunamak\/dalan inbox --all$/m);
+    assert.match(npx.stdout, /^Full detail: npx @tnunamak\/dalan status --json$/m);
     const installed = await run(['status'], fresh('status-real'), { DALAN_HOME: home, ...onPath });
     assert.match(installed.stdout, /^Next: .*; list your jobs: dalan inbox --all$/m);
     const json = await run(['status', '--json'], fresh('status-real'), { DALAN_HOME: home });
@@ -237,7 +237,7 @@ test('a queued submit ends with one plain Next line', async () => {
     assert.equal(JSON.parse(out.stdout).request_id, id);
     assert.equal(out.stderr, `Next: send your worker the job, then run: ${byPath} wait ${id} (check it any time with: ${byPath} get ${id})\n`);
     const npx = await run(['submit', '--stdin'], fresh('submit-real'), { DALAN_HOME: home, ...underNpx }, job);
-    assert.equal(npx.stderr, `Next: send your worker the job, then run: npx dalan wait ${id} (check it any time with: npx dalan get ${id})\n`);
+    assert.equal(npx.stderr, `Next: send your worker the job, then run: npx @tnunamak/dalan wait ${id} (check it any time with: npx @tnunamak/dalan get ${id})\n`);
     const installed = await run(['submit', '--stdin'], fresh('submit-real'), { DALAN_HOME: home, ...onPath }, job);
     assert.equal(installed.stderr, `Next: send your worker the job, then run: dalan wait ${id} (check it any time with: dalan get ${id})\n`);
     const json = await run(['submit', '--stdin', '--json'], fresh('submit-real'), { DALAN_HOME: home }, job);
@@ -258,7 +258,7 @@ test('get and wait fixes name the CLI the way the user ran it; --json keeps plai
   const home = fresh('get-unknown');
   const plain = dalan(['get', 'req_not_a_known_job_01'], fresh('get-real'), { DALAN_HOME: home, ...underNpx });
   assert.equal(plain.status, 1);
-  assert.match(plain.stderr, /^dalan: fix: check the ID and DALAN_HOME, or list your jobs with: npx dalan inbox --all$/m);
+  assert.match(plain.stderr, /^dalan: fix: check the ID and DALAN_HOME, or list your jobs with: npx @tnunamak\/dalan inbox --all$/m);
   const json = dalan(['get', 'req_not_a_known_job_01', '--json'], fresh('get-real'), { DALAN_HOME: home, ...underNpx });
   assert.deepEqual(JSON.parse(json.stderr).fix, ['check the ID and DALAN_HOME, or list your jobs with: dalan inbox --all']);
   const wait = dalan(['wait'], fresh('get-real'), { DALAN_HOME: home, ...onPath });
@@ -327,7 +327,7 @@ test('doctor on a trial home whose bridge is stopped says how to start it; --jso
 
 test('the default trial home is started with plain dalan try; another home needs --home', () => {
   assert.equal(tryCommand('dalan', '/u/me/.local/share/dalan-trial', '/u/me'), 'dalan try');
-  assert.equal(tryCommand('npx dalan', '/u/me/.local/share/dalan-trial', '/u/me'), 'npx dalan try');
+  assert.equal(tryCommand('npx @tnunamak/dalan', '/u/me/.local/share/dalan-trial', '/u/me'), 'npx @tnunamak/dalan try');
   assert.equal(tryCommand('dalan', "/x/it's", '/u/me'), "dalan try --home '/x/it'\\''s'");
 });
 

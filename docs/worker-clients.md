@@ -199,7 +199,7 @@ This example uses a bridge from the [Tailscale Funnel setup](service-setup.md#wi
 5. On the bridge computer, run `dalan connect pending`. Compare the code and the redirect with the page, then run `dalan connect approve CODE --worker NAME --confirm-redirect REDIRECT`.
 6. **Check:** `codex mcp add` ends with `Successfully logged in.` Add the five tool approvals from the [Codex CLI section](#native-cli-worker-codex-cli) to the worker computer's `config.toml`. Submit the README's first job with `--worker NAME`, run `codex exec` on the worker computer, then use `dalan wait`, `get` and `decide` on the bridge computer.
 
-To undo it, run `codex mcp remove NAME` on the worker computer, and `node "$(npm root -g)/dalan/scripts/worker-bridge-setup.mjs" --remove --worker NAME --home HOME_PATH` on the bridge computer (from a checkout, `node scripts/worker-bridge-setup.mjs` with the same options); that also turns off the Funnel rule that setup created.
+To undo it, run `codex mcp remove NAME` on the worker computer, and `node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --remove --worker NAME --home HOME_PATH` on the bridge computer (from a checkout, `node scripts/worker-bridge-setup.mjs` with the same options); that also turns off the Funnel rule that setup created.
 
 ## Worker names and more than one worker
 
