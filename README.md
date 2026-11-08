@@ -271,7 +271,7 @@ Any client that speaks HTTP MCP and completes the bridge's OAuth sign-in can be 
 | Claude Code | [Native CLI worker: Claude Code](docs/worker-clients.md#native-cli-worker-claude-code) |
 | opencode | [CLI worker: opencode](docs/worker-clients.md#cli-worker-opencode), with a model that supports tool calls |
 | ChatGPT | [Connect ChatGPT](docs/connect-chatgpt.md) |
-| Muse Spark (Meta) | Connects like any remote MCP client: follow [Expose the bridge](#expose-your-bridge) and the [worker guide](docs/worker-clients.md); there is no client-specific recipe. |
+| Muse Spark (Meta) | [Send a job from Codex CLI to Muse Spark](docs/codex-to-muse.md) |
 | Claude on the web (hosted) | [Claude cloud worker](docs/claude-worker-onboarding.md); separate from Claude Code |
 
 Start each new worker by hand for its first job. Dalan never starts a worker, including after a reboot.
