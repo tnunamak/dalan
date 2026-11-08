@@ -1,7 +1,6 @@
 # Mirror fetch ownership
 
-Mirrors hold full Git objects for live worktrees and reference clones. They must
-not use partial clones or prune objects that consumers still need.
+Dalan keeps a local Git mirror, a reusable repository cache, so jobs can fetch pinned commits and create working copies without downloading every object again. Those working copies may still read objects from the mirror. Keep the mirror complete and do not prune objects while any working copy depends on them.
 
 `prepareGithubRepo` runs fetches through `src/mirror-fetch.mjs`. The synchronous
 API stays in place; a Node child supervises a detached Git process group.

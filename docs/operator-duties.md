@@ -2,7 +2,7 @@
 
 This is a checklist of operator responsibilities, not another operating manual. Follow [operations](operations.md) for procedures and [the Dalan upgrade guide](dalan-upgrade.md) for command, setting and path compatibility. Use the service's HOME and environment when checking an installation.
 
-Each duty names a command or registered test, its source, and the limits of that evidence. A test name is an entry point, not a claim that it passed on this host. Run `node scripts/operator-duties-test.mjs` for this document's structural check: it reads repository files only, validates cited files, links, CLI forms and suite registrations, and executes none of the cited commands. It does not prove operational readiness or the semantic completeness of a regression test.
+Each duty names a command or registered test, its source, and the limits of that evidence. A test name is an entry point, not a claim that it passed on this host. From a source checkout installed with `npm ci`, run `node scripts/operator-duties-test.mjs` for this document's structural check; the npm package does not include that script. The check reads repository files only, validates cited files, links, CLI forms and suite registrations, and executes none of the cited commands. It does not prove operational readiness or the semantic completeness of a regression test.
 
 ## Backup and restore
 

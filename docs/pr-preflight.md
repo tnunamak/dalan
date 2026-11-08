@@ -23,4 +23,6 @@ For example, add these fields to the normal assignment:
 
 A direct observation proves the head at its recorded instant. GitHub can change immediately afterward; the result remains tied to its declared SHA and must be verified against the current head before use. This preflight does not prove the broader objective is still useful. When the objective, revision or validity changes, the producer must prepare a new immutable identity; changing the old assignment conflicts.
 
+The following checks require a source checkout installed with `npm ci`; their scripts are not included in the npm package.
+
 Run `node scripts/pr-preflight-test.mjs` and `node scripts/pr-preflight-commit-test.mjs` and `node scripts/pr-preflight-e2e.mjs`. The HTTP journey uses a local Git fixture and an inert gh executable, verifies zero assignments/claims on refusal, and proves claim retries keep their ID through a simulated observation outage. It does not contact GitHub or a live worker.

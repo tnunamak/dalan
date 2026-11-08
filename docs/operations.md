@@ -257,6 +257,7 @@ The loop skips `bridge.db.secrets/owner.sqlite` and `as-owner.sqlite` on purpose
 **Check a restore.** The check copies the backup into a new, empty home and then reads it with `restore-check.mjs`. That script opens the databases read-only and decrypts what the bridge would decrypt. It starts no bridge, no delivery loop and no network socket, so a webhook subscription or pending notice in the restored copy is not sent. Set `backup` to the backup directory and, if you want to read one request back, `request_id` to a known recent request ID. Then run:
 
 ```sh
+(
 umask 077
 export DALAN_HOME="$HOME/dalan-restore-check"
 [ ! -e "$DALAN_HOME" ] || { echo "$DALAN_HOME exists; choose a new path" >&2; exit 1; }
@@ -269,6 +270,7 @@ cp -Rp "$backup/data/." "$data_root/" || exit 1
 find "$backup/config" -maxdepth 1 -type f -exec sh -c 'cp -p "$@" "$0"' "$config_root" {} + || exit 1
 if [ -d "$backup/artifacts" ]; then cp -Rp "$backup/artifacts" "$workspace_root/artifacts" || exit 1; fi
 node "$(npm root -g)/@tnunamak/dalan/src/restore-check.mjs" "$data_root" "$config_root" "$request_id" || exit 1
+)
 ```
 
 From a checkout, run `node src/restore-check.mjs` in the checkout instead of the `npm root -g` path. With `request_id` empty, the script counts the assignments instead. The script prints one JSON line and exits 0 only when `bridge.db` passes `integrity_check`, its status reads back and every stored subscription secret decrypts with the restored key. For an encrypted database a missing key stops it with `subscription storage key is missing`, and a wrong key with `subscription storage cannot be decrypted with the restored key`. It also checks `as.sqlite` and `workers-audit-checkpoint.sqlite` when they are present. For `as.sqlite` it authenticates the storage verifier and decrypts every sealed row with `as-storage.key`, so a wrong key of the right size fails with `authorization storage cannot be decrypted with the restored key`. It does not prove that the whole service starts. To prove that, start the restored home as a service in an environment you have cut off from the network: nothing in these commands cuts it off, and a full start runs the delivery loops. A backup that fails this check is incomplete: take a new one. Delete the restore home when you are done.
@@ -521,25 +523,31 @@ Repository work uses the bridge host's full GitHub credential through Git askpas
 
 Switching a host from legacy mode to a `workers.json` profile retires every legacy subscription that has no verified persisted connection, including an old OAuth callback. The bridge suppresses that subscription's unsent wakes. The default worker must send a new authenticated `events/subscribe` request before it receives wake-ups again; a successful subscription replays still-queued work and records the approved connection. Check `dalan status --json`: after retirement, `subscriptions_active` is `0` and `subscription.state` is `revoked` (or `absent` if no row remains). The bridge does not create a replacement subscription. ChatGPT's MCP Events client is documented to refresh before a finite `refreshBefore`, but this early-retirement path has not been observed and that refresh may be days away. For immediate wake-ups, reconnect or refresh the default worker connector on the approved OAuth client to prompt `events/subscribe`, then confirm `subscriptions_active` is nonzero and `subscription.state` is `active`.
 
-**PRE-UPGRADE backup.** Before installing this build, stop the pre-isolation service and take a consistent backup of its DB and artifact directory. Save `workers.json` only if it exists. Keep this backup: the refusal of an abandoned worker-isolation schema requires restoring a pre-isolation DB, not a rollback DB. Use the service's workspace-root environment and fresh backup destinations.
+**Pre-isolation recovery backup.** Before upgrading a pre-isolation installation, stop every writer and preserve all application databases, matching keys, configuration, receipts, artifact indexes and artifact bytes; exclude ownership-lock files. The commands below take that set in place, beside the live files, with a `.pre-isolation` suffix, and copy nothing that does not exist. The complete [Upgrade and rollback](#upgrade-and-rollback) procedure writes the same material into its own backup directory; keep both separate from any later rollback snapshot, because recovery from an abandoned worker-isolation schema requires compatible pre-isolation state.
 
 <!-- pre-upgrade-backup -->
 ```sh
+umask 077
 bridge_data_root="$(dalan paths --data-root)" || exit 1
 bridge_config_root="$(dalan paths --config-root)" || exit 1
-sqlite3 -bail "${bridge_data_root}/bridge.db" ".backup '${bridge_data_root}/bridge.db.pre-isolation'"
+bridge_workspace_root="$(dalan paths --workspace-root)" || exit 1
+sqlite3 -bail "${bridge_data_root}/bridge.db" ".backup '${bridge_data_root}/bridge.db.pre-isolation'" || exit 1
 if [ -f "${bridge_data_root}/delivery-acks.db" ]; then
-  sqlite3 -bail "${bridge_data_root}/delivery-acks.db" ".backup '${bridge_data_root}/delivery-acks.db.pre-isolation'"
+  sqlite3 -bail "${bridge_data_root}/delivery-acks.db" ".backup '${bridge_data_root}/delivery-acks.db.pre-isolation'" || exit 1
   chmod 600 "${bridge_data_root}/delivery-acks.db.pre-isolation"
 fi
-if [ -f "${bridge_config_root}/workers.json" ]; then
-  cp -p "${bridge_config_root}/workers.json" "${bridge_config_root}/workers.json.pre-isolation"
+for name in bridge.db.secrets receipts artifact-index; do
+  if [ -e "${bridge_data_root}/${name}" ]; then cp -Rp "${bridge_data_root}/${name}" "${bridge_data_root}/${name}.pre-isolation" || exit 1; fi
+done
+for name in workers.json workers-repos.json oauth.env as-storage.key operator.key alerts.env limits.json workers-audit.jsonl; do
+  if [ -f "${bridge_config_root}/${name}" ]; then cp -p "${bridge_config_root}/${name}" "${bridge_config_root}/${name}.pre-isolation" || exit 1; fi
+done
+for name in as.sqlite workers-audit-checkpoint.sqlite; do
+  if [ -f "${bridge_config_root}/${name}" ]; then sqlite3 -bail "${bridge_config_root}/${name}" ".backup '${bridge_config_root}/${name}.pre-isolation'" || exit 1; fi
+done
+if [ -d "${bridge_workspace_root}/artifacts" ]; then
+  cp -a "${bridge_workspace_root}/artifacts" "${bridge_workspace_root}/artifacts.pre-isolation" || exit 1
 fi
-if [ -f "${bridge_config_root}/workers-repos.json" ]; then
-  cp -p "${bridge_config_root}/workers-repos.json" "${bridge_config_root}/workers-repos.json.pre-isolation"
-fi
-bridge_workspace_root="$(dalan paths --workspace-root)" || exit 1
-cp -a "${bridge_workspace_root}/artifacts" "${bridge_workspace_root}/artifacts.pre-isolation"
 ```
 
 Upload IDs chosen by workers are request-scoped aliases. The server gives each upload a globally unique `id`; owner get, `/artifact` and the CLI artifact cache use only that ID. Existing worker IDs remain valid. Assignment error parity uses an absent-ID gate before validation and effects; it makes no timing-equivalence claim. Limitation: usage breaks are tracked only for the default worker. Break inference, ledgers and probe budgets are not per worker.

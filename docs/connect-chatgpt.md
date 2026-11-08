@@ -38,7 +38,7 @@ This guide takes you from a built-in OAuth connection to one completed job. Use 
    dalan connect pending
    ```
 
-   Match the code on the browser page, worker `NAME`, resource, client ID, callback and requested scopes. ChatGPT names itself `ChatGPT` and uses the callback `https://chatgpt.com/connector_platform_oauth_redirect`; the name is untrusted client text. If attempts are ambiguous or a value differs unexpectedly, resolve that before approval.
+   Match the code on the browser page, worker `NAME`, resource, client ID, callback and requested scopes. The client name is untrusted text. Compare the callback with the exact redirect shown by ChatGPT for this connection; it may be the stable redirect or a callback-ID-specific redirect described in [Resolve the exact callback](chatgpt-worker-onboarding.md#2-resolve-the-exact-callback-before-registration). If attempts are ambiguous or a value differs unexpectedly, resolve that before approval.
 
    ```sh
    dalan connect approve CODE --worker NAME

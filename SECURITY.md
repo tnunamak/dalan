@@ -12,7 +12,7 @@ Include the affected revision, impact, and steps to reproduce with sanitized exa
 
 ## Secret redaction
 
-The bridge masks credentials in logs, alerts, errors, in the report text and progress notes it shows the owner, and in stored report artifacts. The local database keeps the exact text a worker sent, so protect the database and its backups. Redaction catches accidental leaks of registered secrets and known formats, including JSON-escaped spellings such as a `\u0073` escape inside a JSON string or key. It cannot stop a worker that deliberately encodes a secret it knows. Two cases pass unmasked: base64-embedded secrets and secrets split across log lines. See [docs/redaction.md](docs/redaction.md).
+The bridge masks credentials in logs, alerts, errors, in the report text and progress notes it shows the owner, and in stored report artifacts. The local database keeps the exact text a worker sent, so protect the database and its backups. Redaction catches accidental leaks of registered secrets and known formats, including JSON-escaped spellings such as a `\u0073` escape inside a JSON string or key. It cannot stop a worker that deliberately encodes a secret it knows. Examples that can pass unmasked include base64-encoded unregistered secrets and secrets split across log lines. See [docs/redaction.md](docs/redaction.md).
 
 ## Known limits
 

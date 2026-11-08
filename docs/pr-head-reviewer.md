@@ -34,14 +34,17 @@ Every run logs `gh-calls` with invocation counts by `search`, `pull`, and `files
 ## Use
 
 ```
-dalan-pr-reviewer --dry-run [--ignore-capacity]   # print candidates; submit and write nothing
+dalan-pr-reviewer --dry-run                     # inspect candidates without submitting
+dalan-pr-reviewer --dry-run --ignore-capacity   # also inspect candidates when capacity is full
 dalan-pr-reviewer --only OWNER/REPO#N             # one PR, if in the repo's first 200 open search results (still gated and deduped)
 dalan-pr-reviewer --max N
 ```
 
 State and log: `~/.local/state/dot-pr-reviewer/{state.json,log.jsonl}` (one JSON line per decision).
 
-## Install
+## Install on Linux
+
+Run the commands below from the Dalan checkout or installed package directory, where `docs/` and `systemd/` exist. First install Node.js 24+, authenticate `gh`, make `dalan` available on the unit's `PATH`, and configure the `bridge_db` and `t3_db` paths. Both databases must exist; `t3_db` must contain `orchestration_v2_projection_threads`, even for delivery `none`. Disable any previous PR feeder before enabling this timer.
 
 ```
 mkdir -p ~/.config/dot-pr-reviewer ~/.config/systemd/user

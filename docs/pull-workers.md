@@ -87,11 +87,6 @@ An unclaimed job stays queued unless a cancellation rule applies. **Preparation 
 
 ## Vendor notes
 
-| Vendor | Schedule | Hook | Notes |
-|---|---|---|---|
-| Native scheduler | Periodic hook | Timed worker check | Example configuration |
-| Grok Bot | Routines, at least 5 min apart (documented) | Not documented | Needs a Grok account |
-| Grok automations | Daily or less often (documented) | Signed webhook trigger (documented) | Needs a Grok account |
-| Hosted worker | Scheduled background checks | Client-specific | Verify availability for the target account |
+Scheduling and hook support vary by product, account and workspace policy. Check the vendor's current documentation and the controls available in the intended account before choosing a pattern. Dalan supplies neither a scheduler nor a worker-start command. Until that account's scheduled or hook-driven path has completed a real job, use the manual pattern above.
 
 More detail: the "Wake signal for hook-driven workers" section of [portable-auth-profile.md](portable-auth-profile.md) and the hook-driven worker example in [scripts/live-trial/README.md](https://github.com/tnunamak/dalan/blob/main/scripts/live-trial/README.md).

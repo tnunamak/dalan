@@ -19,7 +19,7 @@ Install your client and sign in to it first: [Claude Code](https://code.claude.c
 - **HTTP MCP with OAuth.** The client connects to the bridge's MCP URL and signs in through the bridge's built-in OAuth server.
 - **An allowed callback.** OAuth returns to the client through a callback URI. The bridge accepts only the patterns that the owner allowed with `dalan connect allow-callback`; `dalan try` allows `http://127.0.0.1/callback` and `http://localhost/callback` on any port, and the [setup reference](setup-reference.md#callback-patterns) has the pattern rules.
 - **A reachable bridge.** A client on the bridge computer can use `127.0.0.1`. A client on another computer needs a route to the bridge, and a hosted client needs a public HTTPS address.
-- **A browser on the client's computer.** The browser must run on the computer that runs the client's callback listener.
+- **A browser for sign-in.** For a native client with a loopback callback, open the sign-in page on the computer running that client's callback listener. For a hosted client, use the provider's browser sign-in flow.
 
 The MCP URL contains a secret path, so give it only to the client that you connect.
 
@@ -205,18 +205,18 @@ To undo it, run `codex mcp remove NAME` on the worker computer, and `node "$(npm
 
 A worker name labels one connection and its job queue; it loads no vendor-specific code. Use a lowercase name of up to 32 characters that starts with a letter and contains letters, digits, `_` or `-`; `pool` and `unknown` are reserved.
 
-`try` and the README use the name `local`. To use another name, initialize it in a new bridge home and use it in every command that names a worker:
+`try` and the README use the name `local`. To use another name, initialize it in a new bridge home and use it in every command that names a worker.
+
+From the Dalan source checkout, initialize the new home and start its bridge in the first terminal:
 
 ```sh
-export DALAN_HOME="$HOME/.local/share/dalan-personal" DALAN_LOOPBACK=1
+export DALAN_HOME="$HOME/.local/share/dalan-personal"
+export DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin DALAN_PORT=8799
 dalan init --worker personal --public-url http://127.0.0.1:8799
-dalan connect allow-callback 'CALLBACK_PATTERN'
-dalan connect start --worker personal
-dalan connect pending
-dalan connect approve CODE --worker personal
+HOME="$DALAN_HOME" node src/server.mjs
 ```
 
-`DALAN_HOME` selects the new bridge home, and `init` accepts an `http://127.0.0.1` URL only with `DALAN_LOOPBACK=1`. Start the bridge for that home with `DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin`, as [manual setup](manual-setup.md#owner-and-requester-setup) shows; the server refuses loopback mode without built-in OAuth. Export `DALAN_HOME` in every shell that runs these commands.
+Leave that terminal running. If `8799` is occupied, choose a free port and use it in both `DALAN_PORT` and the public URL. In a second terminal, export the same `DALAN_HOME` and follow the [manual worker setup](manual-setup.md#worker-setup), replacing `local` with `personal`. That sequence allows the callback, opens a pairing window, registers the client, and approves its actual pending code.
 
 Run one `allow-callback` command, for the callback that your client really uses. For a native client, add `--confirm-redirect REDIRECT` to the approve command, with the exact redirect that `pending` shows. A fresh `init` creates one worker, refuses to overwrite an existing profile, grants no repositories and no T3 Code access, and sets execution to `none`. Approval binds the connection to that worker. Changing the model or vendor in the client does not change the connection or its repository grants.
 

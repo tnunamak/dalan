@@ -1,6 +1,6 @@
 # Dalan setup reference
 
-Use this page after the [README](../README.md) first-job path works. It lists server settings, requester commands, worker tools and legacy service files. The package and CLI are named `dalan`; the command names of the `dot-bridge` package are not installed.
+Use this page after the [README](../README.md) first-job path works. It lists server settings, requester commands, worker tools and legacy service files. The npm package is `@tnunamak/dalan` and the CLI command is `dalan`; the command names of the `dot-bridge` package are not installed.
 
 ## Environment and storage
 

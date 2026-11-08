@@ -47,7 +47,7 @@ The timer is one minute; the five-minute receiver deadline tolerates a few misse
 
 ## Local check
 
-Run the deterministic state and HTTP boundary checks with:
+From a source checkout installed with `npm ci`, run the deterministic state and HTTP boundary checks below. These test scripts are not included in the npm package:
 
 ```sh
 node scripts/deadman-test.mjs

@@ -28,6 +28,8 @@ A separate, opt-in feature lets a worker list, read and write T3 threads. It giv
 
 Quiet delivery (`none`) is the default. Only for an explicit visible task-thread notice, obtain the exact owner thread ID from `t3_thread_configuration` (current thread). A delegated child returning to its parent may use `orchestrator_capabilities.parentThreadId`. Verify the chosen ID and its environment with `t3code --json threads inspect --thread ID`. T3 delivery requires a CLI that supports `threads inspect`; metadata lookup fails closed if that command fails, without falling back to a transcript read, and quiet delivery needs no T3 CLI. Do not guess the ID from cwd or a recent thread. Protected top-level threads retain notices quietly.
 
+After verifying the destination, submit with `dalan submit --worker NAME --execution none --deliver t3:THREAD_ID --file job.json --json`. Replace `NAME`, `THREAD_ID` and `job.json` with your worker, verified destination and assignment file. For an ordinary quiet job, keep `--deliver none`.
+
 <a id="main-thread-guard"></a>
 
 ## Main-thread guard
