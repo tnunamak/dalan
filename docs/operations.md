@@ -531,6 +531,31 @@ Switching a host from legacy mode to a `workers.json` profile retires every lega
 
 **Pre-isolation recovery backup.** Before upgrading a pre-isolation installation, stop every writer and follow the complete [worked backup and restore-check procedure](#upgrade-and-rollback). Keep that verified recovery set separately and label it with the installed version and date. Include the matching keys, configuration, receipts, artifact index and artifact bytes. Exclude both ownership-lock databases. Do not use a shorter directory-copy recipe: recovery from an abandoned worker-isolation schema requires a complete, compatible pre-upgrade set.
 
+<!-- pre-upgrade-backup -->
+```sh
+umask 077
+bridge_data_root="$(dalan paths --data-root)" || exit 1
+bridge_config_root="$(dalan paths --config-root)" || exit 1
+bridge_workspace_root="$(dalan paths --workspace-root)" || exit 1
+sqlite3 -bail "${bridge_data_root}/bridge.db" ".backup '${bridge_data_root}/bridge.db.pre-isolation'" || exit 1
+if [ -f "${bridge_data_root}/delivery-acks.db" ]; then
+  sqlite3 -bail "${bridge_data_root}/delivery-acks.db" ".backup '${bridge_data_root}/delivery-acks.db.pre-isolation'" || exit 1
+  chmod 600 "${bridge_data_root}/delivery-acks.db.pre-isolation"
+fi
+for name in bridge.db.secrets receipts artifact-index; do
+  if [ -e "${bridge_data_root}/${name}" ]; then cp -Rp "${bridge_data_root}/${name}" "${bridge_data_root}/${name}.pre-isolation" || exit 1; fi
+done
+for name in workers.json workers-repos.json oauth.env as-storage.key operator.key alerts.env limits.json workers-audit.jsonl; do
+  if [ -f "${bridge_config_root}/${name}" ]; then cp -p "${bridge_config_root}/${name}" "${bridge_config_root}/${name}.pre-isolation" || exit 1; fi
+done
+for name in as.sqlite workers-audit-checkpoint.sqlite; do
+  if [ -f "${bridge_config_root}/${name}" ]; then sqlite3 -bail "${bridge_config_root}/${name}" ".backup '${bridge_config_root}/${name}.pre-isolation'" || exit 1; fi
+done
+if [ -d "${bridge_workspace_root}/artifacts" ]; then
+  cp -a "${bridge_workspace_root}/artifacts" "${bridge_workspace_root}/artifacts.pre-isolation" || exit 1
+fi
+```
+
 Upload IDs chosen by workers are request-scoped aliases. The server gives each upload a globally unique `id`; owner get, `/artifact` and the CLI artifact cache use only that ID. Existing worker IDs remain valid. Assignment error parity uses an absent-ID gate before validation and effects; it makes no timing-equivalence claim. Limitation: usage breaks are tracked only for the default worker. Break inference, ledgers and probe budgets are not per worker.
 
 **Public-route gate.** When you move a legacy single-worker deployment to multiple workers, keep the public multi-vendor route closed until a real issuer revocation plus refresh/reissue test passes against the legacy build: a non-default-worker client's previously valid access token must fail, and refreshing or reissuing must not restore access. The legacy build cannot distinguish clients sharing a subject. Disabling a bridge mapping alone does not revoke a bearer token there. The test issuer in `worker-isolation-test.mjs` is a simulator: it proves local expiry and a simulated refusal to issue, not real issuer revocation, refresh invalidation or other clients' token state.
