@@ -83,12 +83,35 @@ for (const [kind, options, format] of [['ec', { namedCurve: 'P-256' }, 'sec1'], 
     });
   }
 }
-test('colliding keys scale', () => {
-  const value = Object.fromEntries(Array.from({ length: 20000 }, (_, i) => [`token=ABCDEF123456${i}`, i]));
-  const start = performance.now();
-  const result = JSON.parse(logged({ value })).value;
+test('colliding keys scale', t => {
+  const values = [2000, 20000].map(length => Object.fromEntries(
+    Array.from({ length }, (_, i) => [`token=ABCDEF123456${i}`, i]),
+  ));
+  const measure = value => {
+    const start = performance.now();
+    const result = JSON.parse(logged({ value })).value;
+    return { ms: performance.now() - start, result };
+  };
+  // Warm both sizes before measuring, then interleave them to reduce JIT and
+  // host-load bias. Best of three avoids treating one scheduling pause as work.
+  for (const value of values) measure(value);
+  const times = [[], []];
+  let result;
+  for (let trial = 0; trial < 3; trial++) {
+    for (const index of trial % 2 ? [1, 0] : [0, 1]) {
+      const measured = measure(values[index]);
+      times[index].push(measured.ms);
+      if (index === 1) result = measured.result;
+    }
+  }
   assert.equal(Object.keys(result).length, 20000);
-  assert(performance.now() - start < 1000, 'colliding keys took over one second');
+  const [small, large] = times.map(samples => Math.min(...samples));
+  const ratio = large / small;
+  t.diagnostic(`colliding keys: 2,000=${small.toFixed(1)} ms, 20,000=${large.toFixed(1)} ms, ratio=${ratio.toFixed(1)}x`);
+  // Ten times as many colliding keys is about 10x work for suffix tracking,
+  // but about 100x if every collision scans suffixes from the beginning.
+  // 30x leaves a 3x margin over linear growth without a host-speed deadline.
+  assert(ratio < 30, `colliding-key growth was ${ratio.toFixed(1)}x; expected under 30x for 10x as many keys`);
 });
 test('circular and deeply nested values', () => {
   const circular = {}; circular.self = circular;
