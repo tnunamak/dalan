@@ -14,9 +14,9 @@ These calls use owner-granted, job-independent authority. They require no `reque
 | `t3_thread_set` | `dalan.work` | Change a thread's provider, model, effort, permission or mode. |
 | `notify_owner` | `dalan.work` | Publish a short message through the configured ntfy alerts path. |
 
-`dalan tell "text"` adds a durable lightweight message to a worker's `list_pending` inbox and emits the existing `assignment.available` event with `{message_id,title}`. The event uses the signed webhook retry path, so the existing subscription wakes the worker. The worker reads it with `get {request_id: message_id}` and removes it from the pending list with `ack_message {message_id}`. Messages do not need assignment claim or finish. `tell` accepts `--json` and `--worker NAME` (default: `dot` if that worker exists, else the only configured worker; with several workers and no `dot`, pass `--worker`); `dalan untell MESSAGE_ID [--worker NAME]` withdraws a pending message.
+`dalan tell "text"` adds a durable lightweight message to a worker's `list_pending` inbox and emits the existing `assignment.available` event with `{message_id,title}`. The event uses the signed webhook retry path, so an existing subscription can notify a client that supports wake-up. The worker reads it with `get {request_id: message_id}` and removes it from the pending list with `ack_message {message_id}`. Messages do not need assignment claim or finish. `tell` accepts `--json` and `--worker NAME` (default: `dot` if that worker exists, else the only configured worker; with several workers and no `dot`, pass `--worker`); `dalan untell MESSAGE_ID [--worker NAME]` withdraws a pending message.
 
-The notification aliases retain their existing `t3` capability, work scope and audit checks. They remain available independently of `DALAN_ENABLE_T3_TOOLS`; this flag controls only the six `t3_thread_*` operations. The `legacy-v46` pin retains its exact twelve-tool catalog and advertises neither notification alias.
+The `notify_owner` tool retains its `t3` capability, work scope and audit checks. It remains available independently of `DALAN_ENABLE_T3_TOOLS`; this flag controls only the six `t3_thread_*` operations. The `legacy-v46` pin advertises no notification tool. The earlier notification alias was removed.
 
 ## Notification retries outside the job lifecycle
 
@@ -49,7 +49,7 @@ Audit admission uses persisted rolling windows per `(worker, subject)`. Each den
 Before refreshing, enable `DALAN_ENABLE_T3_TOOLS=1` and retain the worker’s `t3` capability.
 
 1. Open the existing Dalan connector in ChatGPT and select **Refresh** to load the new tool schemas.
-2. T3 tools use the existing `dalan.read`/`dalan.work` scopes (the legacy `dot-bridge.*` names are accepted aliases); re-login only if the current grant lacks `offline_access`.
+2. T3 tools use the existing `dalan.read`/`dalan.work` scopes; the legacy `dot-bridge.read`/`dot-bridge.work` names are accepted aliases. Refresh the catalog first. Sign in again if the connection is no longer live or the client cannot refresh its credentials. For an external issuer, check its offline-access requirements separately; do not add scopes merely to refresh the tool list.
 3. Inspect the refreshed tool list for `notify_owner`, `list_tools`, `call_tool_read`, `call_tool_write`, and `ack_message`. If you recreate the connector, upload [t3-connector-icon.png](t3-connector-icon.png) as its icon.
 4. In a disposable worker conversation, call `t3_thread_list` and `notify_owner`, then inspect `dalan audit --json`. Recheck the original subscribed worker conversation separately.
 
@@ -57,7 +57,7 @@ Do not trigger a ChatGPT reconnect from the bridge host. The connector's current
 
 ## Standing instruction for worker
 
-> You can inspect the owner's T3 threads through this connector. Use `t3_thread_list` and `t3_thread_read`. They can reach any project or thread the local T3 CLI can reach by an ID of at most 128 bytes. Use `notify_owner` for a short out-of-band alert that does not start a T3 turn. Send assignment questions to the exact owner thread. Mark blockers with optional `progress.blocker:true` or start the note with `BLOCKED:` / `QUESTION:` so the bridge forwards them once if you forget. The owner can leave a lightweight message with `dalan tell`; its event wakes you. Find it in `list_pending`, read it with `get`, and call `ack_message` after reading it. It is a message, not an assignment. `run_check` can return `{check_run_id,status:"running"}`; poll `workspace_result` for completion. Upload sealed evidence with `artifact_chunk` in any claimed assignment. Call `list_tools` first to learn the other tools you may use, then run them with `call_tool_read` or `call_tool_write`. All T3 tool calls are audited.
+> You can inspect the owner's T3 threads through this connector. Use `t3_thread_list` and `t3_thread_read`. They can reach any project or thread the local T3 CLI can reach by an ID of at most 128 bytes. Use `notify_owner` for a short out-of-band alert that does not start a T3 turn. Send assignment questions to the exact owner thread. Mark blockers with optional `progress.blocker:true` or start the note with `BLOCKED:` / `QUESTION:` so the bridge forwards them once if you forget. The owner can leave a lightweight message with `dalan tell`; it emits an event, but whether that starts a run depends on your client. Find it in `list_pending`, read it with `get`, and call `ack_message` after reading it. It is a message, not an assignment. `run_check` can return `{check_run_id,status:"running"}`; poll `workspace_result` for completion. Upload sealed evidence with `artifact_chunk` in any claimed assignment. Call `list_tools` first to learn the other tools you may use, then run them with `call_tool_read` or `call_tool_write`. All T3 tool calls are audited.
 
 ## After adding or changing tools
 
@@ -66,7 +66,7 @@ Do not trigger a ChatGPT reconnect from the bridge host. The connector's current
 
 ## Catalog freeze
 
-The `stable` catalog omits question tools, and `DALAN_CATALOG_PROFILE=questions-v1` adds `ask_question` and `consume_answer`. In either profile, the six T3 tools require `DALAN_ENABLE_T3_TOOLS=1`; notification aliases retain their capability check. Catalog selection does not split OAuth scopes or add pagination. Catalog v2 is the last advertised change: add abilities by registering tools, which never changes the tool list, and never through tool names, descriptions or schemas (see [Catalog v2](../PROTOCOL.md#catalog-v2)). Compare the running server catalog with the approved profile before any Refresh. If you deploy server support before your clients refresh, keep the default profile until they have refreshed their tool list and restarted.
+The `stable` catalog omits question tools, and `DALAN_CATALOG_PROFILE=questions-v1` adds `ask_question` and `consume_answer`. In either profile, the six T3 tools require `DALAN_ENABLE_T3_TOOLS=1`; `notify_owner` retains its capability check. Catalog selection does not split OAuth scopes or add pagination. Catalog v2 is the last advertised change: add abilities by registering tools, which never changes the tool list, and never through tool names, descriptions or schemas (see [Catalog v2](../PROTOCOL.md#catalog-v2)). Compare the running server catalog with the approved profile before any Refresh. If you deploy server support before your clients refresh, keep the default profile until they have refreshed their tool list and restarted.
 
 Clients may cache tool and event schemas. Plan a connector refresh and client restart when changing the catalog.
 

@@ -4,7 +4,7 @@ Dalan is a job queue between your shell or coding agent and a separate AI worker
 
 Use it when you want a second agent, a second account or another computer to do a job while you keep the accept or reject decision: for example, your coding agent hands a code review to an agent signed in to another account, and you read its report before you accept it.
 
-- **Repository access starts denied.** A new worker can read no repository until you grant one, and a finished job counts as accepted only after you run `dalan decide` or answer `y`.
+- **Repository access starts denied.** A new worker can use no repository through Dalan until you grant one. Finishing a job does not accept its result: acceptance is a separate owner decision.
 - **Any MCP client can be the worker.** Claude Code, Codex CLI, ChatGPT, Muse Spark (Meta) or your own agent connect over MCP (Model Context Protocol) with OAuth sign-in. Dalan does not run a model itself. See [Connect any MCP worker](#connect-any-mcp-worker) and [Connect ChatGPT](docs/connect-chatgpt.md). [T3 Code](docs/t3-integration.md#use-dalan-from-t3-code) can delegate to any of them.
 - **The bridge listens only on your computer** until you choose to expose it.
 
@@ -55,7 +55,7 @@ Job req_01234567… is queued for your worker. When it is connected, send it:
 Waiting for your worker. Ctrl-C stops the bridge.
 ```
 
-**Check:** look for the `✔ Self-check passed` line. The demo worker signed in through OAuth, finished a text job, read the one demo repository that it was granted and was refused another. The demo repository is local, so no network or GitHub login is used.
+**Check:** look for the `✔ Self-check passed` line. The demo worker signed in through OAuth and finished a text job. When Git and Python are available, it also reads the permitted demo repository and is refused another; otherwise the output says that the repository part was skipped. That repository is local and needs no GitHub login.
 
 `try` now keeps the bridge running and has queued a second job for your own worker. Leave this terminal open and continue below. Ctrl-C stops the bridge and keeps the trial home for the next run ([The trial home](#the-trial-home)).
 
@@ -117,7 +117,7 @@ Each row starts from a working trial.
 
 | To do this | Go to |
 |---|---|
-| Run `dalan` commands against the trial bridge | Run `npm install -g @tnunamak/dalan`, then `export DALAN_HOME=~/.local/share/dalan-trial` in each shell. Try `dalan status` and `dalan inbox --all`. |
+| Run `dalan` commands against the trial bridge | Run `npm install -g @tnunamak/dalan`. In each shell, set `DALAN_HOME` to the **Home** printed by the running trial; the usual default is `~/.local/share/dalan-trial`. Then run `dalan status` and `dalan inbox --all`. |
 | Give your worker a task of your own, with no file to write | [Your own first job](#your-own-first-job) |
 | Give your worker a job on a real repository | [Give a worker a repository job](#separate-repository-assignment) |
 | Let a coding agent submit and read jobs as tool calls | [`dalan mcp`](docs/local-agent-mcp.md) |
@@ -130,7 +130,7 @@ Each row starts from a working trial.
 
 ### Your own first job
 
-This gives your connected worker a task of your own, with no file to write and no JSON. Leave `try` running, and use a second shell. First install the CLI, select the trial home and type your task:
+This gives your connected worker a task of your own, with no file to write and no JSON. Leave `try` running and use a second shell. First install the CLI and select the exact **Home** printed by the running trial. The export below shows the usual default; replace it before running the block if `try` used `--home DIR` or an existing `DALAN_HOME`. Then type your task:
 
 ```sh
 npm install -g @tnunamak/dalan
@@ -138,7 +138,7 @@ export DALAN_HOME=~/.local/share/dalan-trial
 printf 'Your task, on one line: '; IFS= read -r task
 ```
 
-If `npm install -g @tnunamak/dalan` fails with `EACCES`, your global npm directory belongs to root. Do not use `sudo`; [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally), or skip the install and write `npx @tnunamak/dalan` wherever this section says `dalan`.
+If `npm install -g @tnunamak/dalan` fails with `EACCES`, npm cannot write to its global install directory. Do not use `sudo`; [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally), or skip the install and write `npx @tnunamak/dalan` wherever this section says `dalan`.
 
 Type the task and press Enter. The shell stores it as plain text, so quotes, `$` and backticks in it are safe. Then submit it:
 
@@ -152,7 +152,7 @@ dalan submit --worker local --execution none --deliver none --brief "$task Do no
 dalan wait REQUEST_ID --timeout 3600 && dalan get REQUEST_ID
 ```
 
-**Check:** `dalan get` prints `Job REQUEST_ID: finished`, then `Summary:` and your worker's answer. It then prints `Next: dalan decide REQUEST_ID accepted`, and its last line is `Full record: dalan get REQUEST_ID --json`. It may also print an `Outcome:` line. Review the answer, then run the `Next:` command to record your decision. If `wait` times out, the job is still open: check it with `dalan get REQUEST_ID` and ask the worker to check Dalan again. If you passed `--home DIR` to `try`, export that directory as `DALAN_HOME` instead.
+**Check:** `dalan get` prints `Job REQUEST_ID: finished`, then `Summary:` and your worker's answer. It then prints `Next: dalan decide REQUEST_ID accepted`, and its last line is `Full record: dalan get REQUEST_ID --json`. It may also print an `Outcome:` line. Review the answer, then run the `Next:` command to record your decision. If `wait` times out, the job is still open: check it with `dalan get REQUEST_ID` and ask the worker to check Dalan again.
 
 <a id="what-dalan-is"></a>
 
@@ -271,7 +271,7 @@ Any client that speaks HTTP MCP and completes the bridge's OAuth sign-in can be 
 | Claude Code | [Native CLI worker: Claude Code](docs/worker-clients.md#native-cli-worker-claude-code) |
 | opencode | [CLI worker: opencode](docs/worker-clients.md#cli-worker-opencode), with a model that supports tool calls |
 | ChatGPT | [Connect ChatGPT](docs/connect-chatgpt.md) |
-| Muse Spark (Meta) | Connects like any remote MCP client: follow [Expose the bridge](#expose-your-bridge) and the [worker guide](docs/worker-clients.md); there is no client-specific recipe. |
+| Muse Spark (Meta) | [Send a job from Codex CLI to Muse Spark](docs/codex-to-muse.md) |
 | Claude on the web (hosted) | [Claude cloud worker](docs/claude-worker-onboarding.md); separate from Claude Code |
 
 Start each new worker by hand for its first job. Dalan never starts a worker, including after a reboot.

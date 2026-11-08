@@ -148,8 +148,10 @@ Setup with `--expose tailscale` or `--expose ngrok` can leave the home, service 
 The retry has the form below. It needs the exposure record that those two modes save, so it does not work for an install made with an explicit `--public-url`.
 
 ```sh
-node scripts/worker-bridge-setup.mjs --retry-public-check --worker NAME --public-url EXPOSURE_URL --port PORT --home HOME_PATH
+node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --retry-public-check --worker NAME --public-url EXPOSURE_URL --port PORT --home HOME_PATH
 ```
+
+From a source checkout, use `node scripts/worker-bridge-setup.mjs` with the same options.
 
 It should mark the existing exposure verified. A 404 from unauthenticated `/admin` proves the expected public route answers, not that OAuth pairing or a worker job works, so complete both separately.
 

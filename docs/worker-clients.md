@@ -10,7 +10,7 @@ Start from the section that matches your bridge:
 | `dalan try` is running on this computer | opencode on this computer | [opencode](#cli-worker-opencode) |
 | A bridge that you started by hand ([manual setup](manual-setup.md#step-by-step)) | Claude Code or Codex CLI on this computer | The same sections, "From a bridge you started by hand" |
 | A bridge with a public HTTPS address ([service guide](service-setup.md)) | A client on another computer | [Native client on a remote HTTPS bridge](#native-client-on-a-remote-https-bridge) |
-| A bridge with a public HTTPS address | ChatGPT or Claude on the web | [Connect ChatGPT](connect-chatgpt.md) or [Claude cloud worker](claude-worker-onboarding.md) |
+| A bridge with a public HTTPS address | ChatGPT, Muse Spark or Claude on the web | [Connect ChatGPT](connect-chatgpt.md), [Codex CLI to Muse Spark](codex-to-muse.md) or [Claude cloud worker](claude-worker-onboarding.md) |
 
 Install your client and sign in to it first: [Claude Code](https://code.claude.com/docs/en/quickstart), [Codex CLI](https://developers.openai.com/codex/cli/) or opencode. Check that `claude --version` or `codex --version` works; Dalan does not require a particular client.
 
@@ -19,7 +19,7 @@ Install your client and sign in to it first: [Claude Code](https://code.claude.c
 - **HTTP MCP with OAuth.** The client connects to the bridge's MCP URL and signs in through the bridge's built-in OAuth server.
 - **An allowed callback.** OAuth returns to the client through a callback URI. The bridge accepts only the patterns that the owner allowed with `dalan connect allow-callback`; `dalan try` allows `http://127.0.0.1/callback` and `http://localhost/callback` on any port, and the [setup reference](setup-reference.md#callback-patterns) has the pattern rules.
 - **A reachable bridge.** A client on the bridge computer can use `127.0.0.1`. A client on another computer needs a route to the bridge, and a hosted client needs a public HTTPS address.
-- **A browser on the client's computer.** The browser must run on the computer that runs the client's callback listener.
+- **A browser for sign-in.** For a native client with a loopback callback, open the sign-in page on the computer running that client's callback listener. For a hosted client, use the provider's browser sign-in flow.
 
 The MCP URL contains a secret path, so give it only to the client that you connect.
 
@@ -60,7 +60,7 @@ To remove the registration later, run `claude mcp remove --scope user WORKER`.
 
 ## CLI worker: opencode
 
-Use a model that supports tool calls; the worker does its job through tool calls.
+This recipe describes opencode 2.2. Install and sign in to opencode, run `opencode --version`, and use a model that supports tool calls. If your version has different MCP or permission settings, check its documentation before using the commands below.
 
 Work in a project directory whose `opencode.json` already configures your model provider. Deny these tools there:
 
@@ -78,7 +78,7 @@ opencode's own prompt still suggests `execute`, and a model that follows it writ
 
 If you passed `--home DIR` to `try`, use `DIR/worker-instructions.md`. For a service bridge, use `BRIDGE_HOME/worker-instructions.md`.
 
-Register the bridge from `dalan try`:
+Register the bridge from `dalan try`. If you used `--home DIR`, replace `~/.local/share/dalan-trial` below with `DIR`, as you did for `worker-instructions.md`:
 
 ```sh
 opencode mcp add local --url "$(cat ~/.local/share/dalan-trial/resource-url)"
@@ -205,18 +205,18 @@ To undo it, run `codex mcp remove NAME` on the worker computer, and `node "$(npm
 
 A worker name labels one connection and its job queue; it loads no vendor-specific code. Use a lowercase name of up to 32 characters that starts with a letter and contains letters, digits, `_` or `-`; `pool` and `unknown` are reserved.
 
-`try` and the README use the name `local`. To use another name, initialize it in a new bridge home and use it in every command that names a worker:
+`try` and the README use the name `local`. To use another name, initialize it in a new bridge home and use it in every command that names a worker.
+
+From the Dalan source checkout, initialize the new home and start its bridge in the first terminal:
 
 ```sh
-export DALAN_HOME="$HOME/.local/share/dalan-personal" DALAN_LOOPBACK=1
+export DALAN_HOME="$HOME/.local/share/dalan-personal"
+export DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin DALAN_PORT=8799
 dalan init --worker personal --public-url http://127.0.0.1:8799
-dalan connect allow-callback 'CALLBACK_PATTERN'
-dalan connect start --worker personal
-dalan connect pending
-dalan connect approve CODE --worker personal
+HOME="$DALAN_HOME" node src/server.mjs
 ```
 
-`DALAN_HOME` selects the new bridge home, and `init` accepts an `http://127.0.0.1` URL only with `DALAN_LOOPBACK=1`. Start the bridge for that home with `DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin`, as [manual setup](manual-setup.md#owner-and-requester-setup) shows; the server refuses loopback mode without built-in OAuth. Export `DALAN_HOME` in every shell that runs these commands.
+Leave that terminal running. If `8799` is occupied, choose a free port and use it in both `DALAN_PORT` and the public URL. In a second terminal, export the same `DALAN_HOME` and follow the [manual worker setup](manual-setup.md#worker-setup), replacing `local` with `personal`. That sequence allows the callback, opens a pairing window, registers the client, and approves its actual pending code.
 
 Run one `allow-callback` command, for the callback that your client really uses. For a native client, add `--confirm-redirect REDIRECT` to the approve command, with the exact redirect that `pending` shows. A fresh `init` creates one worker, refuses to overwrite an existing profile, grants no repositories and no T3 Code access, and sets execution to `none`. Approval binds the connection to that worker. Changing the model or vendor in the client does not change the connection or its repository grants.
 
@@ -256,8 +256,6 @@ On the bridge computer, run these commands. `WORKER` is the name of a configured
 dalan tool add --file owner_message.json
 dalan tool grant owner_message WORKER
 dalan tool list
-dalan tool revoke owner_message WORKER   # take the ability back
-dalan tool remove owner_message          # delete the tool and all its grants
 ```
 
 A new tool is denied to every worker until you grant it. `dalan tool list` shows each tool, its class and its granted workers. There is no command to disable or edit a tool. To change one, remove it and add the new file. A grant is lost when you remove the tool, so grant it again.
@@ -267,6 +265,13 @@ The worker calls `list_tools`. The reply holds `registry_version` and, for each 
 ```json
 { "tool": "owner_message", "arguments": { "kind": "question", "text": "Which branch should I use?" },
   "schema_hash": "<from list_tools>", "idempotency_key": "<new for each message>" }
+```
+
+**Remove it when you are done.** Run these only after completing the worker call:
+
+```sh
+dalan tool revoke owner_message WORKER
+dalan tool remove owner_message
 ```
 
 If the registry changed, the call fails with `stale_registry`. Call `list_tools` again and use the new `schema_hash`. Limits, retries and errors for `owner_message` are in [the T3 guide](t3-reverse-control.md#adding-abilities-without-a-refresh).

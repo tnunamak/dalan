@@ -48,11 +48,13 @@ Each worker has its own URL. A hook with one worker's URL cannot see other worke
 
 The answer is exactly `{"work":true}` or `{"work":false}`. It has no job ids, titles or counts. A wrong token gets `404`, the same as any unknown path. The bridge recomputes the answer at most once every 10 seconds.
 
-A hook, run every N seconds by whatever the vendor offers:
+On the bridge computer, run `dalan connect signal-token --worker NAME` once. Transfer the private file it names to the worker host over a trusted channel and keep it mode 0600. The hook needs only that file, not Dalan's owner socket or connector credentials.
+
+On the worker host, set `SIGNAL_FILE` to that file's absolute path and replace `wake` with your worker client's supported start command. Run this hook at the [poll interval below](#poll-interval-and-url-secrecy). Do not echo the URL or enable shell tracing.
 
 ```sh
-SIGNAL_FILE=$(dalan connect signal-token --worker NAME)
-SIGNAL_URL=$(cat "$SIGNAL_FILE")  # do not echo the value or enable shell tracing
+SIGNAL_FILE=/absolute/path/to/private-signal-url
+SIGNAL_URL=$(cat "$SIGNAL_FILE") || exit 1
 curl -fsS "$SIGNAL_URL" | grep -q '"work":true' && wake
 ```
 
@@ -70,7 +72,7 @@ A vendor run can stop in the middle of a job. Resume wake exposes an expired own
 - **Progress nudge (opt in per worker).** In `workers.json` set `"guidance": "resume"` for the worker. `claim` and `get` then add acquisition and progress guidance. The progress interval is half the idle threshold, rounded down to a multiple of 30 seconds, with a minimum of 30 seconds. Thresholds of `120000`, `240000`, and `45000` ms produce intervals of 1 minute, 2 minutes, and 30 seconds. For the default threshold the text is: "Generate one random acquisition_id per run and pass it on every claim call, including retries. Post progress at least every 1 minute with what is done and what remains, so a resumed run can continue; if your run may end, post progress first." With the switch at 0, guidance uses the default threshold. The only valid guidance value is `"resume"`.
 - **Measure.** `dalan metrics --json` has `resume_wake.by_worker.<worker>`: `resumed`, `lease_expiry_retries`, and `time_to_finish_resumed` against `time_to_finish_lease_expiry` (first queued event to completed, p50/p90). `resume_wake.duplicate_epoch_claims` must be 0. The text form prints `resumed=` and `duplicate_epochs=`. Falsifier: resumed jobs do not finish sooner than lease-expiry jobs.
 
-Test: `node scripts/resume-wake-test.mjs`.
+Maintainer check: from a source checkout installed with `npm ci`, run `node scripts/resume-wake-test.mjs`. The npm package does not include this script.
 
 ### Poll interval and URL secrecy
 
@@ -87,11 +89,6 @@ An unclaimed job stays queued unless a cancellation rule applies. **Preparation 
 
 ## Vendor notes
 
-| Vendor | Schedule | Hook | Notes |
-|---|---|---|---|
-| Native scheduler | Periodic hook | Timed worker check | Example configuration |
-| Grok Bot | Routines, at least 5 min apart (documented) | Not documented | Needs a Grok account |
-| Grok automations | Daily or less often (documented) | Signed webhook trigger (documented) | Needs a Grok account |
-| Hosted worker | Scheduled background checks | Client-specific | Verify availability for the target account |
+Scheduling and hook support vary by product, account and workspace policy. Check the vendor's current documentation and the controls available in the intended account before choosing a pattern. Dalan supplies neither a scheduler nor a worker-start command. Until that account's scheduled or hook-driven path has completed a real job, use the manual pattern above.
 
 More detail: the "Wake signal for hook-driven workers" section of [portable-auth-profile.md](portable-auth-profile.md) and the hook-driven worker example in [scripts/live-trial/README.md](https://github.com/tnunamak/dalan/blob/main/scripts/live-trial/README.md).

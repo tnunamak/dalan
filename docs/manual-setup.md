@@ -36,7 +36,7 @@
    HOME="$DALAN_HOME" DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin DALAN_PORT=8799 node src/server.mjs
    ```
 
-   **Check:** `init` reports a new worker profile for `local`, and the server prints `MCP listening on 127.0.0.1:8799` and keeps running. Leave this terminal open: closing it stops the bridge. If you plan a repository job, add `DALAN_ENABLE_WORKSPACE=1` to the server command now to save a restart. If the port is taken, choose another free port in both commands.
+   **Check:** `init` reports a new worker profile for `local`, and the server prints `MCP listening on 127.0.0.1:8799` and keeps running. Leave this terminal open: closing it stops the bridge. If you plan a repository job, add `DALAN_ENABLE_WORKSPACE=1` to the server command now to save a restart. If the port is taken, choose a free port and replace `8799` in the exported `DALAN_PORT`, the init public URL, and the server command. Use that same port in the worker's MCP URL.
 
 4. In a second shell, export the same `DALAN_HOME`, then check the bridge.
 

@@ -1,5 +1,13 @@
 # Dalan operations
 
+Use this reference to operate an existing bridge. For installation, start with the [README](../README.md).
+
+- [Recover a stalled job or delivery](#recovery-and-operation)
+- [Back up, restore or upgrade](#upgrade-and-rollback)
+- [Restart or remove a service](#restart-a-service-and-check-its-state)
+- [Review repository access](#repository-access-per-worker)
+- [Configure host checks](#execution-capability-and-check-evidence)
+
 The admin socket is mode `0600`, but every process that runs as the bridge's own user can connect to it, so run executors and worker processes as a different user. The current check sandbox does not enforce this separation: it confines the check process but does not change its Unix user.
 
 Fresh homes use Dalan directories; existing installations retain their populated legacy roots. Use `dalan paths --json` with the service HOME and environment for the effective config, data, state and workspace roots. See [the upgrade guide](dalan-upgrade.md) for settings, catalog retention, local HTTP and explicit path migration.
@@ -37,11 +45,7 @@ schema/config/CLI migration and catalog refresh requirements). Review and test
 the release, merge it, create an annotated `vX.Y.Z` tag on that merge commit,
 then publish GitHub release notes with those actions and compatibility limits.
 
-**Rollback.** Stop the service and restore a full, compatible pre-upgrade backup
-with the older code, not just an older executable against the migrated database.
-Follow [Upgrade and rollback](#upgrade-and-rollback) for the complete state set,
-lock-file exclusions and compatible newer delivery-ACK preservation. Snapshot
-restore loses later work; losing newer ACK proof can duplicate accepted notices.
+**Rollback.** Stop every writer and first verify whether the target code supports the current database, keys and configuration. If it does, preserve current state and newer delivery-ACK proof. If it does not, use compatible code or a separately reviewed restore of the complete pre-upgrade backup. A snapshot restore discards later work, and losing newer ACK proof can duplicate accepted notices. Follow [Upgrade and rollback](#upgrade-and-rollback) before starting older code.
 
 ## Opt-in legacy-v46 catalog
 
@@ -59,9 +63,7 @@ tools are unavailable in this profile even for a capable worker.
 This is a catalog compatibility option, not evidence of live deployment or a
 completed migration. Existing `questions-v1` and `protocol-v0` behavior is unchanged.
 
-Paths: `<home>` is your home directory and `<config>` is `<home>/.config`.
-
-This page holds the operating detail for the bridge: service configuration, delivery and recovery, claims and leases, lifecycle metrics, usage breaks, workspaces and checks. It was moved out of the README, which now gives a short overview. Start with the [README](../README.md) if you have not seen the bridge before.
+Paths: `<home>` means the bridge service's `HOME`, which may differ from your login home; `<config>` means `<home>/.config`. Use `dalan paths` with the service's environment to resolve an existing installation's active roots.
 
 A Node 24 service stores immutable assignments, exposes worker MCP tools and MCP Events, and sends report or stored legacy watch notices to the exact bound T3 thread. The assignment path does not launch models, decide fallback, merge patches, or stop remote worker compute. The public endpoint is `https://dalan.example.com/<secret>/mcp`; OAuth authenticates worker requests, and `<config>/dalan/env` holds the additional path secret. The service listens on port 8787 by default.
 
@@ -141,7 +143,7 @@ Local proof recovery starts at service startup and runs at most once per minute,
 
 Event retries reuse one event ID, and a stored legacy watch is a one-shot attention notice and never launches fallback. Pause prevents new claims and outbound notices; resume drains eligible work. Cancel withdraws bridge authority, but `compute_stopped` remains false. Cancel is refused with `uncertain_delivery: reconcile first` while an owner delivery for the job is `uncertain`, `sending`, `uncertain_terminal` or `waiting`; run `dalan reconcile ID --json` first. A paused bridge is not a frozen database: do not copy `bridge.db` while the service runs, even when paused. Stop the service, then take the copy with SQLite's `.backup` command, as the [backup procedure](#upgrade-and-rollback) describes. Do not copy the database file by hand. With a still-valid claim, a new finish after cancellation retains bounded audit-only `late_evidence` and returns `assignment_cancelled`; it creates no report or successful late receipt and does not wake the owner. A `late:true` success can only repeat a matching already-stored legacy report.
 
-**Delivery guarantee.** The current T3 `sendArgs` always uses `--if-busy steer` for CLI-delivered notices. Results sent through the result transport instead use orchestration `message.dispatch`: by default, `steer_active` targets the latest active run; if no active run exists, `queue_after_active` is selected when a queued run exists, and `start_immediately` otherwise. See [result retry and delivery](t3-result-retry-delivery.md) for the separate transport and lifecycle contract. "Never dropped" means every result, blocker and watch message is stored durably and its state stays visible in `dalan get` and `status`. It does not mean exactly-once. A send that fails with `invalid session credential` is a known pre-accept rejection from T3: the message stays `pending` and is retried with backoff under the same event ID, up to 8 attempts (`DALAN_T3_AUTH_RETRY_MAX` overrides this for tests), then becomes `uncertain` with a reason. Any other failure after a send starts stays `uncertain` without automatic resend. The transcript-marker lookup is available only through explicit manual reconciliation. The automatic age-release policy above never resends an unknown notice; a late accepted message remains possible.
+**Delivery guarantee.** The current T3 `sendArgs` always uses `--if-busy steer` for CLI-delivered notices. Results sent through the result transport instead use orchestration `message.dispatch`: by default, `steer_active` targets the latest active run; if no active run exists, `queue_after_active` is selected when a queued run exists, and `start_immediately` otherwise. See [result retry and delivery](t3-result-retry-delivery.md) for the separate transport and lifecycle contract. "Never dropped" means every result, blocker and watch message is stored durably and its state stays visible in `dalan get` and `status`. It does not mean exactly-once. A send that fails with `invalid session credential` is a known pre-accept rejection from T3: the message stays `pending` and is retried with backoff under the same event ID, up to 8 attempts (`DALAN_T3_AUTH_RETRY_MAX` overrides this for tests), then becomes `uncertain` with a reason. Any other failure after a send starts stays `uncertain` without automatic resend. The transcript-marker lookup is available only through explicit manual reconciliation. Aging an unknown notice to `uncertain_terminal` stops automatic retry; it does not release the claim fence or prove delivery. A late accepted message remains possible.
 
 **Claim refused with `claim_effects_unverified`.** The bridge will not give a job to a new worker until it has proof that the host checks of the earlier claim have stopped. The error `claim_effects_unverified: prior host work has not verifiably stopped` means that proof is missing. The usual causes: the stop recorder saw a process still alive in the check's control group (for example a task stuck in uninterruptible I/O), or the bridge or host stopped before the recorder wrote its result. The first verdict is kept as written and is not changed later.
 
@@ -156,7 +158,7 @@ A process that is still alive, a read error, an unreadable boot id, or a check f
 
 Back up the application state consistently: `bridge.db`, its `bridge.db.secrets/storage.key`, the independent positive-ACK ledger, owner receipts, the artifact index and artifact bytes, and the relevant auth/config files including `as-storage.key`. Never copy the `bridge.db.secrets/owner.sqlite` lock file; it is recreated locally. Preserve their private permissions and binding identity. Exclude `as-owner.sqlite` as required by [authorization-server ownership](#built-in-authorization-server-ownership); it is not application backup data. A database-only backup is not a complete recovery set.
 
-For an operational code rollback, preserve newer jobs, reports, receipts, artifact-index entries, artifacts and positive ACK proof; do not overwrite them with an older full-state snapshot merely to run older code. A schema-incompatible build needs a separately reviewed recovery plan, not a blind database downgrade. The legacy snapshot-restore recipe below is a destructive rollback boundary, not this state-preserving procedure. Restoring missing ACK evidence from backup may recover some proof but cannot establish exactly-once delivery for the lost interval. No restart, restore, deadline extension, redispatch or operator waiver is required for automatic age release.
+For an operational code rollback, preserve newer jobs, reports, receipts, artifact-index entries, artifacts and positive ACK proof; do not overwrite them with an older full-state snapshot merely to run older code. A schema-incompatible build needs a separately reviewed recovery plan, not a blind database downgrade. The legacy snapshot-restore recipe below is a destructive rollback boundary, not this state-preserving procedure. Restoring missing ACK evidence from backup may recover some proof but cannot establish exactly-once delivery for the lost interval. The transition to `uncertain_terminal` happens automatically. Regrant remains blocked until matching positive acknowledgment evidence or explicit reconciliation resolves the delivery.
 
 ### Legacy question ties
 
@@ -257,6 +259,7 @@ The loop skips `bridge.db.secrets/owner.sqlite` and `as-owner.sqlite` on purpose
 **Check a restore.** The check copies the backup into a new, empty home and then reads it with `restore-check.mjs`. That script opens the databases read-only and decrypts what the bridge would decrypt. It starts no bridge, no delivery loop and no network socket, so a webhook subscription or pending notice in the restored copy is not sent. Set `backup` to the backup directory and, if you want to read one request back, `request_id` to a known recent request ID. Then run:
 
 ```sh
+(
 umask 077
 export DALAN_HOME="$HOME/dalan-restore-check"
 [ ! -e "$DALAN_HOME" ] || { echo "$DALAN_HOME exists; choose a new path" >&2; exit 1; }
@@ -264,11 +267,51 @@ mkdir -m 0700 "$DALAN_HOME" || exit 1
 data_root="$(dalan paths --data-root)" || exit 1
 config_root="$(dalan paths --config-root)" || exit 1
 workspace_root="$(dalan paths --workspace-root)" || exit 1
+node --input-type=module - "$data_root" "$config_root" "$workspace_root" <<'JS' || exit 1
+import fs from 'node:fs';
+import path from 'node:path';
+try {
+  const home = fs.realpathSync(process.env.DALAN_HOME);
+  if (!fs.statSync(home).isDirectory()) throw new Error('restore home is not a directory');
+  for (const root of process.argv.slice(2)) {
+    const normalized = path.resolve(root);
+    if (!path.isAbsolute(root) || root !== normalized) {
+      throw new Error(`restore root is not a normalized absolute path: ${root}`);
+    }
+    let ancestor = normalized;
+    const missing = [];
+    for (;;) {
+      try {
+        fs.lstatSync(ancestor);
+        break;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) throw error;
+        missing.unshift(path.basename(ancestor));
+        ancestor = parent;
+      }
+    }
+    // A dangling symlink or unreadable existing ancestor fails here.
+    const realAncestor = fs.realpathSync(ancestor);
+    if (!fs.statSync(realAncestor).isDirectory()) throw new Error(`not a directory: ${ancestor}`);
+    const canonical = path.resolve(realAncestor, ...missing);
+    const relative = path.relative(home, canonical);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`restore root is outside the disposable home: ${root}`);
+    }
+  }
+} catch (error) {
+  console.error(`Restore stopped before copying: ${error.message}`);
+  process.exit(1);
+}
+JS
 mkdir -p "$data_root" "$config_root" "$workspace_root" || exit 1
 cp -Rp "$backup/data/." "$data_root/" || exit 1
 find "$backup/config" -maxdepth 1 -type f -exec sh -c 'cp -p "$@" "$0"' "$config_root" {} + || exit 1
 if [ -d "$backup/artifacts" ]; then cp -Rp "$backup/artifacts" "$workspace_root/artifacts" || exit 1; fi
 node "$(npm root -g)/@tnunamak/dalan/src/restore-check.mjs" "$data_root" "$config_root" "$request_id" || exit 1
+)
 ```
 
 From a checkout, run `node src/restore-check.mjs` in the checkout instead of the `npm root -g` path. With `request_id` empty, the script counts the assignments instead. The script prints one JSON line and exits 0 only when `bridge.db` passes `integrity_check`, its status reads back and every stored subscription secret decrypts with the restored key. For an encrypted database a missing key stops it with `subscription storage key is missing`, and a wrong key with `subscription storage cannot be decrypted with the restored key`. It also checks `as.sqlite` and `workers-audit-checkpoint.sqlite` when they are present. For `as.sqlite` it authenticates the storage verifier and decrypts every sealed row with `as-storage.key`, so a wrong key of the right size fails with `authorization storage cannot be decrypted with the restored key`. It does not prove that the whole service starts. To prove that, start the restored home as a service in an environment you have cut off from the network: nothing in these commands cuts it off, and a full start runs the delivery loops. A backup that fails this check is incomplete: take a new one. Delete the restore home when you are done.
@@ -321,7 +364,7 @@ Setup loads the agent into the `user/UID` launchd domain. Earlier releases loade
 `dalan doctor` is a local check; it does not prove that a worker can finish a job. After setup, a restart or an upgrade, run these with `DALAN_HOME` set to the service's home:
 
 1. `dalan status --json` exits 0 and shows the queue and worker state.
-2. Confirm that the log shows `MCP listening on 127.0.0.1:PORT`.
+2. Confirm that the log shows `MCP listening` on the bind address and port configured for this service. Generated built-in-auth services use `127.0.0.1:PORT`; an external-OAuth service behind an HTTPS reverse proxy may use its explicitly configured non-loopback address.
 3. Connect the worker's client as in [worker pairing](manual-setup.md#worker-setup), using the service's HTTPS URL from `$DALAN_HOME/resource-url`. The `try` command does not run against an existing service, and a plain loopback URL is not accepted outside loopback mode.
 4. Submit the repository-free job from [the manual setup](manual-setup.md#submit-finish-and-read-the-result) with `dalan submit --worker NAME --execution none --deliver none --file first-job.json --json`, prompt the worker, then run `dalan wait REQUEST_ID` and `dalan decide REQUEST_ID accepted`. The job must reach `finished`.
 
@@ -479,7 +522,7 @@ Limits: CPU and output are observed by a supervisor, so stopping can overshoot b
 
 The supervisor requires libseccomp and installs an inherited filter before any phase starts; failure to install it refuses the check. It denies inotify and fanotify creation, POSIX message queue creation, and keyring operations because their quotas can affect the host user. Watch-mode checks are unsupported: `inotify_init` and `inotify_init1` return `EPERM`. A failed phase includes a restriction notice when output space permits; the notice does not establish why the phase failed. POSIX message queues and keyring-dependent checks are also unsupported. The filter has been qualified only for the native architecture; 32-bit compatibility binaries are unsupported and their behavior has not been verified. Bubblewrap disables creation of further user namespaces, and the private IPC namespace isolates System V IPC objects. Other shared per-user or system-wide kernel resources, including queued signals and open files, are not exhaustively isolated or audited by these budgets.
 
-Run the Linux qualification with an outer timeout and reduced priority: `timeout --kill-after=5s 150s nice -n 10 node --test scripts/host-budgets-test.mjs`. It exercises fork exhaustion, memory growth, disk filling, wall/CPU exhaustion, output flooding, killed/frozen supervisors, bridge death, concurrent admission, cumulative phases, receipt protection and a persisted host-check result. On other platforms those kernel journeys explicitly skip. The older host journeys have no budget declarations and still test default-off refusal before skipping execution.
+From a source checkout installed with `npm ci`, run the Linux qualification with an outer timeout and reduced priority: `timeout --kill-after=5s 150s nice -n 10 node --test scripts/host-budgets-test.mjs`. This test script is not included in the npm package. It exercises fork exhaustion, memory growth, disk filling, wall/CPU exhaustion, output flooding, killed/frozen supervisors, bridge death, concurrent admission, cumulative phases, receipt protection and a persisted host-check result. On other platforms those kernel journeys explicitly skip. The older host journeys have no budget declarations and still test default-off refusal before skipping execution.
 
 ### Worker identity and rollback
 
@@ -489,7 +532,7 @@ Run the Linux qualification with an outer timeout and reduced priority: `timeout
 {"workers":{"acme":{"connections":[{"issuer":"https://issuer.example/realm","subject":"owner","client_id":"acme-client"}],"capabilities":["t3"],"repos":[]},"example-worker":{"connections":[{"issuer":"https://issuer.example/realm","subject":"owner","client_id":"example-client"}],"repos":[]}},"default_execution":"none"}
 ```
 
-Submit with `dalan submit --worker NAME`. In profile mode, omitting it is refused with the configured worker names, except that a profile with exactly one worker defaults to it; only a legacy install (a database but no `workers.json`) defaults to `dot`. A new host starts with `dalan init --public-url URL --worker NAME`, which writes `workers.json` with `repos: []` for the worker (mode 0600, no `t3` capability, no host execution, and no repository access) and refuses to overwrite one that exists. `dalan init --legacy` writes none and keeps the legacy profile, for existing worker hosts only. `as-init` creates the AS files alone. `tell --worker NAME` targets a lightweight message. `pool` is unsupported as a target, name or configuration key. Assignments, claims and subscriptions retain their recorded identity when the profile changes. Removed workers see nothing; their subscriptions are revoked on startup and refused at delivery. Migration 35 has the durable identity `s1v2-worker-facts-20261022`. An abandoned worker-isolation database without that identity is refused: restore its pre-isolation backup. The supported upgrade starts from schema version 34, including live claims and unsealed uploads. The base supported exactly one worker. Subject-bearing facts outside the deployment's allowed subjects become `unknown`, never worker.
+Submit with `dalan submit --worker NAME`. In profile mode, omitting it is refused with the configured worker names, except that a profile with exactly one worker defaults to it; only a legacy install (a database but no `workers.json`) defaults to `dot`. A new host starts with `dalan init --public-url URL --worker NAME`, which writes `workers.json` with `repos: []` for the worker (mode 0600, no `t3` capability, no host execution, and no repository access) and refuses to overwrite one that exists. `dalan init --legacy` is an explicit legacy-profile compatibility option, not the normal setup path. Prefer `dalan init --worker NAME` for new installations; legacy mode does not itself grant repository access. `as-init` creates the AS files alone. `tell --worker NAME` targets a lightweight message. `pool` is unsupported as a target, name or configuration key. Assignments, claims and subscriptions retain their recorded identity when the profile changes. Removed workers see nothing; their subscriptions are revoked on startup and refused at delivery. Migration 35 has the durable identity `s1v2-worker-facts-20261022`. An abandoned worker-isolation database without that identity is refused: restore its pre-isolation backup. The supported upgrade starts from schema version 34, including live claims and unsealed uploads. The base supported exactly one worker. Subject-bearing facts outside the deployment's allowed subjects become `unknown`, never worker.
 
 ### Repository access per worker
 
@@ -521,25 +564,31 @@ Repository work uses the bridge host's full GitHub credential through Git askpas
 
 Switching a host from legacy mode to a `workers.json` profile retires every legacy subscription that has no verified persisted connection, including an old OAuth callback. The bridge suppresses that subscription's unsent wakes. The default worker must send a new authenticated `events/subscribe` request before it receives wake-ups again; a successful subscription replays still-queued work and records the approved connection. Check `dalan status --json`: after retirement, `subscriptions_active` is `0` and `subscription.state` is `revoked` (or `absent` if no row remains). The bridge does not create a replacement subscription. ChatGPT's MCP Events client is documented to refresh before a finite `refreshBefore`, but this early-retirement path has not been observed and that refresh may be days away. For immediate wake-ups, reconnect or refresh the default worker connector on the approved OAuth client to prompt `events/subscribe`, then confirm `subscriptions_active` is nonzero and `subscription.state` is `active`.
 
-**PRE-UPGRADE backup.** Before installing this build, stop the pre-isolation service and take a consistent backup of its DB and artifact directory. Save `workers.json` only if it exists. Keep this backup: the refusal of an abandoned worker-isolation schema requires restoring a pre-isolation DB, not a rollback DB. Use the service's workspace-root environment and fresh backup destinations.
+**Pre-isolation recovery backup.** Before upgrading a pre-isolation installation, stop every writer and follow the complete [worked backup and restore-check procedure](#upgrade-and-rollback). Keep that verified recovery set separately and label it with the installed version and date. Include the matching keys, configuration, receipts, artifact index and artifact bytes. Exclude both ownership-lock databases. Do not use a shorter directory-copy recipe: recovery from an abandoned worker-isolation schema requires a complete, compatible pre-upgrade set.
 
 <!-- pre-upgrade-backup -->
 ```sh
+umask 077
 bridge_data_root="$(dalan paths --data-root)" || exit 1
 bridge_config_root="$(dalan paths --config-root)" || exit 1
-sqlite3 -bail "${bridge_data_root}/bridge.db" ".backup '${bridge_data_root}/bridge.db.pre-isolation'"
+bridge_workspace_root="$(dalan paths --workspace-root)" || exit 1
+sqlite3 -bail "${bridge_data_root}/bridge.db" ".backup '${bridge_data_root}/bridge.db.pre-isolation'" || exit 1
 if [ -f "${bridge_data_root}/delivery-acks.db" ]; then
-  sqlite3 -bail "${bridge_data_root}/delivery-acks.db" ".backup '${bridge_data_root}/delivery-acks.db.pre-isolation'"
+  sqlite3 -bail "${bridge_data_root}/delivery-acks.db" ".backup '${bridge_data_root}/delivery-acks.db.pre-isolation'" || exit 1
   chmod 600 "${bridge_data_root}/delivery-acks.db.pre-isolation"
 fi
-if [ -f "${bridge_config_root}/workers.json" ]; then
-  cp -p "${bridge_config_root}/workers.json" "${bridge_config_root}/workers.json.pre-isolation"
+for name in bridge.db.secrets receipts artifact-index; do
+  if [ -e "${bridge_data_root}/${name}" ]; then cp -Rp "${bridge_data_root}/${name}" "${bridge_data_root}/${name}.pre-isolation" || exit 1; fi
+done
+for name in workers.json workers-repos.json oauth.env as-storage.key operator.key alerts.env limits.json workers-audit.jsonl; do
+  if [ -f "${bridge_config_root}/${name}" ]; then cp -p "${bridge_config_root}/${name}" "${bridge_config_root}/${name}.pre-isolation" || exit 1; fi
+done
+for name in as.sqlite workers-audit-checkpoint.sqlite; do
+  if [ -f "${bridge_config_root}/${name}" ]; then sqlite3 -bail "${bridge_config_root}/${name}" ".backup '${bridge_config_root}/${name}.pre-isolation'" || exit 1; fi
+done
+if [ -d "${bridge_workspace_root}/artifacts" ]; then
+  cp -a "${bridge_workspace_root}/artifacts" "${bridge_workspace_root}/artifacts.pre-isolation" || exit 1
 fi
-if [ -f "${bridge_config_root}/workers-repos.json" ]; then
-  cp -p "${bridge_config_root}/workers-repos.json" "${bridge_config_root}/workers-repos.json.pre-isolation"
-fi
-bridge_workspace_root="$(dalan paths --workspace-root)" || exit 1
-cp -a "${bridge_workspace_root}/artifacts" "${bridge_workspace_root}/artifacts.pre-isolation"
 ```
 
 Upload IDs chosen by workers are request-scoped aliases. The server gives each upload a globally unique `id`; owner get, `/artifact` and the CLI artifact cache use only that ID. Existing worker IDs remain valid. Assignment error parity uses an absent-ID gate before validation and effects; it makes no timing-equivalence claim. Limitation: usage breaks are tracked only for the default worker. Break inference, ledgers and probe budgets are not per worker.
@@ -548,11 +597,9 @@ Upload IDs chosen by workers are request-scoped aliases. The server gives each u
 
 The retired pre-worker rollback procedure is retained in the [historical appendix](#historical-appendix-pre-worker-rollback). Current recovery uses compatible code or a reviewed complete backup restore as described under [Upgrade and rollback](#upgrade-and-rollback).
 
-## Test
+## Test a source checkout
 
-```sh
-npm test
-```
+From a source checkout installed with `npm ci`, run `npm test`. The npm package does not include this test suite. To verify an installed service, use [Smoke check an installed service](#smoke-check-an-installed-service).
 
 The fake-worker, durability, workspace, and OAuth tests use isolated temporary HOME directories and non-production ports. They do not send real T3 messages or use model API keys. Tests cover duplicate submit/claim/finish, owner receipt, watches, pause, cancellation, expiry and refresh, interrupted events, report persistence, ambiguous sends, transcript reconciliation, stopped threads, alert dedup, confined checks, patch/artifact transfer, OAuth rejection, and claim capacity. `DALAN_ALLOW_PRIVATE_WEBHOOKS=1` and `DALAN_T3_DRY_RUN=1` are test-only flags.
 

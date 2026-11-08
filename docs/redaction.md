@@ -18,7 +18,7 @@ The tests are in `scripts/secret-sinks-redaction-test.mjs`, `scripts/redaction-m
 
 ## Known residual risks
 
-Redaction catches accidental leaks of registered secrets and known formats. It cannot stop a worker that deliberately encodes a secret it knows, for example as base64. These cases are not masked, and the project accepts them.
+Redaction catches accidental leaks of registered secrets and known formats, including base64 forms of registered values. It cannot prevent deliberate disclosure through unrecognized encodings or transformations. The following cases can pass unmasked.
 
 - **Encoded unknown values:** a credential that Dalan did not register is found only in plain text. Its base64 or percent-encoded form, or a JWT payload, is not decoded.
 - **Split across log lines:** a secret that is split over two separate log entries is not found, because each entry is masked on its own.

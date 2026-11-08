@@ -1,12 +1,14 @@
 # External heartbeat dead-man
 
-`dalan-deadman` is a small receiver for health-gated pings from the bridge host. Run it on an independently powered and networked host of your choice. It stores heartbeat and episode state in SQLite on that host. The bridge host sends `POST /heartbeat` with `Authorization: Bearer <token>` and `{"healthy":true}`. The body is limited to 1 KiB. The receiver accepts only `{"healthy":true}`; any other field, including a sender timestamp, gets HTTP 400. It records its own receive time.
+`dalan-deadman` is a small receiver for health-gated pings from the bridge host. Run it on an independently powered and networked host. The setup below requires Linux with systemd on both the receiver and bridge hosts; other service managers need their own installation steps. It stores heartbeat and episode state in SQLite on that host. The bridge host sends `POST /heartbeat` with `Authorization: Bearer <token>` and `{"healthy":true}`. The body is limited to 1 KiB. The receiver accepts only `{"healthy":true}`; any other field, including a sender timestamp, gets HTTP 400. It records its own receive time.
 
 The receiver opens an episode after five minutes without a heartbeat. A new process waits through a five-minute startup grace period for a ping before opening a new episode; an episode already open before restart keeps its alert and reminder state. It sends one initial notification, then one reminder two hours after a confirmed initial notification if the episode remains open. It clears an episode only after timely pings continue for 15 minutes. A tick that observes a late or missing heartbeat resets the recovery clock. Deadline arithmetic uses a monotonic logical clock while the process runs, so wall-clock steps do not freeze recovery. The receiver anchors that clock across restarts using persisted state and nonnegative wall-clock downtime. A new episode is created for a later outage.
 
 Notification publication is optional: set `DOT_DEADMAN_NTFY_URL` to an HTTPS ntfy topic URL and, if required, set `DOT_DEADMAN_NTFY_TOKEN`. Missing publisher configuration leaves delivery pending and makes no off-host delivery claim. Confirmed 4xx rejections and failures observed before transport is ready are retried after one minute. Publication uses a total five-second deadline: a timeout before TCP connection (or TLS handshake) completes is safe to retry. A timeout after transport is ready, a 5xx response, or a process crash during publication is marked uncertain and is not resent automatically, because the provider may have accepted the notification. The database retains that evidence. The publisher never follows redirects; redirects and TLS certificate/protocol failures before a completed handshake are recorded as publisher configuration errors and retried only after service restart, once the endpoint is corrected. Publisher tokens with control characters or invalid header values, and URLs containing user credentials, are rejected before the monitor starts. Configuration errors contain no token or URL credentials. Messages contain no heartbeat payload, token, or bridge assignment text.
 
-One auditable state machine holds all of this policy, which is easier to test than a notification provider's vendor-specific repeat, reminder and hysteresis settings. The provider only transports notifications; it does not decide when an episode starts or clears.
+If publication becomes `uncertain`, check the receiver for the alert's stable delivery reference before retrying. Follow [Interrupted dead-man alerts](durability-audit.md#interrupted-dead-man-alerts) to reconcile the result. Do not record `unsent` while delivery is still ambiguous: that decision permits another send.
+
+Dalan decides when an episode starts, when to send a reminder and when to clear it. The notification provider only transports those messages.
 
 ## Operator setup
 
@@ -47,7 +49,7 @@ The timer is one minute; the five-minute receiver deadline tolerates a few misse
 
 ## Local check
 
-Run the deterministic state and HTTP boundary checks with:
+From a source checkout installed with `npm ci`, run the deterministic state and HTTP boundary checks below. These test scripts are not included in the npm package:
 
 ```sh
 node scripts/deadman-test.mjs

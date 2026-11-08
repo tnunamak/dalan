@@ -10,7 +10,7 @@ The owner completes the setup and first-job checks below on the intended account
 
 - Confirm that this account/workspace can add or use a custom remote MCP connector, perform OAuth, enable it in a conversation, and call the required tools. On managed plans, organization role and connector access matter; the official help page describes owner setup before member connection. A plan label alone is not an access test. [Custom connector setup](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 - Unattended execution and background-worker availability are separate observations. An interactive manual smoke proves neither. If a required connector control is absent, stop and have the owner verify access; do not upgrade, change roles, or add a subscription.
-- Have the owner complete [service setup](service-setup.md#owner-setup) and define the `dalan` helper for the service's `DALAN_HOME`. Use an existing dedicated profile with no T3 capability and no repository allowlist. `NAME` below is that exact worker name. No policy changes are part of this recipe.
+- Complete [service setup](service-setup.md#owner-setup), put `dalan` on your PATH, and export `DALAN_HOME` to the generated service home. Use a dedicated worker with no T3 capability and no allowed repositories for this first job. `NAME` below means that worker's profile name, not the account display name.
 - Supply the public **HTTPS resource URL** from the private `<bridge-home>/resource-url` file, including its secret path and `/mcp`. Do not use the origin, an OAuth endpoint or localhost. Claude's remote connector traffic originates from Anthropic infrastructure, even when the UI is on a local device. [Network requirements](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp#network-requirements)
 - Prefer public HTTPS port 443 as a simple trial default, not an asserted Claude port restriction. Have the owner verify path-suffixed resource/authorization discovery (200), tokenless MCP (401), and unsuffixed discovery/root/`/admin` (404) from outside the private network. The [public-surface checker](https://github.com/tnunamak/dalan/blob/main/scripts/live-trial/README.md#3-verify-from-outside-the-tailnet) consumes a private resource-file value; do not reuse an unrelated example job.
 
@@ -31,7 +31,7 @@ dalan connect allow-callback 'https://claude.ai/api/mcp/auth_callback'
 dalan connect start --worker NAME
 ```
 
-The current custom-connector UI distinguishes automatic registration, published identity (CIMD), and a supplied OAuth client. Choose **Register automatically** for this DCR recipe, not the published-identity default simply because it is recommended in the UI. [Connector setup](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+The current custom-connector UI distinguishes automatic registration, a published Client ID Metadata Document (CIMD), and a supplied OAuth client. Choose **Register automatically** for this Dynamic Client Registration (DCR) recipe, not the published-identity default simply because it is recommended in the UI. [Connector setup](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 
 DCR discovers `registration_endpoint` and creates the client. A static OAuth client requires the owner to register the exact redirect first and supply the matching client ID/authentication credentials; it is not a static request-header token. CIMD is another identity method, not DCR. [Claude authentication](https://claude.com/docs/connectors/building/authentication#register-claude-as-an-oauth-client)
 
@@ -88,7 +88,7 @@ dalan submit --worker NAME --execution none --file first-job.json
 dalan get REQUEST_ID --json
 ```
 
-Use the `request_id` from the submit response for `REQUEST_ID`. Save the JSON and that ID; if the response is lost, retry the identical file/ID, not a new job. Confirm `execution` is `none` and the intended target worker before continuing. These submission fields were confirmed by the owner for the pinned base; no submission was made while writing this page.
+Use the `request_id` from the submit response for `REQUEST_ID`. Save the JSON and that ID; if the response is lost, retry the identical file/ID, not a new job. Confirm `execution` is `none` and the intended target worker before continuing.
 
 Manually ask the already authorized cloud conversation to do exactly this (replace `REQUEST_ID` with the confirmed ID and explicitly select the connected bridge):
 
@@ -102,7 +102,7 @@ After the worker finishes, the owner reads the bridge record, not just the chat 
 dalan get REQUEST_ID --json
 ```
 
-Check terminal completed status, the intended target and claim/report attribution, execution none, and the exact nonce from `first-job.json`. Keep a redacted receipt. A conversational answer without the matching bridge `finish` record is a failure. `get` marks the result read; record a disposition only after reviewing it. See [Operate and recover](../README.md#operate-and-recover). Stop after this one job; repository work and recurring triggers require separate acceptance.
+Confirm that the job's status is `finished` and its report outcome is `completed`. Check the intended worker, execution `none` and the exact `SMOKE` value from `first-job.json`. A chat answer without the matching bridge report is not completion. After reviewing the report, run `dalan decide REQUEST_ID accepted`. Stop after this one job; repository work and recurring runs need their own setup.
 
 ## 5. Limits and owner acceptance record
 

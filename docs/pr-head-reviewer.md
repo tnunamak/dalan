@@ -6,7 +6,7 @@
 
 0. Before the capacity gate (skipped with `--only`): for each PR that a queued or claimed assignment targets (objective key `pr:<owner>/<repo>#<n>`, or `inputs[0].github_repo` plus `pr_number`), at most `max_closed_checks` (40) per run, one REST `pulls/<n>` call (ETag-conditional, so an unchanged PR is a 304). A PR with `state` `closed` (merged or not) gets every such request cancelled with `dalan cancel ID --reason pr_closed`; the bridge stores it as `cancelled_reason`. Open PRs are untouched. A failure is logged as `error` with stage `pr-closed-check` and does not stop the run; a rate limit sets the usual backoff.
 1. `dalan status --json`. Stop when the pool is paused, when an owner-confirmed `worker_break` is active (`active` and `source === "owner"`), or when `claim_denied.capacity_hold_until` is in the future.
-2. Free slots = `max_claimed_outer_assignments + headroom - (claimed + live queued)`, at most 0 or more. Submit at most `min(slots, max_submits_per_run)`. Defaults: headroom 6, 10 per run. With no free slot the run lists nothing.
+2. Free slots = `max(0, max_claimed_outer_assignments + headroom - claimed - live queued)`. Submit at most `min(slots, max_submits_per_run)`. Defaults are 6 headroom slots and 10 submissions per run. With no free slot, skip discovery.
 3. Discover open PRs with one REST-backed `gh search prs` per distinct configured owner and one per extra repo not covered by those owners. Apply case-insensitive exact `exclude_owners` and `exclude_repos`, and skip archived/fork repositories when the search or PR detail response identifies them. Bot PRs are skipped. A draft counts only if updated in the last 7 days; any other PR only if updated in the last 30 days. Ready PRs go first, newest first.
 4. Dedupe against `bridge.db` (read-only): any non-cancelled assignment for the same repository whose `inputs[0].head_sha` (or lone `base_sha`) is this head, or whose `objective_key` + `revision` is this PR at this head. This includes reviews that other owners submitted themselves. Cancelled assignments do not cover.
 5. Build the assignment so that `validateSubmission` accepts it: `scope_paths` are the PR's changed files still present at the head (deleted files are omitted), collapsed to directories only when over `max_scope_paths` (150) paths or `max_scope_bytes` (8000) bytes; `inputs` pin `{github_repo, base_sha: head}` in head-only mode (REST pull details provide a base tip, not a merge base); `execution_scope` is `read-only`; the brief names no path. A changed file the lint calls sensitive leaves the scope and the PR is then reviewed at its head without the diff (`inputs: [{github_repo, base_sha: head}]`). A PR whose files are all sensitive, a deletion-only PR, and a PR with more than `max_changed_files` (200) changed files, counting deletions, are skipped.
@@ -33,19 +33,35 @@ Every run logs `gh-calls` with invocation counts by `search`, `pull`, and `files
 
 ## Use
 
+Before any run, configure the repository coverage and `bridge_db` and `t3_db` paths. Both databases must exist, and `t3_db` must contain `orchestration_v2_projection_threads`, even with delivery `none`. Install Node.js 24+, authenticate `gh`, and put `dalan` on `PATH`. See [Install on Linux](#install-on-linux) before enabling the timer.
+
 ```
-dalan-pr-reviewer --dry-run [--ignore-capacity]   # print candidates; submit and write nothing
+dalan-pr-reviewer --dry-run                     # inspect candidates without submitting
+dalan-pr-reviewer --dry-run --ignore-capacity   # also inspect candidates when capacity is full
 dalan-pr-reviewer --only OWNER/REPO#N             # one PR, if in the repo's first 200 open search results (still gated and deduped)
 dalan-pr-reviewer --max N
 ```
 
 State and log: `~/.local/state/dot-pr-reviewer/{state.json,log.jsonl}` (one JSON line per decision).
 
-## Install
+## Install on Linux
 
-```
+Run from the Dalan checkout or installed package directory, where `docs/` and `systemd/` exist. Install Node.js 24+, authenticate `gh`, and make `dalan` available on the unit's `PATH`. Disable any previous PR feeder before enabling this timer.
+
+Create the directories and copy the example only if you have no configuration yet:
+
+```sh
 mkdir -p ~/.config/dot-pr-reviewer ~/.config/systemd/user
-cp docs/dot-pr-reviewer.config.example.json ~/.config/dot-pr-reviewer/config.json   # then edit report_thread_id
+if [ ! -e ~/.config/dot-pr-reviewer/config.json ]; then
+  cp docs/dot-pr-reviewer.config.example.json ~/.config/dot-pr-reviewer/config.json
+fi
+```
+
+Edit `config.json` before continuing: replace the example repository coverage, set `bridge_db` and `t3_db` to the intended existing databases, and replace `report_thread_id` with a verified destination or remove that key for quiet delivery. The T3 database must contain `orchestration_v2_projection_threads`, even with quiet delivery. Check the unit's checkout path and `PATH` as well.
+
+Run `dalan-pr-reviewer --dry-run`. Confirm that it succeeds and shows only the intended repositories and destinations. Only then install and enable the timer:
+
+```sh
 ln -sf "$PWD"/systemd/dot-pr-reviewer.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now dot-pr-reviewer.timer
