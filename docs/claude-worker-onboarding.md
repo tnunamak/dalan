@@ -31,7 +31,7 @@ dalan connect allow-callback 'https://claude.ai/api/mcp/auth_callback'
 dalan connect start --worker NAME
 ```
 
-The current custom-connector UI distinguishes automatic registration, published identity (CIMD), and a supplied OAuth client. Choose **Register automatically** for this DCR recipe, not the published-identity default simply because it is recommended in the UI. [Connector setup](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+The current custom-connector UI distinguishes automatic registration, a published Client ID Metadata Document (CIMD), and a supplied OAuth client. Choose **Register automatically** for this Dynamic Client Registration (DCR) recipe, not the published-identity default simply because it is recommended in the UI. [Connector setup](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 
 DCR discovers `registration_endpoint` and creates the client. A static OAuth client requires the owner to register the exact redirect first and supply the matching client ID/authentication credentials; it is not a static request-header token. CIMD is another identity method, not DCR. [Claude authentication](https://claude.com/docs/connectors/building/authentication#register-claude-as-an-oauth-client)
 

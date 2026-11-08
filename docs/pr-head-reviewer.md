@@ -46,11 +46,22 @@ State and log: `~/.local/state/dot-pr-reviewer/{state.json,log.jsonl}` (one JSON
 
 ## Install on Linux
 
-Run the commands below from the Dalan checkout or installed package directory, where `docs/` and `systemd/` exist. First install Node.js 24+, authenticate `gh`, make `dalan` available on the unit's `PATH`, and configure the `bridge_db` and `t3_db` paths. Both databases must exist; `t3_db` must contain `orchestration_v2_projection_threads`, even for delivery `none`. Disable any previous PR feeder before enabling this timer.
+Run from the Dalan checkout or installed package directory, where `docs/` and `systemd/` exist. Install Node.js 24+, authenticate `gh`, and make `dalan` available on the unit's `PATH`. Disable any previous PR feeder before enabling this timer.
 
-```
+Create the directories and copy the example only if you have no configuration yet:
+
+```sh
 mkdir -p ~/.config/dot-pr-reviewer ~/.config/systemd/user
-cp docs/dot-pr-reviewer.config.example.json ~/.config/dot-pr-reviewer/config.json   # then edit report_thread_id
+if [ ! -e ~/.config/dot-pr-reviewer/config.json ]; then
+  cp docs/dot-pr-reviewer.config.example.json ~/.config/dot-pr-reviewer/config.json
+fi
+```
+
+Edit `config.json` before continuing: replace the example repository coverage, set `bridge_db` and `t3_db` to the intended existing databases, and replace `report_thread_id` with a verified destination or remove that key for quiet delivery. The T3 database must contain `orchestration_v2_projection_threads`, even with quiet delivery. Check the unit's checkout path and `PATH` as well.
+
+Run `dalan-pr-reviewer --dry-run`. Confirm that it succeeds and shows only the intended repositories and destinations. Only then install and enable the timer:
+
+```sh
 ln -sf "$PWD"/systemd/dot-pr-reviewer.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now dot-pr-reviewer.timer

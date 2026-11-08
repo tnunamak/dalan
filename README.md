@@ -79,7 +79,7 @@ Each row starts from a working trial.
 
 | To do this | Go to |
 |---|---|
-| Run `dalan` commands against the trial bridge | [Install the CLI](#install-the-cli), then [select the trial home and submit a job](docs/usage.md#submit-wait-and-review-a-job). |
+| Run `dalan` commands against the trial bridge | Run `npm install -g @tnunamak/dalan`. In each shell, set `DALAN_HOME` to the **Home** printed by the running trial; the usual default is `~/.local/share/dalan-trial`. Then run `dalan status` and `dalan inbox --all`. |
 | Give your worker a task of your own, with no file to write | [Your own first job](#your-own-first-job) |
 | Give your worker a job on a real repository | [Give a worker a repository job](#separate-repository-assignment) |
 | Let a coding agent submit and read jobs as tool calls | [`dalan mcp`](docs/local-agent-mcp.md) |
@@ -92,7 +92,29 @@ Each row starts from a working trial.
 
 ### Your own first job
 
-Follow [Submit, wait and review a job](docs/usage.md#submit-wait-and-review-a-job).
+This gives your connected worker a task of your own, with no file to write and no JSON. Leave `try` running and use a second shell. First install the CLI and select the exact **Home** printed by the running trial. The export below shows the usual default; replace it before running the block if `try` used `--home DIR` or an existing `DALAN_HOME`. Then type your task:
+
+```sh
+npm install -g @tnunamak/dalan
+export DALAN_HOME=~/.local/share/dalan-trial
+printf 'Your task, on one line: '; IFS= read -r task
+```
+
+If `npm install -g @tnunamak/dalan` fails with `EACCES`, npm cannot write to its global install directory. Do not use `sudo`; [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally), or skip the install and write `npx @tnunamak/dalan` wherever this section says `dalan`.
+
+Type the task and press Enter. The shell stores it as plain text, so quotes, `$` and backticks in it are safe. Then submit it:
+
+```sh
+dalan submit --worker local --execution none --deliver none --brief "$task Do not read files, run commands or call external services."
+```
+
+`--brief` makes a read-only job from the text. `submit` prints a `Request ID:` line and a `Send your worker:` line. Paste that prompt into your worker's session, then wait for the result in the same shell. Replace `REQUEST_ID` with the ID that `submit` printed:
+
+```sh
+dalan wait REQUEST_ID --timeout 3600 && dalan get REQUEST_ID
+```
+
+**Check:** `dalan get` prints `Job REQUEST_ID: finished`, then `Summary:` and your worker's answer. It then prints `Next: dalan decide REQUEST_ID accepted`, and its last line is `Full record: dalan get REQUEST_ID --json`. It may also print an `Outcome:` line. Review the answer, then run the `Next:` command to record your decision. If `wait` times out, the job is still open: check it with `dalan get REQUEST_ID` and ask the worker to check Dalan again.
 
 <a id="what-dalan-is"></a>
 

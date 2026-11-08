@@ -15,14 +15,14 @@ Each tool runs the matching `dalan` command with `--json`, so receipts, assignme
 
 ## Access
 
-The server has the access of the user who starts it: it reaches the bridge through the local admin socket, as the CLI does. It opens no network port and has no separate credential. Do not run it for someone you would not give `dalan` to. Set `DALAN_HOME` in the server environment if your bridge home is not the default.
+The server has the access of the user who starts it: it reaches the bridge through the local admin socket, as the CLI does. It opens no network port and has no separate credential. Do not run it for someone you would not give `dalan` to. Set `DALAN_HOME` explicitly in this MCP server's environment to the exact home of the running bridge. For a normal `dalan try`, that is `$HOME/.local/share/dalan-trial`; if the trial printed another home, use that instead. The trial home is not the CLI's normal default, and `dalan mcp` does not stop to ask which home you meant.
 
 ## Claude Code
 
+This example uses the usual trial home. Replace it with the home printed by your running bridge, and replace `/path/to/dalan` as described below.
+
 ```sh
-claude mcp add dalan -- /path/to/dalan mcp
-# with a custom bridge home:
-claude mcp add dalan --env DALAN_HOME=/path/to/bridge-home -- /path/to/dalan mcp
+claude mcp add dalan --env DALAN_HOME="$HOME/.local/share/dalan-trial" -- /path/to/dalan mcp
 ```
 
 ## Codex
@@ -33,7 +33,9 @@ Add this to `~/.codex/config.toml`:
 [mcp_servers.dalan]
 command = "/path/to/dalan"
 args = ["mcp"]
-# env = { DALAN_HOME = "/path/to/bridge-home" }
+env = { DALAN_HOME = "/absolute/path/to/the-running-bridge-home" }
 ```
 
 Replace `/path/to/dalan` with the output of `command -v dalan`, or with `node /path/to/dalan/bin/dalan.mjs` split into `command = "node"` and `args = ["/path/to/dalan/bin/dalan.mjs", "mcp"]`.
+
+Use an absolute home path in the TOML; do not leave `$HOME` or `~` in it. Start a new client session and ask it to call `dalan_status`. Check that the returned status belongs to your running bridge before submitting a job. If the call cannot connect, verify the configured home and run `dalan status --json` in a shell using that same `DALAN_HOME`. For a complete submit-and-result example, follow [Send one small job and read the result](codex-to-muse.md#4-send-one-small-job-and-read-the-result), using your connected worker's name.
