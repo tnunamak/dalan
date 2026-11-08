@@ -14,7 +14,7 @@ In this guide, `<home>` means the bridge service's private home and `<config>` m
 
 ## Connect a worker
 
-1. On a fresh host, `dalan init --public-url https://<stable tunnel host> --worker NAME`. It runs `as-init`, which configures the public origin, and writes the worker profile; on a host that already has a profile, run `dalan as-init --public-url https://<stable tunnel host>` alone. Start the bridge with `DALAN_AUTH_MODE=builtin`; `dalan connect` fails until it runs. At server start, issuer = `<public origin>/<secret>/oauth` and resource = `<public origin>/<secret>/mcp` (the existing secret path segment stays).
+1. For a fresh installation, follow [service setup](service-setup.md#owner-setup), which creates the worker profile and built-in authorization state. For an existing built-in installation, keep its home, profile and public URL; do not rerun `init` or `as-init` merely to connect another client. An intentional issuer or endpoint change needs the [upgrade and recovery procedure](dalan-upgrade.md). The issuer is `<public origin>/<secret>/oauth` and the resource is `<public origin>/<secret>/mcp`.
 2. The owner starts a tunnel or reverse proxy that serves public HTTPS and supports the OAuth browser flow, and forwards only the public listener, never the owner socket. Preserve the public `Host` (including a non-default port); a mismatch returns 421, and forwarded headers do not override it. See [the exposure Host rule](../README.md#expose-your-bridge) and [service setup](service-setup.md) for network configuration. Issuer and resource come from config, never from forwarded headers.
 3. Run `dalan connect start --worker NAME` before adding the connector in the vendor UI. The default pairing window lasts 10 minutes. The vendor reads the path-suffixed protected-resource metadata and AS metadata, then registers by DCR. DCR needs the secret namespace and an open window; registration creates no authority. A vendor that cannot register itself can use a static public client that the owner creates (see [Owner client commands](#owner-client-commands)).
 4. The vendor opens the browser at `/<secret>/oauth/auth`, with PKCE S256, `resource`, scopes and redirect. For a native client with a loopback callback, open the sign-in page on the computer running that client's callback listener. For a hosted client, use the provider's browser sign-in flow. The interaction page shows a short pairing code (for example `KTBX-4QPM`) and an instruction to run `dalan connect approve KTBX-4QPM --worker example-worker` on the bridge computer. The page waits.
@@ -70,7 +70,9 @@ The loopback public listener sets `headersTimeout = 10,000 ms`, `requestTimeout 
 
 `requestTimeout` limits receipt of the request, not tool execution or the response lifetime. The three-minute inactivity timeout covers stalled sockets and leaves a minute of headroom around the MCP T3 wait limit of 120 seconds. Responses with `Content-Type: text/event-stream` disable socket inactivity expiry when headers are sent, so a legitimate SSE response can stay open without a total response deadline. The current MCP endpoint returns JSON; SSE connections still count toward the connection cap. Legacy and external-OAuth listeners retain their prior settings.
 
-## Negative conformance tests (required before any live connection)
+## Maintainer conformance checklist
+
+This checklist is for maintainers changing the authorization implementation. To connect a worker to an unmodified release, follow the setup and first-job checks in the [worker guide](worker-clients.md).
 
 1. Authorization without PKCE, or with `plain`: refused.
 2. A code reused, a code with the wrong verifier, a code for a different redirect or client: refused.
@@ -96,13 +98,9 @@ A worker's MCP client may be one-shot, with no push. Its fastest wake can be a t
 - Rate limit, in memory: about one request per 5 seconds per source address with a burst of 3, and 30 requests per minute for the whole bridge. Excess requests get `429` with `Retry-After`. Only requests with a good token count, so a scanner with wrong tokens cannot use up the allowance. The signal rate limiter uses the socket peer's address rather than a forwarded client address. `DALAN_TRUST_PROXY` acknowledges the HTTPS reverse-proxy deployment requirement on a non-loopback bind; it does not give this limiter a forwarded client IP. Behind a tunnel on this computer that is the loopback address for every caller, and the limit becomes one shared bucket.
 - The request log gets one line per request: `{kind:'signal', status, work}`. It never holds the token or the path.
 
-Hook example (bash, run every N seconds by the worker's host):
+For a complete hook example, including transfer of the private signal file and replacement of the `wake` placeholder, see [The wake signal](pull-workers.md#the-wake-signal). Generate the signal file on the bridge host; the worker hook needs only that file.
 
-```sh
-curl -fsS "$SIGNAL_URL" | grep -q '"work":true' && wake
-```
-
-Treat the URL as a bearer secret: anyone who has it can learn whether work is queued. If it leaks, run `dalan connect signal-token --rotate`. Test: `node scripts/signal-endpoint-test.mjs` (about one minute, because it keeps the real 10 s cache and 5 s rate).
+Treat the URL as a bearer secret: anyone who has it can learn whether work is queued. If it leaks, run `dalan connect signal-token --rotate`. Maintainer check: from a source checkout installed with `npm ci`, run `node scripts/signal-endpoint-test.mjs`. The npm package does not include it; it takes about one minute because it uses the real cache and rate-limit intervals.
 
 ## Not in scope
 

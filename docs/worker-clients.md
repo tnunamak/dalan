@@ -256,8 +256,6 @@ On the bridge computer, run these commands. `WORKER` is the name of a configured
 dalan tool add --file owner_message.json
 dalan tool grant owner_message WORKER
 dalan tool list
-dalan tool revoke owner_message WORKER   # take the ability back
-dalan tool remove owner_message          # delete the tool and all its grants
 ```
 
 A new tool is denied to every worker until you grant it. `dalan tool list` shows each tool, its class and its granted workers. There is no command to disable or edit a tool. To change one, remove it and add the new file. A grant is lost when you remove the tool, so grant it again.
@@ -267,6 +265,13 @@ The worker calls `list_tools`. The reply holds `registry_version` and, for each 
 ```json
 { "tool": "owner_message", "arguments": { "kind": "question", "text": "Which branch should I use?" },
   "schema_hash": "<from list_tools>", "idempotency_key": "<new for each message>" }
+```
+
+**Remove it when you are done.** Run these only after completing the worker call:
+
+```sh
+dalan tool revoke owner_message WORKER
+dalan tool remove owner_message
 ```
 
 If the registry changed, the call fails with `stale_registry`. Call `list_tools` again and use the new `schema_hash`. Limits, retries and errors for `owner_message` are in [the T3 guide](t3-reverse-control.md#adding-abilities-without-a-refresh).

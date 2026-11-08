@@ -21,10 +21,13 @@ This guide takes you from a built-in OAuth connection to one completed job. Use 
    The response shows an open window for `NAME`; the default is ten minutes. Fresh init already allows `https://chatgpt.com/connector_platform_oauth_redirect` and the callback-ID form `https://chatgpt.com/connector/oauth/*`. An existing installation retains its saved allowlist. If its attempt uses the exact callback observed below and that callback is absent, add it before retrying.
 
    ```sh
-   dalan connect allow-callback 'https://chatgpt.com/connector_platform_oauth_redirect'
+   printf 'Exact ChatGPT callback shown for this connection: '
+   IFS= read -r CALLBACK_URL
+   dalan connect allow-callback "$CALLBACK_URL"
+   unset CALLBACK_URL
    ```
 
-   The command reports the allowed callback. Do not broaden the list to accommodate an unknown redirect.
+   Compare the complete value with ChatGPT's displayed redirect before running the command. Add only that verified callback, then restart the connection flow.
 
 ## ChatGPT user setup
 

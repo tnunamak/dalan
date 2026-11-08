@@ -22,7 +22,7 @@ For this built-in recipe, use DCR only if offered and compatible. This recipe co
 
 Owner sequence:
 
-1. Inspect the current MCP connection management UI and copy its **complete exact callback** through the vendor-supported flow. Record the source and observed callback privately. If this screen is unavailable before the first registration, stop at this step: ask the owner to capture the current UI/official instructions that expose it. Do not allow a wildcard or begin a guessing loop.
+1. For a normal first connection, follow [Connect ChatGPT](connect-chatgpt.md). Fresh initialization includes the documented ChatGPT callback patterns. If you need to add a callback to an existing installation, obtain the complete redirect from ChatGPT's connection settings or current official instructions before adding it. If you cannot establish the exact value, stop rather than guessing.
 2. Verify HTTPS, exact vendor host and full path, including any connection-specific suffix. The bridge refuses callback queries, fragments and credentials. The `as_registration_refused` log records no callback details; it is not a callback source. [Bridge callback handling](https://github.com/tnunamak/dalan/blob/main/scripts/live-trial/README.md#4-pair-fixture-a-and-allow-its-callback)
 3. On the bridge host, allow that value **before DCR**, then open the short pairing window:
 
@@ -87,7 +87,7 @@ dalan submit --worker NAME --execution none --file first-job.json
 dalan get REQUEST_ID --json
 ```
 
-Use the `request_id` from the submit response for `REQUEST_ID`. Save the JSON and that ID; if the response is lost, retry the identical file/ID, not a new job. Confirm `execution` is `none` and the intended target worker before continuing. These submission fields were confirmed by the owner for the pinned base; no submission was made while writing this page.
+Use the `request_id` from the submit response for `REQUEST_ID`. Save the JSON and that ID; if the response is lost, retry the identical file/ID, not a new job. Confirm `execution` is `none` and the intended target worker before continuing.
 
 Manually ask the already authorized cloud conversation to do exactly this (replace `REQUEST_ID` with the confirmed ID and explicitly select the connected bridge):
 
@@ -101,7 +101,7 @@ After the worker finishes, the owner reads the bridge record, not just the chat 
 dalan get REQUEST_ID --json
 ```
 
-Check terminal completed status, the intended target and claim/report attribution, execution none, and the exact nonce from `first-job.json`. Keep a redacted receipt. A conversational answer without the matching bridge `finish` record is a failure. `get` marks the result read; record a disposition only after reviewing it. See [requester commands](../README.md#commands-that-matter). Stop after this one job; repository work and recurring triggers require separate acceptance.
+Confirm that the job's status is `finished` and its report outcome is `completed`. Check the intended worker, execution `none` and the exact `SMOKE` value from `first-job.json`. A chat answer without the matching bridge report is not completion. After reviewing the report, run `dalan decide REQUEST_ID accepted`. Stop after this one job; repository work and recurring runs need their own setup.
 
 ## 5. Limits and owner acceptance record
 
