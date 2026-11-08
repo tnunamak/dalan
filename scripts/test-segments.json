@@ -153,6 +153,7 @@
   "node scripts/dispatch-gap-test.mjs",
   "node scripts/queue-wake-e2e.mjs",
   "node scripts/submission-lint-test.mjs",
+  "node --test src/test-support/validator-external-path-test.mjs",
   "node scripts/sensitive-path-regex-parity-test.mjs",
   "node scripts/cleanup-nonblocking-e2e.mjs",
   "DOT_BRIDGE_ALLOW_SHARED_NET_INSTALL=1 node scripts/workspace-disk-test.mjs",

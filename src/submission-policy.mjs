@@ -166,13 +166,28 @@ const plainToken=/(?<![A-Za-z0-9_.@-])((?:(?:~|\$HOME)?\/|\.?\.?\/)?[A-Za-z0-9_.
 function pathTokens(text) {
   return [...text.matchAll(pathToken)].flatMap(m=>hasRouterSyntax(m[1])&&!m[1].includes('/')?[...m[1].matchAll(plainToken)].map(sub=>Object.assign([sub[0],sub[1]],{index:m.index+sub.index})):[m]);
 }
+// Prose outside the repository is context, never a scope grant. Capture the whole
+// spelling so a token inside $CONFIG_DIR/client.toml cannot become a repo path.
+function externalPathMentions(text) {
+  const pattern=/(?<![A-Za-z0-9_./:@)\]}-])((?:~[A-Za-z0-9_-]*[\/\\]|\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})[\/\\]|[A-Za-z]:[\/\\]|\\\\|\/)[^\s`"'<>;,!?]*)/g;
+  return [...text.matchAll(pattern)];
+}
 function mentionedPaths(text,knownPaths=[]) {
   const known=new Set(knownPaths.flatMap(file=>{const parts=file.split('/');return [file,...parts.slice(0,-1).map((_,i)=>parts.slice(0,i+1).join('/'))];}));
   const authoritative=file=>known.has(file)||knownPaths.some(scope=>file.startsWith(`${scope}/`));
   const unwrap=file=>{const name=file.replace(/^_+|_+$/g,'');return file.startsWith('_')&&file.endsWith('_')&&(known.has(name)||hardPath.test(name)||(name.startsWith('@')&&(known.has(name.slice(1))||hardPath.test(name.slice(1)))))?name:file;};
   // Names written with a slash (./old.mjs, Makefile/) stay explicit paths after normalization.
-  const explicit=new Set();
-  const candidates=pathTokens(text).map(m=>{const file=normalize(m);if(file!==null&&m[1].includes('/')) explicit.add(file);return file;});
+  const explicit=new Set(),external=new Set();
+  const hostMentions=externalPathMentions(text);
+  const tokens=[...hostMentions,...pathTokens(text).filter(m=>!hostMentions.some(h=>m.index>=h.index&&m.index<h.index+h[0].length))];
+  const candidates=tokens.map(m=>{
+    const outside=hostMentions.includes(m),file=outside?m[1].replace(/[.)]+$/,''):normalize(m);
+    if(file!==null) {
+      if(outside) external.add(file);
+      if(m[1].includes('/')) explicit.add(file);
+    }
+    return file;
+  });
   function normalize(m) {
     const raw=m[1];
     // A JSX/HTML tag name right after `<` or `</` (</Button>, <Card.Header>, <Icon />) is markup, not a path. A hard
@@ -194,6 +209,7 @@ function mentionedPaths(text,knownPaths=[]) {
     // Exact tree/scope names and explicit lists carry authority. Ordinary words,
     // framework brands and hostnames do not establish repository paths.
     if(file===null) return false;
+    if(external.has(file)) return true;
     if(authoritative(file)) return true;
     if(/^(?:e\.g\.|i\.e\.)\/(?:e\.g|i\.e)\.?$/i.test(file)) return false;
     if(/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\//.test(file)) return false;
@@ -202,7 +218,7 @@ function mentionedPaths(text,knownPaths=[]) {
     if(file.includes('/')) return sourceExtension.test(file)||file.split('/').some(part=>part.includes('.'));
     return sourceExtension.test(file)||(file.includes('.')&&hardPath.test(file));
   });
-  return Object.assign(found,{explicit});
+  return Object.assign(found,{explicit,external});
 }
 export function scanGit(mirror,args,spawn=spawnSync) {
   const maxBuffer=32*1024*1024;
@@ -424,6 +440,11 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
     const treePass=mentionedPaths(text,[...scope,...scan.files]);
     for(const file of treePass) {
       if(file===input.github_repo||outputSet.has(file)) continue;
+      if(treePass.external.has(file)) {
+        inspectPath(file.replaceAll('\\','/'));
+        warn(`the brief mentions external path ${file}; this does not grant repository or host-file access`);
+        continue;
+      }
       const bare=bareToken(file)&&!treePass.explicit.has(file);
       if(bare&&bareWord(file)&&!hardPath.test(file)) { if(!within(file,scope)) warn(`bare word "${file}" matches a repository path outside scope_paths; it is not treated as a path reference`); continue; }
       // In scope, or a directory that holds scope entries (`gateway` for gateway/x.py): context, not a new read.
