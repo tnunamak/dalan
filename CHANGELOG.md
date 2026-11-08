@@ -5,7 +5,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 ## 0.5.2
 
 - Fix: an invalid assignment `execution_scope` error now names `execution_scope` and lists the allowed values, `read-only` and `implementation`. It previously named the separate execution setting.
-- Fix: a brief that mentions a path outside the repository, such as `~/.codex/config.toml`, `/etc/client/config.toml`, or a Windows path, is no longer refused as an undeclared or unknown path. The submission warns and grants no scope. Sensitive external paths are still refused.
+- Fix: a brief that mentions a path outside the repository through a shell variable (`$CONFIG_DIR/client.toml`), a Windows drive path or a UNC path is no longer refused as an undeclared or unknown repository path. The submission warns and grants no scope. Home-directory and absolute paths keep their refusal, and sensitive external paths are still refused.
 
 - Fix: a queued job that a worker had skipped is no longer marked skipped again as soon as it expires and is requeued. A job is marked skipped, and lists behind newer jobs, after it has been claimable for 10 minutes without a claim. The expiry requeue cleared the skip mark but kept the time the job first became claimable, so the next listing marked it skipped again at once and it stayed behind every newer job. The requeue now also restarts that time and the job's listing count.
 

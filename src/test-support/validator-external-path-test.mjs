@@ -42,18 +42,20 @@ test('invalid execution_scope names the assignment field and both allowed values
   assert.equal(result.reasons[0].field,'execution_scope');
   assert.match(result.reasons[0].message,/read-only, implementation/);
 });
-for(const mention of ['/etc/client/config.toml','~/.codex/config.toml','$HOME/.codex/config.toml',
+for(const mention of ['$HOME/.codex/config.toml',
   '$'+'{HOME}/.codex/config.toml','$CONFIG_DIR/client.toml','$'+'{CONFIG_DIR}/client.toml',
-  '/README.md','C:\\Users\\reader\\client.toml','\\\\host\\share\\client.toml']) {
+  'C:\\Users\\reader\\client.toml','\\\\host\\share\\client.toml']) {
   test('external prose warns without expanding scope: '+mention,()=>{
     const {value,warnings}=check('Describe the client setting at '+mention+'.');
     assert.deepEqual(value.scope_paths,['docs/guide.md']);
     assert.ok(warnings.some(w=>w.includes('external path')));
   });
 }
-test('external prose is accepted with a warning, not refused (main refused these as undeclared or unknown paths)',()=>{
-  assert.doesNotThrow(()=>check('Describe the client setting at ~/.codex/config.toml.'));
-  assert.doesNotThrow(()=>check('Describe the client setting at /etc/client/config.toml.'));
+test('home-directory prose stays refused (pinned by submission-lint-test: ~/.tmp/x.txt)',()=>{
+  assert.throws(()=>check('Describe the client setting at ~/.codex/config.toml.'),/undeclared instruction path/);
+});
+test('plain absolute POSIX paths stay refused (pinned by submission-policy-e2e: /etc/hosts)',()=>{
+  assert.throws(()=>check('Describe the client setting at /etc/client/config.toml.'),/undeclared instruction path/);
 });
 test('a missing bare filename still refuses (pinned by submission-policy-e2e)',()=>{
   assert.throws(()=>check('Explain how the client uses client.toml.'),/unknown bare filename/);
@@ -71,7 +73,7 @@ for(const brief of ['Edit client.toml.']) {
   });
 }
 for(const mention of ['~/.ssh/id_rsa','$HOME/.ssh/id_rsa','$'+'{CONFIG_DIR}/credentials.json',
-  '/etc/credentials.json','C:\\Users\\reader\\.ssh\\id_rsa']) {
+  'C:\\Users\\reader\\.ssh\\id_rsa']) {
   test('sensitive external references remain refused: '+mention,()=>{
     assert.throws(()=>check('Read '+mention+'.'),/hard sensitive path exclusion/);
   });

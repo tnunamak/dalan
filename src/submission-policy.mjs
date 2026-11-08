@@ -169,7 +169,8 @@ function pathTokens(text) {
 // Prose outside the repository is context, never a scope grant. Capture the whole
 // spelling so a token inside $CONFIG_DIR/client.toml cannot become a repo path.
 function externalPathMentions(text) {
-  const pattern=/(?<![A-Za-z0-9_./:@)\]}-])((?:~[A-Za-z0-9_-]*[\/\\]|\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})[\/\\]|[A-Za-z]:[\/\\]|\\\\|\/)[^\s`"'<>;,!?]*)/g;
+  const pattern=/(?<![A-Za-z0-9_./:@)\]}<-])((?:\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})[\/\\]|[A-Za-z]:[\/\\]|\\\\)[^\s`"'<>;,!?]*)/g;
+  // Only variable, drive and UNC spellings are external. Plain absolute and home paths (/etc/hosts, ~/.tmp/x.txt) keep their existing refusal: submission-policy-e2e and submission-lint-test pin it.
   return [...text.matchAll(pattern)];
 }
 function mentionedPaths(text,knownPaths=[]) {
