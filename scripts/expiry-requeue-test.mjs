@@ -155,9 +155,10 @@ try {
     assert(s.sweepExpired().requeued.includes('window_job'),'F3b did not requeue');
     s.submit(payload('newer_job',iso(now+HOUR)),{mode:'none'},'','owner');
     now+=MIN; s.recordListed(s.listPending('dot'),6);
-    const row=s.db.prepare('SELECT skipped_at,eligible_since,listed_count FROM assignments WHERE request_id=?').get('window_job');
+    const row=s.db.prepare('SELECT skipped_at,eligible_since,listed_count,last_listed_at FROM assignments WHERE request_id=?').get('window_job');
     assert(row.skipped_at===null,'F3b re-marked skipped right after the requeue: '+JSON.stringify(row));
     assert(row.eligible_since===iso(now),'F3b window did not restart: '+JSON.stringify(row));
+    assert(row.listed_count===1&&row.last_listed_at===iso(now),'F3b listing count did not restart: '+JSON.stringify(row));
     const order=s.listPending('dot').filter(x=>x.kind==='assignment').map(x=>x.request_id);
     assert(order.indexOf('window_job')<order.indexOf('newer_job'),'F3b order: '+JSON.stringify(order));
     s.db.close();log('F3b expiry requeue restarts the claimable window');
