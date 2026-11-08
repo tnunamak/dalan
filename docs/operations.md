@@ -1,5 +1,13 @@
 # Dalan operations
 
+Use this reference to operate an existing bridge. For installation, start with the [README](../README.md).
+
+- [Recover a stalled job or delivery](#recovery-and-operation)
+- [Back up, restore or upgrade](#upgrade-and-rollback)
+- [Restart or remove a service](#restart-a-service-and-check-its-state)
+- [Review repository access](#repository-access-per-worker)
+- [Configure host checks](#execution-capability-and-check-evidence)
+
 The admin socket is mode `0600`, but every process that runs as the bridge's own user can connect to it, so run executors and worker processes as a different user. The current check sandbox does not enforce this separation: it confines the check process but does not change its Unix user.
 
 Fresh homes use Dalan directories; existing installations retain their populated legacy roots. Use `dalan paths --json` with the service HOME and environment for the effective config, data, state and workspace roots. See [the upgrade guide](dalan-upgrade.md) for settings, catalog retention, local HTTP and explicit path migration.
@@ -59,9 +67,7 @@ tools are unavailable in this profile even for a capable worker.
 This is a catalog compatibility option, not evidence of live deployment or a
 completed migration. Existing `questions-v1` and `protocol-v0` behavior is unchanged.
 
-Paths: `<home>` is your home directory and `<config>` is `<home>/.config`.
-
-This page holds the operating detail for the bridge: service configuration, delivery and recovery, claims and leases, lifecycle metrics, usage breaks, workspaces and checks. It was moved out of the README, which now gives a short overview. Start with the [README](../README.md) if you have not seen the bridge before.
+Paths: `<home>` means the bridge service's `HOME`, which may differ from your login home; `<config>` means `<home>/.config`. Use `dalan paths` with the service's environment to resolve an existing installation's active roots.
 
 A Node 24 service stores immutable assignments, exposes worker MCP tools and MCP Events, and sends report or stored legacy watch notices to the exact bound T3 thread. The assignment path does not launch models, decide fallback, merge patches, or stop remote worker compute. The public endpoint is `https://dalan.example.com/<secret>/mcp`; OAuth authenticates worker requests, and `<config>/dalan/env` holds the additional path secret. The service listens on port 8787 by default.
 

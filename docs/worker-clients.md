@@ -60,7 +60,7 @@ To remove the registration later, run `claude mcp remove --scope user WORKER`.
 
 ## CLI worker: opencode
 
-Use a model that supports tool calls; the worker does its job through tool calls.
+This recipe describes opencode 2.2. Install and sign in to opencode, run `opencode --version`, and use a model that supports tool calls. If your version has different MCP or permission settings, check its documentation before using the commands below.
 
 Work in a project directory whose `opencode.json` already configures your model provider. Deny these tools there:
 
@@ -78,7 +78,7 @@ opencode's own prompt still suggests `execute`, and a model that follows it writ
 
 If you passed `--home DIR` to `try`, use `DIR/worker-instructions.md`. For a service bridge, use `BRIDGE_HOME/worker-instructions.md`.
 
-Register the bridge from `dalan try`:
+Register the bridge from `dalan try`. If you used `--home DIR`, replace `~/.local/share/dalan-trial` below with `DIR`, as you did for `worker-instructions.md`:
 
 ```sh
 opencode mcp add local --url "$(cat ~/.local/share/dalan-trial/resource-url)"

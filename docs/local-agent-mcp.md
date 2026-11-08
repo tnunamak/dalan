@@ -7,7 +7,7 @@
 | Tool | Does | Read-only |
 | --- | --- | --- |
 | `dalan_submit` | Queues an assignment, like `dalan submit`. Returns the `request_id` and the bridge verdict. A `clarify` or `reject` verdict comes back as an error result with its reasons. Optional: `worker`, `execution`, `dry_run`, `queue_anyway`, `refuse_defer`. | no |
-| `dalan_wait` | Waits for a stop. `timeout_seconds` defaults to 120 and is capped at 300. On timeout it returns the current state (`"status": "timeout"`); call it again. | yes |
+| `dalan_wait` | Waits for a finished report, question, blocker, cancellation, worker break or timeout. `timeout_seconds` defaults to 120 and is capped at 300. A timeout returns `status: timeout`; call again to keep waiting. | yes |
 | `dalan_result` | Returns the job state and, once finished, the report. Secrets are redacted. Output over 32 KiB is cut at 32 KiB and ends with a note on how to read the rest. | yes |
 | `dalan_status` | Returns `dalan status --json`. | yes |
 

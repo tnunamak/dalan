@@ -4,7 +4,7 @@ Dalan is a job queue between your shell or coding agent and a separate AI worker
 
 Use it when you want a second agent, a second account or another computer to do a job while you keep the accept or reject decision: for example, your coding agent hands a code review to an agent signed in to another account, and you read its report before you accept it.
 
-- **Repository access starts denied.** A new worker can read no repository until you grant one, and a finished job counts as accepted only after you run `dalan decide` or answer `y`.
+- **Repository access starts denied.** A new worker can use no repository through Dalan until you grant one. Finishing a job does not accept its result: acceptance is a separate owner decision.
 - **Any MCP client can be the worker.** Claude Code, Codex CLI, ChatGPT, Muse Spark (Meta) or your own agent connect over MCP (Model Context Protocol) with OAuth sign-in. Dalan does not run a model itself. See [Connect any MCP worker](#connect-any-mcp-worker) and [Connect ChatGPT](docs/connect-chatgpt.md). [T3 Code](docs/t3-integration.md#use-dalan-from-t3-code) can delegate to any of them.
 - **The bridge listens only on your computer** until you choose to expose it.
 
@@ -55,7 +55,7 @@ Job req_01234567… is queued for your worker. When it is connected, send it:
 Waiting for your worker. Ctrl-C stops the bridge.
 ```
 
-**Check:** look for the `✔ Self-check passed` line. The demo worker signed in through OAuth, finished a text job, read the one demo repository that it was granted and was refused another. The demo repository is local, so no network or GitHub login is used.
+**Check:** look for the `✔ Self-check passed` line. The demo worker signed in through OAuth and finished a text job. When Git and Python are available, it also reads the permitted demo repository and is refused another; otherwise the output says that the repository part was skipped. That repository is local and needs no GitHub login.
 
 `try` now keeps the bridge running and has queued a second job for your own worker. Leave this terminal open and continue below. Ctrl-C stops the bridge and keeps the trial home for the next run ([The trial home](#the-trial-home)).
 

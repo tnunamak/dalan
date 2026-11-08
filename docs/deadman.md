@@ -6,7 +6,7 @@ The receiver opens an episode after five minutes without a heartbeat. A new proc
 
 Notification publication is optional: set `DOT_DEADMAN_NTFY_URL` to an HTTPS ntfy topic URL and, if required, set `DOT_DEADMAN_NTFY_TOKEN`. Missing publisher configuration leaves delivery pending and makes no off-host delivery claim. Confirmed 4xx rejections and failures observed before transport is ready are retried after one minute. Publication uses a total five-second deadline: a timeout before TCP connection (or TLS handshake) completes is safe to retry. A timeout after transport is ready, a 5xx response, or a process crash during publication is marked uncertain and is not resent automatically, because the provider may have accepted the notification. The database retains that evidence. The publisher never follows redirects; redirects and TLS certificate/protocol failures before a completed handshake are recorded as publisher configuration errors and retried only after service restart, once the endpoint is corrected. Publisher tokens with control characters or invalid header values, and URLs containing user credentials, are rejected before the monitor starts. Configuration errors contain no token or URL credentials. Messages contain no heartbeat payload, token, or bridge assignment text.
 
-One auditable state machine holds all of this policy, which is easier to test than a notification provider's vendor-specific repeat, reminder and hysteresis settings. The provider only transports notifications; it does not decide when an episode starts or clears.
+Dalan decides when an episode starts, when to send a reminder and when to clear it. The notification provider only transports those messages.
 
 ## Operator setup
 
