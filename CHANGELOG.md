@@ -8,6 +8,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## 0.5.1
 
+- 0.5.1 was not published to npm; 0.5.2 is the first npm release.
 - Packaging: the npm package is `@tnunamak/dalan`. npm refused the name `dalan` as too close to an existing package, so 0.5.0 was not published to npm. Install with `npm install -g @tnunamak/dalan`, or try it with `npx @tnunamak/dalan try`. The command is still `dalan`. 0.5.1 has no other changes from 0.5.0.
 
 ## 0.5.0
