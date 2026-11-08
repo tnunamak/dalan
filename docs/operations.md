@@ -45,11 +45,7 @@ schema/config/CLI migration and catalog refresh requirements). Review and test
 the release, merge it, create an annotated `vX.Y.Z` tag on that merge commit,
 then publish GitHub release notes with those actions and compatibility limits.
 
-**Rollback.** Stop the service and restore a full, compatible pre-upgrade backup
-with the older code, not just an older executable against the migrated database.
-Follow [Upgrade and rollback](#upgrade-and-rollback) for the complete state set,
-lock-file exclusions and compatible newer delivery-ACK preservation. Snapshot
-restore loses later work; losing newer ACK proof can duplicate accepted notices.
+**Rollback.** Stop every writer and first verify whether the target code supports the current database, keys and configuration. If it does, preserve current state and newer delivery-ACK proof. If it does not, use compatible code or a separately reviewed restore of the complete pre-upgrade backup. A snapshot restore discards later work, and losing newer ACK proof can duplicate accepted notices. Follow [Upgrade and rollback](#upgrade-and-rollback) before starting older code.
 
 ## Opt-in legacy-v46 catalog
 
@@ -271,6 +267,45 @@ mkdir -m 0700 "$DALAN_HOME" || exit 1
 data_root="$(dalan paths --data-root)" || exit 1
 config_root="$(dalan paths --config-root)" || exit 1
 workspace_root="$(dalan paths --workspace-root)" || exit 1
+node --input-type=module - "$data_root" "$config_root" "$workspace_root" <<'JS' || exit 1
+import fs from 'node:fs';
+import path from 'node:path';
+try {
+  const home = fs.realpathSync(process.env.DALAN_HOME);
+  if (!fs.statSync(home).isDirectory()) throw new Error('restore home is not a directory');
+  for (const root of process.argv.slice(2)) {
+    const normalized = path.resolve(root);
+    if (!path.isAbsolute(root) || root !== normalized) {
+      throw new Error(`restore root is not a normalized absolute path: ${root}`);
+    }
+    let ancestor = normalized;
+    const missing = [];
+    for (;;) {
+      try {
+        fs.lstatSync(ancestor);
+        break;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) throw error;
+        missing.unshift(path.basename(ancestor));
+        ancestor = parent;
+      }
+    }
+    // A dangling symlink or unreadable existing ancestor fails here.
+    const realAncestor = fs.realpathSync(ancestor);
+    if (!fs.statSync(realAncestor).isDirectory()) throw new Error(`not a directory: ${ancestor}`);
+    const canonical = path.resolve(realAncestor, ...missing);
+    const relative = path.relative(home, canonical);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`restore root is outside the disposable home: ${root}`);
+    }
+  }
+} catch (error) {
+  console.error(`Restore stopped before copying: ${error.message}`);
+  process.exit(1);
+}
+JS
 mkdir -p "$data_root" "$config_root" "$workspace_root" || exit 1
 cp -Rp "$backup/data/." "$data_root/" || exit 1
 find "$backup/config" -maxdepth 1 -type f -exec sh -c 'cp -p "$@" "$0"' "$config_root" {} + || exit 1
@@ -329,7 +364,7 @@ Setup loads the agent into the `user/UID` launchd domain. Earlier releases loade
 `dalan doctor` is a local check; it does not prove that a worker can finish a job. After setup, a restart or an upgrade, run these with `DALAN_HOME` set to the service's home:
 
 1. `dalan status --json` exits 0 and shows the queue and worker state.
-2. Confirm that the log shows `MCP listening on 127.0.0.1:PORT`.
+2. Confirm that the log shows `MCP listening` on the bind address and port configured for this service. Generated built-in-auth services use `127.0.0.1:PORT`; an external-OAuth service behind an HTTPS reverse proxy may use its explicitly configured non-loopback address.
 3. Connect the worker's client as in [worker pairing](manual-setup.md#worker-setup), using the service's HTTPS URL from `$DALAN_HOME/resource-url`. The `try` command does not run against an existing service, and a plain loopback URL is not accepted outside loopback mode.
 4. Submit the repository-free job from [the manual setup](manual-setup.md#submit-finish-and-read-the-result) with `dalan submit --worker NAME --execution none --deliver none --file first-job.json --json`, prompt the worker, then run `dalan wait REQUEST_ID` and `dalan decide REQUEST_ID accepted`. The job must reach `finished`.
 
@@ -487,7 +522,7 @@ Limits: CPU and output are observed by a supervisor, so stopping can overshoot b
 
 The supervisor requires libseccomp and installs an inherited filter before any phase starts; failure to install it refuses the check. It denies inotify and fanotify creation, POSIX message queue creation, and keyring operations because their quotas can affect the host user. Watch-mode checks are unsupported: `inotify_init` and `inotify_init1` return `EPERM`. A failed phase includes a restriction notice when output space permits; the notice does not establish why the phase failed. POSIX message queues and keyring-dependent checks are also unsupported. The filter has been qualified only for the native architecture; 32-bit compatibility binaries are unsupported and their behavior has not been verified. Bubblewrap disables creation of further user namespaces, and the private IPC namespace isolates System V IPC objects. Other shared per-user or system-wide kernel resources, including queued signals and open files, are not exhaustively isolated or audited by these budgets.
 
-Run the Linux qualification with an outer timeout and reduced priority: `timeout --kill-after=5s 150s nice -n 10 node --test scripts/host-budgets-test.mjs`. It exercises fork exhaustion, memory growth, disk filling, wall/CPU exhaustion, output flooding, killed/frozen supervisors, bridge death, concurrent admission, cumulative phases, receipt protection and a persisted host-check result. On other platforms those kernel journeys explicitly skip. The older host journeys have no budget declarations and still test default-off refusal before skipping execution.
+From a source checkout installed with `npm ci`, run the Linux qualification with an outer timeout and reduced priority: `timeout --kill-after=5s 150s nice -n 10 node --test scripts/host-budgets-test.mjs`. This test script is not included in the npm package. It exercises fork exhaustion, memory growth, disk filling, wall/CPU exhaustion, output flooding, killed/frozen supervisors, bridge death, concurrent admission, cumulative phases, receipt protection and a persisted host-check result. On other platforms those kernel journeys explicitly skip. The older host journeys have no budget declarations and still test default-off refusal before skipping execution.
 
 ### Worker identity and rollback
 
@@ -497,7 +532,7 @@ Run the Linux qualification with an outer timeout and reduced priority: `timeout
 {"workers":{"acme":{"connections":[{"issuer":"https://issuer.example/realm","subject":"owner","client_id":"acme-client"}],"capabilities":["t3"],"repos":[]},"example-worker":{"connections":[{"issuer":"https://issuer.example/realm","subject":"owner","client_id":"example-client"}],"repos":[]}},"default_execution":"none"}
 ```
 
-Submit with `dalan submit --worker NAME`. In profile mode, omitting it is refused with the configured worker names, except that a profile with exactly one worker defaults to it; only a legacy install (a database but no `workers.json`) defaults to `dot`. A new host starts with `dalan init --public-url URL --worker NAME`, which writes `workers.json` with `repos: []` for the worker (mode 0600, no `t3` capability, no host execution, and no repository access) and refuses to overwrite one that exists. `dalan init --legacy` writes none and keeps the legacy profile, for existing worker hosts only. `as-init` creates the AS files alone. `tell --worker NAME` targets a lightweight message. `pool` is unsupported as a target, name or configuration key. Assignments, claims and subscriptions retain their recorded identity when the profile changes. Removed workers see nothing; their subscriptions are revoked on startup and refused at delivery. Migration 35 has the durable identity `s1v2-worker-facts-20261022`. An abandoned worker-isolation database without that identity is refused: restore its pre-isolation backup. The supported upgrade starts from schema version 34, including live claims and unsealed uploads. The base supported exactly one worker. Subject-bearing facts outside the deployment's allowed subjects become `unknown`, never worker.
+Submit with `dalan submit --worker NAME`. In profile mode, omitting it is refused with the configured worker names, except that a profile with exactly one worker defaults to it; only a legacy install (a database but no `workers.json`) defaults to `dot`. A new host starts with `dalan init --public-url URL --worker NAME`, which writes `workers.json` with `repos: []` for the worker (mode 0600, no `t3` capability, no host execution, and no repository access) and refuses to overwrite one that exists. `dalan init --legacy` is an explicit legacy-profile compatibility option, not the normal setup path. Prefer `dalan init --worker NAME` for new installations; legacy mode does not itself grant repository access. `as-init` creates the AS files alone. `tell --worker NAME` targets a lightweight message. `pool` is unsupported as a target, name or configuration key. Assignments, claims and subscriptions retain their recorded identity when the profile changes. Removed workers see nothing; their subscriptions are revoked on startup and refused at delivery. Migration 35 has the durable identity `s1v2-worker-facts-20261022`. An abandoned worker-isolation database without that identity is refused: restore its pre-isolation backup. The supported upgrade starts from schema version 34, including live claims and unsealed uploads. The base supported exactly one worker. Subject-bearing facts outside the deployment's allowed subjects become `unknown`, never worker.
 
 ### Repository access per worker
 
@@ -562,11 +597,9 @@ Upload IDs chosen by workers are request-scoped aliases. The server gives each u
 
 The retired pre-worker rollback procedure is retained in the [historical appendix](#historical-appendix-pre-worker-rollback). Current recovery uses compatible code or a reviewed complete backup restore as described under [Upgrade and rollback](#upgrade-and-rollback).
 
-## Test
+## Test a source checkout
 
-```sh
-npm test
-```
+From a source checkout installed with `npm ci`, run `npm test`. The npm package does not include this test suite. To verify an installed service, use [Smoke check an installed service](#smoke-check-an-installed-service).
 
 The fake-worker, durability, workspace, and OAuth tests use isolated temporary HOME directories and non-production ports. They do not send real T3 messages or use model API keys. Tests cover duplicate submit/claim/finish, owner receipt, watches, pause, cancellation, expiry and refresh, interrupted events, report persistence, ambiguous sends, transcript reconciliation, stopped threads, alert dedup, confined checks, patch/artifact transfer, OAuth rejection, and claim capacity. `DALAN_ALLOW_PRIVATE_WEBHOOKS=1` and `DALAN_T3_DRY_RUN=1` are test-only flags.
 
