@@ -2,6 +2,10 @@
 
 This file lists user-visible changes, newest first. Check the section for your target release before you upgrade.
 
+## Unreleased
+
+- Tests: the request-log collision scaling check now compares warmed best-of-three timings at 2,000 and 20,000 keys instead of imposing a one-second deadline. It still checks that all 20,000 keys survive and rejects growth of 30x or more, allowing slower hosts while guarding against quadratic suffix searches.
+
 ## 0.5.2
 
 - Fix: a queued job that a worker had skipped is no longer marked skipped again as soon as it expires and is requeued. A job is marked skipped, and lists behind newer jobs, after it has been claimable for 10 minutes without a claim. The expiry requeue cleared the skip mark but kept the time the job first became claimable, so the next listing marked it skipped again at once and it stayed behind every newer job. The requeue now also restarts that time and the job's listing count.
