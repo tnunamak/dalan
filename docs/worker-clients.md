@@ -25,14 +25,30 @@ The MCP URL contains a secret path, so give it only to the client that you conne
 
 ## Native CLI worker: Claude Code
 
-**From `dalan try`.** The bridge, the worker `local` and the callback pattern already exist. Register the server, then sign in:
+**From `dalan try`.** Leave the [trial](../README.md#quick-start) running. In a second terminal, register its MCP URL and sign in:
 
 ```sh
 claude mcp add --transport http --scope user local "$(cat ~/.local/share/dalan-trial/resource-url)"
 claude mcp login local
 ```
 
-If you passed `--home DIR` to `try`, read `DIR/resource-url` instead. `claude mcp login` opens the sign-in page and waits; in an interactive `claude` session, `/mcp`, then `local`, then **Authenticate** does the same. Approve the attempt by answering `y` in the `try` terminal; you do not run `dalan connect` commands.
+If `try` printed a different home (from `--home DIR` or `DALAN_HOME`), use that directory instead of `~/.local/share/dalan-trial`. The URL contains a secret. Reading it from the file keeps it out of shell history, but the client may print it. Keep that output private.
+
+`claude mcp login` opens the sign-in page and waits. In an interactive `claude` session, `/mcp`, then `local`, then **Authenticate** starts the same flow. Do not submit another smoke job: use the prompt that `try` already printed.
+
+1. **Open the sign-in page.** The client opens a browser tab, or prints a URL for you to open once in a browser on this computer. Leave the tab open. It is titled "Connect to Dalan" and shows a pairing code such as `ABCD-1234`. The page also shows a `dalan connect approve` command: you do not need it, because `try` asks you instead.
+
+2. **Approve in the `try` terminal.** A block of lines appears there with `code`, `client_name`, `redirect` and `scopes`. Check that `code` is the code in the browser tab and that `scopes` are `dalan.read dalan.work`. (Claude Code also asks for `t3.read t3.write`, optional integration scopes that give no extra access in this version.) Then answer `y` to `Approve this connection for worker "local"? [y/N]`.
+
+   **Check:** `try` prints `Approved. Waiting for the worker to finish the job.` `claude mcp login` prints `Authenticated with "local". Its tools are now available in Claude Code.`
+
+3. **Give the worker its job.** Queuing a job does not start a worker, so you start it. Open an interactive session (`claude`), paste the prompt that `try` printed, and allow the Dalan tool calls when the client asks. To run it without an interactive session, Claude Code takes `claude -p "PROMPT" --allowedTools mcp__local`, which approves this server's tool calls in advance; in this mode Claude Code does not prompt, so it does not use tools that need approval.
+
+   **Check:** `try` prints `✔ Your worker finished req_…. Report:` with the worker's report, then asks `Accept this result? [y/N]`. Review the report before answering `y`; `try` prints `Recorded as accepted.`
+
+You have now done the whole loop: a job was queued, your worker claimed and finished it, and you reviewed and accepted the result.
+
+Next, [submit one task of your own](usage.md#submit-wait-and-review-a-job). For connection trouble, use [Recovery and operation](operations.md#recovery-and-operation).
 
 **From a bridge you started by hand.** Allow the callback, open a pairing window, then register the server. Replace `WORKER` with the worker name that you initialized and `SECRET` with the `BRIDGE_PATH_SECRET` value (see [Worker setup](manual-setup.md#worker-setup)):
 
@@ -54,7 +70,7 @@ A native client needs the exact redirect that `pending` shows. Add `--replace` o
 
 **Check:** `claude mcp login` prints `Authenticated with "WORKER". Its tools are now available in Claude Code.`
 
-**Run the job.** Submit a job with `--deliver none`, then prompt Claude Code to use only the Dalan server: list pending jobs, claim the job, report progress and finish it. If your Claude Code account has other MCP connectors, name the server in the prompt so the worker does not use them. `dalan wait REQUEST_ID` returns `finished` when the job is done.
+**Run a real job.** Follow [Submit, wait and review a job](usage.md#submit-wait-and-review-a-job). For a manually started bridge, select its home and replace `local` with your worker name. If your account has other MCP connectors, name the Dalan server in the prompt so the worker does not use them.
 
 To remove the registration later, run `claude mcp remove --scope user WORKER`.
 
@@ -197,7 +213,7 @@ This example uses a bridge from the [Tailscale Funnel setup](service-setup.md#wi
 
 4. On the worker computer, open the printed URL once in a browser and leave the tab open. Read the pairing code from the page. Each visit starts a new attempt with a new code, so use the code from the page that you keep.
 5. On the bridge computer, run `dalan connect pending`. Compare the code and the redirect with the page, then run `dalan connect approve CODE --worker NAME --confirm-redirect REDIRECT`.
-6. **Check:** `codex mcp add` ends with `Successfully logged in.` Add the five tool approvals from the [Codex CLI section](#native-cli-worker-codex-cli) to the worker computer's `config.toml`. Submit the README's first job with `--worker NAME`, run `codex exec` on the worker computer, then use `dalan wait`, `get` and `decide` on the bridge computer.
+6. **Check:** `codex mcp add` ends with `Successfully logged in.` Add the five tool approvals from the [Codex CLI section](#native-cli-worker-codex-cli) to the worker computer's `config.toml`. Follow [the first-job walkthrough](usage.md#submit-wait-and-review-a-job) with `--worker NAME`, run `codex exec` on the worker computer, then use `dalan wait`, `get` and `decide` on the bridge computer.
 
 To undo it, run `codex mcp remove NAME` on the worker computer, and `node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --remove --worker NAME --home HOME_PATH` on the bridge computer (from a checkout, `node scripts/worker-bridge-setup.mjs` with the same options); that also turns off the Funnel rule that setup created.
 
@@ -220,7 +236,7 @@ Leave that terminal running. If `8799` is occupied, choose a free port and use i
 
 Run one `allow-callback` command, for the callback that your client really uses. For a native client, add `--confirm-redirect REDIRECT` to the approve command, with the exact redirect that `pending` shows. A fresh `init` creates one worker, refuses to overwrite an existing profile, grants no repositories and no T3 Code access, and sets execution to `none`. Approval binds the connection to that worker. Changing the model or vendor in the client does not change the connection or its repository grants.
 
-For repository work, grant exact repositories with `dalan worker allow personal OWNER/REPO`. Workspace tools, host checks and repository grants are separate controls; see the README's [repository job](../README.md#separate-repository-assignment) and [operations](operations.md) before you enable execution. A finished job is separate from owner acceptance, patch application and merge authority. See [pull workers](pull-workers.md) for schedules and wake signals after the first job works.
+For repository work, grant exact repositories with `dalan worker allow personal OWNER/REPO`. Workspace tools, host checks and repository grants are separate controls; see the [repository job](usage.md#give-a-worker-a-repository-job) and [operations](operations.md) before you enable execution. A finished job is separate from owner acceptance, patch application and merge authority. See [pull workers](pull-workers.md) for schedules and wake signals after the first job works.
 
 These examples use built-in OAuth, while an external OAuth issuer uses connection identity records in the worker profile; see [authentication profiles](portable-auth-profile.md). A deployment with several workers must configure each identity explicitly.
 

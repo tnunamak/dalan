@@ -8,17 +8,7 @@
 
 ## Owner and requester setup
 
-1. Clone and install Dalan, and put `dalan` on your PATH.
-
-   ```sh
-   git clone https://github.com/tnunamak/dalan.git
-   cd dalan
-   node --version
-   npm ci
-   npm link
-   ```
-
-   **Check:** Node prints `v24` or higher, and npm finishes without an error. The server in step 3 starts Node with a changed `HOME`, so use a Node executable that works then; a version-manager shim can depend on your usual home directory.
+1. Follow [Install from source](../README.md#from-source), including `npm link`, then return here instead of starting `try`. Use Node 24 or newer. The server in step 3 changes `HOME`, so use a Node executable that works then; a version-manager shim can depend on your usual home directory.
 
 2. Choose a new, private bridge home. It must not exist yet and must not be a `try` home (`init` refuses an existing profile). Export it in every shell that you use, including the server shell; `dalan` reads it as the bridge's home. Keep paths short and free of spaces.
 
@@ -88,48 +78,4 @@
 
 ## Submit, finish and read the result
 
-Any shell or coding agent that can run `dalan` can be the requester. Run these commands with `dalan` on your PATH and `DALAN_HOME` set to the bridge home.
-
-1. Make a request ID with `node -e "console.log(require('node:crypto').randomUUID())"`, then save this job as `first-job.json` with that ID. Never reuse another job's ID, and keep the file for retries.
-
-   ```json
-   {
-     "schema_version": 1,
-     "request_id": "req_<stable UUID>",
-     "brief": "Report the exact phrase: bridge first report. Do not read files, run commands or call external services.",
-     "inputs": [],
-     "expected_output": "Text report containing: bridge first report.",
-     "execution_scope": "read-only"
-   }
-   ```
-
-   ```sh
-   dalan submit --worker local --execution none --deliver none --file first-job.json --json
-   ```
-
-   **Check:** the response contains your `request_id`; use it as `REQUEST_ID` below. If the response is lost, submit the same file with the same options again: the bridge recognizes the same job.
-
-2. In the worker client, send this prompt with your request ID:
-
-   > Request REQUEST_ID is your only job: claim it with Dalan, do what its brief asks, report progress and finish it with the claim_id. Stop if it is missing or cancelled. Claim no other job.
-
-   The worker calls `list_pending`, `claim`, `progress` and `finish`.
-
-3. Wait for the result and read the report.
-
-   ```sh
-   dalan wait REQUEST_ID
-   dalan get REQUEST_ID
-   ```
-
-   **Check:** the job is finished and its report contains `bridge first report`. If nothing happens, the job is only queued: send the prompt in step 2. If `wait` times out, inspect the job with `get` and ask the worker to check Dalan again.
-
-   To find results later, for example after a restart, run `dalan inbox --all --json`. It covers the last 72 hours; add `--since` for older results. In a fresh shell with no session ID, plain `dalan inbox` lists every receipt in this bridge home. A resumed agent can have a different session label from its earlier one: use the saved label with `--producer ID`, or `--all` to list every receipt.
-
-4. Review the report and record your decision.
-
-   ```sh
-   dalan decide REQUEST_ID accepted
-   ```
-
-   **Check:** the response records `accepted`. Review a real report or patch before you accept or apply it. When you are done, press Ctrl-C in the server terminal. Keep the bridge home if you need its receipts or connection again.
+Follow [Optional: submit a JSON job](usage.md#optional-submit-a-json-job), using your manual bridge home and worker name.

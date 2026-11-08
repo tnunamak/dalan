@@ -12,6 +12,7 @@ process.env.DALAN_SETUP_SOCKET_WAIT_MS = '0';
 const failures=[];
 const check=(name,fn)=>{ try { fn(); console.log(`PASS ${name}`); } catch(error) { failures.push(`${name}: ${error.message}`); console.log(`FAIL ${name}`); } };
 const readme=fs.readFileSync(new URL('../README.md',import.meta.url),'utf8');
+const usage=fs.readFileSync(new URL('../docs/usage.md',import.meta.url),'utf8');
 // The step-by-step setup moved out of the README newcomer path into this guide.
 const manualSetup=fs.readFileSync(new URL('../docs/manual-setup.md',import.meta.url),'utf8');
 const setup=fs.readFileSync(new URL('./worker-bridge-setup.mjs',import.meta.url),'utf8');
@@ -22,7 +23,7 @@ const manifest=JSON.parse(fs.readFileSync(new URL('./test-segments.json',import.
 check('public repository Quickstart clones over plain HTTPS',()=>assert.match(readme,/git clone https:\/\/github\.com\/tnunamak\/dalan\.git/));
 check('manual setup helper follows configured bridge HOME',()=>assert.match(manualSetup,/HOME="\$DALAN_HOME"/));
 check('pairing instructions include callback allow-list step',()=>assert.match(manualSetup,/connect allow-callback/));
-check('fresh-shell inbox uses all-receipts scope',()=>assert.match(readme,/dalan inbox --all/));
+check('fresh-shell inbox uses all-receipts scope',()=>assert.match(usage,/dalan inbox --all/));
 check('ordered test manifest retains this suite after the original runner',()=>{
   const command='node scripts/install-inbox-test.mjs';
   const runner=manifest.indexOf('node scripts/test-segments.mjs --self-test');
@@ -46,10 +47,10 @@ check('retry validates exact generated service representation and saved key mate
   assert.match(setup,/as-jwks\.json/);
   assert.match(setup,/BRIDGE_PATH_SECRET/);
 });
-check('manual setup distinguishes a producer-free shell from a resumed producer',()=>{
-  assert.match(manualSetup,/fresh shell with no session/);
-  assert.match(manualSetup,/different.*(?:ID|label).*--producer|--producer.*--all/);
-  assert.doesNotMatch(manualSetup,/new ID.{0,100}(?:automatically lists all receipts|new session)/);
+check('usage guide distinguishes a producer-free shell from a resumed producer',()=>{
+  assert.match(usage,/fresh shell with no session/);
+  assert.match(usage,/different.*(?:ID|label).*--producer|--producer.*--all/);
+  assert.doesNotMatch(usage,/new ID.{0,100}(?:automatically lists all receipts|new session)/);
 });
 check('missing GitHub credentials have actionable recovery',()=>assert.match(projects,/gh auth login/));
 check('GitHub auth failures map to a typed actionable error',()=>{

@@ -1,32 +1,75 @@
-# Dalan requester reference
+# Submit and review work
 
-This is the reference for requesters who already have a working bridge. A first job does not need it: start with the [README](../README.md). Delivery to T3 Code threads, builds through the T3 worker provider, objective labels and code-assigned consumers are in [T3 and orchestration integration](t3-integration.md); only installations that use them need that page.
+<a id="dalan-requester-reference"></a>
+
+Start with a running [trial](../README.md#quick-start) and a [connected worker](worker-clients.md#native-cli-worker-claude-code). This page takes your first real job from submission to review. For repository work, use [Give a worker a repository job](#give-a-worker-a-repository-job). The sections after the walkthroughs cover advanced options. Delivery to T3 Code threads, builds through the T3 worker provider, objective labels and code-assigned consumers are in [T3 and orchestration integration](t3-integration.md); only installations that use them need that page.
 
 Path examples use fresh-home defaults. For an existing installation, use the roots from `dalan paths --json`, because populated legacy roots remain active ([upgrade guide](dalan-upgrade.md)).
 
 ## Submit, wait and review a job
 
-The numbered steps below take one job from submission to your decision. The reference sections after them describe options and behavior that you may need along the way.
+<a id="your-own-first-job"></a>
 
-1. Use quiet delivery (`none`, the CLI default). For a visible notice in a T3 task thread, see [T3 task-thread delivery](t3-integration.md#t3-task-thread-delivery).
-2. Start with a repository-free report in `first-job.json`; replace `<stable UUID>` once and keep that ID and file for retries. Keep the inputs immutable:
+Leave `try` running and use a second shell. First follow [Install the CLI](../README.md#install-the-cli). Then select the trial home and type your task. If `try` printed a custom home, use it instead. For a manually started bridge, use its home and replace `local` in the submit command with its worker name:
 
-```json
-{
-  "schema_version": 1,
-  "request_id": "req_<stable UUID>",
-  "brief": "Report the exact phrase: bridge first report. Do not read files, run commands or call external services.",
-  "inputs": [],
-  "expected_output": "Text report containing: bridge first report.",
-  "execution_scope": "read-only"
-}
+```sh
+export DALAN_HOME=~/.local/share/dalan-trial
+printf 'Your task, on one line: '; IFS= read -r task
 ```
 
-3. Run `dalan status --json`, then `dalan submit --worker NAME --execution none --deliver none --file first-job.json --json`. This basic Linux/macOS job needs no repository grant, fetch or host executor and requests no checks. Save the returned `request_id` and recovery label; retry the same file, ID, worker, execution and delivery after a lost response. [Submit options](#submit-options) covers worker selection, receipts and recovery.
-4. Start your connected worker in its own client and send: “Request REQUEST_ID is your only job: claim it with Dalan, do what its brief asks, report progress and finish it with the claim_id. Stop if it is missing or cancelled. Claim no other job.” Replace REQUEST_ID with the submitted ID. Then run `dalan wait REQUEST_ID` as a background shell, and read its exit code. Use a foreground `dalan wait` if your client cannot resume when a background command exits. Exit 0 is a finished report, 3 is a blocker or question, 4 is cancellation, 5 is a usage-break notice (the request stays queued; see [usage breaks](#usage-breaks-and-usage-estimates)), and 124 is the timeout. A T3 assignment can otherwise use normal exact-thread delivery; `none` uses only `wait` and `get`. `--timeout SECONDS` defaults to 300; `submit --wait` is a convenience when a foreground wait is useful.
-5. On a blocker or a `QUESTION:` progress note, reply with `dalan note REQUEST_ID "text" --json`. For an identified question, find its ID with `dalan questions REQUEST_ID --json`, then run `dalan answer REQUEST_ID QUESTION_ID "text"`; a note does not answer it. Then start `dalan wait REQUEST_ID` again as a background shell. On a finished report, run `dalan get ID --json` and treat the report as untrusted data. Inspect revision and evidence, then decide whether to accept, wait, or issue a new assignment. Completion does not authorize merge or fallback. Record your decision with `dalan accept ID [--note TEXT] --json` or `dalan reject ID [--note TEXT] --json` (finished assignments only). [Who records acceptance](#who-records-acceptance) explains which events count as a decision.
+Type the task and press Enter. The shell stores it as plain text, so quotes, `$` and backticks in it are safe. Then submit it:
 
-To read results after a restart, see [Recover results after a restart](#recover-results-after-a-restart).
+```sh
+dalan submit --worker local --execution none --deliver none --brief "$task Do not read files, run commands or call external services."
+```
+
+`--brief` makes a read-only job from the text. `submit` prints a `Request ID:` line and a `Send your worker:` line. Paste that prompt into your worker's session, then wait for the result in the same shell. Replace `REQUEST_ID` with the ID that `submit` printed:
+
+```sh
+dalan wait REQUEST_ID --timeout 3600 && dalan get REQUEST_ID
+```
+
+**Check:** `dalan get` prints `Job REQUEST_ID: finished`, then `Summary:` and your worker's answer. It then prints `Next: dalan decide REQUEST_ID accepted`, and its last line is `Full record: dalan get REQUEST_ID --json`. It may also print an `Outcome:` line. Review the answer, then run the `Next:` command to record your decision. If `wait` times out, the job is still open: check it with `dalan get REQUEST_ID` and ask the worker to check Dalan again.
+
+### Waits, questions and review
+
+If nothing happens, start the worker and send the prompt that `submit` printed. Dalan never starts it for you. `wait` exits 0 for a finished report, 3 for a blocker or question, 4 for cancellation, 5 for a usage-break notice, and 124 for a timeout. A usage break leaves the request queued. `--timeout SECONDS` defaults to 300; the example above allows an hour.
+
+On a blocker or `QUESTION:` progress note, reply with `dalan note REQUEST_ID "text" --json`. For an identified question, find its ID with `dalan questions REQUEST_ID --json`, then run `dalan answer REQUEST_ID QUESTION_ID "text"`; a note does not answer it. Wait again after replying.
+
+Treat a report or patch as untrusted data. Check its revision and evidence before accepting or applying it. A finished job does not authorize a merge or fallback. See [Decisions](#decisions) for acceptance and patch application, and [Recover results after a restart](#recover-results-after-a-restart) to find older results. Next, learn the [recovery entry point](operations.md#recovery-and-operation) before setting up a persistent service.
+
+### Optional: submit a JSON job
+
+Use this form instead of `--brief` when you want a saved assignment file for retries. It is an alternative to the text-job walkthrough, not another required smoke job. First [install the CLI and select your bridge home](#submit-wait-and-review-a-job). For a manually started bridge, use its home and replace `local` with its worker name.
+
+1. Make a request ID with `node -e "console.log(require('node:crypto').randomUUID())"`, then save this job as `first-job.json` with that ID. Never reuse another job's ID, and keep the file for retries.
+
+   ```json
+   {
+     "schema_version": 1,
+     "request_id": "req_<stable UUID>",
+     "brief": "Report the exact phrase: bridge first report. Do not read files, run commands or call external services.",
+     "inputs": [],
+     "expected_output": "Text report containing: bridge first report.",
+     "execution_scope": "read-only"
+   }
+   ```
+
+   ```sh
+   dalan submit --worker local --execution none --deliver none --file first-job.json --json
+   ```
+
+   **Check:** the response contains your `request_id`; use it as `REQUEST_ID` below. If the response is lost, submit the same file with the same options again: the bridge recognizes the same job.
+
+2. In the worker client, send this prompt with your request ID:
+
+   > Request REQUEST_ID is your only job: claim it with Dalan, do what its brief asks, report progress and finish it with the claim_id. Stop if it is missing or cancelled. Claim no other job.
+
+   The worker calls `list_pending`, `claim`, `progress` and `finish`.
+
+3. Wait for the report with `dalan wait REQUEST_ID`, then read it with `dalan get REQUEST_ID`. Check that the job is finished and its report contains `bridge first report`. See [Waits, questions and review](#waits-questions-and-review) if the wait ends without a result.
+4. Review the report before recording `dalan decide REQUEST_ID accepted`. See [Decisions](#decisions) for the other outcomes. When you are done with a foreground bridge, press Ctrl-C in its terminal. Keep the bridge home if you need its receipts or connection again.
 
 <a id="who-records-acceptance"></a>
 
@@ -56,6 +99,8 @@ Always select the intended worker explicitly: A multi-worker profile refuses an 
 <a id="recover-results-after-a-restart"></a>
 
 ## Recover results after a restart
+
+To find results later, for example after a restart, run `dalan inbox --all --json`. It covers the last 72 hours; add `--since` for older results. In a fresh shell with no session ID, plain `dalan inbox` lists every receipt in this bridge home. A resumed agent can have a different session label from its earlier one: use the saved label with `--producer ID`, or `--all` to list every receipt.
 
 **Saved recovery binding.** A producer is an opaque local receipt-discovery label, not verified harness identity or proof that two environment IDs identify the same owner. Successful JSON submits add `recovery` with the saved `producer` (or null), `get`, optional `inbox`, `binding`, and `wake`; human submits keep their stdout format and print one `Next:` line on stderr. Reusing a request ID preserves its saved label and capability even when the current session differs: recover with `dalan get ID`, or `dalan inbox --producer SAVED` when that label exists. A missing label does not mean lost ownership. Quiet no-wait means this submit registered no wake, not that another waiter is absent; returned waits promise no future wake or durable observer. Host-wide `--all` recovery and its scanning cost are separate from binding.
 
@@ -115,9 +160,75 @@ Lifecycle history starts at the first recorded event (including any verified bac
 
 A request made before owner receipts existed has no owner receipt; an operator may explicitly adopt one with `dalan reconcile ID --adopt --json` before owner controls work. The mode 0600 socket and receipts prevent accidents, but processes under the same Unix UID can access them.
 
+## Give a worker a repository job
+
+The first job needs no repository. A repository job needs Git and Python 3.8 or newer on the bridge computer, because the bridge fetches the repository with them. The bridge also needs workspaces turned on, the worker needs a grant for that one repository, and the bridge needs a way to fetch it.
+
+A bridge started by `dalan try` already has workspaces on. Leave `try` running and use a second shell with `DALAN_HOME` set ([select the trial home](#submit-wait-and-review-a-job)). For a bridge you started by hand, add `DALAN_ENABLE_WORKSPACE=1` to the server command from [step 3 of the manual setup](manual-setup.md#owner-and-requester-setup) and restart it. Without that setting, repository calls fail with `capability_not_enabled`.
+
+The repository can come from GitHub or from a clone on this computer:
+
+- **A GitHub repository.** The bridge fetches with `gh auth token`. Install the [GitHub CLI](https://cli.github.com/) and run `gh auth login` as the user who runs the bridge. A service with its own home needs its own [GitHub access](operations.md#service-github-access).
+- **A clone on this computer (no GitHub login).** Pick a name `OWNER/REPO` for it, for example `local/my-project`. Start the bridge with a variable named `DALAN_GITHUB_URL_` plus that name in capitals, with every other character replaced by `_`, set to the clone's absolute path. For `local/my-project` the variable is `DALAN_GITHUB_URL_LOCAL_MY_PROJECT`. To use the trial bridge, stop `try` with Ctrl-C and start it again with the variable:
+
+  ```sh
+  DALAN_GITHUB_URL_LOCAL_MY_PROJECT=/path/to/my-project npx @tnunamak/dalan try
+  ```
+
+  The restart replaces your worker's connection with the demo worker again, so sign your worker in again as in [Claude Code pairing](worker-clients.md#native-cli-worker-claude-code). For a bridge you started by hand, add the same variable to the server command instead. Use `local/my-project` wherever the steps below say `OWNER/REPO`. The clone needs at least one commit.
+
+1. As owner, grant the worker one exact repository, then check the grant.
+
+   ```sh
+   dalan worker allow local OWNER/REPO
+   dalan worker list local --json
+   ```
+
+   **Check:** the list contains only the repositories that you intend to allow. A new worker can use no repository; a grant for one repository does not grant its owner's other repositories. Grants take effect without a restart.
+
+2. As requester, find the commit to pin. For a GitHub repository, `git ls-remote https://github.com/OWNER/REPO HEAD` prints it in the first column; for a local clone, run `git -C /path/to/my-project rev-parse HEAD`. Make a new request ID with `node -e "console.log(require('node:crypto').randomUUID())"`.
+
+3. Save this job as `repository-job.json`, with your repository, commit and request ID. The job reads `README.md`; if the repository has none in its top directory, name another file.
+
+   ```json
+   {
+     "schema_version": 1,
+     "request_id": "req_<new UUID>",
+     "brief": "Read README.md at the pinned commit and report its title. Do not run checks or change files.",
+     "inputs": [{"github_repo": "OWNER/REPO", "base_sha": "<full 40-character commit SHA>"}],
+     "expected_output": "README title and pinned revision; no patch or check claim.",
+     "scope_paths": ["README.md"],
+     "execution_scope": "read-only"
+   }
+   ```
+
+4. Submit the job.
+
+   ```sh
+   dalan submit --worker local --execution none --deliver none --file repository-job.json --json
+   ```
+
+5. In your worker's client, send this prompt with your request ID:
+
+   > Request REQUEST_ID is your only job: claim it with Dalan, do what its brief asks, report progress and finish it with the claim_id. Stop if it is missing or cancelled. Claim no other job.
+
+   Then wait for the result, read it and record your decision:
+
+   ```sh
+   dalan wait REQUEST_ID && dalan get REQUEST_ID
+   ```
+
+   Read the report before running `dalan decide REQUEST_ID accepted`.
+
+   **Check:** the report names the file's title and the exact commit that you pinned. Each repository job takes one repository; submit separate jobs for more.
+
+If submission or claim says the repository is not allowed, run `dalan paths --json` to confirm that you are in the bridge's home, then `dalan worker list local --json`, and grant the exact repository. A queued job that loses its grant stays queued until the grant returns or you cancel the job. A GitHub authentication error means the bridge's home has no working GitHub credential.
+
+Repository workspaces and host checks (tests that the bridge runs) are separate capabilities. `try` does not turn on host checks. They need Linux, explicit owner opt-in, an allowlisted repository and check, and resource budgets; see [execution and evidence](operations.md#execution-capability-and-check-evidence). A finished job or a passing check never authorizes a merge.
+
 ## Repository jobs, review mode and checks
 
-Repository assignments are a separate branch after the first text report. Fresh workers have `repos: []`: the owner must run `dalan worker allow NAME OWNER/REPO`, then `dalan worker list NAME --json` and verify the exact intended list before submitting. The host's GitHub credential must also read that repository; its authority is not narrowed by the worker list. No local folder mapping is needed. Use a new request ID and `--execution none` for basic repository delegation without host checks; the [copyable repository example](../README.md#separate-repository-assignment) includes the pinned input and scope. Missing `repos` is legacy compatibility only, not a fresh-profile example. A full base commit SHA is required; an optional `head_sha` can pin a revision to review. The worker must not start metered model tasks for a read-only assignment. With the optional T3 Code adapter, if a fallback worker is needed, the owner chooses it after checking that worker's remaining usage quota, and records the reason. Treat stale or missing quota data as unknown.
+Repository assignments are a separate branch after the first text report. Fresh workers have `repos: []`: the owner must run `dalan worker allow NAME OWNER/REPO`, then `dalan worker list NAME --json` and verify the exact intended list before submitting. The host's GitHub credential must also read that repository; its authority is not narrowed by the worker list. No local folder mapping is needed. Use a new request ID and `--execution none` for basic repository delegation without host checks; the [repository walkthrough](#give-a-worker-a-repository-job) includes the pinned input and scope. Missing `repos` is legacy compatibility only, not a fresh-profile example. A full base commit SHA is required; an optional `head_sha` can pin a revision to review. The worker must not start metered model tasks for a read-only assignment. With the optional T3 Code adapter, if a fallback worker is needed, the owner chooses it after checking that worker's remaining usage quota, and records the reason. Treat stale or missing quota data as unknown.
 
 **Review mode.** `dalan submit --deliver none --file assignment.json --review` marks the assignment as a review. The bridge stores the flag on the assignment row, outside the assignment payload and its hash; the worker never sees it in `assignment`, and the brief is not changed. `--review` sets `execution_scope` to `implementation` only when the file does not state a scope. Retrying the same `request_id` with a different `--review` setting is a `request_id conflict`. `get` shows `review: true`. In review mode `apply_patch` returns the structured error `{"error":"review_mode_read_only"}`; `list_files`, `read_file` and `workspace_result` work, and so does `run_check` when the assignment has implementation scope (a file that states `read-only` keeps it closed), and `finish` is never blocked by diff state. The worktree is checked out at `head_sha` when the assignment gives one, so checks and reads see the revision under review; `workspace_result` still diffs against `base_sha`. Without `--review`, implementation scope checks out `base_sha`, so the bridge now rejects a new implementation assignment whose `head_sha` differs from `base_sha` (`head_sha_unsupported`); pin `base_sha` to the revision to work on.
 

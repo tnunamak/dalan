@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The README "Your own first job" commands take the reader's task as typed text. The shell must not run or expand
+// The usage guide first-job commands take the reader's task as typed text. The shell must not run or expand
 // anything in it, and `dalan submit --brief` must receive it exactly. A stub `dalan` on PATH records its arguments.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -8,8 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
-const section = readme.slice(readme.indexOf('<a id="your-own-first-job"></a>'));
+const usage = fs.readFileSync(new URL('../docs/usage.md', import.meta.url), 'utf8');
+const section = usage.slice(usage.indexOf('<a id="your-own-first-job"></a>'));
 const blocks = [...section.matchAll(/```sh\n([\s\S]*?)```/g)].map(m => m[1]).slice(0, 2);
 
 function hasShell(name) {
@@ -38,7 +38,7 @@ function runSnippet(shell, { submitStatus = 0 } = {}) {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
-test('the README section has the two command blocks this test runs', () => {
+test('the usage section has the two command blocks this test runs', () => {
   assert.equal(blocks.length, 2);
   assert.match(blocks[0], /IFS= read -r task/);
   assert.match(blocks[1], /dalan submit .*--brief "\$task /);
@@ -57,3 +57,20 @@ for (const shell of ['bash', 'zsh']) {
     assert.equal(argv.length, 9);
   });
 }
+
+// CLI help still links to the manual setup fragment for first-job.json.
+test('the manual first-job link retains the optional JSON walkthrough', () => {
+  const manual = fs.readFileSync(new URL('../docs/manual-setup.md', import.meta.url), 'utf8');
+  const optional = usage.split('### Optional: submit a JSON job\n')[1]?.split('<a id="who-records-acceptance">')[0];
+  assert.match(manual, /usage\.md#optional-submit-a-json-job/);
+  assert.ok(optional, 'the linked optional JSON subsection exists');
+  const assignment = JSON.parse(/```json\n([\s\S]*?)```/.exec(optional)[1]);
+  assert.equal(assignment.request_id, 'req_<stable UUID>');
+  assert.equal(assignment.execution_scope, 'read-only');
+  assert.deepEqual(assignment.inputs, []);
+  assert.match(optional, /--file first-job\.json --json/);
+  assert.match(optional, /same file with the same options again/);
+  assert.match(optional, /dalan wait REQUEST_ID/);
+  assert.match(optional, /dalan get REQUEST_ID/);
+  assert.match(optional, /dalan decide REQUEST_ID accepted/);
+});

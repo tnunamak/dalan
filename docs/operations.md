@@ -1,6 +1,15 @@
 # Dalan operations
 
-Use this reference to operate an existing bridge. For installation, start with the [README](../README.md).
+Use this guide to operate an existing bridge. For installation, start with the [README](../README.md).
+
+For a first trial, go directly to [Recovery and operation](#recovery-and-operation). For an existing service, keep these duties in view:
+
+- Keep a consistent stopped-service backup, including keys, receipts and artifacts.
+- Review worker connections and exact repository grants.
+- Inspect queue, claim and delivery state when work stalls. Cancellation is not proof that remote computation stopped.
+- Check storage and claim capacity. Plan upgrades and rollback before changing the service.
+
+The [operator checklist](operator-duties.md) gives the full duties and their limits.
 
 - [Recover a stalled job or delivery](#recovery-and-operation)
 - [Back up, restore or upgrade](#upgrade-and-rollback)
@@ -136,6 +145,26 @@ See the [requester reference](usage.md) for the assignment sequence and [T3 and 
 `dalan status --json` shows queue counts, pause reason, subscription state and expiry, last verification, last event 2xx, last claim, queue age and uncertain T3 deliveries. Liveness fields (additive): `claimed_outer_count` (all subjects' active claims), `max_claimed_outer_assignments` (the cap per recorded lane: subject in the legacy profile, worker in profile mode), `oldest_claim_age_ms`, `oldest_claim_progress_age_ms`, `last_worker_call_at` (the newest tool call recorded for the worker), `last_list_pending_at`, `oldest_unclaimed_event_2xx_age_ms`, `queue_classes` and `stale_claims`. Queued work is classified, never called simply "paused" or "missed": `pause_suspected` (no worker call and silence of at least 20 min), `at_capacity_healthy` (every active worker subscriber has no free capacity after counting its worker lanes and its principal's subject lanes from recorded claims, and the newest activity on at least one claim is younger than that claim's stored lease duration; the default is 60 min), `alive_not_claiming` (the default worker calls tools, slots are free, the item stays queued beyond twice the interval), `transport_failing` (no event ever got a 2xx), and `stale_claims` (claims past their persisted lease deadline, the same deadline the sweep uses, checked even with an empty queue; inspect `lease_expires_at`). The bridge's automatic claim abandonment requires lease expiry (actor `system`, reason `lease_expired`, checked by the independent maintenance timer, same path as `dalan abandon`): the item is requeued and its lane is free. A usage break does not hold the sweep and does not move `lease_expires_at`: a claim with no claimant activity for one lease period is released during a break too. After a bridge start, a claim whose last activity came before the start is not swept before the start plus that claim's own lease (`lease_ms`, one hour by default), the full lease a restart would have given it, so a deadline that ran out while the bridge was down or draining does not requeue work the worker may still be running; a claim the worker touched since the start has no grace. After that window, the first maintenance tick sweeps it. Native protocol fixed-deadline leases renew only through explicit `renew_claim`. Claim-bearing calls still require an unexpired grant under the applicable lease model; acquire a new epoch when permitted. Preparation expiry and default-worker-only skip expiry still run during a break and while delivery is paused (see **Preparation expiry** and **Skip expiry** under [Usage breaks and usage estimates](#usage-breaks-and-usage-estimates)). Merged or closed PRs are cancelled by the PR-head reviewer (`cancelled_reason` `pr_closed`); see docs/pr-head-reviewer.md. An expired lease also lets another claimant take the claim over; see [Claims and leases](#claims-and-leases). An event 2xx proves webhook transport only, while a claim is stronger evidence of worker wakeup. The bridge never treats worker `completed` as owner acceptance.
 
 ## Recovery and operation
+
+Use the same `DALAN_HOME` selected in [the first-job walkthrough](usage.md#submit-wait-and-review-a-job). In that shell, start here:
+
+```sh
+dalan status
+dalan doctor
+```
+
+`status` describes the bridge and queue. `doctor` checks local configuration and capabilities; it does not prove that a worker completed a job. If the home is wrong, select the home printed by `try` or used by your service, then check again.
+
+- **The job stays queued.** Open your worker client and send the prompt from `submit`. Read its progress with `dalan get REQUEST_ID`. A queue does not start a worker.
+- **A wait times out.** The job is still open. Follow [waits, questions and review](usage.md#waits-questions-and-review); do not submit a duplicate just to wait again.
+- **The browser shows `Connection attempt invalid or expired`.** Each visit to the sign-in URL starts a new attempt with a new code, and only a live attempt can be approved. Start the sign-in again in the client and approve the new code.
+- **No approval block appears in the `try` terminal.** After a while, `try` prints the `dalan connect pending` and `dalan status` commands to run in another terminal, and it shows each new attempt as it arrives.
+- **`npx @tnunamak/dalan try` fails with an npm error such as `ECONNREFUSED`, `ETIMEDOUT` or `ENOTFOUND`.** npm cannot reach the registry. Check the network or proxy with `npm config get registry` and `npm config get proxy`, then run the command again.
+- **Your client uses a different callback.** `try` allows `http://127.0.0.1/callback` and `http://localhost/callback` on any port. Stop `try` and start it again with `--callback PATTERN` ([pattern rules](setup-reference.md#callback-patterns)).
+
+If these steps do not help, [open an issue](https://github.com/tnunamak/dalan/issues) with the Dalan version, OS, worker client and version, command and error. Remove private values. Never include the private MCP URL, tokens or sign-in links. Report vulnerabilities through the [security policy](../SECURITY.md), not in an issue.
+
+### Delivery and claim recovery
 
 `status --json` includes recent terminal unknown deliveries under `uncertain_terminal_deliveries`. Each record names its notification and request IDs, aging time and reason. `get ID --json` also shows the original attempt time and terminal fields, so operators can distinguish aging from confirmed delivery. An aged delivery still blocks a new claim until delivery is reconciled.
 
