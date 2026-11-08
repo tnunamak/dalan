@@ -91,7 +91,7 @@ args = ["mcp"]
 env = { DALAN_HOME = "/absolute/path/to/.local/share/dalan-muse" }
 ```
 
-Start a new Codex CLI session on this computer so it loads the entry. Ask it to call `dalan_status`.
+Start a new Codex CLI session on this computer so it loads the entry. Ask it to call `dalan_status`. To call these tools from `codex exec`, which has no screen to approve them, set per-tool approval for the `dalan` server as the `codex exec` paragraph of [Worker clients](worker-clients.md#native-cli-worker-codex-cli) describes.
 
 The local server has the access of the Unix user running it. It uses the bridge's admin socket and needs no separate OAuth connection. Give it only to an agent you trust with your local Dalan CLI access.
 
