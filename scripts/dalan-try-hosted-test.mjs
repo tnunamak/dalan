@@ -12,7 +12,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { beginPairing, openSession, workJob } from '../src/demo-worker.mjs';
-import { parseTryArgs, runTry } from '../src/try.mjs';
+import { parseTryArgs, runTry, tryInternals } from '../src/try.mjs';
 import { chooseMode } from '../src/try-hosted.mjs';
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { CLOUDFLARED, HelperError, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, startRoute, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
@@ -223,6 +223,20 @@ test('the Claude profile uses its own callback and its own steps', async () => {
   } finally { controller.abort(); await finished; }
 });
 
+test('a route that fails to start names the real next steps, not a new home', async () => {
+  const home = path.join(tmp, 'routefail');
+  const failing = { name: 'tailscale', probe: () => ({ ok: true, origin: 'x' }), start: async () => { throw new Error('tailscale funnel did not publish the rule'); }, stop: async () => ({ removed: true }) };
+  const context = { shellCli: `'x'`, cli: 'dalan', shellHome: `'${home}'`, logFile: '/none', shellLog: '/none' };
+  const error = await runTry({ argv: ['--public', '--route', 'tailscale', '--home', home], env: { PATH: process.env.PATH }, out: { write() {} }, input: new PassThrough(), errorContext: context, hosted: { interactive: true, providers: [failing] } }).then(() => null, e => e);
+  assert.equal(error.tryKind, 'route_start');
+  const text = tryInternals.formatTryError(error, context, { home: '/other', port: 1 });
+  assert.match(text, /tailscale funnel did not publish the rule\nThe public route did not start, so the bridge was not started\./);
+  assert.doesNotMatch(text, /new home|Fix the problem above/);
+  assert.match(text, /Try again with:\n\s+dalan try --public --client chatgpt --route tailscale --home /);
+  assert.match(text, /Or use a temporary Cloudflare route instead:\n\s+dalan try --public --client chatgpt --route cloudflare --home /);
+  assert.match(text, /Or try on this computer only:\n\s+dalan try --local/);
+});
+
 test('a public trial without a terminal fails before any route or file exists', async () => {
   const home = path.join(tmp, 'noterm');
   const route = fakeRoute();
@@ -311,14 +325,26 @@ test('the mode question: an input that ends chooses the local path, never a publ
 // ---- prerequisites -----------------------------------------------------------------------------------------------------
 const capMap = { https: [], funnel: [], 'https://tailscale.com/cap/funnel-ports?ports=443,8443,10000': [] };
 const readyStatus = { BackendState: 'Running', Self: { DNSName: 'box.tail1234.ts.net.', CapMap: capMap }, CurrentTailnet: { MagicDNSEnabled: true } };
-function fakeTailscale({ status = readyStatus, serve = {}, onFunnelOn } = {}) {
-  const state = { calls: [], web: {}, serve };
+// Mirrors real Tailscale 1.104.5: a foreground `tailscale funnel` (no --bg) is listed only under Foreground.<session>, never in the
+// top-level TCP/Web/AllowFunnel maps (checked live; a fake that put it at the top level hid the first live failure).
+const foregroundView = (state) => {
+  const sessions = Object.entries(state.foreground);
+  if (!sessions.length) return {};
+  return { Foreground: Object.fromEntries(sessions.map(([id, port]) => [id, {
+    TCP: { [port]: { HTTPS: true } },
+    Web: { [`box.tail1234.ts.net:${port}`]: state.fgWeb[id] },
+    AllowFunnel: { [`box.tail1234.ts.net:${port}`]: true },
+  }])) };
+};
+function fakeTailscale({ status = readyStatus, serve = {}, onFunnelOn, foreignForeground } = {}) {
+  const state = { calls: [], web: {}, serve, foreground: {}, fgWeb: {} };
+  if (foreignForeground) { state.foreground.other = foreignForeground; state.fgWeb.other = { Handlers: { '/': { Proxy: 'http://127.0.0.1:1' } } }; }
   const run = args => {
     state.calls.push(args.join(' '));
     const ok = value => ({ status: 0, stdout: JSON.stringify(value) });
     if (args[0] === 'status') return ok(status);
-    if (args[0] === 'serve') return ok(state.serve);
-    if (args[0] === 'funnel' && args[1] === 'status') return ok({ Web: state.web, AllowFunnel: Object.fromEntries(Object.keys(state.web).map(k => [k, true])) });
+    if (args[0] === 'serve') return ok({ ...state.serve, ...foregroundView(state) });
+    if (args[0] === 'funnel' && args[1] === 'status') return ok({ Web: state.web, AllowFunnel: Object.fromEntries(Object.keys(state.web).map(k => [k, true])), ...foregroundView(state) });
     if (args[0] === 'funnel' && args.at(-1) === 'off') { delete state.web[`box.tail1234.ts.net:${args[1].split('=')[1]}`]; return { status: 0, stdout: '' }; }
     throw new Error(`unexpected tailscale call ${args.join(' ')}`);
   };
@@ -327,8 +353,9 @@ function fakeTailscale({ status = readyStatus, serve = {}, onFunnelOn } = {}) {
     child.exitCode = null; child.signalCode = null; child.pid = 4242;
     const port = args.find(a => a.startsWith('--https=')).split('=')[1], target = args.at(-1);
     onFunnelOn?.(args);
-    state.web[`box.tail1234.ts.net:${port}`] = { Handlers: { '/': { Proxy: target } } };
-    child.kill = () => { child.exitCode = 0; delete state.web[`box.tail1234.ts.net:${port}`]; child.emit('exit'); };
+    const id = `session${port}`;
+    state.foreground[id] = port; state.fgWeb[id] = { Handlers: { '/': { Proxy: target } } };
+    child.kill = () => { child.exitCode = 0; delete state.foreground[id]; child.emit('exit'); };
     state.child = child; state.spawned = [cmd, ...args];
     return child;
   };
@@ -364,6 +391,17 @@ test('a ready Funnel is used, on a free port, and removed on stop; another rule 
   assert.deepEqual(await ts.stop(), { removed: true });
   assert.equal(fs.existsSync(path.join(home, 'dot-bridge-trial.exposure.json')), false);
   assert.deepEqual(fake.state.calls.filter(c => c.startsWith('funnel --https')), [], 'no blanket reset and no other rule was switched off');
+});
+
+test('a foreground rule listed only under Foreground.<session> is seen: ours is found, and another session\'s port is not reused', async () => {
+  const fake = fakeTailscale({ foreignForeground: 443 });
+  const ts = provider(fake);
+  assert.equal(ts.probe().origin, 'https://box.tail1234.ts.net:8443', 'port 443 is held by another foreground session');
+  const started = await ts.start({ gatePort: 5151, home: fs.mkdtempSync(path.join(tmp, 'ts-fg-')) });
+  assert.equal(started.origin, 'https://box.tail1234.ts.net:8443');
+  assert.deepEqual(Object.keys(fake.state.web), [], 'nothing is at the top level, as on real Tailscale');
+  assert.deepEqual(await ts.stop(), { removed: true });
+  assert.deepEqual(Object.keys(fake.state.foreground), ['other'], 'the other session is untouched');
 });
 
 test('a port another rule took after the check is left alone and Funnel is not applied', async () => {
@@ -403,8 +441,8 @@ test('a Funnel rule that someone else replaced is left alone and reported with t
   ts.probe();
   const home = fs.mkdtempSync(path.join(tmp, 'ts-'));
   await ts.start({ gatePort: 5151, home });
-  // The child ends without removing the rule (as after a crash), and the rule now points somewhere else.
-  other.state.child.kill = () => { other.state.child.exitCode = 0; other.state.child.emit('exit'); };
+  // The child ends, its foreground session goes with it, and the port now holds someone else's rule that points elsewhere.
+  other.state.child.kill = () => { other.state.child.exitCode = 0; other.state.foreground = {}; other.state.child.emit('exit'); };
   other.state.web['box.tail1234.ts.net:443'] = { Handlers: { '/': { Proxy: 'http://127.0.0.1:7777' } } };
   const refused = await ts.stop();
   assert.equal(refused.removed, false);

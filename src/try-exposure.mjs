@@ -46,6 +46,22 @@ export async function createGate() {
 // ---- Tailscale Funnel --------------------------------------------------------------------------------------------------
 const tailscaleRunner = (env = process.env) => args => spawnSync('tailscale', args, { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
 
+// A foreground Funnel (no --bg) is listed by `serve|funnel status --json` under Foreground.<session>.{TCP,Web,AllowFunnel}, not in
+// the top-level maps that the shared preflight and rule matching read (verified live on Tailscale 1.104.5). Merging the sessions
+// into the top-level view makes those routines see foreground rules, ours and other people's, exactly like background ones.
+export function mergeForeground(status) {
+  const sessions = Object.values(status?.Foreground ?? {});
+  if (!sessions.length) return status;
+  const merged = { ...status, TCP: { ...status.TCP }, Web: { ...status.Web }, AllowFunnel: { ...status.AllowFunnel } };
+  for (const session of sessions) for (const key of ['TCP', 'Web', 'AllowFunnel']) Object.assign(merged[key], session?.[key]);
+  return merged;
+}
+const seeForeground = run => args => {
+  const result = run(args);
+  if (!(args.includes('status') || args[0] === 'serve') || !args.includes('--json') || result.status !== 0 || !result.stdout) return result;
+  try { return { ...result, stdout: JSON.stringify(mergeForeground(JSON.parse(result.stdout))) }; } catch { return result; }
+};
+
 // One line for the first thing that stops Funnel, plus the owner's own fix. `auto` mode prints only `line` and uses Cloudflare.
 export function explainTailscale(error) {
   const text = String(error?.message ?? error);
@@ -61,7 +77,8 @@ export function explainTailscale(error) {
   return first(`Tailscale Funnel is not usable (${line}); using Cloudflare.`, line);
 }
 
-export function tailscaleProvider({ tailscale = tailscaleRunner(), env = process.env, platform = process.platform, spawnChild = spawn, clock = { sleep }, which = name => whichOnPath(name, env) } = {}) {
+export function tailscaleProvider({ tailscale: rawTailscale = tailscaleRunner(), env = process.env, platform = process.platform, spawnChild = spawn, clock = { sleep }, which = name => whichOnPath(name, env) } = {}) {
+  const tailscale = seeForeground(rawTailscale);
   let plan = null, child = null, record = null, rule = null;
   return {
     name: 'tailscale',

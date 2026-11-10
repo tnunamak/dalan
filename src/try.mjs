@@ -74,6 +74,12 @@ function formatTryError(error, context, alternate = null) {
     return recover(`${invariant}\nServer log: ${context.logFile}`, error?.tryKind === 'unexpected');
   }
   if (error?.tryKind === 'already_running') return cause;
+  if (error?.tryKind === 'route_start') {
+    // The route, not the home, failed: the same home retries cleanly, and the other route or a local trial are the real alternatives.
+    const otherRoute = /--route tailscale\b/.test(flags) ? commandBlock('Or use a temporary Cloudflare route instead:', `${cli} try${flags.replace('--route tailscale', '--route cloudflare')} --home ${context.shellHome}`) : null;
+    return [`${cause}\nThe public route did not start, so the bridge was not started.`, commandBlock('Try again with:', `${cli} try${flags} --home ${context.shellHome}`), otherRoute,
+      commandBlock('Or try on this computer only:', `${cli} try --local`)].filter(Boolean).join('\n');
+  }
   const notStarted = `${cause}\nThe server has not started; no server log was created for this attempt.`;
   if (error?.freePort && context.shellHome) return `${notStarted}\n${commandBlock('Stop that program, or run the trial on a free port:', `${cli} try${flags} --home ${context.shellHome} --port ${error.freePort}`)}`;
   return `${notStarted}\nFix the problem above, then run the command again.${alternate ? ` ${newHome('Or start a trial in a new home:')}` : ''}`;

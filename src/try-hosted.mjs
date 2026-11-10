@@ -149,7 +149,8 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     for (const line of NOTICE) say(line);
     say('Checking public routes…');
     gate = await createGate();
-    route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say });
+    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say }); }
+    catch (error) { if (error && typeof error === 'object') error.tryKind ??= 'route_start'; throw error; }
     routeGone = route.exited ? route.exited.then(() => { routeDied = true; }) : routeGone;
     const origin = route.origin;
     say(`Public route ready (${route.provider.name}).`);
