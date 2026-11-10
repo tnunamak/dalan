@@ -2459,7 +2459,7 @@ export class Store {
     return {free_lanes:this.freeLanes(subject,worker,laneCapacity,claimCapacity),queued:this.listPending(worker).filter(x=>x.kind==='assignment'&&!x.blocked).length};
   }
   // In-band dispatch notice for a worker that is busy, not silent. A webhook wake is a hint into one conversation and a 2xx only
-  // means it was accepted: a conversation inside a long turn keeps calling tools (progress, get) but never lists. Those calls
+  // means it was accepted: a conversation inside a long turn keeps calling tools (progress, get) but rarely lists. Those calls
   // are the one channel that reaches it, so they carry the queue head while work waits past the wake grace, lanes are free and
   // claims are allowed. Read-only, throttled per principal and worker; it never claims, wakes or marks anything.
   dispatchNotice(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity,{graceMs=this.limits.rewakeMs??defaultRedeliveryLimits.rewakeMs,everyMs=30000}={}) {
