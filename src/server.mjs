@@ -725,12 +725,12 @@ async function dispatchTool(name,a,principal,notifyMeta) {
       if(!strictJob) throw new Error('renew_claim requires a protocol job');
       return store.renewClaim(id(a.request_id),id(a.claim_id,'claim_id'),a.lease_ms,commandContext('renew',{leaseMs:a.lease_ms}),subject,worker,connectionId);
     }
-    case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject)),guidance:store.guidanceFor(worker)}; }
+    case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject)),guidance:store.guidanceFor(worker),...dispatchNotice(subject,worker)}; }
     case 'ack_message': {const message=store.ackMessage(id(a.message_id,'message_id'),worker);log({kind:'message_acknowledged',message_id:message.message_id});return {kind:'message',message};}
     case 'progress': {
       const requestId=id(a.request_id),note=str(a.note,'note',4096),receipt=store.progress(requestId,id(a.claim_id,'claim_id'),note,subject,a.blocker===true,worker,null,commandContext('progress',{note,blocker:a.blocker===true}),connectionId);
       notifyAttachedWaiter(requestId);
-      return {...receipt,...repaired.marks};
+      return {...receipt,...repaired.marks,...dispatchNotice(subject,worker)};
     }
     case 'ask_question': {
       const requestId=id(a.request_id),question=str(a.question_id,'question_id',128),text=str(a.text,'text',4096),receipt=store.askQuestion(requestId,id(a.claim_id,'claim_id'),question,text,subject,worker,commandContext('ask_question',{question,text}),connectionId);
@@ -778,6 +778,8 @@ async function dispatchTool(name,a,principal,notifyMeta) {
     case 'workspace_result': workspaceFence();return workspace.result(id(a.request_id),id(a.claim_id,'claim_id'),subject,worker);
   }
 }
+// Busy-worker nudge: see Store.dispatchNotice. Never lets a notice failure fail the call it rides on.
+function dispatchNotice(subject,worker) { try { return store.dispatchNotice(subject,worker,redeliveryLimits.laneCapacity,claimCapacity); } catch { return {}; } }
 function subId(url,subject,worker) { const identity=worker==='dot'?subject:`${subject}\0${worker}`;return 'sub_' + createHash('sha256').update(`${identity}\0${url}\0assignment.available\0{}`).digest('hex').slice(0, 32); }
 function validEventParams(p) { return p.name === 'assignment.available' && JSON.stringify(p.arguments ?? {}) === '{}' && p.delivery?.mode === 'webhook'; }
 async function subscribe(p,principal) {
@@ -1278,9 +1280,11 @@ async function drain() {
             // An earlier ACK is not a new callback and must not clear callback failures.
             if(ackLedger.has(ack)) { ackDurablyRecorded=true; state='delivered'; reason='recovered from durable webhook acceptance acknowledgment'; }
             else {
+              const sentAt=Date.now();
               const response=await sendWebhook(sub.url,store.subscriptionSecret(sub),item.id,sub.id,item.body);
               if(response.status>=200&&response.status<300) { positiveAckObserved=true; ackLedger.record(ack); ackDurablyRecorded=true; }
               store.eventResult(sub.id,response.status);
+              log({kind:'webhook_sent',event_id:item.id,subscription_id:sub.id,request_id:item.request_id??null,wake_kind:item.wake_kind??null,http_status:response.status,duration_ms:Date.now()-sentAt});
               state=response.status>=200&&response.status<300?'delivered':response.status===410||response.status===413?'suppressed':'failed';
               reason=state==='delivered'?'':`HTTP ${response.status}`;
               if(item.message_id) log({kind:'message_event',message_id:item.message_id,event_id:item.id,state,http_status:response.status});

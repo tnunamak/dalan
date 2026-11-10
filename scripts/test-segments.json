@@ -152,6 +152,7 @@
   "node scripts/wake-test.mjs",
   "node scripts/dispatch-gap-test.mjs",
   "node scripts/queue-wake-e2e.mjs",
+  "node scripts/dispatch-stall-e2e.mjs",
   "node scripts/submission-lint-test.mjs",
   "node scripts/sensitive-path-regex-parity-test.mjs",
   "node scripts/cleanup-nonblocking-e2e.mjs",
