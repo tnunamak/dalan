@@ -1,12 +1,12 @@
 # Dalan
 
-Dalan is a job queue between your shell or coding agent and a separate AI worker. A small local service, the *bridge*, holds the jobs; the worker connects to it over MCP. You submit a bounded task, follow its progress, and review the worker's report or patch before you accept it. Start with a local demo that needs no account, then connect your own worker.
+Give a bounded job to ChatGPT or Claude and review its report in your terminal. Dalan holds the queue; your selected client does the work. A small service on your computer, the *bridge*, holds the jobs; the worker connects to it over MCP. You submit a bounded task, follow its progress, and review the worker's report or patch before you accept it.
 
 Use it when you want a second agent, a second account or another computer to do a job while you keep the accept or reject decision: for example, your coding agent hands a code review to an agent signed in to another account, and you read its report before you accept it.
 
 - **Repository access starts denied.** A new worker can use no repository through Dalan until you grant one. Finishing a job does not accept its result: acceptance is a separate owner decision.
 - **Any MCP client can be the worker.** Claude Code, Codex CLI, ChatGPT, Muse Spark (Meta) or your own agent connect over MCP (Model Context Protocol) with OAuth sign-in. Dalan does not run a model itself. See [Connect any MCP worker](#connect-any-mcp-worker) and [Connect ChatGPT](docs/connect-chatgpt.md). [T3 Code](docs/t3-integration.md#use-dalan-from-t3-code) can delegate to any of them.
-- **The bridge listens only on your computer** until you choose to expose it.
+- **The bridge listens only on your computer.** A hosted trial puts a temporary public route in front of it, only after you choose ChatGPT or claude.ai, and removes the route when you stop.
 
 **Not for:** Dalan does not run, schedule or start agents for you, and it does not merge code. It queues work and returns reports for you to review.
 
@@ -14,18 +14,38 @@ Use it when you want a second agent, a second account or another computer to do 
 
 <a id="quickstart"></a>
 
-## Quick start
+## Try it with ChatGPT or claude.ai
 
-You need:
+You need Node.js 24 or newer on Linux or macOS (on Windows, use a WSL shell). Run:
+
+```sh
+npx -y @tnunamak/dalan try
+```
+
+Press Enter twice to choose ChatGPT (type `2` for claude.ai). Dalan then:
+
+1. **Opens a temporary public HTTPS route.** It uses a Tailscale Funnel that already works on your computer; otherwise it starts a Cloudflare Quick Tunnel and, if needed, downloads the `cloudflared` helper into your user cache after checking its SHA-256. It needs no account, domain, API key or placeholder. If Tailscale is missing or not ready for Funnel, it says why in one line and uses Cloudflare.
+2. **Prints your complete connector URL** and the steps to add it in ChatGPT or claude.ai, plus one prompt to paste into a chat. Add the connector, sign in, and send the prompt.
+3. **Asks you to approve the sign-in**, shows the code to compare with the sign-in page, and tells you when the hosted client has claimed and finished the demo job. Then you review its report and accept it if it is correct.
+
+Keep the terminal open; Ctrl-C stops the trial and removes the public route. The connector URL contains a secret: it is printed once on your terminal and kept in a private file in the trial home. The trial needs your OAuth approval and grants no repository access. A Cloudflare address changes on every run, so each run needs a new connector; a ready Tailscale Funnel keeps its address. The hosted demo runs on your ChatGPT or claude.ai account, with that account's normal limits and any workspace permission it requires; Dalan runs no model. For other options, see `npx -y @tnunamak/dalan help try`.
+
+Skip the question with `npx -y @tnunamak/dalan try --public --client chatgpt` (or `--client claude`; `--route tailscale` or `--route cloudflare` forces a route).
+
+<a id="local-trial"></a>
+
+## Try it on this computer only
+
+Run `npx -y @tnunamak/dalan try --local` for a self-check with no account, no MCP client and no public route. You need:
 
 - **Linux or macOS.** On Windows, [install WSL](https://learn.microsoft.com/windows/wsl/install) and run every command in the WSL shell.
 - **Node.js 24 or newer.** Run `node --version`; it must print `v24` or higher. If it does not, install Node.js from the [official download page](https://nodejs.org/en/download) and open a new shell.
 - **Optional: Git and Python 3.8 or newer**, for the repository part of the demo. Run `git --version` and `python3 --version`. Without them, the demo skips that part and says so.
 
-The demo needs no AI account and no MCP client. The shell examples in this README use POSIX shell syntax (bash or zsh). Start the demo with one command:
+The shell examples in this README use POSIX shell syntax (bash or zsh). Start the local demo with one command:
 
 ```sh
-npx @tnunamak/dalan try
+npx -y @tnunamak/dalan try --local
 ```
 
 To run from a checkout instead, see [Install from source](#from-source).
@@ -33,7 +53,7 @@ To run from a checkout instead, see [Install from source](#from-source).
 `try` starts a bridge on `127.0.0.1` and runs a built-in demo worker against it. The first run takes about half a minute. npx asks once to install the package; answer `y`. A first run prints this (the request ID is shortened):
 
 ```text
-$ npx @tnunamak/dalan try
+$ npx @tnunamak/dalan try --local
 Need to install the following packages:
 @tnunamak/dalan@0.5.2
 Ok to proceed? (y) y
@@ -182,7 +202,7 @@ The repository can come from GitHub or from a clone on this computer:
 - **A clone on this computer (no GitHub login).** Pick a name `OWNER/REPO` for it, for example `local/my-project`. Start the bridge with a variable named `DALAN_GITHUB_URL_` plus that name in capitals, with every other character replaced by `_`, set to the clone's absolute path. For `local/my-project` the variable is `DALAN_GITHUB_URL_LOCAL_MY_PROJECT`. To use the trial bridge, stop `try` with Ctrl-C and start it again with the variable:
 
   ```sh
-  DALAN_GITHUB_URL_LOCAL_MY_PROJECT=/path/to/my-project npx @tnunamak/dalan try
+  DALAN_GITHUB_URL_LOCAL_MY_PROJECT=/path/to/my-project npx @tnunamak/dalan try --local
   ```
 
   The restart replaces your worker's connection with the demo worker again, so sign your worker in again as in [Connect your own worker](#connect-your-own-worker). For a bridge you started by hand, add the same variable to the server command instead. Use `local/my-project` wherever the steps below say `OWNER/REPO`. The clone needs at least one commit.
@@ -240,6 +260,8 @@ Repository workspaces and host checks (tests that the bridge runs) are separate 
 
 ## Expose the bridge to other machines
 
+To try a hosted client once, run `npx -y @tnunamak/dalan try` ([above](#quickstart)); it opens and removes its own public route. This section sets up a separate, permanent bridge.
+
 A worker connects from wherever its MCP client runs. `127.0.0.1` reaches only the bridge computer. A worker on another computer needs a network route to the bridge, and a hosted client such as ChatGPT needs a public HTTPS address.
 
 For this, set up a separate, long-running bridge with a stable HTTPS address. The setup script writes a systemd user service (Linux) or a launchd agent (macOS). The default route is [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), which needs no reverse proxy and no domain of your own:
@@ -284,16 +306,18 @@ Start each new worker by hand for its first job. Dalan never starts a worker, in
 
 - **What `try` refuses.** It refuses your real home directory and any non-empty directory without a `.dalan-trial` marker file, so it cannot take over an existing bridge home.
 - **Keep it dedicated.** A directory that has the marker is reused without checking its other files. On exit, `try` deletes `demo/` and every `req_*.json` request file in the home, revokes the demo grant and deletes the demo repository. A run that was killed is cleaned up at the next start.
-- **Use a short path on a local disk.** The bridge's admin socket path has a length limit, and network or FUSE file systems are not supported. If a home is too long or not on a local disk, use a new short directory: `npx @tnunamak/dalan try --home /short/local/path`. Do not use an existing bridge home.
+- **Use a short path on a local disk.** The bridge's admin socket path has a length limit, and network or FUSE file systems are not supported. If a home is too long or not on a local disk, use a new short directory: `npx @tnunamak/dalan try --local --home /short/local/path`. Do not use an existing bridge home.
 - **A second run reuses the home**, its worker profile, job history and port. It first replaces the worker's connection with the demo worker, so sign in again in your client and approve it again after the demo.
 - **To start over**, stop `try` and delete the trial home.
 - **For scripts**, run `dalan try < /dev/null`: with standard input closed, `try` runs the self-check and stops.
 
-`try` takes three options:
+`try` takes these options:
 
+- `--local`: this computer only (the self-check above). `--public`: ChatGPT or claude.ai through a public route. With neither, a terminal is asked; with no terminal, `try` runs the local self-check and never opens a route.
+- `--client chatgpt|claude` and `--route auto|tailscale|cloudflare`: the hosted client and public route. Each implies `--public`. A public trial gets a new trial home on every run unless you pass `--home`; its address is part of its sign-in identity, so a home is reused only at the same address.
 - `--home DIR`: the trial home.
-- `--port N`: the bridge port. The default is the port that the home used before, otherwise 8799 or the next free port. A home keeps its port; for another port, start a separate trial with `--home NEW_DIR --port N`.
-- `--callback PATTERN`: allow one more OAuth callback pattern; repeatable.
+- `--port N`: the bridge port on this computer (for a public trial, never the public port). The default is the port that the home used before, otherwise 8799 or the next free port. A home keeps its port; for another port, start a separate trial with `--home NEW_DIR --port N`.
+- `--callback PATTERN`: local mode only: allow one more OAuth callback pattern; repeatable.
 
 `try` turns repository workspaces on (with at least 256 MiB of free disk) and makes only the demo repository available locally. Every other repository stays denied until you grant it. `try` does not turn on host checks.
 

@@ -2,6 +2,8 @@
 
 This guide takes you from a built-in OAuth connection to one completed job. Use ChatGPT on the web with custom MCP connections enabled for your account or workspace; UI labels can vary. The owner runs Dalan and approves the connection; the ChatGPT user connects the worker and starts its run. One person can perform both roles.
 
+**Just trying it?** Run `npx -y @tnunamak/dalan try` and choose ChatGPT: it opens a temporary public route, prints the connector URL and the steps, and confirms that ChatGPT finished a demo job. The rest of this guide sets up a permanent bridge.
+
 ## Owner setup
 
 1. Follow the [service setup](service-setup.md) with a publicly reachable HTTPS origin. Set `DALAN_HOME` to that service's private home and make `dalan` available on your PATH with the [manual setup](manual-setup.md#owner-and-requester-setup) steps. Use the service's worker name wherever this guide says `NAME`.

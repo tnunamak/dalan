@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- New: `dalan try` in a terminal asks whether your worker runs on ChatGPT or claude.ai (the default) or on this computer only. The hosted path opens a temporary public HTTPS route (a ready Tailscale Funnel, else a Cloudflare Quick Tunnel through a pinned, SHA-256-verified `cloudflared` helper), prints the full connector URL, the steps and a prompt for ChatGPT or claude.ai, asks you to approve the sign-in, and confirms that the hosted client finished the demo job. New options: `--local`, `--public`, `--client chatgpt|claude`, `--route auto|tailscale|cloudflare`. With no terminal, `try` still runs only the local self-check. The README now starts with this path.
 - Tests: the request-log collision scaling check now compares warmed best-of-three timings at 2,000 and 20,000 keys instead of imposing a one-second deadline. It still checks that all 20,000 keys survive and rejects growth of 30x or more, allowing slower hosts while guarding against quadratic suffix searches.
 
 ## 0.5.2

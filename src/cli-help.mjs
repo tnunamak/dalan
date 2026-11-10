@@ -6,12 +6,15 @@ import { docsUrl } from './docs-url.mjs';
 // commands without a group only appear under `dalan help --all`, and internal maintenance commands only under
 // `dalan help --internal`. Every command runs and has its own help either way.
 export const COMMANDS = [
-  { name: 'try', group: 'start', summary: 'Run a private trial bridge and finish a first job', usage: 'dalan try [--home DIR] [--port N] [--callback PATTERN]...',
-    detail: ['Starts a bridge and a built-in demo worker in a private trial home and runs a self-check: the demo worker finishes one job,',
-      'and a repository grant is tested. In an interactive terminal it then waits for you to connect your own worker; press Ctrl-C to stop.',
-      'With standard input closed (dalan try < /dev/null) it stops after the self-check. Nothing outside the trial home is touched.', '',
-      'Options:', '  --home DIR          trial home (default: DALAN_HOME if set, else ~/.local/share/dalan-trial)', '  --port N            bridge port (default: the home\'s previous port, else 8799 or the next free port)', '  --callback PATTERN  allow one more OAuth callback pattern; repeatable', '',
-      'Example: dalan try', `Then connect your worker and review its first result: ${docsUrl('README.md', 'connect-your-own-worker')}`] },
+  { name: 'try', group: 'start', summary: 'Try Dalan with ChatGPT or claude.ai, or on this computer only', usage: 'dalan try [--local | --public [--client chatgpt|claude] [--route auto|tailscale|cloudflare]] [--home DIR] [--port N] [--callback PATTERN]...',
+    detail: ['In an interactive terminal, asks where your worker runs. Choose ChatGPT or claude.ai (the default): it opens a temporary public HTTPS route (a ready Tailscale Funnel,',
+      'else a Cloudflare Quick Tunnel through a checksum-verified helper), prints the connector URL and the clicks to add it, asks you to approve the sign-in,',
+      'and confirms that the hosted client finished a demo job. Ctrl-C stops the trial and removes the route. Choose this computer only, or pass --local, for a',
+      'self-check with a built-in demo worker; then connect a local client. With no terminal (dalan try < /dev/null) it runs the local self-check and never opens a route.', '',
+      'Options:', '  --local             this computer only', '  --public            ChatGPT or claude.ai through a public route', '  --client NAME       chatgpt (default) or claude; implies --public',
+      '  --route NAME        auto (default), tailscale or cloudflare; implies --public', '  --home DIR          trial home (default: DALAN_HOME if set, else ~/.local/share/dalan-trial)',
+      '  --port N            bridge port (default: the home\'s previous port, else 8799 or the next free port)', '  --callback PATTERN  local mode only: allow one more OAuth callback pattern; repeatable', '',
+      'Example: dalan try', 'A public trial gets a new home on every run unless you pass --home; --port is always the bridge port on this computer, never the public port.', `In local mode, connect your own worker and review its first result: ${docsUrl('README.md', 'connect-your-own-worker')}`] },
   { name: 'init', group: 'start', summary: 'Create a bridge home and its first worker profile', usage: 'dalan init --public-url URL (--worker NAME | --legacy) [--json]',
     detail: ['Writes the built-in authorization server files and the first worker profile into the bridge home (DALAN_HOME).', 'It needs no running bridge.', '',
       'Options:', '  --public-url URL  the address clients will use to reach the bridge: https://HOST, or',
