@@ -2458,6 +2458,24 @@ export class Store {
   laneState(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity) {
     return {free_lanes:this.freeLanes(subject,worker,laneCapacity,claimCapacity),queued:this.listPending(worker).filter(x=>x.kind==='assignment'&&!x.blocked).length};
   }
+  // In-band dispatch notice for a worker that is busy, not silent. A webhook wake is a hint into one conversation and a 2xx only
+  // means it was accepted: a conversation inside a long turn keeps calling tools (progress, get) but rarely lists. Those calls
+  // are the one channel that reaches it, so they carry the queue head while work waits past the wake grace, lanes are free and
+  // claims are allowed. Read-only, throttled per principal and worker; it never claims, wakes or marks anything.
+  dispatchNotice(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity,{graceMs=this.limits.rewakeMs??defaultRedeliveryLimits.rewakeMs,everyMs=30000}={}) {
+    const key=`${subject}\0${worker}`, now=this.nowMs();
+    this.noticeAt??=new Map();
+    if(now-(this.noticeAt.get(key)??-Infinity)<everyMs) return {};
+    this.noticeAt.set(key,now);
+    if(this.paused()||this.capacityHoldUntil(worker)) return {};
+    const free=this.freeLanes(subject,worker,laneCapacity,claimCapacity);
+    const next=this.nextQueued(free,null,worker);
+    if(!next.next_queued?.length) return {};
+    const head=this.queuedRows().find(r=>r.request_id===next.next_queued[0].request_id);
+    const waitedMs=head?this.queuedAgeMs(head.queued_at,now,worker==='dot'?this.breakIntervals():[]):0;
+    if(waitedMs<graceMs) return {};
+    return {dispatch_notice:{free_lanes:free,oldest_waiting_s:Math.round(waitedMs/1000),...next,next_action:`Work waits unclaimed while ${free} ${free===1?'lane is':'lanes are'} free. Before more work on this job, ${next.next_action}.`}};
+  }
   // A claimed assignment left its lane: the next reannounceQueued tick may wake the worker at once instead of waiting out rewakeMs.
   laneFreed() { this.dispatchWake=true; }
   // Up to `free` live queued assignments in list_pending order (oldest, normal work first), never `exceptId`, with the one-line prompt to claim them.

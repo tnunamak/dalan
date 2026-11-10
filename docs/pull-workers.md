@@ -17,6 +17,8 @@ Each run checks the worker's MCP connector. The bridge stores the job, progress 
 5. To ask the requester a question, send `progress` with a note that starts `QUESTION:`. The requester answers with `dalan note REQUEST_ID TEXT`. `list_pending` lists claimed jobs with unread owner notes under `attention`, and `get` shows the answer. QUESTION records waiting history but does not pause the lease, stop compute or renew authority when the answer arrives. Continue with the saved grant while it remains valid. If an independent later run takes over, it must use its own acquisition and wait for lease expiry and verified effect-channel cessation; it must not copy the earlier grant from `get`.
 6. Call `finish` with the report. If the response carries `next_queued`, claim `next_queued[0]` yourself before the run ends. On any wake, call `list_pending` and claim up to `free_lanes` assignments, oldest first, instead of claiming only the event's `request_id`. After any claim error such as `assignment_expired`, call `list_pending` again before you claim another. For builds, inspect `workspace_result` first; the bridge computes the patch from the workspace changes.
 
+While jobs wait with free lanes, a `progress` or `get` response can carry `dispatch_notice` with `next_queued`. Treat it as a wake: claim those jobs now, oldest first.
+
 Messages that the owner sends with `dalan tell` show up in `list_pending`; read them, then call `ack_message`.
 
 Put this loop in the worker's standing instructions, for example in its scheduled task prompt. The bridge also returns short guidance in each `get` response.
