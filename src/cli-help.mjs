@@ -8,7 +8,7 @@ import { docsUrl } from './docs-url.mjs';
 export const COMMANDS = [
   { name: 'try', group: 'start', summary: 'Try Dalan with ChatGPT or claude.ai, or on this computer only', usage: 'dalan try [--local | --public [--client chatgpt|claude] [--route auto|tailscale|cloudflare]] [--home DIR] [--port N] [--callback PATTERN]...',
     detail: ['In an interactive terminal, asks where your worker runs. Choose ChatGPT or claude.ai (the default): it opens a temporary public HTTPS route (a ready Tailscale Funnel,',
-      'else a Cloudflare Quick Tunnel through a checksum-verified helper), prints the connector URL and the clicks to add it, asks you to approve the sign-in,',
+      'else, for ChatGPT only, a Cloudflare Quick Tunnel through a checksum-verified helper; claude.ai needs Tailscale, because a quick tunnel answers it with 403), prints the connector URL and the clicks to add it, asks you to approve the sign-in,',
       'and confirms that the hosted client finished a demo job. Ctrl-C stops the trial and removes the route. Choose this computer only, or pass --local, for a',
       'self-check with a built-in demo worker; then connect a local client. With no terminal (dalan try < /dev/null) it runs the local self-check and never opens a route.', '',
       'Options:', '  --local             this computer only', '  --public            ChatGPT or claude.ai through a public route', '  --client NAME       chatgpt (default) or claude; implies --public',

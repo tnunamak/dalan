@@ -220,11 +220,11 @@ test('the Claude profile uses its own callback and its own steps', async () => {
   const run = await hostedRun('claude', { argv: [] });
   run.controller.abort(); await run.finished;
   const claude = path.join(tmp, 'claude2');
-  const route = fakeRoute();
+  const route = fakeRoute('tailscale');
   const input = new PassThrough(), controller = new AbortController();
   let out = '';
   const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', claude, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: { started: false },
-    hosted: { interactive: true, providers: [unreadyTailscale('x'), route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
+    hosted: { interactive: true, providers: [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
   try {
     for (let i = 0; i < 400 && !/\/mcp$/m.test(out); i++) await sleepMs(50);
     const url = /^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m.exec(out)[1];
@@ -240,11 +240,11 @@ test('the Claude profile uses its own callback and its own steps', async () => {
 
 test('claude.ai\'s order: challenge, discovery from the challenge, registration, sign-in, token, then an MCP call; every step is in the log by name', async () => {
   const home = path.join(tmp, 'claudeflow');
-  const route = fakeRoute();
+  const route = fakeRoute('tailscale');
   const input = new PassThrough(), controller = new AbortController();
   let out = '';
   const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: { started: false },
-    hosted: { interactive: true, providers: [unreadyTailscale('x'), route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
+    hosted: { interactive: true, providers: [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
   try {
     for (let i = 0; i < 400 && !/\/mcp$/m.test(out); i++) await sleepMs(50);
     const url = /^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m.exec(out)[1];
@@ -293,11 +293,11 @@ test('claude.ai\'s order: challenge, discovery from the challenge, registration,
 
 test('the self-check walks a live trial as a real client: every step passes, and no token, code, secret or URL is printed', async () => {
   const home = path.join(tmp, 'selfcheck');
-  const route = fakeRoute();
+  const route = fakeRoute('tailscale');
   const input = new PassThrough(), controller = new AbortController();
   let out = '';
   const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: {},
-    hosted: { interactive: true, providers: [unreadyTailscale('x'), route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
+    hosted: { interactive: true, providers: [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
   try {
     for (let i = 0; i < 400 && !/\/mcp$/m.test(out); i++) await sleepMs(50);
     const url = /^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m.exec(out)[1];
@@ -335,11 +335,11 @@ test('the self-check stops at the first failing step, skips the rest and says FA
 
 async function liveSelfCheck(wrapFetch) {
   const home = path.join(tmp, `sc-${Math.random().toString(16).slice(2, 8)}`);
-  const route = fakeRoute();
+  const route = fakeRoute('tailscale');
   const input = new PassThrough(), controller = new AbortController();
   let out = '';
   const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: {},
-    hosted: { interactive: true, providers: [unreadyTailscale('x'), route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
+    hosted: { interactive: true, providers: [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
   try {
     for (let i = 0; i < 400 && !/\/mcp$/m.test(out); i++) await sleepMs(50);
     const url = /^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m.exec(out)[1];
@@ -423,6 +423,33 @@ test('route choice: the computer\'s Tailscale on 443, else a node of its own, el
   assert.equal(skipped.chosen, 'cloudflare');
   // Cloudflare asked for by name touches no Tailscale provider.
   assert.equal((await pick('cloudflare', [host, node, stubProvider('cloudflare')])).chosen, 'cloudflare');
+});
+
+test('claude.ai is never given a Cloudflare quick tunnel: auto mode without Tailscale and an explicit --route cloudflare both stop with the fix', async () => {
+  const cf = stubProvider('cloudflare');
+  const lines = [];
+  const pick = async (route, providers, client = 'claude') => startRoute({ route, providers, gatePort: 1, home: tmp, say: l => lines.push(l), client }).then(r => ({ chosen: r.provider.name }), error => ({ error: error.message }));
+  const absent = stubProvider('tailscale', { ok: false, line: 'Tailscale is not installed; using a temporary Cloudflare route.', fix: 'Install Tailscale from https://tailscale.com/download, run `tailscale up`, then retry.' });
+  const auto = await pick('auto', [absent, stubProvider('tailscale-node'), cf]);
+  assert.match(auto.error, /^claude\.ai cannot reach a Cloudflare quick tunnel[^\n]*Install Tailscale from https:\/\/tailscale\.com\/download, run `tailscale up`, then retry\.[^\n]*use ChatGPT: dalan try --public --client chatgpt$/);
+  assert.equal(cf.record.started, 0, 'Cloudflare is not started');
+  assert.ok(!lines.some(l => /Cloudflare/.test(l)), 'no line promises a Cloudflare route');
+  const explicit = await pick('cloudflare', [stubProvider('tailscale'), cf]);
+  assert.match(explicit.error, /^claude\.ai cannot reach a Cloudflare quick tunnel/);
+  assert.equal(cf.record.started, 0);
+  // A Tailscale start that fails does not fall through to Cloudflare either.
+  const failing = await pick('auto', [stubProvider('tailscale', { startError: 'serve failed' }), cf]);
+  assert.match(failing.error, /Tailscale did not start \(serve failed\)/);
+  assert.equal(cf.record.started, 0);
+  // ChatGPT is unchanged, and claude.ai still gets Tailscale.
+  assert.equal((await pick('auto', [absent, stubProvider('tailscale-node'), cf], 'chatgpt')).chosen, 'cloudflare');
+  assert.equal((await pick('auto', [stubProvider('tailscale'), cf])).chosen, 'tailscale');
+  // Through the whole command: one stop, no route started, and no advice to switch to Cloudflare.
+  const home = path.join(tmp, 'claude-no-ts');
+  const context = { started: false, shellCli: 'dalan', shellHome: home, tryFlags: ' --public --client claude --route tailscale' };
+  const fail = await runTry({ argv: ['--public', '--client', 'claude', '--home', home], env: { PATH: process.env.PATH }, out: { write() {} }, input: new PassThrough(), errorContext: context, hosted: { interactive: true, providers: [absent, stubProvider('tailscale-node'), cf] } }).catch(error => error);
+  assert.match(fail.message, /claude\.ai cannot reach a Cloudflare quick tunnel/);
+  assert.equal(fail.tryKind, 'route_start');
 });
 
 function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {

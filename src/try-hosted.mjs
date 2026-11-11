@@ -162,7 +162,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     // A trial that was killed earlier may have left a Tailscale node of its own running; end it before this one starts.
     for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended a Tailscale node left by an earlier trial (${ended.join(', ')}).`); }
     signal?.throwIfAborted();
-    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal }); }
+    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal, client }); }
     catch (error) { if (error && typeof error === 'object' && !signal?.aborted) error.tryKind ??= 'route_start'; throw error; }
     routeGone = route.exited ? route.exited.then(() => { routeDied = true; }) : routeGone;
     const origin = route.origin;

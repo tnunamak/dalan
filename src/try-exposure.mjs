@@ -493,7 +493,12 @@ export function cloudflareProvider({ env = process.env, platform = process.platf
 // route with its provider name; the caller owns `stop()`.
 // Route choice, in order: this computer's Tailscale on :443 when no rule uses it; else a Tailscale node of the trial's own; else
 // Cloudflare. `tailscale` allows only the first two. A rule that already holds 443 is never changed.
-export async function startRoute({ route = 'auto', providers, gatePort, home, say, signal }) {
+// Measured: a Cloudflare Quick Tunnel answers 403 to Claude's user agents (Claude-User, ClaudeBot, anthropic-ai) and buffers event
+// streams, so claude.ai cannot use it. For that client no path ends at Cloudflare.
+export const claudeNeedsTailscale = fix => new Error(`claude.ai cannot reach a Cloudflare quick tunnel (it answers 403 to Claude's requests), so this trial needs Tailscale: ${fix} Or use ChatGPT: dalan try --public --client chatgpt`);
+export async function startRoute({ route = 'auto', providers, gatePort, home, say, signal, client = 'chatgpt' }) {
+  const claude = client === 'claude';
+  const hostSay = line => { if (!claude) say(line); }; // those lines end "using Cloudflare", which is no option for claude.ai
   const named = name => providers.find(p => p.name === name);
   // A start that fails is cleaned up before anything else happens, so a failed route never leaves a rule, node or process behind.
   const attempt = async provider => {
@@ -508,15 +513,18 @@ export async function startRoute({ route = 'auto', providers, gatePort, home, sa
     }
   };
   signal?.throwIfAborted();
-  if (route === 'cloudflare') return attempt(named('cloudflare'));
+  if (route === 'cloudflare') {
+    if (claude) throw claudeNeedsTailscale('use --route tailscale (or the default route) after installing and signing in to Tailscale, https://tailscale.com/download.');
+    return attempt(named('cloudflare'));
+  }
   const host = named('tailscale').probe();
   let choice = null, why = host.fix;
   if (host.ok) choice = named('tailscale');
   else if (host.busy && named('tailscale-node')) {
     const node = named('tailscale-node').probe();
     if (node.ok) { say(`${host.line} Starting a separate Tailscale node for this trial.`); choice = named('tailscale-node'); }
-    else { say(host.line); why = `${host.fix} (${node.fix})`; }
-  } else say(host.line);
+    else { hostSay(host.line); why = `${host.fix} (${node.fix})`; }
+  } else hostSay(host.line);
   if (route === 'tailscale') {
     if (!choice) throw new Error(why);
     return attempt(choice);
@@ -525,9 +533,11 @@ export async function startRoute({ route = 'auto', providers, gatePort, home, sa
     try { return await attempt(choice); }
     catch (error) {
       if (error.cleanupFailed || signal?.aborted) throw error; // a stop request is never answered by trying another route
+      if (claude) throw claudeNeedsTailscale(`Tailscale did not start (${safeDiagnostic(error.message, 120)}); fix that and retry.`);
       say(`Tailscale did not start (${safeDiagnostic(error.message, 120)}); using a temporary Cloudflare route.`);
     }
   }
+  if (claude) throw claudeNeedsTailscale(why);
   return attempt(named('cloudflare'));
 }
 
