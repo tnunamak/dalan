@@ -342,8 +342,11 @@ function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 
       events.cert = { args, child, signals: [], files: args.filter(a => /^--(cert|key)-file=/.test(a)).map(a => a.split('=')[1]) };
       child.kill = sig => {
         events.cert.signals.push(sig); events.cert.dirAtKill = fs.existsSync(path.dirname(events.cert.files[0]));
-        if (certBehaviour === 'stubborn' && sig !== 'SIGKILL') return true; // ignores SIGTERM
-        child.signalCode = sig; setTimeout(() => child.emit('exit', null), 10); return true;
+        if ((certBehaviour === 'stubborn' || certBehaviour === 'late') && sig !== 'SIGKILL') return true; // ignores SIGTERM
+        if (certBehaviour === 'immortal') return true; // ignores everything
+        child.signalCode = sig;
+        setTimeout(() => { events.cert.dirAtExit = fs.existsSync(path.dirname(events.cert.files[0])); child.emit('exit', null); }, certBehaviour === 'late' ? 150 : 10);
+        return true;
       };
       setImmediate(() => {
         if (certBehaviour === 'ok') { for (const f of events.cert.files) fs.writeFileSync(f, '-----BEGIN PRIVATE KEY-----\nPRIVATE-KEY-BODY\n-----END PRIVATE KEY-----\n'); child.exitCode = 0; child.emit('exit', 0); }
@@ -467,6 +470,56 @@ test('the trial\'s own node: the certificate check ends on cancel, escalates pas
   assert.equal(fs.existsSync(path.dirname(c.events.cert.files[0])), false);
   assert.match(linesC.join('\n'), /TLS certificate: error \(no answer in 0 s\)/);
   await c.node.stop();
+});
+
+test('the trial\'s own node: outputs wait for a late exit, and are kept for the sweep when the exit never comes', async () => {
+  // A SIGKILLed child exits late: the files exist until then and are gone after.
+  const late = nodeHarness({ certBehaviour: 'late', certWaitMs: 40, killGraceMs: 400 });
+  const homeL = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await late.node.start({ gatePort: 6161, home: homeL, say: late.say });
+  await late.node.diagnose({ home: homeL, say() {} });
+  assert.deepEqual(late.events.cert.signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(late.events.cert.dirAtExit, true, 'the outputs existed until the child exited');
+  assert.equal(fs.existsSync(path.dirname(late.events.cert.files[0])), false, 'and were removed after');
+  await late.node.stop();
+  // A child that never exits: one SIGKILL only, the outputs stay under tsnode, the line says termination was not confirmed, the sweep owns the files.
+  const never = nodeHarness({ certBehaviour: 'immortal', certWaitMs: 40, killGraceMs: 40 });
+  const homeN = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await never.node.start({ gatePort: 6161, home: homeN, say: never.say });
+  const lines = []; await never.node.diagnose({ home: homeN, say: l => lines.push(l) });
+  const kept = path.dirname(never.events.cert.files[0]);
+  assert.deepEqual(never.events.cert.signals, ['SIGTERM', 'SIGKILL'], 'no second SIGKILL');
+  assert.equal(path.dirname(kept), path.join(homeN, 'tsnode'));
+  assert.equal(fs.existsSync(kept), true, 'not removed without a confirmed exit');
+  assert.match(lines.join('\n'), /did not stop \(termination not confirmed\)/);
+  const ended = await sweepTrialNodes({ registry: never.registry, processCmd: () => null, kill() {}, clock: { sleep: async () => {} } });
+  assert.deepEqual(ended, ['dalan-trial-abc123']);
+  assert.equal(fs.existsSync(kept), false, 'the sweep removed them');
+});
+
+test('the trial\'s own node: the identity is cached at sign-in; with none known, any email in the log and the error line is redacted', async () => {
+  // Cached at sign-in: status fails later, the names are still redacted and the check still runs.
+  const named = { ...readyStatus, CurrentTailnet: { MagicDNSEnabled: true, Name: 'owner@example.com' } };
+  const a = nodeHarness({ certBehaviour: 'error-named', host: { status: named }, daemonOutput: ['joined tailnet owner@example.com as box.tail1234.ts.net\n'] });
+  const homeA = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await a.node.start({ gatePort: 6161, home: homeA, say: a.say });
+  await sleepMs(30);
+  a.fake.state.statusFails = true;
+  const linesA = []; await a.node.diagnose({ home: homeA, say: l => linesA.push(l) });
+  assert.match(linesA.join('\n'), /TLS certificate: error \(500 Internal Server Error: no cert for \[tailnet name\] \(\[tailnet name\]\)\)/);
+  assert.ok(!fs.readFileSync(path.join(homeA, 'tailscaled.log'), 'utf8').includes('owner@example.com'));
+  await a.node.stop();
+  // Never known (no tailnet name in status) and status failing: fail closed on anything email-shaped.
+  const b = nodeHarness({ certBehaviour: 'error-named', daemonOutput: ['account someone.else+x@corp.example.org signed in; peer foo.tail9.ts.net\n'] });
+  const homeB = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await b.node.start({ gatePort: 6161, home: homeB, say: b.say });
+  await sleepMs(30);
+  b.fake.state.statusFails = true;
+  const linesB = []; await b.node.diagnose({ home: homeB, say: l => linesB.push(l) });
+  const keptB = fs.readFileSync(path.join(homeB, 'tailscaled.log'), 'utf8');
+  for (const secret of ['someone.else', 'corp.example.org', 'tail9', 'ts.net', 'owner@example.com']) { assert.ok(!keptB.includes(secret), `${secret} in the log`); assert.ok(!linesB.join('\n').includes(secret), `${secret} in the line`); }
+  assert.match(keptB, /account \[email\] signed in/);
+  await b.node.stop();
 });
 
 test('the trial\'s own node: tailnet and device names are redacted from the retained log and the certificate line', async () => {
@@ -672,6 +725,21 @@ test('a public address that never answers as this bridge stops the trial before 
   assert.equal(run.route.diagnosed, 0, 'and it runs before the route is stopped');
 });
 
+test('Ctrl-C while the route diagnosis runs reaches it as a signal, so the trial stops at once', async () => {
+  const r = fakeRoute();
+  r.provider.diagnose = ({ signal }) => new Promise(resolve => { r.record.sawSignal = Boolean(signal); r.record.diagnosing = true; signal?.addEventListener('abort', resolve, { once: true }); });
+  const run = await hostedRun('diagcancel', { clock: virtualClock(), fetchImpl: async () => { throw new Error('fetch failed'); }, providers: [unreadyTailscale('x'), r.provider] });
+  try {
+    for (let i = 0; i < 400 && !r.record.diagnosing; i++) await sleepMs(25);
+    assert.equal(r.record.diagnosing, true, 'the diagnosis started');
+    assert.equal(r.record.sawSignal, true, 'it received the abort signal');
+    run.controller.abort();
+    const result = await Promise.race([run.finished, sleepMs(5000).then(() => 'hung')]);
+    assert.notEqual(result, 'hung', 'the trial stops after Ctrl-C instead of waiting for the diagnosis');
+    assert.equal(r.record.stopped, 1);
+  } finally { run.controller.abort(); }
+});
+
 test('a home set up for another public address is refused, not re-issued', async () => {
   const home = path.join(tmp, 'moved');
   fs.mkdirSync(path.join(home, '.config/dot-bridge'), { recursive: true });
@@ -738,7 +806,7 @@ function fakeTailscale({ status = readyStatus, serve = {}, onFunnelOn, foreignFo
   const run = args => {
     state.calls.push(args.join(' '));
     const ok = value => ({ status: 0, stdout: JSON.stringify(value) });
-    if (args[0] === 'status') return ok(status);
+    if (args[0] === 'status') return state.statusFails ? { status: 1, stdout: '' } : ok(status);
     if (args[0] === 'logout') { if (state.logoutFails) return { status: 1, stdout: '' }; state.loggedOut = true; return { status: 0, stdout: '' }; }
     if (args[0] === 'serve') return ok({ ...state.serve, ...foregroundView(state) });
     if (args[0] === 'funnel' && args[1] === 'status') return ok({ Web: state.web, AllowFunnel: Object.fromEntries(Object.keys(state.web).map(k => [k, true])), ...foregroundView(state) });
