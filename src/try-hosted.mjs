@@ -13,7 +13,8 @@ import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
 import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText } from './try-hosted-clients.mjs';
-import { PUBLIC_READY_MS, cloudflareProvider, createGate, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
+import { PUBLIC_READY_MS, createGate, localhostRunProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
+import { readRouteSetting } from './route-setting.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const HOSTED_WORKER = 'hosted';
@@ -21,16 +22,14 @@ const HOSTED_WORKER = 'hosted';
 // A home that a restart reuses keeps the bridge's own config (its path secret); the others lose it.
 export function removeTrialSecrets(home, configDir, { keepConfig = false, keepNode = false } = {}) {
   for (const file of [path.join(home, 'resource-url'), ...(keepConfig ? [] : [path.join(configDir, 'env')])]) fs.rmSync(file, { force: true });
-  fs.rmSync(path.join(home, 'cloudflared'), { recursive: true, force: true });
+  fs.rmSync(path.join(home, 'localhost-run'), { recursive: true, force: true });
   if (!keepNode) fs.rmSync(path.join(home, 'tsnode'), { recursive: true, force: true }); // else a child still holds files there: the next sweep removes them
 }
 const REPORT = 'bridge first report';
 
-export const NOTICE = [
-  'Public mode opens an internet route to this trial, protected by your OAuth approval.',
-  'It may download a tunnel helper into your private cache, or start a separate Tailscale node for the trial. Nothing is installed system-wide.',
-  'Leave this terminal open; Ctrl-C stops the trial and removes its route.',
-];
+// Said once, before any public address exists. A trial link is told apart from a real address in every line that names it.
+export const TRIAL_NOTICE = 'Trial link via localhost.run, a third-party relay that can see this traffic; the address changes within hours. For daily use: dalan setup';
+export const REAL_NOTICE = fromSetup => `Using Tailscale${fromSetup ? ', the address you saved with `dalan setup`' : ''}. This is not a trial link.`;
 
 // Reads answers from one terminal reader and closes it, so the trial's own reader starts clean.
 export async function chooseMode({ input, out, signal }) {
@@ -53,7 +52,7 @@ export async function chooseMode({ input, out, signal }) {
     }
   };
   try {
-    out.write(`Where will your worker run?\n  1. ChatGPT or claude.ai: public HTTPS (recommended)\n  2. Only on this computer\n${NOTICE.join('\n')}\n`);
+    out.write(`Where will your worker run?\n  1. ChatGPT or claude.ai\n  2. Only on this computer\n`);
     const where = await pick('Choose [1]: ', 2);
     if (where === null) return { mode: 'local' };
     if (where === 2) return { mode: 'local' };
@@ -64,7 +63,7 @@ export async function chooseMode({ input, out, signal }) {
 }
 
 export function defaultProviders({ env, say, client, hostedDeps = {} }) {
-  return [tailscaleProvider({ env, ...hostedDeps.tailscale }), tailscaleNodeProvider({ env, ...hostedDeps.tailscaleNode }), cloudflareProvider({ env, say, ...hostedDeps.cloudflare })];
+  return [localhostRunProvider({ env, ...hostedDeps.localhostRun }), tailscaleProvider({ env, ...hostedDeps.tailscale }), tailscaleNodeProvider({ env, ...hostedDeps.tailscaleNode })];
 }
 
 // The restart command for a trial, with every selection, on one line. Only the computer's own Tailscale keeps its address between
@@ -76,7 +75,10 @@ export const restartCommand = ({ cli, home, shellQuote, client, route, provider 
 export async function runHosted({ options, env, out, input, signal, errorContext, clock = { now: Date.now, sleep }, deps = {}, helpers }) {
   const { prepareHome, portFree, socketAnswers, choosePort, shellQuote, commandLine, parsePending, describeAttempt, MARKER, DIAGNOSE_AFTER_MS, DIAGNOSE_EVERY_MS, DIAGNOSE_LIMIT, POLL_MS, repo } = helpers;
   const client = options.client ?? 'chatgpt';
-  const routeChoice = options.route ?? 'auto';
+  // The trial route is the default and needs no choice. A route saved by `dalan setup` is the real one; an explicit --route wins.
+  const saved = options.route === undefined || options.route === 'auto' ? readRouteSetting(env) : null;
+  const routeChoice = options.route && options.route !== 'auto' ? options.route : saved === 'tailscale' ? 'tailscale' : 'localhost.run';
+  const realRoute = routeChoice === 'tailscale';
   const spec = CLIENTS[client];
   const say = line => out.write(`${terminalSafe(line)}\n`);
   const realHome = fs.realpathSync(os.homedir());
@@ -156,14 +158,21 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   let gate = null, route = null, routeStopped = null, cleaned = true;
   const providers = deps.providers ?? defaultProviders({ env, say, client, hostedDeps: deps });
   try {
-    for (const line of NOTICE) say(line);
+    say(realRoute ? REAL_NOTICE(saved === 'tailscale') : TRIAL_NOTICE);
     say('Checking public routes…');
     gate = await createGate();
     // A trial that was killed earlier may have left a Tailscale node of its own running; end it before this one starts.
     for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended a Tailscale node left by an earlier trial (${ended.join(', ')}).`); }
     signal?.throwIfAborted();
     try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal, client }); }
-    catch (error) { if (error && typeof error === 'object' && !signal?.aborted) error.tryKind ??= 'route_start'; throw error; }
+    catch (error) {
+      if (error && typeof error === 'object' && !signal?.aborted) {
+        error.tryKind ??= 'route_start';
+        // A real route never turns into a trial link without the owner choosing it.
+        if (realRoute && error instanceof Error) error.message += '\nA Tailscale route never falls back to a trial link on its own. Fix Tailscale and run again, or make a trial link with: dalan try --public --route localhost.run';
+      }
+      throw error;
+    }
     routeGone = route.exited ? route.exited.then(() => { routeDied = true; }) : routeGone;
     const origin = route.origin;
     say(`Public route ready (${route.provider.name}).`);
@@ -212,7 +221,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     say('');
     say(handoffText({ client, url: mcpUrl, requestId, requestPhrase: phrase }));
     say('');
-    say(`Waiting for sign-in. This terminal shows the connection code. Type help here to see the ${spec.label} steps again. The URL is also in ${urlFile}.`);
+    say(`Waiting for sign-in. Ctrl-C stops the trial and removes its link. This terminal shows the connection code. Type help here to see the ${spec.label} steps again. The URL is also in ${urlFile}.`);
 
     const seen = new Set();
     let approvedConnection = null, reminded = 0, retryNow = false, stage = 'signin';
@@ -285,7 +294,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       if (retryNow) { retryNow = false; continue; }
       await Promise.race([clock.sleep(POLL_MS), untilStopRequested()]);
     }
-    if (routeDied && !stopRequested()) { const error = new Error('The public route stopped. This URL is offline.'); error.tryKind = 'route'; throw error; }
+    if (routeDied && !stopRequested()) { const rotated = route?.provider.endedBecause?.() === 'rotated'; const error = new Error(rotated ? 'The temporary public address changed. This trial has stopped to protect its sign-in identity. Start a fresh trial and replace the connector URL.' : 'The public route stopped. This URL is offline.'); error.tryKind = 'route'; throw error; }
     if (exited && !stopRequested()) { const error = new Error('the bridge stopped unexpectedly'); error.tryKind = 'unexpected'; throw error; }
   } catch (error) {
     if (signal?.aborted) { /* a normal stop */ }

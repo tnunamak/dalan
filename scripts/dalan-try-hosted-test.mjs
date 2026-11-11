@@ -19,7 +19,8 @@ const { chooseMode } = tryHostedInternals;
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
 import { runSelfCheck } from '../src/try-selfcheck.mjs';
-import { CLOUDFLARED, HelperError, sweepTrialNodes, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, authorizationServerMetadataUrl, parseQuickTunnelOrigin, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { sweepTrialNodes, localhostRunProvider, parseLocalhostRunOrigins, createGate, explainTailscale, authorizationServerMetadataUrl, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { writeRouteSetting } from '../src/route-setting.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -34,7 +35,7 @@ const virtualClock = () => { let now = 0; return { now: () => now, sleep: async 
 
 // ---- fakes -------------------------------------------------------------------------------------------------------------
 // A route on its own port that relays to the gate it is given. `origin` is not the bridge's address.
-function fakeRoute(name = 'cloudflare') {
+function fakeRoute(name = 'localhost.run') {
   const record = { started: 0, stopped: 0, gatePort: null, server: null, origin: null };
   const provider = {
     name,
@@ -59,15 +60,16 @@ function fakeRoute(name = 'cloudflare') {
 const unreadyTailscale = reason => ({ name: 'tailscale', probe: () => ({ ok: false, line: reason, fix: reason }), start: async () => { throw new Error('must not start'); }, stop: async () => ({ removed: true }) });
 
 // ---- a hosted run ------------------------------------------------------------------------------------------------------
-async function hostedRun(name, { argv = [], providers, clock, fetchImpl } = {}) {
+async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: savedRoute } = {}) {
   const home = path.join(tmp, name);
   const port = await reservedPort();
   const route = fakeRoute();
+  if (savedRoute) writeRouteSetting(savedRoute, { XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`) });
   const run = { out: '', input: new PassThrough(), controller: new AbortController(), home, route: route.record, errorContext: { started: false, shellCli: `'${path.join(repo, 'bin/dalan.mjs')}'` } };
   run.finished = runTry({
-    argv: ['--public', '--client', 'chatgpt', '--home', home, '--port', String(port), ...argv], env: { PATH: process.env.PATH, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
+    argv: ['--public', '--client', 'chatgpt', '--home', home, '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
     out: { write: text => { run.out += text; } }, input: run.input, signal: run.controller.signal, errorContext: run.errorContext, clock,
-    hosted: { interactive: true, providers: providers ?? [unreadyTailscale('Tailscale is not installed; using a temporary Cloudflare route.'), route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl },
+    hosted: { interactive: true, providers: providers ?? [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl },
   }).then(() => ({}), error => ({ error }));
   run.until = async (pattern, ms = 60_000) => {
     for (let waited = 0; !pattern.test(run.out); waited += 50) {
@@ -105,7 +107,9 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
     const origin = new URL(url).origin;
     assert.notEqual(Number(new URL(origin).port), run.errorContext.bindPort, 'the public origin is not the bridge bind address');
     assert.match(run.out, /Public HTTPS, OAuth discovery and the authorization server's metadata verified\./);
-    assert.match(run.out, /Tailscale is not installed; using a temporary Cloudflare route\./);
+    assert.match(run.out, /^Trial link via localhost\.run, a third-party relay that can see this traffic; the address changes within hours\. For daily use: dalan setup$/m, 'one trial disclaimer before the URL');
+    assert.ok(run.out.indexOf('Trial link via localhost.run') < run.out.indexOf('Paste this URL'));
+    assert.equal(run.out.match(/Trial link via/g).length, 1);
     // The scripted client signs in through the public origin, the owner approves, the client works the job.
     const pairing = await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
     await run.until(/Connection waiting for your approval/);
@@ -147,7 +151,7 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
   assert.match(run.out, /Public route removed\. Bridge stopped\./);
   assert.match(run.out, new RegExp(`Trial history kept at ${run.home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.equal(run.route.stopped, 1, 'the route was stopped exactly once');
-  assert.match(run.out, /To run it again: .*try --public --client chatgpt --route auto\n/, 'the restart command keeps every selection');
+  assert.match(run.out, /To run it again: .*try --public --client chatgpt --route localhost.run\n/, 'the restart command keeps every selection');
   assert.doesNotMatch(run.out.split('To run it again:')[1], /--home/, 'a new address needs a new home, so the restart command names none');
   // After a normal stop no credential is left in the trial home.
   assert.equal(fs.existsSync(path.join(run.home, 'resource-url')), false, 'the connector URL file is removed');
@@ -220,7 +224,7 @@ test('the Claude profile uses its own callback and its own steps', async () => {
   const run = await hostedRun('claude', { argv: [] });
   run.controller.abort(); await run.finished;
   const claude = path.join(tmp, 'claude2');
-  const route = fakeRoute('tailscale');
+  const route = fakeRoute();
   const input = new PassThrough(), controller = new AbortController();
   let out = '';
   const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', claude, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: { started: false },
@@ -240,7 +244,7 @@ test('the Claude profile uses its own callback and its own steps', async () => {
 
 test('claude.ai\'s order: challenge, discovery from the challenge, registration, sign-in, token, then an MCP call; every step is in the log by name', async () => {
   const home = path.join(tmp, 'claudeflow');
-  const route = fakeRoute('tailscale');
+  const route = fakeRoute();
   const input = new PassThrough(), controller = new AbortController();
   let out = '';
   const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: { started: false },
@@ -293,7 +297,7 @@ test('claude.ai\'s order: challenge, discovery from the challenge, registration,
 
 test('the self-check walks a live trial as a real client: every step passes, and no token, code, secret or URL is printed', async () => {
   const home = path.join(tmp, 'selfcheck');
-  const route = fakeRoute('tailscale');
+  const route = fakeRoute();
   const input = new PassThrough(), controller = new AbortController();
   let out = '';
   const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: {},
@@ -335,7 +339,7 @@ test('the self-check stops at the first failing step, skips the rest and says FA
 
 async function liveSelfCheck(wrapFetch) {
   const home = path.join(tmp, `sc-${Math.random().toString(16).slice(2, 8)}`);
-  const route = fakeRoute('tailscale');
+  const route = fakeRoute();
   const input = new PassThrough(), controller = new AbortController();
   let out = '';
   const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: {},
@@ -395,61 +399,31 @@ const stubProvider = (name, { ok = true, busy, startError, line = `${name} line`
   const record = { started: 0, stopped: 0 };
   return { record, name, probe: () => ok ? { ok: true } : { ok: false, line, fix, busy }, start: async () => { record.started++; if (startError) throw new Error(startError); return { origin: `https://${name}.example`, exited: new Promise(() => {}) }; }, stop: async () => { record.stopped++; return { removed: true }; } };
 };
-test('route choice: the computer\'s Tailscale on 443, else a node of its own, else Cloudflare; `tailscale` never reaches Cloudflare', async () => {
-  const pick = async (route, providers) => { const lines = []; try { return { chosen: (await startRoute({ route, providers, gatePort: 1, home: tmp, say: l => lines.push(l) })).provider.name, lines }; } catch (error) { return { error: error.message, lines }; } };
-  // 1. 443 is free on this computer.
-  assert.equal((await pick('auto', [stubProvider('tailscale'), stubProvider('tailscale-node'), stubProvider('cloudflare')])).chosen, 'tailscale');
-  // 2. 443 is held by another rule: the node, with one line saying why; the other rule is not the trial's to change.
-  const busy = { ok: false, busy: true, line: 'Tailscale port 443 is not free for Funnel on this computer; its rules are unchanged.', fix: 'Free Funnel port 443' };
-  const node = stubProvider('tailscale-node'), host = stubProvider('tailscale', busy);
-  const second = await pick('auto', [host, node, stubProvider('cloudflare')]);
-  assert.equal(second.chosen, 'tailscale-node');
-  assert.match(second.lines.join('\n'), /Tailscale port 443 is not free for Funnel on this computer; its rules are unchanged\. Starting a separate Tailscale node for this trial\./);
-  assert.equal(host.record.started, 0, 'the computer\'s Tailscale is not started when 443 is busy');
-  assert.equal((await pick('tailscale', [stubProvider('tailscale', busy), stubProvider('tailscale-node'), stubProvider('cloudflare')])).chosen, 'tailscale-node');
-  // 3. No node is possible (no tailscaled), or its start fails: Cloudflare, after the node was cleaned up.
-  const noNode = stubProvider('tailscale-node', { ok: false });
-  assert.equal((await pick('auto', [stubProvider('tailscale', busy), noNode, stubProvider('cloudflare')])).chosen, 'cloudflare');
-  const failing = stubProvider('tailscale-node', { startError: 'the one-time Tailscale sign-in was not completed in time' });
-  const fell = await pick('auto', [stubProvider('tailscale', busy), failing, stubProvider('cloudflare')]);
-  assert.equal(fell.chosen, 'cloudflare');
-  assert.equal(failing.record.stopped, 1, 'a failed node start is cleaned up');
-  assert.match(fell.lines.join('\n'), /Tailscale did not start \(the one-time Tailscale sign-in was not completed in time\); using a temporary Cloudflare route\./);
-  // `--route tailscale` stops with the reason instead of using Cloudflare; a reason other than 443 skips the node.
-  const refused = await pick('tailscale', [stubProvider('tailscale', busy), noNode, stubProvider('cloudflare')]);
-  assert.match(refused.error, /Free Funnel port 443/);
-  const noTailscale = stubProvider('tailscale', { ok: false, line: 'Tailscale is not installed; using a temporary Cloudflare route.' });
-  const skipped = await pick('auto', [noTailscale, stubProvider('tailscale-node'), stubProvider('cloudflare')]);
-  assert.equal(skipped.chosen, 'cloudflare');
-  // Cloudflare asked for by name touches no Tailscale provider.
-  assert.equal((await pick('cloudflare', [host, node, stubProvider('cloudflare')])).chosen, 'cloudflare');
-});
-
-test('claude.ai is never given a Cloudflare quick tunnel: auto mode without Tailscale and an explicit --route cloudflare both stop with the fix', async () => {
-  const cf = stubProvider('cloudflare');
+test('route choice: trial links are localhost.run, a real route is only Tailscale, and neither falls back to the other', async () => {
   const lines = [];
-  const pick = async (route, providers, client = 'claude') => startRoute({ route, providers, gatePort: 1, home: tmp, say: l => lines.push(l), client }).then(r => ({ chosen: r.provider.name }), error => ({ error: error.message }));
-  const absent = stubProvider('tailscale', { ok: false, line: 'Tailscale is not installed; using a temporary Cloudflare route.', fix: 'Install Tailscale from https://tailscale.com/download, run `tailscale up`, then retry.' });
-  const auto = await pick('auto', [absent, stubProvider('tailscale-node'), cf]);
-  assert.match(auto.error, /^claude\.ai cannot reach a Cloudflare quick tunnel[^\n]*Install Tailscale from https:\/\/tailscale\.com\/download, run `tailscale up`, then retry\.[^\n]*use ChatGPT: dalan try --public --client chatgpt$/);
-  assert.equal(cf.record.started, 0, 'Cloudflare is not started');
-  assert.ok(!lines.some(l => /Cloudflare/.test(l)), 'no line promises a Cloudflare route');
-  const explicit = await pick('cloudflare', [stubProvider('tailscale'), cf]);
-  assert.match(explicit.error, /^claude\.ai cannot reach a Cloudflare quick tunnel/);
-  assert.equal(cf.record.started, 0);
-  // A Tailscale start that fails does not fall through to Cloudflare either.
-  const failing = await pick('auto', [stubProvider('tailscale', { startError: 'serve failed' }), cf]);
-  assert.match(failing.error, /Tailscale did not start \(serve failed\)/);
-  assert.equal(cf.record.started, 0);
-  // ChatGPT is unchanged, and claude.ai still gets Tailscale.
-  assert.equal((await pick('auto', [absent, stubProvider('tailscale-node'), cf], 'chatgpt')).chosen, 'cloudflare');
-  assert.equal((await pick('auto', [stubProvider('tailscale'), cf])).chosen, 'tailscale');
-  // Through the whole command: one stop, no route started, and no advice to switch to Cloudflare.
-  const home = path.join(tmp, 'claude-no-ts');
-  const context = { started: false, shellCli: 'dalan', shellHome: home, tryFlags: ' --public --client claude --route tailscale' };
-  const fail = await runTry({ argv: ['--public', '--client', 'claude', '--home', home], env: { PATH: process.env.PATH }, out: { write() {} }, input: new PassThrough(), errorContext: context, hosted: { interactive: true, providers: [absent, stubProvider('tailscale-node'), cf] } }).catch(error => error);
-  assert.match(fail.message, /claude\.ai cannot reach a Cloudflare quick tunnel/);
-  assert.equal(fail.tryKind, 'route_start');
+  const pick = async (route, providers) => startRoute({ route, providers, gatePort: 1, home: tmp, say: l => lines.push(l) }).then(r => ({ chosen: r.provider.name }), error => ({ error: error.message }));
+  const lhr = () => stubProvider('localhost.run');
+  // The trial route needs nothing but ssh and never touches Tailscale.
+  const ts = stubProvider('tailscale'), node = stubProvider('tailscale-node'), trial = lhr();
+  assert.equal((await pick('localhost.run', [ts, node, trial])).chosen, 'localhost.run');
+  assert.equal(ts.record.started + node.record.started, 0);
+  // ssh missing: one line with the fix, no other route.
+  const noSsh = stubProvider('localhost.run', { ok: false, fix: 'ssh is not installed. Install OpenSSH.' });
+  assert.deepEqual(await pick('localhost.run', [ts, noSsh]), { error: 'ssh is not installed. Install OpenSSH.' });
+  // A real route: this computer's Tailscale on 443, else a node of the trial's own, else a clear stop (never localhost.run).
+  assert.equal((await pick('tailscale', [stubProvider('tailscale'), node, lhr()])).chosen, 'tailscale');
+  const busy = { ok: false, busy: true, line: 'Tailscale port 443 is not free for Funnel on this computer; its rules are unchanged.', fix: 'Free Funnel port 443' };
+  const second = await pick('tailscale', [stubProvider('tailscale', busy), stubProvider('tailscale-node'), lhr()]);
+  assert.equal(second.chosen, 'tailscale-node');
+  assert.match(lines.join('\n'), /its rules are unchanged\. Starting a separate Tailscale node for this trial\./);
+  const absent = stubProvider('tailscale', { ok: false, line: 'Tailscale is not installed.', fix: 'Install Tailscale from https://tailscale.com/download, run `tailscale up`, then retry.' });
+  const refused = lhr();
+  assert.match((await pick('tailscale', [absent, stubProvider('tailscale-node'), refused])).error, /Install Tailscale from https:\/\/tailscale\.com\/download/);
+  assert.equal(refused.record.started, 0, 'a real route is never answered with a trial link');
+  const failing = stubProvider('tailscale', { startError: 'serve failed' });
+  assert.match((await pick('tailscale', [failing, refused])).error, /serve failed/);
+  assert.equal(failing.record.stopped, 1, 'a failed start is cleaned up');
+  assert.equal(refused.record.started, 0);
 });
 
 function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
@@ -765,15 +739,15 @@ test('leftover trial daemons are found in any later run, by registry and a porta
   } finally { crashed.daemon.kill(); running.daemon.kill(); running.owner?.kill(); }
 });
 
-test('Ctrl-C during startup ends it at once: nothing waits for the login, the node is cleaned up and Cloudflare is not tried', async () => {
+test('Ctrl-C during startup ends it at once: nothing waits for the login, the node is cleaned up and a trial link is not tried', async () => {
   const h = nodeHarness({ upBehaviour: 'hang', loginWaitMs: 600_000 }); // the abort must come long before the login timeout
   const long = h.node;
-  const cloudflare = stubProvider('cloudflare');
+  const cloudflare = stubProvider('localhost.run');
   const controller = new AbortController();
   const home = fs.mkdtempSync(path.join(tmp, 'node-'));
   const busy = { ok: false, busy: true, line: 'busy', fix: 'free it' };
   const started = Date.now();
-  const pending = startRoute({ route: 'auto', providers: [stubProvider('tailscale', busy), long, cloudflare], gatePort: 1, home, say() {}, signal: controller.signal });
+  const pending = startRoute({ route: 'tailscale', providers: [stubProvider('tailscale', busy), long, cloudflare], gatePort: 1, home, say() {}, signal: controller.signal });
   await sleepMs(80); controller.abort();
   await assert.rejects(pending, error => error.name === 'AbortError');
   assert.ok(Date.now() - started < 5000, 'it did not wait for the ten-minute login timeout');
@@ -784,30 +758,16 @@ test('Ctrl-C during startup ends it at once: nothing waits for the login, the no
   const gone = new AbortController(); gone.abort();
   await assert.rejects(verifyPublicReady({ origin: 'https://x.example', secret: 's', fetchImpl: async () => { throw new Error('should not fetch'); }, timeoutMs: 60_000, signal: gone.signal }), error => error.name === 'AbortError');
   const slow = new AbortController();
-  const cf = cloudflareProvider({ env: {}, ensure: ({ signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason))), spawnChild: () => { throw new Error('no spawn after abort'); } });
-  const waiting = cf.start({ gatePort: 1, home, signal: slow.signal });
+  const hang = localhostRunProvider({ env: {}, spawnChild: fakeSpawn([]).spawnChild, which: () => 'x', startMs: 60_000 });
+  const waiting = hang.start({ gatePort: 1, home, signal: slow.signal });
   slow.abort();
   await assert.rejects(waiting, error => error.name === 'AbortError');
-});
-
-test('Cloudflare Quick Tunnel: an address split across two output chunks is still found', async () => {
-  const calls = [];
-  const spawnChild = () => {
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.signalCode = null; child.pid = 1;
-    child.kill = () => { child.exitCode = 0; child.emit('exit'); }; calls.push(child);
-    setImmediate(() => { child.stderr.write('INF |  https://split-name-d'); setTimeout(() => child.stderr.write('emo.trycloudflare.com  |\n'), 10); });
-    return child;
-  };
-  const cf = cloudflareProvider({ env: {}, spawnChild, ensure: async () => ({ bin: '/x' }), startMs: 2000 });
-  const started = await cf.start({ gatePort: 1, home: fs.mkdtempSync(path.join(tmp, 'cf-')) });
-  assert.equal(started.origin, 'https://split-name-demo.trycloudflare.com');
-  await cf.stop();
 });
 
 test('the printed restart command: the same home only where the address is stable; a new home otherwise', () => {
   const base = { cli: 'dalan', home: '/h', shellQuote: x => x, client: 'claude', route: 'auto' };
   assert.equal(tryHostedInternals.restartCommand({ ...base, provider: 'tailscale' }), 'dalan try --public --client claude --route auto --home /h');
-  for (const provider of ['cloudflare', 'tailscale-node']) assert.equal(tryHostedInternals.restartCommand({ ...base, provider }), 'dalan try --public --client claude --route auto', `${provider}: its next address is new, so the home would refuse it`);
+  for (const provider of ['localhost.run', 'tailscale-node']) assert.equal(tryHostedInternals.restartCommand({ ...base, provider }), 'dalan try --public --client claude --route auto', `${provider}: its next address is new, so the home would refuse it`);
 });
 
 test('a route that fails to start names the real next steps, not a new home', async () => {
@@ -817,10 +777,10 @@ test('a route that fails to start names the real next steps, not a new home', as
   const error = await runTry({ argv: ['--public', '--route', 'tailscale', '--home', home], env: { PATH: process.env.PATH }, out: { write() {} }, input: new PassThrough(), errorContext: context, hosted: { interactive: true, providers: [failing] } }).then(() => null, e => e);
   assert.equal(error.tryKind, 'route_start');
   const text = tryInternals.formatTryError(error, context, { home: '/other', port: 1 });
-  assert.match(text, /tailscale funnel did not publish the rule\nThe public route did not start, so the bridge was not started\./);
+  assert.match(text, /tailscale funnel did not publish the rule\nA Tailscale route never falls back to a trial link on its own[^\n]*\nThe public route did not start, so the bridge was not started\./);
   assert.doesNotMatch(text, /new home|Fix the problem above/);
   assert.match(text, /Try again with:\n\s+dalan try --public --client chatgpt --route tailscale --home /);
-  assert.match(text, /Or use a temporary Cloudflare route instead:\n\s+dalan try --public --client chatgpt --route cloudflare --home /);
+  assert.match(text, /Or make a trial link \(localhost\.run\) instead:\n\s+dalan try --public --client chatgpt --route localhost\.run --home /);
   assert.match(text, /Or try on this computer only:\n\s+dalan try --local/);
 });
 
@@ -868,7 +828,7 @@ test('a public address that never answers as this bridge stops the trial before 
 test('hosted failure cleanup with the real node provider: a cert check that will not exit keeps only its files, everything else is removed', async () => {
   const h = nodeHarness({ certBehaviour: 'immortal', certWaitMs: 30, killGraceMs: 30 });
   const busy = { name: 'tailscale', probe: () => ({ ok: false, busy: true, line: 'busy', fix: 'free 443' }), start: async () => { throw new Error('must not start'); }, stop: async () => ({ removed: true }) };
-  const run = await hostedRun('nodecleanup', { clock: virtualClock(), fetchImpl: async () => { throw new Error('fetch failed'); }, providers: [busy, h.node] });
+  const run = await hostedRun('nodecleanup', { argv: ['--route', 'tailscale'], clock: virtualClock(), fetchImpl: async () => { throw new Error('fetch failed'); }, providers: [busy, h.node] });
   const result = await run.finished;
   assert.match(result.error?.message ?? '', /The public route is not ready/);
   const kept = path.dirname(h.events.cert.files[0]);
@@ -907,10 +867,10 @@ test('a home set up for another public address is refused, not re-issued', async
 
 // ---- arguments and the mode question -----------------------------------------------------------------------------------
 test('option parsing: local and public modes, clients, routes and conflicts', () => {
-  assert.deepEqual(parseTryArgs(['--public', '--client', 'claude', '--route', 'cloudflare']), { home: null, port: null, callbacks: [], mode: 'public', client: 'claude', route: 'cloudflare' });
+  assert.deepEqual(parseTryArgs(['--public', '--client', 'claude', '--route', 'localhost.run']), { home: null, port: null, callbacks: [], mode: 'public', client: 'claude', route: 'localhost.run' });
   assert.equal(parseTryArgs(['--local']).mode, 'local');
   assert.equal(parseTryArgs(['--client', 'chatgpt']).mode, 'public');
-  for (const bad of [['--local', '--public', '--callback', 'x'], ['--local', '--client', 'chatgpt'], ['--local', '--route', 'auto'], ['--public', '--callback', 'x'], ['--client', 'bing'], ['--route', 'ngrok'], ['--client']]) assert.throws(() => parseTryArgs(bad), /./, JSON.stringify(bad));
+  for (const bad of [['--local', '--public', '--callback', 'x'], ['--local', '--client', 'chatgpt'], ['--local', '--route', 'auto'], ['--public', '--callback', 'x'], ['--client', 'bing'], ['--route', 'ngrok'], ['--route', 'cloudflare'], ['--client']]) assert.throws(() => parseTryArgs(bad), /./, JSON.stringify(bad));
   assert.deepEqual(parseTryArgs([]), { home: null, port: null, callbacks: [] });
 });
 
@@ -921,11 +881,10 @@ async function answerMode(lines) {
   for (const line of lines) { await sleepMs(20); input.write(line); }
   return { choice: await pending, out };
 }
-test('the mode question: Enter chooses hosted ChatGPT, and the exposure notice comes before the choice', async () => {
+test('the mode question: Enter chooses hosted ChatGPT; no route is asked', async () => {
   const enter = await answerMode(['\n', '\n']);
   assert.deepEqual(enter.choice, { mode: 'public', client: 'chatgpt' });
-  assert.ok(enter.out.indexOf('Ctrl-C stops the trial') < enter.out.indexOf('Choose [1]:'));
-  assert.match(enter.out, /It may download a tunnel helper/);
+  assert.doesNotMatch(enter.out, /route|Tailscale|Cloudflare|localhost\.run/i, 'progressive disclosure: no route question');
   assert.deepEqual((await answerMode(['1\n', '2\n'])).choice, { mode: 'public', client: 'claude' });
   assert.deepEqual((await answerMode(['2\n'])).choice, { mode: 'local' });
   const retyped = await answerMode(['9\n', '\n', '\n']);
@@ -981,21 +940,21 @@ function fakeTailscale({ status = readyStatus, serve = {}, onFunnelOn, foreignFo
 }
 const provider = (fake, extra = {}) => tailscaleProvider({ tailscale: fake.run, spawnChild: fake.spawnChild, platform: 'linux', which: () => '/usr/bin/tailscale', clock: { sleep: async () => {} }, ...extra });
 
-test('each missing Tailscale prerequisite gets one line and the Cloudflare fallback', () => {
+test('each missing Tailscale prerequisite gets one line', () => {
   const absent = tailscaleProvider({ which: () => null, tailscale: () => { throw new Error('unused'); } }).probe();
-  assert.equal(absent.line, 'Tailscale is not installed; using a temporary Cloudflare route.');
+  assert.equal(absent.line, 'Tailscale is not installed');
   const probe = status => provider(fakeTailscale({ status })).probe();
-  assert.match(probe({ ...readyStatus, BackendState: 'NeedsLogin' }).line, /^Tailscale is not connected; using Cloudflare\. To reconnect Tailscale later, run: tailscale up$/);
-  assert.match(probe({ ...readyStatus, CurrentTailnet: { MagicDNSEnabled: false } }).line, /^MagicDNS is off; using Cloudflare\.$/);
-  assert.match(probe({ ...readyStatus, Self: { ...readyStatus.Self, CapMap: { funnel: [] } } }).line, /^Tailscale HTTPS is off; using Cloudflare\.$/);
-  assert.match(probe({ ...readyStatus, Self: { ...readyStatus.Self, CapMap: { https: [] } } }).line, /^Funnel is not allowed for this tailnet; using Cloudflare\.$/);
+  assert.match(probe({ ...readyStatus, BackendState: 'NeedsLogin' }).line, /^Tailscale is not connected; run: tailscale up$/);
+  assert.match(probe({ ...readyStatus, CurrentTailnet: { MagicDNSEnabled: false } }).line, /^MagicDNS is off\.$/);
+  assert.match(probe({ ...readyStatus, Self: { ...readyStatus.Self, CapMap: { funnel: [] } } }).line, /^Tailscale HTTPS is off\.$/);
+  assert.match(probe({ ...readyStatus, Self: { ...readyStatus.Self, CapMap: { https: [] } } }).line, /^Funnel is not allowed for this tailnet\.$/);
   assert.match(probe({ ...readyStatus, Self: { ...readyStatus.Self, CapMap: { https: [], funnel: [], 'https://tailscale.com/cap/funnel-ports?ports=443,8443,10000': [] } } }).ok ? 'ok' : 'no', /ok/);
   const full = provider(fakeTailscale({ serve: { TCP: { 443: {} } } })).probe();
   assert.equal(full.line, 'Tailscale port 443 is not free for Funnel on this computer; its rules are unchanged.');
   assert.equal(full.busy, true, 'only a busy 443 leads to a node of the trial\'s own');
   assert.equal(absent.busy, undefined);
   for (const result of [absent, full]) assert.ok(result.fix, 'an explicit --route tailscale gets the owner\'s own fix');
-  assert.match(explainTailscale(new Error('weird')).line, /^Tailscale Funnel is not usable \(weird\); using Cloudflare\.$/);
+  assert.match(explainTailscale(new Error('weird')).line, /^Tailscale Funnel is not usable \(weird\)\.$/);
 });
 
 test('a ready Funnel is used on 443, and removed on stop; another rule is never touched', async () => {
@@ -1038,24 +997,16 @@ test('a port another rule took after the check is left alone and Funnel is not a
   assert.equal(fake.state.spawned, undefined);
 });
 
-test('auto falls back to Cloudflare when Funnel does not start, after confirming its rule is gone; an explicit route does not', async () => {
+test('a Funnel that does not start stops the real route with its reason, after confirming its rule is gone', async () => {
   const lines = [];
-  const fake = fakeTailscale();
-  const ts = provider(fake, { clock: { sleep: async () => {} } });
-  const cloud = fakeRoute();
-  // A Funnel whose status never shows our rule fails to publish.
-  const broken = { ...ts, async start(ctx) { throw new Error('tailscale funnel did not publish the rule'); }, probe: () => ({ ok: true, origin: 'x' }), stop: async () => ({ removed: true }) };
-  const route = await startRoute({ route: 'auto', providers: [broken, cloud.provider], gatePort: 1, home: tmp, say: line => lines.push(line) });
-  assert.equal(route.provider.name, 'cloudflare');
-  assert.match(lines.join("\n"), /Tailscale did not start .* using a temporary Cloudflare route\./);
-  await route.stop();
-  const dead = unreadyTailscale('Funnel is not allowed for this tailnet; using Cloudflare.');
+  const ts = provider(fakeTailscale(), { clock: { sleep: async () => {} } });
+  const trial = fakeRoute();
+  const broken = { ...ts, async start() { throw new Error('tailscale funnel did not publish the rule'); }, probe: () => ({ ok: true, origin: 'x' }), stop: async () => ({ removed: true }) };
+  await assert.rejects(startRoute({ route: 'tailscale', providers: [broken, trial.provider], gatePort: 1, home: tmp, say: line => lines.push(line) }), /did not publish the rule/);
+  assert.equal(trial.record.started, 0, 'no trial link was made');
+  const dead = unreadyTailscale('Funnel is not allowed for this tailnet.');
   dead.probe = () => ({ ok: false, line: 'x', fix: 'A tailnet administrator can enable Funnel at https://console.tailscale.com/admin/acls, then retry.' });
   await assert.rejects(startRoute({ route: 'tailscale', providers: [dead, fakeRoute().provider], gatePort: 1, home: tmp, say() {} }), /tailnet administrator can enable Funnel at https:\/\/console\.tailscale\.com\/admin\/acls/);
-  const cf = fakeRoute();
-  const chosen = await startRoute({ route: 'cloudflare', providers: [dead, cf.provider], gatePort: 1, home: tmp, say() {} });
-  assert.equal(chosen.provider.name, 'cloudflare');
-  await chosen.stop();
 });
 
 test('a Funnel rule that someone else replaced is left alone and reported with the exact command, not as removed', async () => {
@@ -1077,51 +1028,6 @@ test('a Funnel rule that someone else replaced is left alone and reported with t
 
 // ---- the tunnel helper -------------------------------------------------------------------------------------------------
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
-function manifestFor(bytes, archive = false) {
-  return { version: 't1', base: 'https://example.invalid/', assets: { 'linux-x64': { name: 'cloudflared-linux-amd64', sha256: sha(bytes) }, 'darwin-arm64': { name: 'cloudflared-darwin-arm64.tgz', sha256: sha(bytes), archive: true } } };
-}
-test('the helper: the shipped manifest pins a checksum for every supported platform', () => {
-  assert.deepEqual(Object.keys(CLOUDFLARED.assets).sort(), ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64']);
-  for (const asset of Object.values(CLOUDFLARED.assets)) assert.match(asset.sha256, /^[0-9a-f]{64}$/);
-  assert.match(CLOUDFLARED.base, /^https:\/\/github\.com\/cloudflare\/cloudflared\/releases\/download\/[^/]+\/$/);
-});
-test('the helper: verified before it can run, cached, re-checked on reuse, and never executed when wrong', async () => {
-  const bytes = Buffer.from('#!/bin/sh\necho ok\n');
-  const cacheRoot = fs.mkdtempSync(path.join(tmp, 'cache-'));
-  const base = { platform: 'linux', arch: 'x64', env: {}, cacheRoot, which: () => null, manifest: manifestFor(bytes) };
-  const said = [];
-  const first = await ensureCloudflared({ ...base, download: async url => { assert.equal(url, 'https://example.invalid/cloudflared-linux-amd64'); return bytes; }, say: l => said.push(l) });
-  assert.equal(first.source, 'download');
-  assert.deepEqual(said, ['Downloading the verified tunnel helper for this computer…']);
-  assert.equal(fs.statSync(first.bin).mode & 0o777, 0o700);
-  assert.equal((await ensureCloudflared({ ...base, download: async () => { throw new Error('must reuse'); } })).source, 'cache');
-  fs.appendFileSync(first.bin, 'tampered');
-  assert.equal((await ensureCloudflared({ ...base, download: async () => bytes })).source, 'download', 'a changed cached binary is replaced');
-  // A wrong download is refused before anything is written as the helper.
-  const empty = fs.mkdtempSync(path.join(tmp, 'cache-'));
-  await assert.rejects(ensureCloudflared({ ...base, cacheRoot: empty, download: async () => Buffer.from('evil') }), error => error instanceof HelperError && error.code === 'checksum' && /could not be verified/.test(error.message));
-  assert.equal(fs.existsSync(path.join(empty, 'cloudflared')), false);
-  assert.deepEqual(fs.readdirSync(empty), [], 'no partial file is left');
-  await assert.rejects(ensureCloudflared({ ...base, cacheRoot: empty, platform: 'darwin', env: {}, which: n => n === 'brew' ? '/opt/homebrew/bin/brew' : null, arch: 'arm64', download: async () => { throw new Error('offline'); } }), /Tunnel-helper download failed \(offline\)\. Install it with: brew install cloudflared/);
-  await assert.rejects(ensureCloudflared({ ...base, platform: 'win32' }), error => error.code === 'unsupported');
-  assert.equal((await ensureCloudflared({ ...base, which: () => '/usr/local/bin/cloudflared', download: async () => { throw new Error('no'); } })).source, 'path', 'a cloudflared already installed is used as is');
-});
-test('the helper: a macOS archive is extracted only after its checksum matches', async () => {
-  const bytes = Buffer.from('archive-bytes');
-  const cacheRoot = fs.mkdtempSync(path.join(tmp, 'cache-'));
-  const result = await ensureCloudflared({ platform: 'darwin', arch: 'arm64', env: {}, cacheRoot, which: () => null, manifest: manifestFor(bytes), download: async () => bytes,
-    extract: async (archive, dir) => { assert.equal(sha(fs.readFileSync(archive)), sha(bytes)); fs.writeFileSync(path.join(dir, 'cloudflared'), '#!/bin/sh\n'); } });
-  assert.equal(result.source, 'download');
-  assert.ok(fs.existsSync(result.bin));
-});
-
-test('quick tunnel output: the public origin is read strictly, and Cloudflare\'s own API host is not it', () => {
-  assert.equal(parseQuickTunnelOrigin('INF |  https://violet-river-demo.trycloudflare.com  |'), 'https://violet-river-demo.trycloudflare.com');
-  assert.equal(parseQuickTunnelOrigin('failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel"'), null);
-  assert.equal(parseQuickTunnelOrigin('https://trycloudflare.com.evil.example/x'), null);
-  assert.equal(parseQuickTunnelOrigin('nothing here'), null);
-});
-
 function fakeSpawn(lines, { exitEarly = false } = {}) {
   const calls = [];
   const spawnChild = (bin, args, options) => {
@@ -1134,25 +1040,67 @@ function fakeSpawn(lines, { exitEarly = false } = {}) {
   };
   return { spawnChild, calls };
 }
-test('Cloudflare Quick Tunnel: started against the gate with an isolated configuration, stopped by its own handle', async () => {
-  const home = fs.mkdtempSync(path.join(tmp, 'cf-'));
-  const fake = fakeSpawn(['INF Requesting new quick Tunnel on trycloudflare.com...', 'INF |  https://violet-river-demo.trycloudflare.com  |']);
-  const cf = cloudflareProvider({ env: { PATH: '/usr/bin', HOME: '/home/real', TUNNEL_TOKEN: 'secret' }, spawnChild: fake.spawnChild, ensure: async () => ({ bin: '/cache/cloudflared' }), clock: { sleep: async () => {} } });
-  const started = await cf.start({ gatePort: 7001, home });
-  assert.equal(started.origin, 'https://violet-river-demo.trycloudflare.com');
+const LHR_BANNER = ['Welcome to localhost.run!', 'To set up and manage custom domains go to https://admin.localhost.run/', 'https://localhost.run/docs/'];
+test('localhost.run output: only a single-label lhr.life https address is an origin; banner links, look-alikes and ANSI noise are not', () => {
+  assert.deepEqual(parseLocalhostRunOrigins('952406d567dd10.lhr.life tunneled with tls termination, https://952406d567dd10.lhr.life\r'), ['https://952406d567dd10.lhr.life']);
+  assert.deepEqual(parseLocalhostRunOrigins('\u001b[7m  \u001b[0mhttps://abc.lhr.life\u001b[0m'), ['https://abc.lhr.life'], 'terminal control codes are stripped first');
+  for (const bad of ['https://admin.localhost.run/', 'https://localhost.run/docs/', 'https://evil.lhr.life.example.com', 'https://a.b.lhr.life', 'http://abc.lhr.life', 'https://user@abc.lhr.life', 'https://abc.lhr.life:8443', 'https://abc.lhr.life/path', 'https://lhr.life', 'https://abc-.lhr.life']) assert.deepEqual(parseLocalhostRunOrigins(`see ${bad}`), [], bad);
+  assert.deepEqual(parseLocalhostRunOrigins('https://aa.lhr.life and https://bb.lhr.life'), ['https://aa.lhr.life', 'https://bb.lhr.life']);
+});
+test('localhost.run: ssh gets the gate port, a private known_hosts, no user config, agent or key; the address is read from split, CRLF output; stop ends it by handle', async () => {
+  const home = fs.mkdtempSync(path.join(tmp, 'lhr-'));
+  const fake = fakeSpawn([]);
+  const provider = localhostRunProvider({ env: { PATH: '/usr/bin', SSH_AUTH_SOCK: '/agent', HOME: '/home/real' }, spawnChild: fake.spawnChild, which: () => '/usr/bin/ssh', clock: { sleep: async () => {} } });
+  assert.deepEqual(provider.probe(), { ok: true });
+  const starting = provider.start({ gatePort: 7001, home });
+  await sleepMs(10);
   const [call] = fake.calls;
-  assert.equal(call.bin, '/cache/cloudflared');
-  assert.deepEqual(call.args.slice(0, 1).concat(call.args.slice(-2)), ['tunnel', '--url', 'http://127.0.0.1:7001']);
-  assert.equal(fs.readFileSync(call.args[call.args.indexOf('--config') + 1], 'utf8'), '', 'an empty configuration: a named-tunnel config cannot change the target');
-  assert.equal(call.options.env.HOME, path.join(home, 'cloudflared'), 'the helper does not see the user\'s home');
-  assert.equal(call.options.env.TUNNEL_TOKEN, undefined, 'no provider login or token is passed through');
-  assert.deepEqual(await cf.stop(), { removed: true });
+  call.child.stdout.write('\u001b[1mWelcome\u001b[0m\r\nabc123def456.lhr.life tunneled with tls term'); call.child.stdout.write('ination, https://abc123def456.lhr.life\r\n');
+  call.child.stdout.write('This domain periodically rotates to a new one.\r\nhttps://abc123def456.lhr.life\r\n');
+  const started = await starting;
+  assert.equal(started.origin, 'https://abc123def456.lhr.life');
+  assert.equal(call.bin, 'ssh');
+  assert.deepEqual(call.args.slice(0, 3), ['-F', '/dev/null', '-T']);
+  assert.ok(call.args.includes('-R') && call.args[call.args.indexOf('-R') + 1] === '80:127.0.0.1:7001', 'forwards to the gate port only');
+  assert.equal(call.args.at(-1), 'nokey@localhost.run');
+  const joined = call.args.join(' ');
+  for (const flag of ['BatchMode=yes', 'ExitOnForwardFailure=yes', 'ForwardAgent=no', 'IdentitiesOnly=yes', 'GlobalKnownHostsFile=/dev/null', `UserKnownHostsFile=${path.join(home, 'localhost-run', 'known_hosts')}`]) assert.ok(joined.includes(flag), flag);
+  assert.equal(call.options.env.SSH_AUTH_SOCK, undefined, 'the user\'s ssh agent is not passed');
+  assert.equal(call.options.env.HOME, undefined, 'and neither is the home directory');
+  assert.equal(provider.endedBecause(), null, 'the same address repeated is not a rotation');
+  assert.deepEqual(await provider.stop(), { removed: true });
   assert.equal(call.child.exitCode, 0);
 });
-test('Cloudflare Quick Tunnel: a helper that exits before it is ready is a clear failure, not a hang', async () => {
-  const fake = fakeSpawn([], { exitEarly: true });
-  const cf = cloudflareProvider({ env: {}, spawnChild: fake.spawnChild, ensure: async () => ({ bin: '/x' }), startMs: 5000 });
-  await assert.rejects(cf.start({ gatePort: 1, home: fs.mkdtempSync(path.join(tmp, 'cf-')) }), /cloudflared exited before the tunnel was ready/);
+test('localhost.run: a different address after the first ends the route as rotated; ssh missing, an early exit, no address and an abort are clean failures', async () => {
+  const home = fs.mkdtempSync(path.join(tmp, 'lhr-'));
+  const fake = fakeSpawn([]);
+  const provider = localhostRunProvider({ env: {}, spawnChild: fake.spawnChild, which: () => '/usr/bin/ssh', clock: { sleep: async () => {} } });
+  const starting = provider.start({ gatePort: 7002, home }); await sleepMs(10);
+  fake.calls[0].child.stdout.write('x.lhr.life tunneled, https://one.lhr.life\n');
+  const started = await starting;
+  let ended = false; started.exited.then(() => { ended = true; });
+  fake.calls[0].child.stdout.write('new: https://two.lhr.life\n');
+  await sleepMs(20);
+  assert.equal(ended, true, 'the route ended');
+  assert.equal(provider.endedBecause(), 'rotated');
+  assert.equal(fake.calls[0].child.exitCode, 0, 'ssh was stopped');
+  // ssh is not installed: one line, with the fix.
+  const none = localhostRunProvider({ env: {}, which: () => null }).probe();
+  assert.equal(none.ok, false); assert.match(none.fix, /^ssh is not installed\. Install OpenSSH/);
+  await assert.rejects(startRoute({ route: 'localhost.run', providers: [localhostRunProvider({ env: {}, which: () => null })], gatePort: 1, home, say() {} }), /^Error: ssh is not installed\./);
+  // The relay refuses or ssh dies before an address: a clear failure with what ssh said, no hang.
+  const early = fakeSpawn([], { exitEarly: true });
+  await assert.rejects(localhostRunProvider({ env: {}, spawnChild: early.spawnChild, which: () => 'x', startMs: 5000 }).start({ gatePort: 1, home }), /ssh to localhost\.run ended before the tunnel was ready/);
+  // Banner-only output never becomes an address, and the deadline ends the start.
+  const quiet = fakeSpawn(LHR_BANNER);
+  const slow = localhostRunProvider({ env: {}, spawnChild: (...a) => { const c = quiet.spawnChild(...a); setImmediate(() => { for (const l of LHR_BANNER) c.stdout.write(`${l}\n`); }); return c; }, which: () => 'x', startMs: 60 });
+  await assert.rejects(slow.start({ gatePort: 1, home }), /did not report a public address in time/);
+  // An abort ends it at once.
+  const controller = new AbortController();
+  const hang = localhostRunProvider({ env: {}, spawnChild: fakeSpawn([]).spawnChild, which: () => 'x', startMs: 60_000 });
+  const pending = hang.start({ gatePort: 1, home, signal: controller.signal }); await sleepMs(10); controller.abort();
+  await assert.rejects(pending, error => error.name === 'AbortError');
+  await assert.rejects(localhostRunProvider({ env: {}, spawnChild: fakeSpawn([]).spawnChild, which: () => 'x' }).start({ gatePort: 70000, home }), /gate port is not valid/);
 });
 
 // ---- the gate and readiness --------------------------------------------------------------------------------------------
@@ -1240,4 +1188,26 @@ test('uaToken names a known caller class and never echoes the caller\'s own text
     ['node', 'node'], ['undici', 'undici'], ['curl/8.5', 'curl'], ['python-httpx/0.27', 'python'], ['Python-urllib/3.12', 'python'], ['Mozilla/5.0 (X11)', 'Mozilla'], ['Zq8Lm3Vx9Tn2Rb7Kd4Hs6Pw1Yc5Jf0GH', 'other'], ['Zq8Lm3Vx9Tn2Rb7Kd4Hs6Pw1Yc5Jf0GH/1.0', 'other'], ['', null], [undefined, null]]) {
     assert.equal(of(ua), want, String(ua));
   }
+});
+
+test('a saved Tailscale choice asks nothing, says it is not a trial, and never falls back to localhost.run when it fails', async () => {
+  const lhr = fakeRoute('localhost.run');
+  const ts = unreadyTailscale('Tailscale is not connected; run: tailscale up');
+  const run = await hostedRun('saved-ts', { route: 'tailscale', providers: [lhr.provider, ts] });
+  const done = await run.finished;
+  assert.match(run.out, /^Using Tailscale, the address you saved with `dalan setup`\. This is not a trial link\.$/m);
+  assert.doesNotMatch(run.out, /Trial link via/);
+  assert.doesNotMatch(run.out, /Choose|\[Y\/n\]|\[y\/N\]/, 'no question is asked');
+  assert.match(run.out, /Tailscale is not connected/);
+  assert.equal(lhr.record.started, 0, 'localhost.run is never started for a real route');
+  assert.ok(done.error || /did not start/.test(run.out));
+});
+
+test('with no saved choice a trial prints its one disclaimer; ssh missing is one line with the fix', async () => {
+  const missing = localhostRunProvider({ env: {}, which: () => null, spawnChild: () => { throw new Error('must not spawn'); } });
+  const run = await hostedRun('no-ssh', { providers: [missing] });
+  const done = await run.finished;
+  assert.equal(run.out.match(/Trial link via localhost\.run/g).length, 1, 'the disclaimer is printed once');
+  assert.match(`${run.out}${done.error?.message ?? ''}`, /ssh is not installed\. Install OpenSSH/);
+  assert.doesNotMatch(run.out, /Cloudflare/i);
 });

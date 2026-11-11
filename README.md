@@ -16,14 +16,19 @@ Use it when you want a second agent, a second account or another computer to do 
 
 ## Try it with ChatGPT or claude.ai
 
-> **Release status.** The hosted quick start below is unreleased: the version on npm (0.5.2) does not show its prompts yet. To try this revision now, use [Install from source](#from-source) and run `node bin/dalan.mjs try` where this page says `npx -y @tnunamak/dalan try`. When the release ships, this note goes and the command is pinned to the released version.
+> **Release status.** The hosted trial is unreleased: the version on npm (0.5.2) does not have it yet, so `npx -y @tnunamak/dalan try` will not show these prompts until the next release. To try it now, run it from a checkout of this branch:
+>
+> ```sh
+> git clone --branch feat/try-public-one-paste https://github.com/tnunamak/dalan.git && cd dalan && npm ci && node bin/dalan.mjs try
+> ```
+>
+> After the release, use the `npx` command below and this note goes.
 
 Before you start:
 
 - **Node.js 24 or newer.** Run `node --version`. If it is missing or older than v24, install it from the [official download page](https://nodejs.org/en/download) and reopen your terminal.
-- **Linux or macOS.** Use your normal terminal. On Windows, [install WSL](https://learn.microsoft.com/windows/wsl/install) and use its Linux shell.
+- **Linux or macOS, with `ssh`.** Use your normal terminal. macOS and most Linux systems already include `ssh`. On Windows, [install WSL](https://learn.microsoft.com/windows/wsl/install) and use its Linux shell.
 - **A hosted client that allows custom MCP connectors.** Use an account or workspace that permits them. If the option is missing, ask the workspace administrator before you start.
-- **Tailscale, for claude.ai.** claude.ai cannot reach a Cloudflare quick tunnel (it gets a 403), so a claude.ai trial needs [Tailscale](https://tailscale.com/download) installed and signed in (`tailscale up`). For ChatGPT, Tailscale is optional: without it the trial uses Cloudflare.
 
 Run:
 
@@ -31,27 +36,42 @@ Run:
 npx -y @tnunamak/dalan try
 ```
 
-Press Enter twice to choose ChatGPT (type `2` for claude.ai). Dalan opens a temporary public HTTPS address for your computer. It tries Tailscale first and, for ChatGPT only, then Cloudflare. If a Tailscale sign-in link is printed, open it. You do not need a domain or any URL template. Then:
+Press Enter twice to choose ChatGPT (type `2` for claude.ai). There is no account to make and no route to choose. Dalan starts a trial link by itself and prints one line first:
+
+> Trial link via localhost.run, a third-party relay that can see this traffic; the address changes within hours. For daily use: dalan setup
+
+Then:
 
 1. **Add the connector.** Dalan prints your complete connector URL, a click path for your client and one prompt to paste. In ChatGPT or claude.ai, add a custom connector with that URL and start its sign-in. The URL is a secret: it is printed once on your terminal and kept in a private file in the trial home.
 2. **Approve in this terminal.** Dalan shows a pairing code. Compare it with the one on the sign-in page, then answer `y` in the terminal. Nothing is granted until you do.
 3. **Send the prompt.** In a chat with the connector enabled, paste the printed prompt. The client lists the pending jobs, claims the demo job and finishes it with a report. Success is the report appearing in your terminal, followed by the accept or reject question.
 
-What a run looked like on claude.ai: the printed connector URL went into a custom connector, the sign-in page opened, the pairing code matched and the terminal approval let it through. The first tool call, listing pending jobs from the pasted prompt, found the demo job, and claude.ai claimed and finished it.
+Keep the terminal open. Ctrl-C stops the trial and removes the link. The trial grants no repository access. A trial link works for a few hours at most. If the relay gives it a new address, the trial stops and says so, because the sign-in is tied to the first address: start a fresh trial and replace the connector URL. The demo runs on your own ChatGPT or claude.ai account with its normal limits; Dalan runs no model.
 
-Keep the terminal open. Ctrl-C stops the trial and removes the public route. The trial grants no repository access. A Cloudflare address changes on every run, so each run needs a new connector; a ready Tailscale Funnel keeps its address. The demo runs on your own ChatGPT or claude.ai account with its normal limits; Dalan runs no model. Cloudflare Quick Tunnel needs no Cloudflare account; Tailscale may ask you to sign in.
+If the connection fails, keep the terminal open and copy the failing step and its error, with private URLs and codes removed. For other options, see `npx -y @tnunamak/dalan help try`. Skip the question with `npx -y @tnunamak/dalan try --public --client chatgpt` (or `--client claude`).
 
-If the connection fails, keep the terminal open and copy the failing step and its error, with private URLs and codes removed. For other options, see `npx -y @tnunamak/dalan help try`. Skip the question with `npx -y @tnunamak/dalan try --public --client chatgpt` (or `--client claude`). `--route tailscale` forces Tailscale. `--route cloudflare` forces Cloudflare and works only with ChatGPT; with `--client claude` it stops and says why.
+> **Not yet tested with a real client.** The authorization and tool-call steps of this link pass the developer self-check, but a live ChatGPT or claude.ai connection through a trial link has not been confirmed. If yours fails, the failing step helps most.
+
+### Make it permanent
+
+A trial link is for a first look. For daily use you want an address that stays the same, so you add the connector once. Run:
+
+```sh
+npx -y @tnunamak/dalan setup
+```
+
+`dalan setup` looks for [Tailscale](https://tailscale.com/download). If it finds it ready, it asks one question, "Use Tailscale (your-machine) for a stable address? [Y/n]", and saves your answer. If not, it prints a short list: install Tailscale (`tailscale up`, then run `dalan setup` again) or keep using trial links. After that, `dalan try --public` asks nothing. It uses your Tailscale address and says "This is not a trial link." If Tailscale then fails, Dalan stops and tells you why. It never switches to a trial link on its own.
 
 <details>
 <summary>How the temporary address works, and developer diagnostics</summary>
 
-**The address.** The route is always on port 443, because some hosted clients (claude.ai) reach nothing else.
+**The trial link.** `ssh -R 80:localhost:<port> nokey@localhost.run` forwards a public `https://<id>.lhr.life` address to a small gate on your computer. No account or key is used, and Dalan does not read your SSH config, agent or keys. The first connection trusts the relay's host key (trust on first use), kept in a file in the trial home. The relay ends TLS, so it can see the traffic; the connector URL's secret is part of every request path, which is why the disclaimer is there. Dalan checks the discovery and sign-in pages through the link before it prints the URL.
+
+**The real route.** Used after `dalan setup`, or with `--route tailscale`. It is always on port 443, because some hosted clients (claude.ai) reach nothing else.
 - It uses your computer's Tailscale Funnel on 443 when no other rule holds that port.
 - If another rule holds 443, that rule is left alone and the trial starts its own temporary Tailscale node (`dalan-trial-<id>`, userspace, in the trial home). A new node asks for a one-time sign-in, whose link Dalan prints (set `DALAN_TS_AUTHKEY` to skip it).
 - The node keeps its daemon state in memory and uses a temporary directory inside the trial home for TLS certificates. Tailscale drops the ephemeral node when it goes offline, even after a crash, and Ctrl-C also logs it out. A later trial ends any daemon a crashed trial left. If a certificate check cannot be confirmed stopped, cleanup keeps its files for the next run instead of deleting them under a live process.
-- For ChatGPT without Tailscale, it starts a Cloudflare Quick Tunnel and, if needed, downloads the `cloudflared` helper into your user cache after checking its SHA-256. For claude.ai there is no such fallback: Cloudflare quick tunnels answer 403 to Claude's user agents and buffer event streams, so the trial stops with one line naming the Tailscale fix, or ChatGPT.
-- If Tailscale is missing or not ready for Funnel, Dalan says why in one line.
+- If Tailscale is missing or not ready for Funnel, Dalan says why in one line and does not start a trial link.
 
 **Self-check (source checkout only).** The developer self-check needs the repository files, so npm users do not run it. From a checkout, in a second terminal, run `node scripts/dalan-try-selfcheck.mjs --home <the Home line printed by the trial> --client claude`. It acts as a real OAuth client (discovery, registration with the client's published callback, PKCE sign-in, token, then an MCP `initialize`, `tools/list` and one read-only call), waits for you to approve in the trial terminal, and prints one PASS, FAIL or SKIP line per step. It prints no token, code, secret path or URL. The self-check and the readiness check require the authorization server and all its endpoints on the trial's public origin (a bare root issuer counts) and look the metadata up by the RFC 8414 rule: the well-known path goes before the issuer's path without a terminal slash, and the metadata's `issuer` must equal the issuer exactly. That origin rule is a trial constraint, not an OAuth rule, because the trial's bridge serves its own authorization server. Every request has its own deadline; Ctrl-C stops the check.
 
@@ -340,7 +360,7 @@ Start each new worker by hand for its first job. Dalan never starts a worker, in
 `try` takes these options:
 
 - `--local`: this computer only (the self-check above). `--public`: ChatGPT or claude.ai through a public route. With neither, a terminal is asked; with no terminal, `try` runs the local self-check and never opens a route.
-- `--client chatgpt|claude` and `--route auto|tailscale|cloudflare`: the hosted client and public route. Each implies `--public`. `--client claude` never uses Cloudflare: auto mode without Tailscale, and `--route cloudflare`, stop with the fix. A public trial gets a new trial home on every run unless you pass `--home`; its address is part of its sign-in identity, so a home is reused only at the same address.
+- `--client chatgpt|claude` and `--route auto|localhost.run|tailscale`: the hosted client and public route. Each implies `--public`. `auto` is a trial link (localhost.run) unless `dalan setup` saved Tailscale. A public trial gets a new trial home on every run unless you pass `--home`; its address is part of its sign-in identity, so a home is reused only at the same address.
 - `--home DIR`: the trial home.
 - `--port N`: the bridge port on this computer (for a public trial, never the public port). The default is the port that the home used before, otherwise 8799 or the next free port. A home keeps its port; for another port, start a separate trial with `--home NEW_DIR --port N`.
 - `--callback PATTERN`: local mode only: allow one more OAuth callback pattern; repeatable.

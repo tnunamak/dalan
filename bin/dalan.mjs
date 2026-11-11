@@ -22,6 +22,8 @@ if (help) {
 } else if (process.argv[2] === 'mcp') {
   // stdout is the protocol channel: nothing else may print to it. The tools run the CLI, which applies the DALAN_HOME rules.
   await (await import('../src/mcp-stdio.mjs')).main();
+} else if (process.argv[2] === 'setup') {
+  await (await import('../src/setup.mjs')).main();
 } else if (process.argv[2] === 'try') {
   await (await import('../src/try.mjs')).main();
 } else {

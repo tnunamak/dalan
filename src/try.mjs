@@ -28,7 +28,7 @@ const BRIEF = 'Report the exact phrase: bridge first report. Do not read files, 
 const REPORT = 'bridge first report';
 const MARKER = '.dalan-trial';
 const DEFAULT_CALLBACKS = ['http://127.0.0.1/callback', 'http://localhost/callback'];
-const USAGE = 'usage: dalan try [--local | --public [--client chatgpt|claude] [--route auto|tailscale|cloudflare]] [--home DIR] [--port N] [--callback PATTERN]...';
+const USAGE = 'usage: dalan try [--local | --public [--client chatgpt|claude] [--route auto|localhost.run|tailscale]] [--home DIR] [--port N] [--callback PATTERN]...';
 const DEMO_REPO = 'dalan-demo/hello';
 const DENIED_REPO = 'dalan-demo/other';
 const DEMO_TITLE = 'Hello from the Dalan demo repository';
@@ -76,7 +76,7 @@ function formatTryError(error, context, alternate = null) {
   if (error?.tryKind === 'already_running') return cause;
   if (error?.tryKind === 'route_start') {
     // The route, not the home, failed: the same home retries cleanly, and the other route or a local trial are the real alternatives.
-    const otherRoute = /--route tailscale\b/.test(flags) && !/--client claude\b/.test(flags) ? commandBlock('Or use a temporary Cloudflare route instead:', `${cli} try${flags.replace('--route tailscale', '--route cloudflare')} --home ${context.shellHome}`) : null;
+    const otherRoute = /--route tailscale\b/.test(flags) ? commandBlock('Or make a trial link (localhost.run) instead:', `${cli} try${flags.replace('--route tailscale', '--route localhost.run')} --home ${context.shellHome}`) : null;
     return [`${cause}\nThe public route did not start, so the bridge was not started.`, commandBlock('Try again with:', `${cli} try${flags} --home ${context.shellHome}`), otherRoute,
       commandBlock('Or try on this computer only:', `${cli} try --local`)].filter(Boolean).join('\n');
   }
@@ -94,7 +94,7 @@ export async function describeTryError(error, context) {
 
 export function parseTryArgs(argv) {
   const out = { home: null, port: null, callbacks: [] };
-  const choices = { '--client': ['chatgpt', 'claude'], '--route': ['auto', 'tailscale', 'cloudflare'] };
+  const choices = { '--client': ['chatgpt', 'claude'], '--route': ['auto', 'localhost.run', 'tailscale'] };
   for (let i = 0; i < argv.length; i++) {
     const [flag, value] = [argv[i], argv[i + 1]];
     if (flag === '--local' || flag === '--public') { out.mode = flag.slice(2); continue; }
