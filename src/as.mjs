@@ -206,6 +206,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
       if (!store.window()) return reject(403, 'access_denied', 'Open a pairing window before registering.');
       if (!store.reserveRegistration()) return reject(429, 'temporarily_unavailable', 'Registration limit reached. Reuse the client this worker already registered. If you cannot, ask the owner to run dalan connect reset, then retry.');
       if (Number(ctx.get('content-length')) > 8192) return reject(413, 'invalid_client_metadata', 'Registration body exceeds 8192 bytes.');
+      if (!await normalizeRegistration(ctx.req)) { ctx.req.destroy(); return; } // over 8192 bytes
       let bytes = 0;
       const count = chunk => { bytes += chunk.length; if (bytes > 8192) ctx.req.destroy(); };
       ctx.req.on('data', count);
@@ -276,6 +277,24 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
       log({ kind: 'as_handler_error' });
       if (!res.headersSent) page(res, 500, 'Error', '<p>The request failed.</p>'); else res.destroy();
     }
+    return true;
+  }
+  // Every client here is public (PKCE, no secret). RFC 7591 §2 makes `client_secret_basic` the default when a registration omits
+  // `token_endpoint_auth_method`, and the library then issues a secret that the token endpoint and the metadata (only `none`)
+  // would never accept. RFC 7591 §3.2.1 lets the server replace requested values as long as the response shows what it registered,
+  // so an omitted or unsupported method is registered as `none`: the response carries `token_endpoint_auth_method: "none"` and no
+  // `client_secret`, in agreement with the metadata and the token endpoint. A strict client (claude.ai) stops on that mismatch.
+  async function normalizeRegistration(req) {
+    if (!/^application\/json\b/i.test(req.headers['content-type'] ?? '')) return true;
+    const chunks = []; let size = 0;
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) { size += chunk.length; if (size > 8192) return false; chunks.push(chunk); }
+    const text = Buffer.concat(chunks).toString('utf8');
+    let body; try { body = JSON.parse(text); } catch { req.body = text; return true; } // the library reports a body that is not JSON, as before
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      if (body.token_endpoint_auth_method !== 'none') body.token_endpoint_auth_method = 'none';
+      delete body.client_secret; delete body.client_secret_expires_at;
+    }
+    req.body = body;
     return true;
   }
   async function provide(req, res, alias) {
