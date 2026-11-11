@@ -16,19 +16,22 @@ Use it when you want a second agent, a second account or another computer to do 
 
 ## Try it with your MCP client
 
-> **Release status.** The hosted trial is unreleased: the version on npm (0.5.2) does not have it yet, so `npx -y @tnunamak/dalan try` will not show these prompts until the next release. To try it now, run it from a checkout of this branch:
+> **Release status.** The hosted trial is unreleased: the version on npm (0.5.2) does not have it yet, so `npx -y @tnunamak/dalan try` will not show these prompts until the next release. To try the unreleased flow, check the prerequisites below (including Git), then run it from a checkout of this branch:
 >
 > ```sh
 > git clone --branch feat/try-public-one-paste https://github.com/tnunamak/dalan.git && cd dalan && npm ci && node bin/dalan.mjs try
 > ```
 >
-> Until the release is published, run every command in this walkthrough from that checkout: write `node bin/dalan.mjs` wherever an example says `dalan` or `npx -y @tnunamak/dalan`, and do not install npm 0.5.2 for these steps. After the release, use the `npx` command below and this note goes.
+> Until the release is published, the hosted trial runs only from this checkout. Use that checkout in every new terminal, write `node bin/dalan.mjs` wherever a command says `dalan` or `npx -y @tnunamak/dalan`, and do not install npm 0.5.2 for these steps. After the release, use the `npx` commands and this note goes.
 
 Before you start:
 
+- **Git, for the unreleased checkout.** Run `git --version`; install Git if it is missing. The released npm path will not need Git to open a hosted trial.
 - **Node.js 24 or newer.** Run `node --version`. If it is missing or older than v24, install it from the [official download page](https://nodejs.org/en/download) and reopen your terminal.
 - **Linux or macOS, with `ssh`.** Use your normal terminal. macOS and most Linux systems already include `ssh`. On Windows, [install WSL](https://learn.microsoft.com/windows/wsl/install) and use its Linux shell.
 - **A hosted client that allows custom MCP connectors.** Use an account or workspace that permits them. If the option is missing, ask the workspace administrator before you start.
+
+**Choose your path before you run anything.** *ChatGPT or claude.ai:* continue with the hosted trial below; those are the two built-in sign-in profiles. *Another hosted or remote MCP client:* first [expose a stable HTTPS bridge](#expose-the-bridge-to-other-machines), then follow [Connect any MCP worker](#connect-any-mcp-worker) and verify your client's exact OAuth callback; do not pick another client's profile to get past setup. *A client on this computer:* use the [local trial](#local-trial).
 
 Run:
 
@@ -36,7 +39,7 @@ Run:
 npx -y @tnunamak/dalan try
 ```
 
-Press Enter twice to take the default profile, ChatGPT (type `2` for claude.ai). This recipe has built-in sign-in profiles for ChatGPT and claude.ai. For another hosted client, or a client on another computer, use [Connect any MCP worker](#connect-any-mcp-worker) with [Expose the bridge](#expose-the-bridge-to-other-machines), and verify that client's callback before you approve; do not pick a different client's profile just to get past setup. The temporary relay needs no account and there is no route to choose, but your MCP client still needs an eligible account or workspace, and its model use is billed there. Dalan starts a trial link by itself and prints one line first:
+Press Enter twice to take the default profile, ChatGPT (type `2` for claude.ai). The temporary relay needs no account and there is no route to choose, but your MCP client still needs an eligible account or workspace, and its model use is billed there. Dalan starts a trial link by itself and prints one line first:
 
 > Trial link via localhost.run, a third-party relay that can see this traffic; the address changes within hours. For daily use: dalan setup
 
@@ -73,7 +76,7 @@ npx -y @tnunamak/dalan setup
 
 `dalan setup` looks for [Tailscale](https://tailscale.com/download). If it finds it ready, it asks one question, "Use Tailscale (your-machine) for a stable address? [Y/n]", and saves your answer. If not, it prints a short list: install Tailscale (`tailscale up`, then run `dalan setup` again) or keep using trial links. Later public runs reuse that choice and ask no route question. They use your Tailscale address and a home saved at `~/.local/share/dalan-hosted-<client>`, so the address and the sign-in survive a restart and you add the connector once. This holds when your Tailscale can serve Funnel on port 443; if another rule holds that port, the address is a per-run node and changes (see the details below). Tailscale login, client sign-in and your approval can still be asked. The run says "This is not a trial link." If Tailscale fails, Dalan stops and tells you why; it never switches to a trial link on its own.
 
-Switching changes your public address, and the address is part of the sign-in identity, so the trial's client registration and sign-in do not carry over. Start the new run and confirm its URL first. If your client allows two connectors, add and test the new one, then remove the trial one; otherwise remove the trial connector, add the new URL and sign in again. Reports from the trial stay in the trial's Home until you delete it. Dalan never reuses a trial's sign-in under a new address; a home from a different address is refused. `dalan setup` says this in one line.
+Switching changes your public address, and the address is part of the sign-in identity, so the trial's client registration and sign-in do not carry over. Stop the running `try` with Ctrl-C, then start the stable run from the same checkout: `node bin/dalan.mjs try --public --client chatgpt` (use `--client claude` for claude.ai; after the release, `npx -y @tnunamak/dalan try --public --client chatgpt`). Confirm the new URL before you change the connector, and keep that terminal open: `setup` saved a route choice, not a background service. If your client allows two connectors, add and test the new one, then remove the trial one; otherwise remove the trial connector, add the new URL and sign in again. Reports from the trial stay in the trial's Home until you delete it. Dalan never reuses a trial's sign-in under a new address; a home from a different address is refused. `dalan setup` says this in one line.
 
 <details>
 <summary>How the temporary address works, and developer diagnostics</summary>
@@ -195,7 +198,7 @@ Each row starts from a working trial.
 
 | To do this | Go to |
 |---|---|
-| Run `dalan` commands against the trial bridge | Run `npm install -g @tnunamak/dalan`. In each shell, set `DALAN_HOME` to the **Home** printed by the running trial; the usual default is `~/.local/share/dalan-trial`. Then run `dalan status` and `dalan inbox --all`. |
+| Run `dalan` commands against the trial bridge | In a second terminal, open the same checkout (until the release; after it, `npm install -g @tnunamak/dalan`) and set `DALAN_HOME` to the exact **Home** printed by the running trial. Run `node bin/dalan.mjs status`, then `node bin/dalan.mjs inbox --all`. A public trial makes a new home each run; do not use the local-trial default for it. |
 | Give your worker a task of your own, with no file to write | [Your own first job](#your-own-first-job) |
 | Give your worker a job on a real repository | [Give a worker a repository job](#separate-repository-assignment) |
 | Let a coding agent submit and read jobs as tool calls | [`dalan mcp`](docs/local-agent-mcp.md) |
@@ -209,15 +212,13 @@ Each row starts from a working trial.
 
 ### Your own first job
 
-This gives your connected worker a task of your own, with no file to write and no JSON. Leave `try` running and use a second shell. First install the CLI and select the exact **Home** printed by the running trial. The export below shows the usual default; replace it before running the block if `try` used `--home DIR` or an existing `DALAN_HOME`. Then type your task:
+This gives your connected worker a task of your own, with no file to write and no JSON. Leave `try` running and use a second shell in the same checkout (until the release, write `node bin/dalan.mjs` wherever a command below says `dalan`; after it, install the CLI with `npm install -g @tnunamak/dalan`, and if that fails with `EACCES`, do not use `sudo`: [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally) or write `npx @tnunamak/dalan` instead). Select the exact **Home** printed by the running trial, then type your task:
 
 ```sh
-npm install -g @tnunamak/dalan
-export DALAN_HOME=~/.local/share/dalan-trial
+printf 'Paste the Home printed by try: '; IFS= read -r DALAN_HOME
+export DALAN_HOME
 printf 'Your task, on one line: '; IFS= read -r task
 ```
-
-If `npm install -g @tnunamak/dalan` fails with `EACCES`, npm cannot write to its global install directory. Do not use `sudo`; [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally), or skip the install and write `npx @tnunamak/dalan` wherever this section says `dalan`.
 
 Type the task and press Enter. The shell stores it as plain text, so quotes, `$` and backticks in it are safe. Then submit it:
 

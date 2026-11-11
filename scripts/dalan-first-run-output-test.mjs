@@ -62,7 +62,8 @@ test('try help shows an example and where to go next', () => {
 
 test('try help states the home precedence and the port fallback', () => {
   const text = dalan(['try', '--help'], fresh('help')).stdout;
-  assert.match(text, /--home DIR +trial home \(default: DALAN_HOME if set, else ~\/\.local\/share\/dalan-trial\)/);
+  assert.match(text, /--home DIR +bridge home; otherwise DALAN_HOME if set \(defaults by mode below\)/);
+  assert.match(text, /local mode uses ~\/\.local\/share\/dalan-trial, a public trial creates a new home, and a saved Tailscale route uses ~\/\.local\/share\/dalan-hosted-<client>/);
   assert.match(text, /--port N +bridge port \(default: the home's previous port, else 8799 or the next free port\)/);
 });
 
