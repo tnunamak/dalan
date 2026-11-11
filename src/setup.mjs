@@ -6,6 +6,9 @@ import { INSTALL_URL, defaultTailscale, preflight, whichOnPath } from '../script
 import { readRouteSetting, writeRouteSetting } from './route-setting.mjs';
 
 // What this computer's Tailscale can do now: { ok, node } or { ok: false, installed, reason }.
+// The address is the OAuth issuer, so a new address is a new sign-in identity: nothing from a trial carries over.
+export const SWITCH_NOTE = 'Next: run `dalan try --public`, then in claude.ai or ChatGPT remove the trial connector and add the new URL it prints; a new address cannot reuse the trial sign-in.';
+
 export function detectTailscale({ env = process.env, tailscale = defaultTailscale, which = name => whichOnPath(name, env), platform = process.platform, mac } = {}) {
   if (!which('tailscale')) return { ok: false, installed: false, reason: 'Tailscale is not installed.' };
   try {
@@ -32,6 +35,7 @@ export async function runSetup({ env = process.env, out = process.stdout, input 
       if (answer === '' || answer === 'y' || answer === 'yes') {
         writeRouteSetting('tailscale', env);
         say('Saved. `dalan try --public` now uses your Tailscale address, which stays the same between runs. This is a real address, not a trial link.');
+        say(SWITCH_NOTE);
         return { route: 'tailscale', changed: saved !== 'tailscale' };
       }
       writeRouteSetting('localhost.run', env);

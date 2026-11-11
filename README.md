@@ -46,7 +46,7 @@ Then:
 2. **Approve in this terminal.** Dalan shows a pairing code. Compare it with the one on the sign-in page, then answer `y` in the terminal. Nothing is granted until you do.
 3. **Send the prompt.** In a chat with the connector enabled, paste the printed prompt. The client lists the pending jobs, claims the demo job and finishes it with a report. Success is the report appearing in your terminal, followed by the accept or reject question.
 
-Keep the terminal open. Ctrl-C stops the trial and removes the link. The trial grants no repository access. A trial link works for a few hours at most. If the relay gives it a new address, the trial stops and says so, because the sign-in is tied to the first address: start a fresh trial and replace the connector URL. The demo runs on your own ChatGPT or claude.ai account with its normal limits; Dalan runs no model.
+Keep the terminal open. Ctrl-C stops the trial and removes the link. The trial grants no repository access. The output says "Temporary trial" and shows the time left: a trial link works for 3 hours at most, then the trial ends and removes it. If the relay gives it a new address, the trial stops and says so, because the sign-in is tied to the first address: start a fresh trial and replace the connector URL. The demo runs on your own ChatGPT or claude.ai account with its normal limits; Dalan runs no model.
 
 If the connection fails, keep the terminal open and copy the failing step and its error, with private URLs and codes removed. For other options, see `npx -y @tnunamak/dalan help try`. Skip the question with `npx -y @tnunamak/dalan try --public --client chatgpt` (or `--client claude`).
 
@@ -61,6 +61,8 @@ npx -y @tnunamak/dalan setup
 ```
 
 `dalan setup` looks for [Tailscale](https://tailscale.com/download). If it finds it ready, it asks one question, "Use Tailscale (your-machine) for a stable address? [Y/n]", and saves your answer. If not, it prints a short list: install Tailscale (`tailscale up`, then run `dalan setup` again) or keep using trial links. After that, `dalan try --public` asks nothing. It uses your Tailscale address and says "This is not a trial link." If Tailscale then fails, Dalan stops and tells you why. It never switches to a trial link on its own.
+
+Switching changes your public address, and the address is part of the sign-in identity, so nothing from the trial carries over: remove the trial connector in claude.ai or ChatGPT and add the new URL that `dalan try --public` prints. `dalan setup` says this in one line. Dalan never reuses a trial's sign-in under a new address; a trial home from a different address is refused.
 
 <details>
 <summary>How the temporary address works, and developer diagnostics</summary>

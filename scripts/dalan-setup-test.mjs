@@ -29,6 +29,8 @@ test('Tailscale found: exactly one question, Enter saves it, and later runs read
   assert.equal((s.out.match(/\[Y\/n\]/g) ?? []).length, 1);
   assert.match(s.out, /Use Tailscale \(box\) for a stable address\? \[Y\/n\] /);
   assert.equal(result.route, 'tailscale');
+  assert.match(s.out, /^Next: run `dalan try --public`, then in claude\.ai or ChatGPT remove the trial connector and add the new URL it prints; a new address cannot reuse the trial sign-in\.$/m);
+  assert.equal(s.out.match(/^Next:/gm).length, 1, 'one line, once');
   assert.equal(readRouteSetting(s.env), 'tailscale');
   assert.equal(fs.statSync(routeSettingPath(s.env)).mode & 0o777, 0o600);
 });

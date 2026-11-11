@@ -60,7 +60,7 @@ function fakeRoute(name = 'localhost.run') {
 const unreadyTailscale = reason => ({ name: 'tailscale', probe: () => ({ ok: false, line: reason, fix: reason }), start: async () => { throw new Error('must not start'); }, stop: async () => ({ removed: true }) });
 
 // ---- a hosted run ------------------------------------------------------------------------------------------------------
-async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: savedRoute } = {}) {
+async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: savedRoute, trialMs } = {}) {
   const home = path.join(tmp, name);
   const port = await reservedPort();
   const route = fakeRoute();
@@ -69,7 +69,7 @@ async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: 
   run.finished = runTry({
     argv: ['--public', '--client', 'chatgpt', '--home', home, '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
     out: { write: text => { run.out += text; } }, input: run.input, signal: run.controller.signal, errorContext: run.errorContext, clock,
-    hosted: { interactive: true, providers: providers ?? [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl },
+    hosted: { interactive: true, providers: providers ?? [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, ...(trialMs ? { trialMs } : {}) },
   }).then(() => ({}), error => ({ error }));
   run.until = async (pattern, ms = 60_000) => {
     for (let waited = 0; !pattern.test(run.out); waited += 50) {
@@ -1210,4 +1210,17 @@ test('with no saved choice a trial prints its one disclaimer; ssh missing is one
   assert.equal(run.out.match(/Trial link via localhost\.run/g).length, 1, 'the disclaimer is printed once');
   assert.match(`${run.out}${done.error?.message ?? ''}`, /ssh is not installed\. Install OpenSSH/);
   assert.doesNotMatch(run.out, /Cloudflare/i);
+});
+
+test('a trial says it is a temporary trial with the time left, and ends itself when the time is up; a real route has no timer', async () => {
+  const run = await hostedRun('trial-time', { trialMs: 3 * 60_000, clock: virtualClock() });
+  const done = await run.finished;
+  assert.match(run.out, /^Temporary trial: this link stops in 3 min or sooner if the relay changes the address\./m);
+  assert.ok(run.out.indexOf('Temporary trial:') < run.out.indexOf('Connector name:'));
+  assert.match(done.error?.message ?? '', /The temporary trial ended after 3 min; its link is removed\. Start a fresh trial/);
+  assert.match(run.out, /Temporary trial: \d+ (h \d+ )?min left\./, 'reminders show the time left');
+  assert.equal(run.route.stopped, 1, 'the link is removed');
+  const real = await hostedRun('real-no-timer', { route: 'tailscale', providers: [unreadyTailscale('x')] });
+  await real.finished;
+  assert.doesNotMatch(real.out, /Temporary trial/);
 });

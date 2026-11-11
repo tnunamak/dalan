@@ -29,6 +29,9 @@ const REPORT = 'bridge first report';
 
 // Said once, before any public address exists. A trial link is told apart from a real address in every line that names it.
 export const TRIAL_NOTICE = 'Trial link via localhost.run, a third-party relay that can see this traffic; the address changes within hours. For daily use: dalan setup';
+// A trial link lasts at most this long: localhost.run rotates free addresses within hours, so the trial ends itself first, on its own terms.
+export const TRIAL_MS = 3 * 60 * 60 * 1000;
+export const timeLeft = ms => { const minutes = Math.max(0, Math.ceil(ms / 60_000)); return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min` : `${minutes} min`; };
 export const REAL_NOTICE = fromSetup => `Using Tailscale${fromSetup ? ', the address you saved with `dalan setup`' : ''}. This is not a trial link.`;
 
 // Reads answers from one terminal reader and closes it, so the trial's own reader starts clean.
@@ -218,6 +221,10 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     const job = async () => JSON.parse(await dalan(['get', requestId, '--json']));
     const pendingNow = async () => parsePending(JSON.parse(await dalan(['connect', 'pending', '--json'])));
 
+    const trialMs = realRoute ? null : (deps.trialMs ?? TRIAL_MS), trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
+    const trialOver = () => trialEndsAt !== null && clock.now() >= trialEndsAt;
+    const trialLeft = () => trialEndsAt === null ? '' : ` Temporary trial: ${timeLeft(trialEndsAt - clock.now())} left.`;
+    if (trialEndsAt !== null) say(`Temporary trial: this link stops in ${timeLeft(trialMs)} or sooner if the relay changes the address. Replace it with \`dalan setup\` for daily use.`);
     say('');
     say(handoffText({ client, url: mcpUrl, requestId, requestPhrase: phrase }));
     say('');
@@ -242,7 +249,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     lines.on('line', line => { if (line.trim().toLowerCase() === 'help' && !asking) { say(`${spec.label}\n${spec.steps.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n(The connector URL is in ${urlFile}.)`); } });
     const askOnce = async question => { asking = true; try { return await ask(question); } finally { asking = false; } };
 
-    while (!exited && !stopRequested() && !routeDied) {
+    while (!exited && !stopRequested() && !routeDied && !trialOver()) {
       const current = await job();
       if (current.status === 'finished') {
         const result = String(current.report?.result ?? '');
@@ -290,11 +297,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
           say(`Not approved. Approve later with:\n${commandLine(ownCommand('connect', 'approve', attempt.code, '--worker', HOSTED_WORKER, '--replace'))}`);
         }
       } else if (stage !== 'claimed') { stage = 'claimed'; say(`Hosted worker claimed ${requestId}.`); }
-      if (reminded < DIAGNOSE_LIMIT && !exited && !stopRequested() && clock.now() >= remindAt) { say(`\n${stageNote()}`); reminded++; remindAt = clock.now() + DIAGNOSE_EVERY_MS; }
+      if (reminded < DIAGNOSE_LIMIT && !exited && !stopRequested() && clock.now() >= remindAt) { say(`\n${stageNote()}${trialLeft()}`); reminded++; remindAt = clock.now() + DIAGNOSE_EVERY_MS; }
       if (retryNow) { retryNow = false; continue; }
       await Promise.race([clock.sleep(POLL_MS), untilStopRequested()]);
     }
     if (routeDied && !stopRequested()) { const rotated = route?.provider.endedBecause?.() === 'rotated'; const error = new Error(rotated ? 'The temporary public address changed. This trial has stopped to protect its sign-in identity. Start a fresh trial and replace the connector URL.' : 'The public route stopped. This URL is offline.'); error.tryKind = 'route'; throw error; }
+    if (trialOver() && !stopRequested()) { const error = new Error(`The temporary trial ended after ${timeLeft(trialMs)}; its link is removed. Start a fresh trial for a new link, or run dalan setup for a stable address.`); error.tryKind = 'route'; throw error; }
     if (exited && !stopRequested()) { const error = new Error('the bridge stopped unexpectedly'); error.tryKind = 'unexpected'; throw error; }
   } catch (error) {
     if (signal?.aborted) { /* a normal stop */ }
