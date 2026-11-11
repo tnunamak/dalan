@@ -2,7 +2,7 @@
 // otherwise a Cloudflare Quick Tunnel through a pinned, checksum-verified `cloudflared`. Every process, file and rule here is
 // owned by one trial and removed by `stop()`. Every outside effect goes through a seam in `deps` so tests need no real route.
 import { spawn, spawnSync, execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -15,7 +15,7 @@ import { safeDiagnostic } from './diagnostic.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const PROBE_TIMEOUT_MS = 10_000;
-export const PUBLIC_READY_MS = { tailscale: 120_000, cloudflare: 60_000 };
+export const PUBLIC_READY_MS = { tailscale: 120_000, 'tailscale-node': 120_000, cloudflare: 60_000 };
 
 // ---- the gate ----------------------------------------------------------------------------------------------------------
 // The route forwards to this listener, never to the bridge. A Quick Tunnel reports its address only after it starts, and the
@@ -76,18 +76,22 @@ export function explainTailscale(error) {
   if (/Funnel is not allowed/.test(text)) return first('Funnel is not allowed for this tailnet; using Cloudflare.', `A tailnet administrator can enable Funnel at ${ADMIN_ACL_URL}, then retry.`);
   if (/no free Funnel port/.test(text)) return first('All permitted Funnel ports are occupied; using Cloudflare. Existing routes are unchanged.', 'Free one Funnel port (tailscale funnel status), then retry.');
   const port = /--funnel-port (\d+) is (?:already used|not allowed)/.exec(text)?.[1];
-  if (port) return first(`Tailscale port ${port} is not free for Funnel; using a temporary Cloudflare route. Existing routes are unchanged.`, `Free Funnel port ${port} (tailscale funnel status shows what uses it), or use --route cloudflare.`);
+  if (port) return { ...first(`Tailscale port ${port} is not free for Funnel on this computer; its rules are unchanged.`, `Free Funnel port ${port} (tailscale funnel status shows what uses it), or use --route cloudflare.`), busy: /already used/.test(text) };
   if (/macOS: the Tailscale/.test(text)) return first('The Tailscale app on this Mac cannot serve Funnel here; using Cloudflare.', text.split('\n')[0]);
   const line = safeDiagnostic(text.split('\n')[0], 160);
   return first(`Tailscale Funnel is not usable (${line}); using Cloudflare.`, line);
 }
 
-// `port` pins the public port (a client that reaches only 443 sets it); without it the first free permitted port is used.
-export function tailscaleProvider({ port: wantedPort, tailscale: rawTailscale = tailscaleRunner(), env = process.env, platform = process.platform, spawnChild = spawn, clock = { sleep }, which = name => whichOnPath(name, env) } = {}) {
+// WHY 443 ONLY: a trial always publishes on public port 443, for every client. On 2026-11-10 claude.ai could not reach a Funnel on
+// 8443 ("Couldn't reach this address") but did reach 443, so a Funnel on any other port is not a working route. When this
+// computer's Tailscale already has a rule on 443 (it is never changed), the trial uses its own Tailscale node instead
+// (`tailscaleNodeProvider`), and Cloudflare after that.
+export const TRIAL_PORT = 443;
+export function tailscaleProvider({ port: wantedPort = TRIAL_PORT, name = 'tailscale', record: recordName = 'trial', tailscale: rawTailscale = tailscaleRunner(), env = process.env, platform = process.platform, spawnChild = spawn, clock = { sleep }, which = name => whichOnPath(name, env) } = {}) {
   const tailscale = seeForeground(rawTailscale);
   let plan = null, child = null, record = null, rule = null;
   return {
-    name: 'tailscale',
+    name,
     // Read-only: inspects the daemon, DNS identity, capabilities and the ports other rules already use.
     probe() {
       if (!which('tailscale')) return { ok: false, ...explainTailscale(new Error('Tailscale is not installed')) };
@@ -104,8 +108,8 @@ export function tailscaleProvider({ port: wantedPort, tailscale: rawTailscale = 
       // Re-read just before applying: a port another rule took since the probe is not ours to share.
       const again = preflight({ tailscale, platform });
       if (again.occupied.has(plan.port)) throw new Error(`Funnel port ${plan.port} was taken by another rule after the check; its rule is unchanged`);
-      record = recordPath(home, 'trial');
-      recoverStaleFunnel(home, tailscale);
+      record = recordPath(home, recordName);
+      recoverStaleFunnel(home, tailscale, recordName);
       writeExposureRecord({ file: record, worker: 'trial', dnsName: plan.dnsName, port: plan.port, localPort: gatePort, url: plan.origin });
       rule = { dnsName: plan.dnsName, port: plan.port, gatePort };
       child = spawnChild('tailscale', funnelOnArgs(plan.port, gatePort).filter(arg => arg !== '--bg'), { env, stdio: 'ignore' });
@@ -129,9 +133,103 @@ export function tailscaleProvider({ port: wantedPort, tailscale: rawTailscale = 
 }
 
 // A record from a trial that was killed: switch off exactly its rule if it is still ours, then drop the record.
-function recoverStaleFunnel(home, tailscale) {
-  const file = recordPath(home, 'trial');
+function recoverStaleFunnel(home, tailscale, recordName = 'trial') {
+  const file = recordPath(home, recordName);
   if (fs.existsSync(file)) removeExposure({ tailscale, file, log: () => {} });
+}
+
+// ---- A Tailscale node of its own -----------------------------------------------------------------------------------------
+// When this computer's Tailscale has a rule on 443, the trial starts a second, userspace `tailscaled` under the trial home: its own
+// state directory, socket and hostname (dalan-trial-<id>), so it has its own address and its own :443 Funnel. It touches nothing of
+// the computer's Tailscale. `stop` ends the Funnel, logs the node out, ends the daemon and deletes the state directory.
+const SOCKET_PATH_LIMIT = 100; // a unix socket path must fit sun_path (104 on macOS, 108 on Linux)
+const nodeCli = (sock, env) => args => spawnSync('tailscale', [`--socket=${sock}`, ...args], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
+const procCmdline = pid => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '); } catch { return null; } };
+
+// A trial that was killed leaves its daemon and node behind. Its record names both; end exactly them, and only if the process is
+// still the daemon that was started for that state directory.
+function recoverStaleNode(home, { runCli = nodeCli, env }) {
+  const file = path.join(home, 'dot-bridge-trial-node.json');
+  let rec; try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+  if (rec?.dir && rec?.sock) { try { runCli(rec.sock, env)(['logout']); } catch { /* the daemon is gone */ } }
+  if (Number.isInteger(rec?.pid) && procCmdline(rec.pid)?.includes(rec.dir)) { try { process.kill(rec.pid, 'SIGTERM'); } catch { /* already gone */ } }
+  if (rec?.dir && path.dirname(rec.dir) === home) fs.rmSync(rec.dir, { recursive: true, force: true });
+  fs.rmSync(file, { force: true });
+}
+
+export function tailscaleNodeProvider({
+  env = process.env, platform = process.platform, spawnChild = spawn, runCli = nodeCli, clock = { sleep }, which = name => whichOnPath(name, env),
+  newId = () => randomBytes(3).toString('hex'), loginWaitMs = 600_000, daemonWaitMs = 20_000,
+} = {}) {
+  let node = null; // { dir, sock, hostname, daemon, daemonExited, run, inner, recordFile }
+  return {
+    name: 'tailscale-node',
+    probe() {
+      if (!which('tailscaled') || !which('tailscale')) return { ok: false, line: 'tailscaled is not installed, so a separate Tailscale node cannot be started; using Cloudflare.', fix: 'Install Tailscale (it includes tailscaled) from https://tailscale.com/download, or free Funnel port 443 on this computer.' };
+      return { ok: true };
+    },
+    async start({ gatePort, home, say = () => {} }) {
+      recoverStaleNode(home, { runCli, env });
+      const dir = path.join(home, 'tsnode'), sock = path.join(dir, 'tailscaled.sock'), hostname = `dalan-trial-${newId()}`;
+      if (Buffer.byteLength(sock) > SOCKET_PATH_LIMIT) throw new Error('the trial home path is too long for a Tailscale socket; choose a shorter --home');
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const recordFile = path.join(home, 'dot-bridge-trial-node.json');
+      const writeRecord = pid => fs.writeFileSync(recordFile, JSON.stringify({ dir, sock, hostname, pid, created_at: new Date().toISOString() }), { mode: 0o600 });
+      writeRecord(null); // ownership is recorded before the first process exists
+      const run = runCli(sock, env);
+      const logFd = fs.openSync(path.join(dir, 'tailscaled.log'), 'a', 0o600);
+      const daemon = spawnChild('tailscaled', ['--tun=userspace-networking', `--statedir=${dir}`, `--socket=${sock}`, '--port=0'], { env, stdio: ['ignore', logFd, logFd] });
+      fs.closeSync(logFd);
+      const daemonExited = new Promise(resolve => { daemon.once('exit', resolve); daemon.once('error', resolve); });
+      node = { dir, sock, hostname, daemon, daemonExited, run, recordFile, inner: null };
+      writeRecord(daemon.pid ?? null);
+      for (let waited = 0; ; waited += 250) {
+        let up = false; try { up = Boolean(JSON.parse(run(['status', '--json']).stdout || '{}').BackendState); } catch { /* not ready */ }
+        if (up) break;
+        if (daemon.exitCode !== null || waited >= daemonWaitMs) throw new Error('tailscaled did not start for the trial node');
+        await clock.sleep(250);
+      }
+      // One-time sign-in of the new node: a login URL on a terminal, or an auth key from DALAN_TS_AUTHKEY (kept in a 0600 file).
+      const keyFile = path.join(dir, 'authkey');
+      const upArgs = ['up', `--hostname=${hostname}`, '--accept-dns=false', '--accept-routes=false'];
+      if (env.DALAN_TS_AUTHKEY) { fs.writeFileSync(keyFile, env.DALAN_TS_AUTHKEY, { mode: 0o600 }); upArgs.push(`--auth-key=file:${keyFile}`); }
+      const upChild = spawnChild('tailscale', [`--socket=${sock}`, ...upArgs], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let announced = false;
+      const scan = chunk => {
+        const url = !announced && /https:\/\/login\.tailscale\.com\/\S+/.exec(String(chunk))?.[0];
+        if (url) { announced = true; say(`This temporary Tailscale node needs a one-time sign-in. Open: ${url}`); say('Waiting for the sign-in…'); }
+      };
+      upChild.stdout?.on('data', scan); upChild.stderr?.on('data', scan);
+      const upDone = new Promise(resolve => { upChild.once('exit', code => resolve(code)); upChild.once('error', () => resolve(-1)); });
+      const code = await Promise.race([upDone, clock.sleep(loginWaitMs).then(() => 'timeout')]);
+      if (code !== 0) {
+        if (upChild.exitCode === null) upChild.kill('SIGTERM');
+        throw new Error(code === 'timeout' ? 'the one-time Tailscale sign-in was not completed in time' : 'the Tailscale node could not sign in');
+      }
+      node.signedIn = true;
+      const wrapSpawn = (cmd, args, opts) => spawnChild(cmd, [`--socket=${sock}`, ...args], opts);
+      const inner = tailscaleProvider({ tailscale: run, env, platform: 'linux', spawnChild: wrapSpawn, clock, which: () => true, name: 'tailscale-node', record: 'trial-node' });
+      node.inner = inner;
+      const probe = inner.probe();
+      if (!probe.ok) throw new Error(probe.fix);
+      const started = await inner.start({ gatePort, home });
+      return { origin: started.origin, exited: Promise.race([started.exited, daemonExited]) };
+    },
+    async stop() {
+      if (!node) return { removed: true };
+      const { dir, hostname, daemon, run, recordFile, inner } = node;
+      let result = { removed: true };
+      if (inner) result = await inner.stop();
+      let loggedOut = true;
+      if (node.signedIn) { try { loggedOut = run(['logout']).status === 0; } catch { loggedOut = false; } }
+      if (daemon.exitCode === null) { daemon.kill('SIGTERM'); await Promise.race([new Promise(resolve => daemon.once('exit', resolve)), clock.sleep(5000)]); if (daemon.exitCode === null) daemon.kill('SIGKILL'); }
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(recordFile, { force: true });
+      node = null;
+      if (!result.removed) return result;
+      return { removed: true, ...(loggedOut ? {} : { note: `The trial's Tailscale node ${hostname} could not be logged out; remove it in the Tailscale admin console.` }) };
+    },
+  };
 }
 
 // ---- Cloudflare Quick Tunnel -------------------------------------------------------------------------------------------
@@ -248,26 +346,41 @@ export function cloudflareProvider({ env = process.env, platform = process.platf
 // ---- choosing a route --------------------------------------------------------------------------------------------------
 // `auto`: a ready Funnel, else a Quick Tunnel. An explicit route shows its own failure and never falls back. Returns the started
 // route with its provider name; the caller owns `stop()`.
+// Route choice, in order: this computer's Tailscale on :443 when no rule uses it; else a Tailscale node of the trial's own; else
+// Cloudflare. `tailscale` allows only the first two. A rule that already holds 443 is never changed.
 export async function startRoute({ route = 'auto', providers, gatePort, home, say }) {
-  const attempt = async provider => {
-    const started = await provider.start({ gatePort, home });
-    return { provider, origin: started.origin, exited: started.exited, stop: () => provider.stop() };
-  };
   const named = name => providers.find(p => p.name === name);
-  if (route === 'cloudflare') return attempt(named('cloudflare'));
-  const funnel = named('tailscale').probe();
-  if (route === 'tailscale') {
-    if (!funnel.ok) throw new Error(funnel.fix);
-    return attempt(named('tailscale'));
-  }
-  if (funnel.ok) {
-    try { return await attempt(named('tailscale')); }
-    catch (error) {
-      const cleaned = await named('tailscale').stop();
-      if (!cleaned.removed) throw new Error(`Tailscale Funnel failed (${error.message}) and its rule could not be removed: ${cleaned.detail}\nRemove it with:\n  ${cleaned.command}`);
-      say(`Tailscale Funnel did not start (${safeDiagnostic(error.message, 120)}); using a temporary Cloudflare route.`);
+  // A start that fails is cleaned up before anything else happens, so a failed route never leaves a rule, node or process behind.
+  const attempt = async provider => {
+    try {
+      const started = await provider.start({ gatePort, home, say });
+      return { provider, origin: started.origin, exited: started.exited, stop: () => provider.stop() };
+    } catch (error) {
+      const cleaned = await provider.stop().catch(e => ({ removed: false, detail: e.message }));
+      if (!cleaned.removed) throw Object.assign(new Error(`${provider.name} failed (${error.message}) and could not be removed: ${cleaned.detail}${cleaned.command ? `\nRemove it with:\n  ${cleaned.command}` : ''}`), { cleanupFailed: true });
+      throw error;
     }
-  } else say(funnel.line);
+  };
+  if (route === 'cloudflare') return attempt(named('cloudflare'));
+  const host = named('tailscale').probe();
+  let choice = null, why = host.fix;
+  if (host.ok) choice = named('tailscale');
+  else if (host.busy && named('tailscale-node')) {
+    const node = named('tailscale-node').probe();
+    if (node.ok) { say(`${host.line} Starting a separate Tailscale node for this trial.`); choice = named('tailscale-node'); }
+    else { say(host.line); why = `${host.fix} (${node.fix})`; }
+  } else say(host.line);
+  if (route === 'tailscale') {
+    if (!choice) throw new Error(why);
+    return attempt(choice);
+  }
+  if (choice) {
+    try { return await attempt(choice); }
+    catch (error) {
+      if (error.cleanupFailed) throw error;
+      say(`Tailscale did not start (${safeDiagnostic(error.message, 120)}); using a temporary Cloudflare route.`);
+    }
+  }
   return attempt(named('cloudflare'));
 }
 

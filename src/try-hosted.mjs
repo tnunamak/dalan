@@ -13,7 +13,7 @@ import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
 import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText } from './try-hosted-clients.mjs';
-import { PUBLIC_READY_MS, cloudflareProvider, createGate, startRoute, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
+import { PUBLIC_READY_MS, cloudflareProvider, createGate, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const HOSTED_WORKER = 'hosted';
@@ -21,7 +21,7 @@ const REPORT = 'bridge first report';
 
 export const NOTICE = [
   'Public mode opens an internet route to this trial, protected by your OAuth approval.',
-  'It may download a tunnel helper into your private cache. Nothing is installed system-wide.',
+  'It may download a tunnel helper into your private cache, or start a separate Tailscale node for the trial. Nothing is installed system-wide.',
   'Leave this terminal open; Ctrl-C stops the trial and removes its route.',
 ];
 
@@ -57,7 +57,7 @@ export async function chooseMode({ input, out, signal }) {
 }
 
 export function defaultProviders({ env, say, client, hostedDeps = {} }) {
-  return [tailscaleProvider({ env, port: CLIENTS[client]?.port, ...hostedDeps.tailscale }), cloudflareProvider({ env, say, ...hostedDeps.cloudflare })];
+  return [tailscaleProvider({ env, ...hostedDeps.tailscale }), tailscaleNodeProvider({ env, ...hostedDeps.tailscaleNode }), cloudflareProvider({ env, say, ...hostedDeps.cloudflare })];
 }
 
 // The restart command for a trial, with every selection, on one line.
@@ -289,6 +289,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     if (!cleaned) { process.exitCode = 1; out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n${routeStopped.command ? `Remove it with:\n${commandLine(routeStopped.command)}\n` : ''}`); }
   }
   if (cleaned) say('Public route removed. Bridge stopped.');
+  if (routeStopped?.note) say(routeStopped.note);
   say(`Trial history kept at ${home}`);
   say(`To run it again: ${retry().trim()}`);
 }

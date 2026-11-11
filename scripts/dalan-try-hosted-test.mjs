@@ -15,7 +15,7 @@ import { beginPairing, openSession, workJob } from '../src/demo-worker.mjs';
 import { parseTryArgs, runTry, tryInternals } from '../src/try.mjs';
 import { chooseMode } from '../src/try-hosted.mjs';
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
-import { CLOUDFLARED, HelperError, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, startRoute, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { CLOUDFLARED, HelperError, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -263,28 +263,109 @@ test('claude.ai\'s order: challenge, discovery from the challenge, registration,
   } finally { controller.abort(); await finished; }
 });
 
-test('a client that reaches only port 443 gets Funnel on 443 when it is free, and Cloudflare otherwise', async () => {
-  assert.equal(CLIENTS.claude.port, 443);
-  assert.equal(CLIENTS.chatgpt.port, undefined);
-  const free = provider(fakeTailscale(), { port: 443 });
-  assert.equal(free.probe().origin, 'https://box.tail1234.ts.net', '443 has no port suffix');
-  // 443 held by another rule (as T3's tailnet-only serve is on a real host): never taken, never changed.
-  const taken = fakeTailscale({ serve: { TCP: { 443: { HTTPS: true } }, Web: { 'box.tail1234.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:3773' } } } } } });
-  const busy = provider(taken, { port: 443 }).probe();
-  assert.equal(busy.ok, false);
-  assert.equal(busy.line, 'Tailscale port 443 is not free for Funnel; using a temporary Cloudflare route. Existing routes are unchanged.');
-  assert.match(busy.fix, /Free Funnel port 443 .* or use --route cloudflare\./);
-  // `auto` then uses Cloudflare; an explicit tailscale route fails before anything changes.
-  const cloud = fakeRoute();
+// ---- route choice and the trial's own Tailscale node -----------------------------------------------------------------------
+const stubProvider = (name, { ok = true, busy, startError, line = `${name} line`, fix = `${name} fix` } = {}) => {
+  const record = { started: 0, stopped: 0 };
+  return { record, name, probe: () => ok ? { ok: true } : { ok: false, line, fix, busy }, start: async () => { record.started++; if (startError) throw new Error(startError); return { origin: `https://${name}.example`, exited: new Promise(() => {}) }; }, stop: async () => { record.stopped++; return { removed: true }; } };
+};
+test('route choice: the computer\'s Tailscale on 443, else a node of its own, else Cloudflare; `tailscale` never reaches Cloudflare', async () => {
+  const pick = async (route, providers) => { const lines = []; try { return { chosen: (await startRoute({ route, providers, gatePort: 1, home: tmp, say: l => lines.push(l) })).provider.name, lines }; } catch (error) { return { error: error.message, lines }; } };
+  // 1. 443 is free on this computer.
+  assert.equal((await pick('auto', [stubProvider('tailscale'), stubProvider('tailscale-node'), stubProvider('cloudflare')])).chosen, 'tailscale');
+  // 2. 443 is held by another rule: the node, with one line saying why; the other rule is not the trial's to change.
+  const busy = { ok: false, busy: true, line: 'Tailscale port 443 is not free for Funnel on this computer; its rules are unchanged.', fix: 'Free Funnel port 443' };
+  const node = stubProvider('tailscale-node'), host = stubProvider('tailscale', busy);
+  const second = await pick('auto', [host, node, stubProvider('cloudflare')]);
+  assert.equal(second.chosen, 'tailscale-node');
+  assert.match(second.lines.join('\n'), /Tailscale port 443 is not free for Funnel on this computer; its rules are unchanged\. Starting a separate Tailscale node for this trial\./);
+  assert.equal(host.record.started, 0, 'the computer\'s Tailscale is not started when 443 is busy');
+  assert.equal((await pick('tailscale', [stubProvider('tailscale', busy), stubProvider('tailscale-node'), stubProvider('cloudflare')])).chosen, 'tailscale-node');
+  // 3. No node is possible (no tailscaled), or its start fails: Cloudflare, after the node was cleaned up.
+  const noNode = stubProvider('tailscale-node', { ok: false });
+  assert.equal((await pick('auto', [stubProvider('tailscale', busy), noNode, stubProvider('cloudflare')])).chosen, 'cloudflare');
+  const failing = stubProvider('tailscale-node', { startError: 'the one-time Tailscale sign-in was not completed in time' });
+  const fell = await pick('auto', [stubProvider('tailscale', busy), failing, stubProvider('cloudflare')]);
+  assert.equal(fell.chosen, 'cloudflare');
+  assert.equal(failing.record.stopped, 1, 'a failed node start is cleaned up');
+  assert.match(fell.lines.join('\n'), /Tailscale did not start \(the one-time Tailscale sign-in was not completed in time\); using a temporary Cloudflare route\./);
+  // `--route tailscale` stops with the reason instead of using Cloudflare; a reason other than 443 skips the node.
+  const refused = await pick('tailscale', [stubProvider('tailscale', busy), noNode, stubProvider('cloudflare')]);
+  assert.match(refused.error, /Free Funnel port 443/);
+  const noTailscale = stubProvider('tailscale', { ok: false, line: 'Tailscale is not installed; using a temporary Cloudflare route.' });
+  const skipped = await pick('auto', [noTailscale, stubProvider('tailscale-node'), stubProvider('cloudflare')]);
+  assert.equal(skipped.chosen, 'cloudflare');
+  // Cloudflare asked for by name touches no Tailscale provider.
+  assert.equal((await pick('cloudflare', [host, node, stubProvider('cloudflare')])).chosen, 'cloudflare');
+});
+
+function nodeHarness({ upBehaviour = 'login-then-ok', host = {}, sockHome } = {}) {
+  const fake = fakeTailscale(host);
+  const events = { spawned: [], daemon: null };
+  const spawnChild = (cmd, args, opts) => {
+    events.spawned.push([cmd, ...args]);
+    if (cmd === 'tailscaled') {
+      const child = new EventEmitter(); child.exitCode = null; child.pid = 777;
+      child.kill = () => { child.exitCode = 0; child.emit('exit'); };
+      events.daemon = child; return child;
+    }
+    if (args.includes('up')) {
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
+      child.kill = () => { child.exitCode = 1; child.emit('exit', 1); };
+      queueMicrotask(() => {
+        if (upBehaviour === 'login-then-ok') { child.stderr.emit('data', Buffer.from('\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n')); setTimeout(() => { child.exitCode = 0; child.emit('exit', 0); }, 5); }
+        if (upBehaviour === 'ok') { child.exitCode = 0; child.emit('exit', 0); }
+      });
+      return child;
+    }
+    return fake.spawnChild(cmd, args, opts);
+  };
   const lines = [];
-  const auto = await startRoute({ route: 'auto', providers: [provider(taken, { port: 443 }), cloud.provider], gatePort: 1, home: tmp, say: l => lines.push(l) });
-  assert.equal(auto.provider.name, 'cloudflare');
-  assert.match(lines.join('\n'), /Tailscale port 443 is not free for Funnel; using a temporary Cloudflare route/);
-  await auto.stop();
-  await assert.rejects(startRoute({ route: 'tailscale', providers: [provider(taken, { port: 443 }), fakeRoute().provider], gatePort: 1, home: tmp, say() {} }), /Free Funnel port 443/);
-  assert.deepEqual(taken.state.calls.filter(c => c.startsWith('funnel --https')), [], 'the rule on 443 is untouched');
-  // Without the pin, ChatGPT keeps the first free port.
-  assert.equal(provider(fakeTailscale({ serve: { Web: { 'box.tail1234.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:1' } } } } } })).probe().origin, 'https://box.tail1234.ts.net:8443');
+  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs: 200, daemonWaitMs: 200 });
+  return { node, fake, events, lines, say: l => lines.push(l) };
+}
+
+test('the trial\'s own node: userspace tailscaled under the trial home, a one-time login line, a 443 Funnel, then logout and removal', async () => {
+  const h = nodeHarness();
+  assert.equal(h.node.probe().ok, true);
+  const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+  const started = await h.node.start({ gatePort: 6161, home, say: h.say });
+  assert.equal(started.origin, 'https://box.tail1234.ts.net', '443 on the node\'s own address');
+  const [daemon] = h.events.spawned;
+  assert.deepEqual(daemon, ['tailscaled', '--tun=userspace-networking', `--statedir=${home}/tsnode`, `--socket=${home}/tsnode/tailscaled.sock`, '--port=0']);
+  assert.ok(h.events.spawned.some(a => a[0] === 'tailscale' && a.includes('up') && a.includes('--hostname=dalan-trial-abc123')), 'its own hostname');
+  assert.deepEqual(h.lines.filter(l => /login/.test(l)), ['This temporary Tailscale node needs a one-time sign-in. Open: https://login.tailscale.com/a/abc123'], 'one login line');
+  const funnel = h.events.spawned.find(a => a.includes('funnel'));
+  assert.deepEqual(funnel, ['tailscale', `--socket=${home}/tsnode/tailscaled.sock`, 'funnel', '--https=443', 'http://127.0.0.1:6161']);
+  assert.ok(fs.existsSync(path.join(home, 'dot-bridge-trial-node.json')), 'the node is recorded for recovery');
+  const stopped = await h.node.stop();
+  assert.deepEqual(stopped, { removed: true });
+  assert.equal(h.fake.state.loggedOut, true, 'the node is logged out');
+  assert.equal(h.events.daemon.exitCode, 0, 'the daemon is ended');
+  assert.equal(fs.existsSync(path.join(home, 'tsnode')), false, 'its state directory is deleted');
+  assert.equal(fs.existsSync(path.join(home, 'dot-bridge-trial-node.json')), false);
+});
+
+test('the trial\'s own node: an unfinished login is a clean failure; a stale node from a killed trial is cleared first; a long home path is refused', async () => {
+  const h = nodeHarness({ upBehaviour: 'hang' });
+  const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await assert.rejects(h.node.start({ gatePort: 1, home, say: h.say }), /sign-in was not completed in time/);
+  assert.deepEqual(await h.node.stop(), { removed: true });
+  assert.equal(h.fake.state.loggedOut, undefined, 'a node that never signed in is not logged out');
+  assert.equal(h.events.daemon.exitCode, 0);
+  assert.equal(fs.existsSync(path.join(home, 'tsnode')), false);
+  // A killed trial left a directory and a record.
+  const again = nodeHarness({ upBehaviour: 'ok' });
+  const stale = fs.mkdtempSync(path.join(tmp, 'node-'));
+  fs.mkdirSync(path.join(stale, 'tsnode')); fs.writeFileSync(path.join(stale, 'tsnode', 'old-state'), 'x');
+  fs.writeFileSync(path.join(stale, 'dot-bridge-trial-node.json'), JSON.stringify({ dir: path.join(stale, 'tsnode'), sock: path.join(stale, 'tsnode', 'tailscaled.sock'), hostname: 'dalan-trial-old', pid: null }));
+  await again.node.start({ gatePort: 1, home: stale, say: again.say });
+  assert.equal(again.fake.state.loggedOut, true, 'the old node was logged out');
+  assert.equal(fs.existsSync(path.join(stale, 'tsnode', 'old-state')), false, 'its old state is gone');
+  await again.node.stop();
+  const long = nodeHarness({ upBehaviour: 'ok' });
+  await assert.rejects(long.node.start({ gatePort: 1, home: path.join(tmp, 'x'.repeat(120)), say() {} }), /path is too long for a Tailscale socket/);
+  assert.equal(long.events.spawned.length, 0, 'no process starts');
+  assert.equal(tailscaleNodeProvider({ which: () => null }).probe().ok, false);
 });
 
 test('a route that fails to start names the real next steps, not a new home', async () => {
@@ -407,6 +488,7 @@ function fakeTailscale({ status = readyStatus, serve = {}, onFunnelOn, foreignFo
     state.calls.push(args.join(' '));
     const ok = value => ({ status: 0, stdout: JSON.stringify(value) });
     if (args[0] === 'status') return ok(status);
+    if (args[0] === 'logout') { state.loggedOut = true; return { status: 0, stdout: '' }; }
     if (args[0] === 'serve') return ok({ ...state.serve, ...foregroundView(state) });
     if (args[0] === 'funnel' && args[1] === 'status') return ok({ Web: state.web, AllowFunnel: Object.fromEntries(Object.keys(state.web).map(k => [k, true])), ...foregroundView(state) });
     if (args[0] === 'funnel' && args.at(-1) === 'off') { delete state.web[`box.tail1234.ts.net:${args[1].split('=')[1]}`]; return { status: 0, stdout: '' }; }
@@ -436,36 +518,41 @@ test('each missing Tailscale prerequisite gets one line and the Cloudflare fallb
   assert.match(probe({ ...readyStatus, Self: { ...readyStatus.Self, CapMap: { funnel: [] } } }).line, /^Tailscale HTTPS is off; using Cloudflare\.$/);
   assert.match(probe({ ...readyStatus, Self: { ...readyStatus.Self, CapMap: { https: [] } } }).line, /^Funnel is not allowed for this tailnet; using Cloudflare\.$/);
   assert.match(probe({ ...readyStatus, Self: { ...readyStatus.Self, CapMap: { https: [], funnel: [], 'https://tailscale.com/cap/funnel-ports?ports=443,8443,10000': [] } } }).ok ? 'ok' : 'no', /ok/);
-  const full = provider(fakeTailscale({ serve: { TCP: { 443: {}, 8443: {}, 10000: {} } } })).probe();
-  assert.equal(full.line, 'All permitted Funnel ports are occupied; using Cloudflare. Existing routes are unchanged.');
+  const full = provider(fakeTailscale({ serve: { TCP: { 443: {} } } })).probe();
+  assert.equal(full.line, 'Tailscale port 443 is not free for Funnel on this computer; its rules are unchanged.');
+  assert.equal(full.busy, true, 'only a busy 443 leads to a node of the trial\'s own');
+  assert.equal(absent.busy, undefined);
   for (const result of [absent, full]) assert.ok(result.fix, 'an explicit --route tailscale gets the owner\'s own fix');
   assert.match(explainTailscale(new Error('weird')).line, /^Tailscale Funnel is not usable \(weird\); using Cloudflare\.$/);
 });
 
-test('a ready Funnel is used, on a free port, and removed on stop; another rule is never touched', async () => {
-  const fake = fakeTailscale({ serve: { Web: { 'box.tail1234.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:9999' } } } } } });
+test('a ready Funnel is used on 443, and removed on stop; another rule is never touched', async () => {
+  const fake = fakeTailscale({ serve: { Web: { 'box.tail1234.ts.net:8443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:9999' } } } } } });
   const ts = provider(fake);
   const probe = ts.probe();
-  assert.equal(probe.origin, 'https://box.tail1234.ts.net:8443', '443 is taken by another rule, so the next permitted port is used');
+  assert.equal(probe.origin, 'https://box.tail1234.ts.net', 'always 443, whatever else is in use');
   const home = fs.mkdtempSync(path.join(tmp, 'ts-'));
   const started = await ts.start({ gatePort: 5151, home });
   assert.equal(started.origin, probe.origin);
-  assert.deepEqual(fake.state.spawned, ['tailscale', 'funnel', '--https=8443', 'http://127.0.0.1:5151'], 'a foreground rule to the gate, never --bg');
+  assert.deepEqual(fake.state.spawned, ['tailscale', 'funnel', '--https=443', 'http://127.0.0.1:5151'], 'a foreground rule to the gate, never --bg');
   assert.ok(fs.existsSync(path.join(home, 'dot-bridge-trial.exposure.json')), 'ownership is recorded before the rule exists');
   assert.deepEqual(await ts.stop(), { removed: true });
   assert.equal(fs.existsSync(path.join(home, 'dot-bridge-trial.exposure.json')), false);
   assert.deepEqual(fake.state.calls.filter(c => c.startsWith('funnel --https')), [], 'no blanket reset and no other rule was switched off');
 });
 
-test('a foreground rule listed only under Foreground.<session> is seen: ours is found, and another session\'s port is not reused', async () => {
-  const fake = fakeTailscale({ foreignForeground: 443 });
+test('a foreground rule listed only under Foreground.<session> is seen: ours is found, and another session\'s 443 is not taken', async () => {
+  const fake = fakeTailscale({ foreignForeground: 8443 });
   const ts = provider(fake);
-  assert.equal(ts.probe().origin, 'https://box.tail1234.ts.net:8443', 'port 443 is held by another foreground session');
+  assert.equal(ts.probe().origin, 'https://box.tail1234.ts.net');
   const started = await ts.start({ gatePort: 5151, home: fs.mkdtempSync(path.join(tmp, 'ts-fg-')) });
-  assert.equal(started.origin, 'https://box.tail1234.ts.net:8443');
+  assert.equal(started.origin, 'https://box.tail1234.ts.net');
   assert.deepEqual(Object.keys(fake.state.web), [], 'nothing is at the top level, as on real Tailscale');
   assert.deepEqual(await ts.stop(), { removed: true });
   assert.deepEqual(Object.keys(fake.state.foreground), ['other'], 'the other session is untouched');
+  const held = provider(fakeTailscale({ foreignForeground: 443 })).probe();
+  assert.equal(held.ok, false, 'a foreground rule on 443 occupies it');
+  assert.equal(held.busy, true);
 });
 
 test('a port another rule took after the check is left alone and Funnel is not applied', async () => {
@@ -488,7 +575,7 @@ test('auto falls back to Cloudflare when Funnel does not start, after confirming
   const broken = { ...ts, async start(ctx) { throw new Error('tailscale funnel did not publish the rule'); }, probe: () => ({ ok: true, origin: 'x' }), stop: async () => ({ removed: true }) };
   const route = await startRoute({ route: 'auto', providers: [broken, cloud.provider], gatePort: 1, home: tmp, say: line => lines.push(line) });
   assert.equal(route.provider.name, 'cloudflare');
-  assert.match(lines.join('\n'), /Tailscale Funnel did not start .* using a temporary Cloudflare route\./);
+  assert.match(lines.join("\n"), /Tailscale did not start .* using a temporary Cloudflare route\./);
   await route.stop();
   const dead = unreadyTailscale('Funnel is not allowed for this tailnet; using Cloudflare.');
   dead.probe = () => ({ ok: false, line: 'x', fix: 'A tailnet administrator can enable Funnel at https://console.tailscale.com/admin/acls, then retry.' });
