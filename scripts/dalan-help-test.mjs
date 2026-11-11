@@ -164,7 +164,7 @@ test('try help describes the self-check and the wait for your worker, not a prin
 
 test('top-level help names DALAN_HOME before "Start here"', () => {
   const text = dalan('--help').stdout;
-  const line = '  DALAN_HOME   bridge home that commands use; for the trial: export DALAN_HOME=~/.local/share/dalan-trial';
+  const line = '  DALAN_HOME   bridge home commands use: the Home line a run prints (local: ~/.local/share/dalan-trial)';
   assert.ok(text.split('\n').includes(line), text);
   assert.match(text, /^Environment:$/m);
   assert.ok(text.indexOf('Environment:') < text.indexOf('Start here:'));

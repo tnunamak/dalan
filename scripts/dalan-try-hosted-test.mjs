@@ -20,6 +20,8 @@ import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
 import { runSelfCheck } from '../src/try-selfcheck.mjs';
 import { sweepTrialNodes, localhostRunProvider, parseLocalhostRunOrigins, createGate, explainTailscale, authorizationServerMetadataUrl, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { acquireHomeLock } from '../src/try-hosted.mjs';
+import { registerChild, sweepChildren } from '../src/child-registry.mjs';
 import { writeRouteSetting } from '../src/route-setting.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
@@ -60,14 +62,14 @@ function fakeRoute(name = 'localhost.run') {
 const unreadyTailscale = reason => ({ name: 'tailscale', probe: () => ({ ok: false, line: reason, fix: reason }), start: async () => { throw new Error('must not start'); }, stop: async () => ({ removed: true }) });
 
 // ---- a hosted run ------------------------------------------------------------------------------------------------------
-async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: savedRoute, trialMs } = {}) {
+async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: savedRoute, trialMs, noHome } = {}) {
   const home = path.join(tmp, name);
   const port = await reservedPort();
   const route = fakeRoute();
   if (savedRoute) writeRouteSetting(savedRoute, { XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`) });
   const run = { out: '', input: new PassThrough(), controller: new AbortController(), home, route: route.record, errorContext: { started: false, shellCli: `'${path.join(repo, 'bin/dalan.mjs')}'` } };
   run.finished = runTry({
-    argv: ['--public', '--client', 'chatgpt', '--home', home, '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
+    argv: ['--public', '--client', 'chatgpt', ...(noHome ? [] : ['--home', home]), '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), XDG_CACHE_HOME: path.join(tmp, `cache-${name}`), ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
     out: { write: text => { run.out += text; } }, input: run.input, signal: run.controller.signal, errorContext: run.errorContext, clock,
     hosted: { interactive: true, providers: providers ?? [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, ...(trialMs ? { trialMs } : {}) },
   }).then(() => ({}), error => ({ error }));
@@ -1223,4 +1225,74 @@ test('a trial says it is a temporary trial with the time left, and ends itself w
   const real = await hostedRun('real-no-timer', { route: 'tailscale', providers: [unreadyTailscale('x')] });
   await real.finished;
   assert.doesNotMatch(real.out, /Temporary trial/);
+});
+
+test('a real route reuses one home per client, so its address and sign-in survive a restart; a trial gets a new home each run', async () => {
+  const oldHome = process.env.HOME;
+  process.env.HOME = path.join(tmp, 'fake-home');
+  fs.mkdirSync(process.env.HOME, { recursive: true });
+  try {
+    const homes = [];
+    for (const [route, name] of [['tailscale', 'rh1'], ['tailscale', 'rh2'], [undefined, 'th1'], [undefined, 'th2']]) {
+      const run = await hostedRun(name, { noHome: true, route, providers: [unreadyTailscale('x'), fakeRoute().provider] });
+      if (!route) await run.close(); else await run.finished;
+      homes.push(run.errorContext.home);
+    }
+    assert.equal(homes[0], homes[1]);
+    assert.equal(path.basename(homes[0]), 'dalan-hosted-chatgpt');
+    assert.notEqual(homes[2], homes[3]);
+    assert.notEqual(path.basename(homes[2]), 'dalan-hosted-chatgpt');
+  } finally { process.env.HOME = oldHome; }
+});
+
+test('the three-hour limit also ends an unanswered approval question, and the link is removed', async () => {
+  const run = await hostedRun('expire-prompt', { trialMs: 6000 });
+  await approveAs(run, { answer: null });
+  await run.until(/Approve this connection\? \[y\/N\] /);
+  const done = await run.finished;
+  assert.match(done.error?.message ?? '', /The temporary trial ended after/);
+  assert.equal(run.route.stopped, 1);
+});
+
+test('a second run on a home that is in use leaves its files alone; a lock whose owner is gone is taken over', () => {
+  const home = path.join(tmp, 'lockhome');
+  fs.mkdirSync(home, { recursive: true });
+  const release = acquireHomeLock(home);
+  assert.throws(() => acquireHomeLock(home), /another trial is using this home/);
+  release();
+  assert.equal(fs.existsSync(path.join(home, '.hosted-lock')), false);
+  fs.writeFileSync(path.join(home, '.hosted-lock'), '2147483646 stale');
+  acquireHomeLock(home)();
+  fs.writeFileSync(path.join(home, '.hosted-lock'), 'not a pid');
+  assert.throws(() => acquireHomeLock(home), /another trial is using this home/, 'an unreadable lock is not taken over');
+});
+
+test('a run that loses the home lock removes nothing of the winner', async () => {
+  const home = path.join(tmp, 'lost');
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, '.dalan-trial'), 'created by `dalan try`\n');
+  fs.writeFileSync(path.join(home, 'resource-url'), 'winner');
+  fs.writeFileSync(path.join(home, '.hosted-lock'), `${process.pid} winner`);
+  const run = await hostedRun('lost');
+  const done = await run.finished;
+  assert.match(done.error?.message ?? '', /another trial is using this home/);
+  assert.equal(fs.readFileSync(path.join(home, 'resource-url'), 'utf8'), 'winner');
+  assert.equal(run.route.started, 0);
+});
+
+test('children of a trial that was killed are ended by the next trial, only when the process still matches', async () => {
+  const registry = path.join(tmp, 'children');
+  const live = new Map([[111, 'ssh -R x'], [222, 'ssh -R y'], [999, 'node bin/dalan.mjs try']]);
+  const processCmd = pid => live.get(pid) ?? null;
+  const killed = [];
+  const kill = (pid, signal) => { killed.push([pid, signal]); live.delete(pid); };
+  registerChild({ registry, child: { pid: 111 }, processCmd, owner: 998 }); // owner 998 is gone
+  registerChild({ registry, child: { pid: 222 }, processCmd, owner: 999 }); // owner 999 still runs
+  fs.writeFileSync(path.join(registry, '333.json'), JSON.stringify({ pid: 333, cmd: 'ssh -R z', owner: 998, ownerCmd: 'node old' })); // pid 333 now belongs to another process
+  live.set(333, 'vim notes.txt');
+  const ended = await sweepChildren({ registry, processCmd, kill, clock: { sleep: async () => {} } });
+  assert.deepEqual(ended, [111]);
+  assert.deepEqual(killed, [[111, 'SIGTERM']]);
+  assert.ok(live.has(222) && live.has(333), 'a live owner and a reused PID are left alone');
+  assert.deepEqual(fs.readdirSync(registry).sort(), ['222.json']);
 });

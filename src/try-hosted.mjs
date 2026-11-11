@@ -15,6 +15,7 @@ import { PAIRING_MINUTES } from './as-files.mjs';
 import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText } from './try-hosted-clients.mjs';
 import { PUBLIC_READY_MS, createGate, localhostRunProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
 import { readRouteSetting } from './route-setting.mjs';
+import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const HOSTED_WORKER = 'hosted';
@@ -26,6 +27,26 @@ export function removeTrialSecrets(home, configDir, { keepConfig = false, keepNo
   if (!keepNode) fs.rmSync(path.join(home, 'tsnode'), { recursive: true, force: true }); // else a child still holds files there: the next sweep removes them
 }
 const REPORT = 'bridge first report';
+
+// One trial at a time per home. A lock file names its owner; a loser exits before it creates, truncates or removes anything.
+export function acquireHomeLock(home) {
+  const file = path.join(home, '.hosted-lock');
+  const token = `${process.pid} ${randomBytes(8).toString('hex')}`;
+  const busy = () => Object.assign(new Error(`another trial is using this home; stop it first or choose a new --home (if none is running, delete ${file})`), { tryKind: 'already_running' });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(file, 'wx', 0o600); fs.writeSync(fd, token); fs.closeSync(fd);
+      return () => { try { if (fs.readFileSync(file, 'utf8') === token) fs.rmSync(file, { force: true }); } catch { /* gone */ } };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const pid = Number.parseInt(fs.readFileSync(file, 'utf8'), 10);
+      if (!Number.isInteger(pid)) throw busy();
+      try { process.kill(pid, 0); throw busy(); } catch (probe) { if (probe.tryKind || probe.code === 'EPERM') throw busy(); }
+      fs.rmSync(file, { force: true }); // its owner is gone
+    }
+  }
+  throw busy();
+}
 
 // Said once, before any public address exists. A trial link is told apart from a real address in every line that names it.
 export const TRIAL_NOTICE = 'Trial link via localhost.run, a third-party relay that can see this traffic; the address changes within hours. For daily use: dalan setup';
@@ -85,7 +106,8 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const spec = CLIENTS[client];
   const say = line => out.write(`${terminalSafe(line)}\n`);
   const realHome = fs.realpathSync(os.homedir());
-  const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
+  // A real route keeps one home per client, so its address and its sign-in survive a restart; a trial gets a new home every run.
+  const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', realRoute ? `dalan-hosted-${client}` : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
   errorContext.home = home;
   const cliPath = errorContext.shellCli ?? shellQuote(path.join(repo, 'bin/dalan.mjs'));
   const cli = errorContext.cli ?? `node ${cliPath}`;
@@ -96,6 +118,10 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   errorContext.tryFlags = ` --public --client ${client} --route ${routeChoice}`;
   const retry = () => commandLine(restartCommand({ cli, home, shellQuote, client, route: routeChoice, provider: route?.provider.name }));
 
+  // A bridge or ssh that an earlier trial left behind (its process was killed without cleanup) is ended first; only a recorded, matching process is touched.
+  const registry = childRegistry(env);
+  const leftovers = await sweepChildren({ registry }).catch(() => []);
+  if (leftovers.length) out.write(`Ended ${leftovers.length} process${leftovers.length === 1 ? '' : 'es'} left by an earlier trial.\n`);
   // A home that already has a bridge or another trial's profile is never reused silently.
   const adminSock = defaultPath(home, '.local/share/dot-bridge', 'admin.sock');
   if (await socketAnswers(adminSock)) throw Object.assign(new Error('the bridge for this home is already running; stop it with Ctrl-C in its terminal first, or choose a new --home'), { tryKind: 'already_running' });
@@ -110,9 +136,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   let exited = true, stopped = Promise.resolve(), server = null, routeDied = false;
   const stopPromise = new Promise(resolve => { if (signal?.aborted) resolve(); signal?.addEventListener('abort', resolve, { once: true }); lines.once('close', resolve); });
   let routeGone = new Promise(() => {});
+  // The trial's lifetime is a real timer, not a check in the polling loop, so it also ends an unanswered question or a wait after a result.
+  const trialMs = realRoute ? null : (deps.trialMs ?? TRIAL_MS);
+  let expired = false, expireTimer = null;
   const untilStopRequested = () => Promise.race([stopPromise, stopped, routeGone]);
   const ask = question => {
-    if (stopRequested() || exited || routeDied) return null;
+    if (stopRequested() || exited || routeDied || expired) return null;
     out.write(question);
     return new Promise(resolve => {
       const done = answer => { lines.off('line', done); lines.off('close', onClose); signal?.removeEventListener('abort', onClose); resolve(answer); };
@@ -136,6 +165,8 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     const log = fs.openSync(logFile, 'w', 0o600); fs.fchmodSync(log, 0o600); fs.closeSync(log);
     exited = false;
     server = spawn(process.execPath, [path.join(repo, 'src/server.mjs')], { env: { ...baseEnv, DALAN_PORT: String(bindPort) }, cwd: repo, stdio: ['ignore', 'pipe', 'pipe'] });
+    const forgetServer = registerChild({ registry, child: server });
+    server.once('close', forgetServer);
     const child = server;
     const sinks = [child.stdout, child.stderr].map(stream => { const persist = createLineMasker(text => fs.appendFileSync(logFile, text)); stream.setEncoding('utf8').on('data', chunk => persist(chunk)); return persist; });
     stopped = new Promise(resolve => {
@@ -159,13 +190,15 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   };
 
   let gate = null, route = null, routeStopped = null, cleaned = true;
+  let releaseHome;
+  try { releaseHome = acquireHomeLock(home); } catch (error) { lines.close(); throw error; }
   const providers = deps.providers ?? defaultProviders({ env, say, client, hostedDeps: deps });
   try {
     say(realRoute ? REAL_NOTICE(saved === 'tailscale') : TRIAL_NOTICE);
     say('Checking public routes…');
     gate = await createGate();
     // A trial that was killed earlier may have left a Tailscale node of its own running; end it before this one starts.
-    for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended a Tailscale node left by an earlier trial (${ended.join(', ')}).`); }
+    for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended ${ended.join(', ')} left by an earlier trial.`); }
     signal?.throwIfAborted();
     try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal, client }); }
     catch (error) {
@@ -221,8 +254,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     const job = async () => JSON.parse(await dalan(['get', requestId, '--json']));
     const pendingNow = async () => parsePending(JSON.parse(await dalan(['connect', 'pending', '--json'])));
 
-    const trialMs = realRoute ? null : (deps.trialMs ?? TRIAL_MS), trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
-    const trialOver = () => trialEndsAt !== null && clock.now() >= trialEndsAt;
+    const trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
+    const trialOver = () => expired || (trialEndsAt !== null && clock.now() >= trialEndsAt);
+    if (trialMs !== null) {
+      const expiry = new Promise(resolve => { expireTimer = setTimeout(() => { expired = true; resolve(); }, trialMs); expireTimer.unref?.(); });
+      routeGone = Promise.race([routeGone, expiry]);
+    }
     const trialLeft = () => trialEndsAt === null ? '' : ` Temporary trial: ${timeLeft(trialEndsAt - clock.now())} left.`;
     if (trialEndsAt !== null) say(`Temporary trial: this link stops in ${timeLeft(trialMs)} or sooner if the relay changes the address. Replace it with \`dalan setup\` for daily use.`);
     say('');
@@ -267,7 +304,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
         const answer = await askOnce('Accept this result? [y/N] ');
         if (answer?.trim().toLowerCase() === 'y') { await dalan(['decide', requestId, 'accepted']); say(`Recorded as accepted. The trial stays available until you press Ctrl-C.`); }
         else say(stopRequested() ? '\nNot recorded.' : `Not recorded. Decide later while the trial runs:\n${commandLine(ownCommand('decide', requestId, 'accepted'))}`);
-        if (!stopRequested() && !routeDied && !exited) await untilStopRequested();
+        if (!stopRequested() && !routeDied && !exited && !trialOver()) await untilStopRequested();
         break;
       }
       if (current.status === 'queued') {
@@ -309,6 +346,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     else throw error;
   } finally {
     lines.close();
+    clearTimeout(expireTimer);
     // Close forwarding first, then end the connection while the bridge can still answer, then remove the route and stop the bridge.
     gate?.shut();
     if (errorContext.started && !exited) await dalan(['connect', 'revoke', HOSTED_WORKER], { abortable: false }).catch(() => {});
@@ -317,6 +355,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     await gate?.close();
     // The connector URL and the bridge's secrets are no use after the trial and stay on disk for nobody.
     removeTrialSecrets(home, configDir, { keepConfig: STABLE_ORIGIN_ROUTES.has(route?.provider.name), keepNode: Boolean(routeStopped?.keepNode) });
+    releaseHome();
     cleaned = routeStopped ? routeStopped.removed : true;
     if (!cleaned) { process.exitCode = 1; out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n${routeStopped.command ? `Remove it with:\n${commandLine(routeStopped.command)}\n` : ''}`); }
   }

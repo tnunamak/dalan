@@ -2,7 +2,7 @@
 
 This guide takes you from a built-in OAuth connection to one completed job. Use ChatGPT on the web with custom MCP connections enabled for your account or workspace; UI labels can vary. The owner runs Dalan and approves the connection; the ChatGPT user connects the worker and starts its run. One person can perform both roles.
 
-**Just trying it?** Run `npx -y @tnunamak/dalan try` and choose ChatGPT: it opens a temporary public route, prints the connector URL and the steps, and confirms that ChatGPT finished a demo job. The rest of this guide sets up a permanent bridge.
+**Just trying it?** Follow the [README hosted trial](../README.md#quickstart), including its release-status note: until the release, run `node bin/dalan.mjs try` from the checkout, because npm 0.5.2 has no hosted trial. It opens a temporary public route, prints the connector URL and the steps, and confirms that ChatGPT finished a demo job. The rest of this guide sets up a permanent bridge.
 
 ## Owner setup
 
@@ -74,7 +74,7 @@ This guide takes you from a built-in OAuth connection to one completed job. Use 
 
 ## When connection fails
 
-If ChatGPT says “Couldn't discover OAuth settings” or “Some app settings were rejected,” inspect discovery, registration, tunnel and TLS stages rather than assuming a single cause. OpenAI does not document a universal port requirement for public custom MCP endpoints. See its [connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt) and [OAuth guide](https://developers.openai.com/plugins/build/auth).
+If ChatGPT says “Couldn't discover OAuth settings” or “Some app settings were rejected,” first check that the bridge is running (`dalan status --json` in the service's Home) and that ChatGPT has the complete HTTPS MCP URL, then inspect the discovery, registration, tunnel and TLS stages rather than assuming a single cause. Do not change authentication to get past the error. OpenAI does not document a universal port requirement for public custom MCP endpoints. See its [connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt) and [OAuth guide](https://developers.openai.com/plugins/build/auth).
 
 HTTP 421 means the incoming Host does not match the configured public origin, including any non-default port. Preserve Host through the proxy; forwarding a different `X-Forwarded-Host` does not fix it. See [network setup](service-setup.md).
 

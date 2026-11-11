@@ -11,6 +11,7 @@ import {
   ADMIN_ACL_URL, ADMIN_DNS_URL, choosePort, funnelOffArgs, funnelOnArgs, funnelRuleMatches, funnelStatusArgs,
   preflight, publicUrl, removeExposure, whichOnPath, writeExposureRecord, recordPath,
 } from '../scripts/lib/expose-tailscale.mjs';
+import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 import { safeDiagnostic } from './diagnostic.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -390,9 +391,12 @@ export function parseLocalhostRunOrigins(line) {
 }
 export const LOCALHOST_RUN_FIX = 'ssh is not installed. Install OpenSSH (macOS and most Linux systems include it; on Debian or Ubuntu: sudo apt install openssh-client) and run this again.';
 export function localhostRunProvider({ env = process.env, spawnChild = spawn, which = name => whichOnPath(name, env), clock = { sleep }, startMs = 30_000, killGraceMs = 2000 } = {}) {
-  let child = null, reason = null;
+  let child = null, reason = null, forget = () => {};
+  const registry = childRegistry(env);
   return {
     name: 'localhost.run',
+    // An ssh left by a trial whose process was killed without cleanup is ended by the next trial.
+    recover: () => sweepChildren({ registry, clock }).then(pids => pids.length ? ['ssh'] : []),
     probe: () => which('ssh') ? { ok: true } : { ok: false, line: LOCALHOST_RUN_FIX, fix: LOCALHOST_RUN_FIX },
     // Why the route ended, when the provider knows: 'rotated' (the relay named a new address), else null.
     endedBecause: () => reason,
@@ -408,6 +412,8 @@ export function localhostRunProvider({ env = process.env, spawnChild = spawn, wh
         '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${path.join(dir, 'known_hosts')}`, '-o', 'GlobalKnownHostsFile=/dev/null', '-o', 'ForwardAgent=no', '-o', 'IdentitiesOnly=yes', '-o', 'PasswordAuthentication=no',
         '-R', `80:127.0.0.1:${gatePort}`, 'nokey@localhost.run'];
       child = spawnChild('ssh', args, { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+      forget = registerChild({ registry, child });
+      child.once('exit', () => forget());
       let first = null, tail = '';
       let onRotate = () => {};
       const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', resolve); });
