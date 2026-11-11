@@ -4,9 +4,14 @@ import { redactNote } from './alerts.mjs';
 
 const responses = new WeakMap();
 
-// The caller's product token only (first token of User-Agent, e.g. "Claude-User/1.0"), never the full string, which can carry
-// contact addresses or version detail. It tells an Anthropic or OpenAI caller from a generic one in the request log.
-export const uaToken = req => /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}(?:\/[A-Za-z0-9._+-]{1,20})?/.exec(String(req.headers?.['user-agent'] ?? ''))?.[0] ?? null;
+// The caller's class, never its text: a User-Agent can hold anything, including a credential, so only a name from this fixed
+// list is logged ("other" for the rest, null when absent). That is enough to tell an Anthropic or OpenAI caller from a generic one.
+const UA_CLASSES = [['Claude-User', /^claude-user/i], ['ClaudeBot', /^claudebot/i], ['anthropic-ai', /^anthropic-ai/i], ['ChatGPT-User', /^chatgpt-user/i], ['OAI-SearchBot', /^oai-searchbot/i],
+  ['node', /^node(?![A-Za-z0-9._-])/i], ['undici', /^undici/i], ['curl', /^curl/i], ['python', /^python/i], ['Mozilla', /^mozilla/i]];
+export const uaToken = req => {
+  const ua = String(req.headers?.['user-agent'] ?? '');
+  return ua === '' ? null : (UA_CLASSES.find(([, pattern]) => pattern.test(ua))?.[0] ?? 'other');
+};
 const methods = new Set(['server/discover', 'initialize', 'ping', 'tools/list', 'tools/call', 'events/list', 'events/subscribe', 'events/unsubscribe', 'notifications/initialized', 'notifications/cancelled']);
 
 // Log only declared protocol names and numeric outcomes. RPC IDs, arguments,

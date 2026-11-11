@@ -1,4 +1,6 @@
 import { uaToken } from './mcp-outcome.mjs';
+const GRANT_TYPES = ['authorization_code', 'refresh_token', 'client_credentials'];
+const TOKEN_PARAMS = ['grant_type', 'code', 'redirect_uri', 'client_id', 'client_secret', 'code_verifier', 'refresh_token', 'scope', 'resource', 'client_assertion', 'client_assertion_type'];
 import { Provider, errors } from 'oidc-provider';
 import { ACCEPTED_SCOPES, ADVERTISED_SCOPES, canonicalScopes } from './scopes.mjs';
 import { randomUUID } from 'node:crypto';
@@ -207,7 +209,9 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
       if (!store.window()) return reject(403, 'access_denied', 'Open a pairing window before registering.');
       if (!store.reserveRegistration()) return reject(429, 'temporarily_unavailable', 'Registration limit reached. Reuse the client this worker already registered. If you cannot, ask the owner to run dalan connect reset, then retry.');
       if (Number(ctx.get('content-length')) > 8192) return reject(413, 'invalid_client_metadata', 'Registration body exceeds 8192 bytes.');
-      if (!await normalizeRegistration(ctx.req)) { ctx.req.destroy(); return; } // over 8192 bytes
+      const normalized = await normalizeRegistration(ctx.req);
+      if (normalized === 'too_large') { ctx.req.destroy(); return; }
+      if (normalized === 'invalid') return reject(400, 'invalid_request', 'The registration body must be a UTF-8 JSON object.');
       let bytes = 0;
       const count = chunk => { bytes += chunk.length; if (bytes > 8192) ctx.req.destroy(); };
       ctx.req.on('data', count);
@@ -217,8 +221,10 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     if (route === '/token' && ctx.method === 'POST') {
       await next();
       // Names and shapes only, never a value of a secret: what a client sent and what it was given back.
+      // Names come from fixed lists: a caller chooses the text of grant_type and the names of its parameters, so neither is logged as sent.
       const sent = ctx.oidc?.body ?? {}, given = ctx.body && typeof ctx.body === 'object' ? ctx.body : {};
-      log({ kind: 'as_token_detail', status: ctx.status, grant_type: typeof sent.grant_type === 'string' ? sent.grant_type.slice(0, 40) : null, request_params: Object.keys(sent).sort(), response_has: ['access_token', 'refresh_token', 'id_token', 'scope', 'expires_in', 'token_type'].filter(k => given[k] !== undefined).map(k => k.replace('_token', 'Tok')), token_type: given.token_type ?? null, scope: given.scope ?? null, expires_in: given.expires_in ?? null, has_resource: Boolean(sent.resource) });
+      const names = Object.keys(sent), known = names.filter(k => TOKEN_PARAMS.includes(k)).sort();
+      log({ kind: 'as_token_detail', status: ctx.status, grant_type: typeof sent.grant_type === 'string' ? (GRANT_TYPES.includes(sent.grant_type) ? sent.grant_type : 'other') : null, request_params: known, unknown_params: names.length - known.length, response_has: ['access_token', 'refresh_token', 'id_token', 'scope', 'expires_in', 'token_type'].filter(k => given[k] !== undefined).map(k => k.replace('_token', 'Tok')), token_type: given.token_type === 'Bearer' ? 'Bearer' : null, scope: typeof given.scope === 'string' ? given.scope.split(' ').filter(x => ACCEPTED_SCOPES.includes(x) || x === 'openid').join(' ') : null, expires_in: Number.isInteger(given.expires_in) ? given.expires_in : null, has_resource: Boolean(sent.resource) });
       return;
     }
     if (route === '/auth' && ctx.query.response_type !== 'code') return refuse(400, 'Unsupported response type', 'Only response_type=code is supported.');
@@ -292,18 +298,21 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
   // would never accept. RFC 7591 §3.2.1 lets the server replace requested values as long as the response shows what it registered,
   // so an omitted or unsupported method is registered as `none`: the response carries `token_endpoint_auth_method: "none"` and no
   // `client_secret`, in agreement with the metadata and the token endpoint. A strict client (claude.ai) stops on that mismatch.
+  // Returns 'ok', or 'invalid' for a body that is not a UTF-8 JSON object (the caller answers it as the library answers a bad body).
   async function normalizeRegistration(req) {
-    if (!/^application\/json\b/i.test(req.headers['content-type'] ?? '')) return true;
+    const type = req.headers['content-type'] ?? '';
+    if (!/^application\/json\b/i.test(type)) return 'ok';
+    const charset = /;\s*charset\s*=\s*"?([^";\s]+)/i.exec(type)?.[1];
+    if (charset && !/^utf-?8$/i.test(charset)) return 'invalid';
     const chunks = []; let size = 0;
-    for await (const chunk of req.iterator({ destroyOnReturn: false })) { size += chunk.length; if (size > 8192) return false; chunks.push(chunk); }
-    const text = Buffer.concat(chunks).toString('utf8');
-    let body; try { body = JSON.parse(text); } catch { req.body = text; return true; } // the library reports a body that is not JSON, as before
-    if (body && typeof body === 'object' && !Array.isArray(body)) {
-      if (body.token_endpoint_auth_method !== 'none') body.token_endpoint_auth_method = 'none';
-      delete body.client_secret; delete body.client_secret_expires_at;
-    }
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) { size += chunk.length; if (size > 8192) return 'too_large'; chunks.push(chunk); }
+    let body;
+    try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); } catch { return 'invalid'; }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return 'invalid'; // parsed once, here; a JSON string is never parsed again
+    if (body.token_endpoint_auth_method !== 'none') body.token_endpoint_auth_method = 'none';
+    delete body.client_secret; delete body.client_secret_expires_at;
     req.body = body;
-    return true;
+    return 'ok';
   }
   async function provide(req, res, alias) {
     if (alias && !['GET', 'HEAD'].includes(req.method)) { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return; }

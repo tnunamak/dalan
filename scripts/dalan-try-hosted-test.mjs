@@ -17,6 +17,7 @@ import { parseTryArgs, runTry, tryInternals } from '../src/try.mjs';
 import * as tryHostedInternals from '../src/try-hosted.mjs';
 const { chooseMode } = tryHostedInternals;
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
+import { uaToken } from '../src/mcp-outcome.mjs';
 import { CLOUDFLARED, HelperError, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
@@ -265,13 +266,25 @@ test('claude.ai\'s order: challenge, discovery from the challenge, registration,
     // 4. The first authenticated call is an MCP initialize.
     const call = await openSession(url, token);
     await assert.doesNotReject(call('list_pending', {}));
+    assert.equal(fs.readFileSync(path.join(home, '.local/state/dalan/requests.jsonl'), 'utf8').includes('"as_error"'), false, 'the honest flow logs no OAuth error');
+    // A caller can put any text in a User-Agent, a grant_type or a parameter name; none of it may reach the log verbatim.
+    const SENTINEL = 'Zq8Lm3Vx9Tn2Rb7Kd4Hs6Pw1Yc5Jf0GH', SENTINEL_NAME = 'Ab3De5Gh7Jk9Mn1Pq2St4Vw6Xy8Zc0Fu';
+    assert.equal(SENTINEL.length, 32);
+    await fetch(`${origin}/${secret}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': SENTINEL }, body: `grant_type=${SENTINEL}&${SENTINEL_NAME}=${SENTINEL}&client_id=x` });
+    await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': `${SENTINEL}/1.0` }, body: '{}' });
+    await fetch(`${origin}/${secret}/oauth/.well-known/other`, { headers: { 'user-agent': `Mozilla/5.0 ${SENTINEL}` } });
     // Every step is in the request log by route name and status, with no path, query or secret.
     const log = fs.readFileSync(path.join(home, '.local/state/dalan/requests.jsonl'), 'utf8');
     assert.ok(!log.includes(secret), 'the log never holds the secret path');
     const steps = log.split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.kind === 'as_request').map(e => `${e.route}:${e.status}`);
     for (const expected of ['discovery:200', 'registration:201', 'authorize:303', 'interaction:200', 'token:200']) assert.ok(steps.includes(expected), `${expected} in ${steps.join(' ')}`);
-    assert.equal(log.includes('"as_error"'), false);
-    for (const line of log.split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.kind === 'as_request')) assert.equal(line.ua, 'node', `ua on ${line.route}`);
+    assert.equal(log.includes(SENTINEL), false, 'no caller-chosen text in the log');
+    assert.equal(log.includes(SENTINEL_NAME), false, 'no caller-chosen parameter name in the log');
+    const detail = log.split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.kind === 'as_token_detail');
+    assert.ok(detail.some(e => e.grant_type === 'other' && e.unknown_params === 1 && e.request_params.includes('client_id')), JSON.stringify(detail));
+    assert.ok(detail.every(e => ['authorization_code', 'refresh_token', 'client_credentials', 'other', null].includes(e.grant_type)));
+    assert.ok(log.split('\n').filter(Boolean).map(l => JSON.parse(l)).some(e => e.kind === 'mcp_received' && e.ua === 'other'));
+    for (const line of log.split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.kind === 'as_request')) assert.ok(['node', 'other', 'Mozilla'].includes(line.ua), `ua on ${line.route}: ${line.ua}`);
     assert.match(log, /"kind":"mcp_inbound","status":200,"route":"resource_metadata"/);
   } finally { controller.abort(); await finished; }
 });
@@ -858,5 +871,13 @@ test('handoff text: the same text for the same inputs, with no unfilled value', 
     const text = handoffText({ client, url: 'https://x.trycloudflare.com/s/mcp', requestId: 'req_1', requestPhrase: 'bridge first report abcd1234' });
     assert.doesNotMatch(text, /<[^>]+>|PATTERN|NAME\b|PORT\b/);
     assert.ok(text.includes('https://x.trycloudflare.com/s/mcp') && text.includes('claim only req_1,') && text.includes('(bridge first report abcd1234)'));
+  }
+});
+
+test('uaToken names a known caller class and never echoes the caller\'s own text', () => {
+  const of = ua => uaToken({ headers: ua === undefined ? {} : { 'user-agent': ua } });
+  for (const [ua, want] of [['Claude-User/1.0 (+Anthropic)', 'Claude-User'], ['ClaudeBot/1.0', 'ClaudeBot'], ['anthropic-ai/1.0', 'anthropic-ai'], ['ChatGPT-User/1.0', 'ChatGPT-User'], ['OAI-SearchBot/1.0', 'OAI-SearchBot'],
+    ['node', 'node'], ['undici', 'undici'], ['curl/8.5', 'curl'], ['python-httpx/0.27', 'python'], ['Python-urllib/3.12', 'python'], ['Mozilla/5.0 (X11)', 'Mozilla'], ['Zq8Lm3Vx9Tn2Rb7Kd4Hs6Pw1Yc5Jf0GH', 'other'], ['Zq8Lm3Vx9Tn2Rb7Kd4Hs6Pw1Yc5Jf0GH/1.0', 'other'], ['', null], [undefined, null]]) {
+    assert.equal(of(ua), want, String(ua));
   }
 });

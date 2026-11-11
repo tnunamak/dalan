@@ -84,8 +84,8 @@ async function request(body, auth = bearer, method = 'POST') {
   assert.equal(typeof outcome.duration_ms, 'number');
   assert(outcome.duration_ms >= 0);
   assert.equal(logs().filter(row => row.kind === 'mcp_received' && row.call_id === outcome.call_id).length, 1);
-  // Only the first product token of the User-Agent is logged, so the log shows who called without holding the full string.
-  assert.equal(logs().find(row => row.kind === 'mcp_received' && row.call_id === outcome.call_id).ua, 'Claude-User/1.0');
+  // Only a fixed class name for the User-Agent is logged, never its text.
+  assert.equal(logs().find(row => row.kind === 'mcp_received' && row.call_id === outcome.call_id).ua, 'Claude-User');
   return { response, bytes, outcome, json: bytes.length ? JSON.parse(bytes) : null };
 }
 const rpc = (method, params = {}, auth = bearer) => request(JSON.stringify({ jsonrpc: '2.0', id: 'private-rpc-id', method, params }), auth);
@@ -238,7 +238,7 @@ try {
   assert.equal(probe.status, 404);
   await waitFor(() => logs().some(row => row.kind === 'mcp_inbound' && row.route === 'other'));
   const other = logs().findLast(row => row.kind === 'mcp_inbound' && row.route === 'other');
-  assert.deepEqual([other.status, other.http_method, other.path_shape, other.auth_header_present, other.ua], [404, 'GET', '/<48 chars>/mcp', true, 'python-httpx/0.27']);
+  assert.deepEqual([other.status, other.http_method, other.path_shape, other.auth_header_present, other.ua], [404, 'GET', '/<48 chars>/mcp', true, 'python']);
   assert.equal(fs.readFileSync(logPath, 'utf8').includes('private-ua-detail'), false);
   const wellKnown = await fetch(`${origin}/.well-known/oauth-authorization-server`);
   assert.equal(wellKnown.status, 404);
