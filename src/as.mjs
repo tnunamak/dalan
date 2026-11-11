@@ -213,6 +213,13 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
       try { await next(); } finally { ctx.req.off('data', count); }
       return;
     }
+    if (route === '/token' && ctx.method === 'POST') {
+      await next();
+      // Names and shapes only, never a value of a secret: what a client sent and what it was given back.
+      const sent = ctx.oidc?.body ?? {}, given = ctx.body && typeof ctx.body === 'object' ? ctx.body : {};
+      log({ kind: 'as_token_detail', status: ctx.status, grant_type: typeof sent.grant_type === 'string' ? sent.grant_type.slice(0, 40) : null, request_params: Object.keys(sent).sort(), response_has: ['access_token', 'refresh_token', 'id_token', 'scope', 'expires_in', 'token_type'].filter(k => given[k] !== undefined).map(k => k.replace('_token', 'Tok')), token_type: given.token_type ?? null, scope: given.scope ?? null, expires_in: given.expires_in ?? null, has_resource: Boolean(sent.resource) });
+      return;
+    }
     if (route === '/auth' && ctx.query.response_type !== 'code') return refuse(400, 'Unsupported response type', 'Only response_type=code is supported.');
     if (route === '/auth' || route.startsWith('/auth/')) {
       // Only response_mode=query is supported: form_post would need a script-free page the CSP cannot allow.
