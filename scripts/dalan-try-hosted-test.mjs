@@ -1229,20 +1229,22 @@ test('a trial says it is a temporary trial with the time left, and ends itself w
 
 test('a real route reuses one home per client, so its address and sign-in survive a restart; a trial gets a new home each run', async () => {
   const oldHome = process.env.HOME;
-  process.env.HOME = path.join(tmp, 'fake-home');
-  fs.mkdirSync(process.env.HOME, { recursive: true });
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dfh-')); // short: the admin socket path has a length limit
+  process.env.HOME = fakeHome;
   try {
     const homes = [];
     for (const [route, name] of [['tailscale', 'rh1'], ['tailscale', 'rh2'], [undefined, 'th1'], [undefined, 'th2']]) {
       const run = await hostedRun(name, { noHome: true, route, providers: [unreadyTailscale('x'), fakeRoute().provider] });
+      for (let waited = 0; !run.errorContext.home && waited < 5000; waited += 20) await sleepMs(20);
       if (!route) await run.close(); else await run.finished;
+      assert.ok(run.errorContext.home, 'the home is chosen before anything else happens');
       homes.push(run.errorContext.home);
     }
     assert.equal(homes[0], homes[1]);
     assert.equal(path.basename(homes[0]), 'dalan-hosted-chatgpt');
     assert.notEqual(homes[2], homes[3]);
     assert.notEqual(path.basename(homes[2]), 'dalan-hosted-chatgpt');
-  } finally { process.env.HOME = oldHome; }
+  } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; fs.rmSync(fakeHome, { recursive: true, force: true }); }
 });
 
 test('the three-hour limit also ends an unanswered approval question, and the link is removed', async () => {
