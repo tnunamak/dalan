@@ -56,8 +56,8 @@ export async function chooseMode({ input, out, signal }) {
   } finally { lines.close(); }
 }
 
-export function defaultProviders({ env, say, hostedDeps = {} }) {
-  return [tailscaleProvider({ env, ...hostedDeps.tailscale }), cloudflareProvider({ env, say, ...hostedDeps.cloudflare })];
+export function defaultProviders({ env, say, client, hostedDeps = {} }) {
+  return [tailscaleProvider({ env, port: CLIENTS[client]?.port, ...hostedDeps.tailscale }), cloudflareProvider({ env, say, ...hostedDeps.cloudflare })];
 }
 
 // The restart command for a trial, with every selection, on one line.
@@ -144,7 +144,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   };
 
   let gate = null, route = null, routeStopped = null, cleaned = true;
-  const providers = deps.providers ?? defaultProviders({ env, say, hostedDeps: deps });
+  const providers = deps.providers ?? defaultProviders({ env, say, client, hostedDeps: deps });
   try {
     for (const line of NOTICE) say(line);
     say('Checking public routes…');

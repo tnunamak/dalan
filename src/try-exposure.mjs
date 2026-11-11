@@ -23,9 +23,12 @@ export const PUBLIC_READY_MS = { tailscale: 120_000, cloudflare: 60_000 };
 // one bridge port after that, and answers 503 again once closed. Nothing else on the computer is ever reachable through the route.
 export async function createGate() {
   let upstream = null;
+  // A fresh connection per request: a kept-alive socket that the bridge closed in the meantime would fail the next request with a 502
+  // that the bridge never sees.
+  const agent = new http.Agent({ keepAlive: false });
   const server = http.createServer((req, res) => {
     if (!upstream) { res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '2' }); res.end('starting\n'); return; }
-    const forward = http.request({ host: '127.0.0.1', port: upstream, method: req.method, path: req.url, headers: req.headers }, answer => {
+    const forward = http.request({ agent, host: '127.0.0.1', port: upstream, method: req.method, path: req.url, headers: req.headers }, answer => {
       res.writeHead(answer.statusCode, answer.headers);
       answer.pipe(res);
     });
@@ -72,12 +75,15 @@ export function explainTailscale(error) {
   if (/HTTPS certificates/.test(text)) return first('Tailscale HTTPS is off; using Cloudflare.', `Enable HTTPS Certificates at ${ADMIN_DNS_URL} (it publishes your machine names on a public ledger), then retry.`);
   if (/Funnel is not allowed/.test(text)) return first('Funnel is not allowed for this tailnet; using Cloudflare.', `A tailnet administrator can enable Funnel at ${ADMIN_ACL_URL}, then retry.`);
   if (/no free Funnel port/.test(text)) return first('All permitted Funnel ports are occupied; using Cloudflare. Existing routes are unchanged.', 'Free one Funnel port (tailscale funnel status), then retry.');
+  const port = /--funnel-port (\d+) is (?:already used|not allowed)/.exec(text)?.[1];
+  if (port) return first(`Tailscale port ${port} is not free for Funnel; using a temporary Cloudflare route. Existing routes are unchanged.`, `Free Funnel port ${port} (tailscale funnel status shows what uses it), or use --route cloudflare.`);
   if (/macOS: the Tailscale/.test(text)) return first('The Tailscale app on this Mac cannot serve Funnel here; using Cloudflare.', text.split('\n')[0]);
   const line = safeDiagnostic(text.split('\n')[0], 160);
   return first(`Tailscale Funnel is not usable (${line}); using Cloudflare.`, line);
 }
 
-export function tailscaleProvider({ tailscale: rawTailscale = tailscaleRunner(), env = process.env, platform = process.platform, spawnChild = spawn, clock = { sleep }, which = name => whichOnPath(name, env) } = {}) {
+// `port` pins the public port (a client that reaches only 443 sets it); without it the first free permitted port is used.
+export function tailscaleProvider({ port: wantedPort, tailscale: rawTailscale = tailscaleRunner(), env = process.env, platform = process.platform, spawnChild = spawn, clock = { sleep }, which = name => whichOnPath(name, env) } = {}) {
   const tailscale = seeForeground(rawTailscale);
   let plan = null, child = null, record = null, rule = null;
   return {
@@ -87,7 +93,7 @@ export function tailscaleProvider({ tailscale: rawTailscale = tailscaleRunner(),
       if (!which('tailscale')) return { ok: false, ...explainTailscale(new Error('Tailscale is not installed')) };
       try {
         const state = preflight({ tailscale, platform });
-        const port = choosePort({ allowed: state.allowed, occupied: state.occupied });
+        const port = choosePort({ requested: wantedPort, allowed: state.allowed, occupied: state.occupied });
         plan = { dnsName: state.dnsName, port, origin: publicUrl(state.dnsName, port) };
         return { ok: true, origin: plan.origin };
       } catch (error) { return { ok: false, ...explainTailscale(error) }; }

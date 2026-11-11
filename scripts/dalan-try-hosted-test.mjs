@@ -223,6 +223,70 @@ test('the Claude profile uses its own callback and its own steps', async () => {
   } finally { controller.abort(); await finished; }
 });
 
+test('claude.ai\'s order: challenge, discovery from the challenge, registration, sign-in, token, then an MCP call; every step is in the log by name', async () => {
+  const home = path.join(tmp, 'claudeflow');
+  const route = fakeRoute();
+  const input = new PassThrough(), controller = new AbortController();
+  let out = '';
+  const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: { started: false },
+    hosted: { interactive: true, providers: [unreadyTailscale('x'), route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
+  try {
+    for (let i = 0; i < 400 && !/\/mcp$/m.test(out); i++) await sleepMs(50);
+    const url = /^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m.exec(out)[1];
+    const origin = new URL(url).origin, secret = new URL(url).pathname.split('/')[1];
+    // 1. The tokenless request is answered with a challenge that names the discovery document.
+    const challenge = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"claude-ai","version":"0.1.0"}}}' });
+    assert.equal(challenge.status, 401);
+    const metadataUrl = /resource_metadata="([^"]+)"/.exec(challenge.headers.get('www-authenticate'))[1];
+    assert.equal(metadataUrl, `${origin}/.well-known/oauth-protected-resource/${secret}/mcp`);
+    // 2. Discovery that needs no secret is not served at the origin root; the challenge is the only way in, and it is enough.
+    for (const root of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-authorization-server', '/.well-known/openid-configuration', '/register', '/authorize', '/token']) {
+      assert.equal((await fetch(`${origin}${root}`, { redirect: 'manual' })).status, 404, root);
+    }
+    // 3. Sign-in from that document: registration, the owner's approval, the token.
+    const prm = await (await fetch(metadataUrl)).json();
+    assert.equal(prm.resource, url);
+    const pairing = await beginPairing(url, { redirect: CLAUDE_CALLBACK, clientName: 'Claude' });
+    for (let i = 0; i < 400 && !/Approve this connection\? \[y\/N\] /.test(out); i++) await sleepMs(50);
+    input.write('y\n');
+    const token = await pairing.complete();
+    // 4. The first authenticated call is an MCP initialize.
+    const call = await openSession(url, token);
+    await assert.doesNotReject(call('list_pending', {}));
+    // Every step is in the request log by route name and status, with no path, query or secret.
+    const log = fs.readFileSync(path.join(home, '.local/state/dalan/requests.jsonl'), 'utf8');
+    assert.ok(!log.includes(secret), 'the log never holds the secret path');
+    const steps = log.split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.kind === 'as_request').map(e => `${e.route}:${e.status}`);
+    for (const expected of ['discovery:200', 'registration:201', 'authorize:303', 'interaction:200', 'token:200']) assert.ok(steps.includes(expected), `${expected} in ${steps.join(' ')}`);
+    assert.equal(log.includes('"as_error"'), false);
+    assert.match(log, /"kind":"mcp_inbound","status":200,"route":"resource_metadata"/);
+  } finally { controller.abort(); await finished; }
+});
+
+test('a client that reaches only port 443 gets Funnel on 443 when it is free, and Cloudflare otherwise', async () => {
+  assert.equal(CLIENTS.claude.port, 443);
+  assert.equal(CLIENTS.chatgpt.port, undefined);
+  const free = provider(fakeTailscale(), { port: 443 });
+  assert.equal(free.probe().origin, 'https://box.tail1234.ts.net', '443 has no port suffix');
+  // 443 held by another rule (as T3's tailnet-only serve is on a real host): never taken, never changed.
+  const taken = fakeTailscale({ serve: { TCP: { 443: { HTTPS: true } }, Web: { 'box.tail1234.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:3773' } } } } } });
+  const busy = provider(taken, { port: 443 }).probe();
+  assert.equal(busy.ok, false);
+  assert.equal(busy.line, 'Tailscale port 443 is not free for Funnel; using a temporary Cloudflare route. Existing routes are unchanged.');
+  assert.match(busy.fix, /Free Funnel port 443 .* or use --route cloudflare\./);
+  // `auto` then uses Cloudflare; an explicit tailscale route fails before anything changes.
+  const cloud = fakeRoute();
+  const lines = [];
+  const auto = await startRoute({ route: 'auto', providers: [provider(taken, { port: 443 }), cloud.provider], gatePort: 1, home: tmp, say: l => lines.push(l) });
+  assert.equal(auto.provider.name, 'cloudflare');
+  assert.match(lines.join('\n'), /Tailscale port 443 is not free for Funnel; using a temporary Cloudflare route/);
+  await auto.stop();
+  await assert.rejects(startRoute({ route: 'tailscale', providers: [provider(taken, { port: 443 }), fakeRoute().provider], gatePort: 1, home: tmp, say() {} }), /Free Funnel port 443/);
+  assert.deepEqual(taken.state.calls.filter(c => c.startsWith('funnel --https')), [], 'the rule on 443 is untouched');
+  // Without the pin, ChatGPT keeps the first free port.
+  assert.equal(provider(fakeTailscale({ serve: { Web: { 'box.tail1234.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:1' } } } } } })).probe().origin, 'https://box.tail1234.ts.net:8443');
+});
+
 test('a route that fails to start names the real next steps, not a new home', async () => {
   const home = path.join(tmp, 'routefail');
   const failing = { name: 'tailscale', probe: () => ({ ok: true, origin: 'x' }), start: async () => { throw new Error('tailscale funnel did not publish the rule'); }, stop: async () => ({ removed: true }) };

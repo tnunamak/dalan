@@ -19,6 +19,9 @@ export const CLIENTS = {
   },
   claude: {
     label: 'claude.ai',
+    // Observed live (a Funnel on 8443 gave "Couldn't reach this address"; a Quick Tunnel on 443 connected): claude.ai reaches
+    // only port 443. Anthropic does not document this, so it is treated as a rule of the trial, not as a vendor guarantee.
+    port: 443,
     callbacks: ['https://claude.ai/api/mcp/auth_callback'],
     steps: [
       'Open claude.ai, then Customize → Connectors → + → Add custom connector. (If your organization manages connectors, an owner adds it under Organization settings → Connectors first.)',

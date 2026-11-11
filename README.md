@@ -24,7 +24,7 @@ npx -y @tnunamak/dalan try
 
 Press Enter twice to choose ChatGPT (type `2` for claude.ai). Dalan then:
 
-1. **Opens a temporary public HTTPS route.** It uses a Tailscale Funnel that already works on your computer; otherwise it starts a Cloudflare Quick Tunnel and, if needed, downloads the `cloudflared` helper into your user cache after checking its SHA-256. It needs no account, domain, API key or placeholder. If Tailscale is missing or not ready for Funnel, it says why in one line and uses Cloudflare.
+1. **Opens a temporary public HTTPS route.** It uses a Tailscale Funnel that already works on your computer; otherwise it starts a Cloudflare Quick Tunnel and, if needed, downloads the `cloudflared` helper into your user cache after checking its SHA-256. It needs no account, domain, API key or placeholder. If Tailscale is missing or not ready for Funnel, it says why in one line and uses Cloudflare. claude.ai connects only to port 443, so for claude.ai a Tailscale route is used only when Funnel port 443 is free; if another rule holds it, that rule is left alone and Cloudflare is used.
 2. **Prints your complete connector URL** and the steps to add it in ChatGPT or claude.ai, plus one prompt to paste into a chat. Add the connector, sign in, and send the prompt.
 3. **Asks you to approve the sign-in**, shows the code to compare with the sign-in page, and tells you when the hosted client has claimed and finished the demo job. Then you review its report and accept it if it is correct.
 

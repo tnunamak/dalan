@@ -831,7 +831,7 @@ const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)
     if(as&&!as.hostOk(req)) { log({kind:'mcp_inbound',status:421,route:'host'}); res.writeHead(421); res.end(); return; }
     if(!as && req.url==='/.well-known/oauth-protected-resource' && oauthMetadata && req.method==='GET') return json(res,200,protectedResource(oauthMetadata));
     // RFC 9728 / MCP auth: clients first try metadata suffixed with the MCP path, whose resource is the exact MCP URL.
-    if(req.url===`/.well-known/oauth-protected-resource${publicPath}` && oauthMetadata && req.method==='GET') { if(as)res.setHeader('Cache-Control','no-store'); return json(res,200,protectedResource(oauthMetadata,new URL(publicPath,oauthMetadata.OAUTH_AUDIENCE).href)); }
+    if(req.url===`/.well-known/oauth-protected-resource${publicPath}` && oauthMetadata && req.method==='GET') { if(as)res.setHeader('Cache-Control','no-store'); log({kind:'mcp_inbound',status:200,route:'resource_metadata',http_method:req.method,auth_header_present:false}); return json(res,200,protectedResource(oauthMetadata,new URL(publicPath,oauthMetadata.OAUTH_AUDIENCE).href)); }
     if(signal&&signal.handle(req,res)) return;
     if(as&&await as.handle(req,res)) return;
     if(req.url!==publicPath) { log({kind:'mcp_inbound',status:404,route:'other',http_method:req.method,path_shape:pathShape(req.url),auth_header_present:(req.headers.authorization??'').startsWith('Bearer ')}); res.writeHead(404); res.end(); return; }

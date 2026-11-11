@@ -264,6 +264,11 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     const alias = WELL_KNOWN[pathname];
     if (!alias && pathname !== PREFIX && !pathname.startsWith(`${PREFIX}/`)) return false;
     const interaction = interactionPath.exec(pathname.slice(PREFIX.length));
+    // One line per request with a fixed route name and the status, never a path, query or body: a connection that stalls after
+    // approval can then be told apart (no token request vs a refused one) without the log holding a secret.
+    const routeName = alias ? 'discovery' : ({ '/reg': 'registration', '/auth': 'authorize', '/token': 'token', '/token/revocation': 'revocation', '/jwks': 'jwks' }[pathname.slice(PREFIX.length).toLowerCase().replace(/\/+$/, '')]
+      ?? (interaction ? 'interaction' : pathname.slice(PREFIX.length).startsWith('/auth/') ? 'authorize_resume' : 'other'));
+    res.once('finish', () => log({ kind: 'as_request', route: routeName, http_method: req.method, status: res.statusCode }));
     try {
       if (interaction) await interactionPage(req, res, interaction[1]);
       else await provide(req, res, alias);
