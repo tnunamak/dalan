@@ -3,6 +3,10 @@ import { performance } from 'node:perf_hooks';
 import { redactNote } from './alerts.mjs';
 
 const responses = new WeakMap();
+
+// The caller's product token only (first token of User-Agent, e.g. "Claude-User/1.0"), never the full string, which can carry
+// contact addresses or version detail. It tells an Anthropic or OpenAI caller from a generic one in the request log.
+export const uaToken = req => /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}(?:\/[A-Za-z0-9._+-]{1,20})?/.exec(String(req.headers?.['user-agent'] ?? ''))?.[0] ?? null;
 const methods = new Set(['server/discover', 'initialize', 'ping', 'tools/list', 'tools/call', 'events/list', 'events/subscribe', 'events/unsubscribe', 'notifications/initialized', 'notifications/cancelled']);
 
 // Log only declared protocol names and numeric outcomes. RPC IDs, arguments,
@@ -22,7 +26,7 @@ export function beginMcpOutcome(req, res, log, toolNames, authRequired) {
     response_kind: 'empty', error_type: null,
   };
   responses.set(res, state);
-  log({ kind: 'mcp_received', call_id: state.call_id, http_method: state.http_method });
+  log({ kind: 'mcp_received', call_id: state.call_id, http_method: state.http_method, ua: uaToken(req) });
   let recorded = false;
   const complete = completion => {
     if (recorded) return;

@@ -1,3 +1,4 @@
+import { uaToken } from './mcp-outcome.mjs';
 import { Provider, errors } from 'oidc-provider';
 import { ACCEPTED_SCOPES, ADVERTISED_SCOPES, canonicalScopes } from './scopes.mjs';
 import { randomUUID } from 'node:crypto';
@@ -276,7 +277,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     // approval can then be told apart (no token request vs a refused one) without the log holding a secret.
     const routeName = alias ? 'discovery' : ({ '/reg': 'registration', '/auth': 'authorize', '/token': 'token', '/token/revocation': 'revocation', '/jwks': 'jwks' }[pathname.slice(PREFIX.length).toLowerCase().replace(/\/+$/, '')]
       ?? (interaction ? 'interaction' : pathname.slice(PREFIX.length).startsWith('/auth/') ? 'authorize_resume' : 'other'));
-    res.once('finish', () => log({ kind: 'as_request', route: routeName, http_method: req.method, status: res.statusCode }));
+    res.once('finish', () => log({ kind: 'as_request', route: routeName, http_method: req.method, status: res.statusCode, ua: uaToken(req) }));
     try {
       if (interaction) await interactionPage(req, res, interaction[1]);
       else await provide(req, res, alias);

@@ -271,6 +271,7 @@ test('claude.ai\'s order: challenge, discovery from the challenge, registration,
     const steps = log.split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.kind === 'as_request').map(e => `${e.route}:${e.status}`);
     for (const expected of ['discovery:200', 'registration:201', 'authorize:303', 'interaction:200', 'token:200']) assert.ok(steps.includes(expected), `${expected} in ${steps.join(' ')}`);
     assert.equal(log.includes('"as_error"'), false);
+    for (const line of log.split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.kind === 'as_request')) assert.equal(line.ua, 'node', `ua on ${line.route}`);
     assert.match(log, /"kind":"mcp_inbound","status":200,"route":"resource_metadata"/);
   } finally { controller.abort(); await finished; }
 });
