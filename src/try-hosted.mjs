@@ -197,7 +197,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     gate.open(bindPort);
     const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS[route.provider.name], say, signal });
     if (!ready.ready) { if (!signal?.aborted) await route.provider.diagnose?.({ home, say, signal }).catch(() => {}); const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
-    say('Public HTTPS and OAuth discovery verified.');
+    say("Public HTTPS, OAuth discovery and the authorization server's metadata verified.");
 
     // The default callback list already holds both clients' published callbacks; the approval below accepts only the selected client's.
     await dalan(['connect', 'start', '--worker', HOSTED_WORKER]);

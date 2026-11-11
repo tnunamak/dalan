@@ -515,7 +515,17 @@ export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clo
     if (meta.status !== 200) return `discovery returned HTTP ${meta.status}`;
     const doc = await meta.json().catch(() => null);
     if (doc?.resource !== resource) return 'discovery names a different resource';
-    if (!Array.isArray(doc.authorization_servers) || !doc.authorization_servers.every(s => String(s).startsWith(`${origin}/`))) return 'discovery names a different issuer';
+    if (!Array.isArray(doc.authorization_servers) || doc.authorization_servers.length === 0) return 'discovery names no authorization server';
+    if (!doc.authorization_servers.every(s => String(s).startsWith(`${origin}/`))) return 'discovery names a different issuer';
+    // The issuer's own metadata: the exact issuer, and https endpoints for sign-in, tokens and registration on this origin.
+    const issuer = String(doc.authorization_servers[0]), issuerUrl = new URL(issuer);
+    const asMeta = await fetchImpl(`${issuerUrl.origin}/.well-known/oauth-authorization-server${issuerUrl.pathname}`, { redirect: 'manual', signal: within(10_000) });
+    if (asMeta.status !== 200) return `authorization-server metadata returned HTTP ${asMeta.status}`;
+    const as = await asMeta.json().catch(() => null);
+    if (as?.issuer !== issuer) return 'the authorization-server issuer does not match the issuer in discovery';
+    for (const key of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) {
+      if (typeof as[key] !== 'string' || !as[key].startsWith(`${origin}/`)) return `the authorization server's ${key} is missing or is not an address on this origin`;
+    }
     const challenge = await fetchImpl(resource, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}', signal: within(10_000) });
     if (challenge.status !== 401 || !/^Bearer/i.test(challenge.headers.get('www-authenticate') ?? '')) return `an unauthenticated MCP request returned HTTP ${challenge.status}, not an OAuth challenge`;
     for (const owner of ['/admin', '/connect/pending', '/connect/list']) {

@@ -18,6 +18,7 @@ import * as tryHostedInternals from '../src/try-hosted.mjs';
 const { chooseMode } = tryHostedInternals;
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
+import { runSelfCheck } from '../src/try-selfcheck.mjs';
 import { CLOUDFLARED, HelperError, sweepTrialNodes, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
@@ -103,7 +104,7 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
     assert.ok(handoff.includes('Paste this into the chat:'));
     const origin = new URL(url).origin;
     assert.notEqual(Number(new URL(origin).port), run.errorContext.bindPort, 'the public origin is not the bridge bind address');
-    assert.match(run.out, /Public HTTPS and OAuth discovery verified\./);
+    assert.match(run.out, /Public HTTPS, OAuth discovery and the authorization server's metadata verified\./);
     assert.match(run.out, /Tailscale is not installed; using a temporary Cloudflare route\./);
     // The scripted client signs in through the public origin, the owner approves, the client works the job.
     const pairing = await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
@@ -288,6 +289,48 @@ test('claude.ai\'s order: challenge, discovery from the challenge, registration,
     for (const line of log.split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.kind === 'as_request')) assert.ok(['node', 'other', 'Mozilla'].includes(line.ua), `ua on ${line.route}: ${line.ua}`);
     assert.match(log, /"kind":"mcp_inbound","status":200,"route":"resource_metadata"/);
   } finally { controller.abort(); await finished; }
+});
+
+test('the self-check walks a live trial as a real client: every step passes, and no token, code, secret or URL is printed', async () => {
+  const home = path.join(tmp, 'selfcheck');
+  const route = fakeRoute();
+  const input = new PassThrough(), controller = new AbortController();
+  let out = '';
+  const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: {},
+    hosted: { interactive: true, providers: [unreadyTailscale('x'), route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
+  try {
+    for (let i = 0; i < 400 && !/\/mcp$/m.test(out); i++) await sleepMs(50);
+    const url = /^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m.exec(out)[1];
+    const secret = new URL(url).pathname.split('/')[1];
+    const lines = [];
+    const checking = runSelfCheck({ url, client: 'claude', approveWaitMs: 30_000, say: l => lines.push(l) });
+    for (let i = 0; i < 400 && !/Approve this connection\? \[y\/N\] /.test(out); i++) await sleepMs(50);
+    input.write('y\n');
+    const result = await checking;
+    assert.equal(result.ok, true, lines.join('\n'));
+    const text = lines.join('\n');
+    assert.deepEqual(lines.filter(l => /^(PASS|FAIL|SKIP)/.test(l)).map(l => l.split(':')[0].split(' ')[0] + ' ' + l.split(' ')[1].replace(':', '')),
+      ['PASS challenge', 'PASS discovery', 'PASS metadata', 'PASS registration', 'PASS authorize', 'PASS approval', 'PASS callback', 'PASS token', 'PASS mcp', 'PASS mcp', 'PASS mcp', 'PASS mcp']);
+    assert.equal(lines.at(-1), 'RESULT PASS');
+    assert.ok(!text.includes(secret) && !text.includes(url), 'no secret path or URL');
+    assert.doesNotMatch(text, /eyJ[A-Za-z0-9_-]{10,}|[A-Za-z0-9_-]{32,}/, 'no token or code');
+    // The check does not leave the trial unusable: its registered client is one of the limited ones, nothing else changed.
+    assert.match(text, /PASS token: .*(audience is this resource|opaque token)/);
+  } finally { controller.abort(); await finished; }
+});
+
+test('the self-check stops at the first failing step, skips the rest and says FAIL', async () => {
+  const url = 'https://demo.example/' + 'a'.repeat(64) + '/mcp';
+  const lines = [];
+  const fetchImpl = async (u, init = {}) => {
+    if (init.method === 'POST' && String(u) === url) return new Response('', { status: 401, headers: { 'www-authenticate': 'Bearer resource_metadata="https://demo.example/.well-known/oauth-protected-resource/x/mcp"' } });
+    return Response.json({ resource: url, authorization_servers: [] });
+  };
+  const result = await runSelfCheck({ url, client: 'chatgpt', fetchImpl, say: l => lines.push(l) });
+  assert.equal(result.ok, false);
+  assert.match(lines.join('\n'), /PASS challenge[^\n]*\nFAIL discovery[^\n]*no authorization server\nSKIP metadata[^\n]*\nSKIP registration/);
+  assert.equal(lines.at(-1), 'RESULT FAIL');
+  assert.ok(!lines.join('\n').includes('a'.repeat(64)), 'the secret path is not printed');
 });
 
 // ---- route choice and the trial's own Tailscale node -----------------------------------------------------------------------
@@ -1021,12 +1064,16 @@ test('the gate answers 503 until the bridge port is set, forwards to that one po
 
 test('public readiness: wrong resource, wrong issuer, an unauthenticated 200 or an exposed owner route is not ready', async () => {
   const origin = 'https://demo.trycloudflare.com', secret = 'a'.repeat(64);
+  const issuer = `${origin}/${secret}/oauth`;
   const good = {
-    meta: { resource: `${origin}/${secret}/mcp`, authorization_servers: [`${origin}/${secret}/oauth`] },
+    meta: { resource: `${origin}/${secret}/mcp`, authorization_servers: [issuer] },
+    as: { issuer, authorization_endpoint: `${issuer}/auth`, token_endpoint: `${issuer}/token`, registration_endpoint: `${issuer}/reg` },
   };
+  const asPath = `/.well-known/oauth-authorization-server/${secret}/oauth`;
   const respond = (overrides = {}) => async (url, init = {}) => {
     const u = new URL(url);
     if (overrides[u.pathname]) return overrides[u.pathname]();
+    if (u.pathname === asPath) return Response.json(good.as);
     if (u.pathname.startsWith('/.well-known/')) return Response.json(good.meta);
     if (u.pathname === `/${secret}/mcp`) return new Response('', { status: 401, headers: { 'www-authenticate': 'Bearer resource_metadata="x"' } });
     return new Response('', { status: 404 });
@@ -1036,6 +1083,15 @@ test('public readiness: wrong resource, wrong issuer, an unauthenticated 200 or 
   assert.match((await check({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => Response.json({ resource: 'https://other/x', authorization_servers: [] }) })).last, /different resource/);
   assert.match((await check({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => Response.json({ resource: good.meta.resource, authorization_servers: ['https://elsewhere.example/o'] }) })).last, /different issuer/);
   assert.match((await check({ [`/${secret}/mcp`]: () => new Response('{}', { status: 200 }) })).last, /not an OAuth challenge/);
+  // The discovery chain is checked to its end: a non-empty list, the issuer's own metadata with the exact issuer, and https endpoints on this origin.
+  const prm = authorization_servers => ({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => Response.json({ resource: good.meta.resource, authorization_servers }) });
+  assert.match((await check(prm([]))).last, /no authorization server/);
+  assert.match((await check({ [asPath]: () => Response.json({ ...good.as, issuer: `${issuer}/` }) })).last, /issuer.*does not match/);
+  assert.match((await check({ [asPath]: () => Response.json({ ...good.as, token_endpoint: `http://demo.trycloudflare.com/${secret}/oauth/token` }) })).last, /token_endpoint/);
+  assert.match((await check({ [asPath]: () => Response.json({ ...good.as, authorization_endpoint: 'https://elsewhere.example/auth' }) })).last, /authorization_endpoint/);
+  const { registration_endpoint, ...noReg } = good.as;
+  assert.match((await check({ [asPath]: () => Response.json(noReg) })).last, /registration_endpoint/);
+  assert.match((await check({ [asPath]: () => new Response('', { status: 404 }) })).last, /authorization-server metadata returned HTTP 404/);
   assert.match((await check({ '/connect/pending': () => new Response('{}', { status: 200 }) })).last, /\/connect\/pending answers on the public address/);
   assert.match((await check({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => new Response('', { status: 503 }) })).last, /HTTP 503/);
 });
