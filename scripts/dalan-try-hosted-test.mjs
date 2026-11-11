@@ -438,7 +438,8 @@ function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 
       return child;
     }
     if (args.includes('cert')) {
-      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.signalCode = null;
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.signalCode = null; child.pid = 5555; events.certAlive = true;
+      child.once('exit', () => { events.certAlive = false; });
       events.cert = { args, child, signals: [], files: args.filter(a => /^--(cert|key)-file=/.test(a)).map(a => a.split('=')[1]) };
       child.kill = sig => {
         events.cert.signals.push(sig); events.cert.dirAtKill = fs.existsSync(path.dirname(events.cert.files[0]));
@@ -470,7 +471,7 @@ function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 
     return fake.spawnChild(cmd, args, opts);
   };
   const lines = [];
-  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200, certWaitMs, killGraceMs });
+  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200, certWaitMs, killGraceMs, processCmd: pid => pid === 5555 ? (events.certAlive ? 'tailscale cert' : null) : processCommand(pid) });
   return { node, fake, events, lines, registry, say: l => lines.push(l) };
 }
 const liveProcess = marker => spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)', '--', marker], { stdio: 'ignore' });
@@ -597,9 +598,16 @@ test('the trial\'s own node: outputs wait for a late exit, and are kept for the 
   assert.equal(fs.existsSync(kept), true, 'stop keeps the files of a cert child that never exited');
   assert.deepEqual(fs.readdirSync(path.join(homeN, 'tsnode')), [path.basename(kept)], 'and removes the rest');
   assert.deepEqual(fs.readdirSync(never.registry), ['dalan-trial-abc123.json'], 'the record stays, so the sweep finishes the job');
+  // Owner and daemon are gone but the cert child still runs: the sweep keeps its folder and the record; after its exit it removes both.
+  const alive = pid => pid === 5555 ? 'tailscale cert' : null;
+  const kept1 = await sweepTrialNodes({ registry: never.registry, processCmd: alive, kill() {}, clock: { sleep: async () => {} } });
+  assert.deepEqual(kept1, [], 'nothing is ended while the cert child runs');
+  assert.equal(fs.existsSync(kept), true, 'its folder stays');
+  assert.deepEqual(fs.readdirSync(never.registry), ['dalan-trial-abc123.json'], 'and so does the record');
   const ended = await sweepTrialNodes({ registry: never.registry, processCmd: () => null, kill() {}, clock: { sleep: async () => {} } });
   assert.deepEqual(ended, ['dalan-trial-abc123']);
-  assert.equal(fs.existsSync(kept), false, 'the sweep removed them');
+  assert.equal(fs.existsSync(kept), false, 'removed after the exit is confirmed');
+  assert.deepEqual(fs.readdirSync(never.registry), []);
 });
 
 test('the trial\'s own node: the identity is cached at sign-in; with none known, any email in the log and the error line is redacted', async () => {
@@ -1179,6 +1187,12 @@ test('public readiness: wrong resource, wrong issuer, an unauthenticated 200 or 
   assert.equal((await viaSlash(bareFetch)).ready, true, 'a bare root issuer is accepted');
   const lastOf = fetchImpl => viaSlash(fetchImpl).then(r => r.last);
   assert.match(await lastOf(async (url, init) => new URL(url).pathname === slashPath ? Response.json({ ...asSlash, issuer }) : slashFetch(url, init)), /does not match/, 'issuer equality stays exact, slash included');
+  for (const bad of [`${issuer}?x=1`, `${issuer}#frag`]) {
+    const seen = [];
+    const r = await viaSlash(async (url, init) => { const u = new URL(url); seen.push(u.pathname); return u.pathname.startsWith('/.well-known/oauth-protected') ? Response.json({ ...good.meta, authorization_servers: [bad] }) : respond()(url, init); });
+    assert.match(r.last, /not a plain address/);
+    assert.ok(!seen.some(p => p.startsWith('/.well-known/oauth-authorization-server')), 'the issuer is not mapped to a lookup');
+  }
   assert.match(authorizationServerMetadataUrl('https://x.example/tenant/'), /oauth-authorization-server\/tenant$/);
   assert.equal(authorizationServerMetadataUrl('https://x.example'), 'https://x.example/.well-known/oauth-authorization-server');
   assert.match((await check({ '/connect/pending': () => new Response('{}', { status: 200 }) })).last, /\/connect\/pending answers on the public address/);

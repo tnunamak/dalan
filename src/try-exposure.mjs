@@ -189,6 +189,7 @@ export const redactTailnetNames = (text, names = [], { strict = false } = {}) =>
 
 // Ends the daemons of trials that no longer run. A record is stale when its trial process is gone (or its PID now runs something
 // else); the daemon is ended only if its command line still names the socket this trial started it with.
+const safeList = dir => { try { return fs.readdirSync(dir); } catch { return []; } };
 export async function sweepTrialNodes({ registry, processCmd = processCommand, kill = (pid, sig) => process.kill(pid, sig), clock = { sleep } }) {
   let names = []; try { names = fs.readdirSync(registry).filter(n => n.endsWith('.json')); } catch { return []; }
   const ended = [];
@@ -200,6 +201,12 @@ export async function sweepTrialNodes({ registry, processCmd = processCommand, k
       try { kill(rec.pid, 'SIGTERM'); } catch { /* gone */ }
       for (let i = 0; i < 20 && processCmd(rec.pid)?.includes(rec.sock); i++) await clock.sleep(100);
       if (processCmd(rec.pid)?.includes(rec.sock)) { try { kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } }
+    }
+    // A certificate check that outlived its trial still writes into its folder: while it runs (same PID, same command line), its
+    // folder and this record stay; the next sweep removes them once it has exited.
+    if (Number.isInteger(rec.certPid) && rec.certCmd && processCmd(rec.certPid) === rec.certCmd) {
+      if (rec.dir && path.basename(rec.dir) === 'tsnode') for (const entry of safeList(rec.dir)) if (path.join(rec.dir, entry) !== rec.certOut) fs.rmSync(path.join(rec.dir, entry), { recursive: true, force: true });
+      continue;
     }
     if (rec.dir && path.basename(rec.dir) === 'tsnode') fs.rmSync(rec.dir, { recursive: true, force: true });
     fs.rmSync(file, { force: true });
@@ -318,6 +325,11 @@ export function tailscaleNodeProvider({
           if (gone) fs.rmSync(out, { recursive: true, force: true });
           else {
             node.certChild = { out, exited }; // the node's stop keeps owning it
+            // And so does the registry: a later sweep must not delete the folder while this process runs.
+            try {
+              const rec = JSON.parse(fs.readFileSync(node.recordFile, 'utf8'));
+              fs.writeFileSync(node.recordFile, JSON.stringify({ ...rec, certPid: child?.pid ?? null, certCmd: child?.pid ? processCmd(child.pid) : null, certOut: out }), { mode: 0o600 });
+            } catch { /* no record to extend */ }
             say(`TLS certificate check did not stop (termination not confirmed); its files stay in ${out} until the node is removed.`);
           }
         }
@@ -526,7 +538,8 @@ export const onOrigin = (origin, value) => value === origin || value.startsWith(
 // RFC 8414 section 3.1: the well-known segment goes between the host and the issuer's path, and a terminal slash of that path is
 // dropped. The metadata's `issuer` is still compared to the issuer exactly as written.
 export function authorizationServerMetadataUrl(issuer) {
-  const url = new URL(issuer);
+  let url; try { url = new URL(issuer); } catch { url = null; }
+  if (!url || url.search || url.hash || issuer.includes('?') || issuer.includes('#')) throw new Error('the issuer is not a plain address (it has a query or fragment, or is not a URL)');
   return `${url.origin}/.well-known/oauth-authorization-server${url.pathname.replace(/\/$/, '')}`;
 }
 
@@ -546,7 +559,8 @@ export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clo
     if (!doc.authorization_servers.every(s => onOrigin(origin, String(s)))) return `discovery names an issuer outside this origin (${TRIAL_ORIGIN_RULE})`;
     // The issuer's own metadata: the exact issuer, and https endpoints for sign-in, tokens and registration on this origin.
     const issuer = String(doc.authorization_servers[0]);
-    const asMeta = await fetchImpl(authorizationServerMetadataUrl(issuer), { redirect: 'manual', signal: within(10_000) });
+    let asUrl; try { asUrl = authorizationServerMetadataUrl(issuer); } catch (error) { return error.message; }
+    const asMeta = await fetchImpl(asUrl, { redirect: 'manual', signal: within(10_000) });
     if (asMeta.status !== 200) return `authorization-server metadata returned HTTP ${asMeta.status}`;
     const as = await asMeta.json().catch(() => null);
     if (as?.issuer !== issuer) return 'the authorization-server issuer does not match the issuer in discovery';
