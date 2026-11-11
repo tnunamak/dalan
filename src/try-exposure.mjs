@@ -294,13 +294,13 @@ export function tailscaleNodeProvider({
       if (!dnsName) verdict = 'error (the node has no DNS name)';
       else {
         const out = fs.mkdtempSync(path.join(node.dir, 'tlscheck-'));
-        let timer = null, child = null, gone = true;
+        let timer = null, child = null, gone = true, exited = null;
         try {
           child = spawnChild('tailscale', [`--socket=${node.sock}`, 'cert', `--cert-file=${path.join(out, 'cert')}`, `--key-file=${path.join(out, 'key')}`, dnsName], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
           let said = '';
           for (const stream of [child.stdout, child.stderr]) { stream?.setEncoding?.('utf8'); stream?.on('data', chunk => { if (said.length < 2000) said += chunk; }); }
           gone = false;
-          const exited = new Promise(resolve => { const done = code => { gone = true; resolve(code); }; child.once('exit', done); child.once('error', () => done(-1)); });
+          exited = new Promise(resolve => { const done = code => { gone = true; resolve(code); }; child.once('exit', done); child.once('error', () => done(-1)); });
           const aborted = new Promise(resolve => { if (signal?.aborted) resolve('aborted'); else signal?.addEventListener('abort', () => resolve('aborted'), { once: true }); });
           const code = await Promise.race([exited, aborted, new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), certWaitMs); })]);
           const first = said.split('\n').map(l => l.trim()).find(Boolean);
@@ -316,7 +316,10 @@ export function tailscaleNodeProvider({
           clearTimeout(timer);
           // The files go only after a confirmed exit. Otherwise they stay inside tsnode, which the node's stop and the sweep delete.
           if (gone) fs.rmSync(out, { recursive: true, force: true });
-          else say(`TLS certificate check did not stop (termination not confirmed); its files stay in ${out} until the node is removed.`);
+          else {
+            node.certChild = { out, exited }; // the node's stop keeps owning it
+            say(`TLS certificate check did not stop (termination not confirmed); its files stay in ${out} until the node is removed.`);
+          }
         }
       }
       say(`TLS certificate: ${verdict}`);
@@ -334,12 +337,25 @@ export function tailscaleNodeProvider({
       let loggedOut = true;
       if (node.signedIn) { try { loggedOut = run(['logout']).status === 0; } catch { loggedOut = false; } }
       if (daemon.exitCode === null && daemon.signalCode == null) { const gone = new Promise(resolve => daemon.once('exit', resolve)); daemon.kill('SIGTERM'); await Promise.race([gone, clock.sleep(5000)]); if (daemon.exitCode === null && daemon.signalCode == null) daemon.kill('SIGKILL'); }
-      fs.rmSync(dir, { recursive: true, force: true });
-      fs.rmSync(recordFile, { force: true });
+      // A certificate child that diagnose could not stop still holds its files: wait once more for its exit. Without a confirmed
+      // exit, everything else goes, the child's directory stays, and the record stays so the next sweep removes it.
+      const pendingCert = node.certChild;
+      let certConfirmed = true;
+      if (pendingCert) {
+        let exitedNow = false; pendingCert.exited.then(() => { exitedNow = true; });
+        await Promise.race([pendingCert.exited, clock.sleep(killGraceMs)]);
+        certConfirmed = exitedNow;
+      }
+      if (certConfirmed) { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(recordFile, { force: true }); }
+      else {
+        for (const entry of fs.readdirSync(dir)) if (path.join(dir, entry) !== pendingCert.out) fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+      }
       node = null;
-      if (!result.removed) return result;
+      // keepNode tells the caller not to delete the node's directory: a certificate child still holds files there.
+      const keep = certConfirmed ? {} : { keepNode: true };
+      if (!result.removed) return { ...result, ...keep };
       // Logout removes the node at once. If it failed, the node is still registered until Tailscale drops the ephemeral machine.
-      return loggedOut ? { removed: true } : { removed: false, detail: `the trial's Tailscale node ${hostname} could not be logged out. It is ephemeral, so Tailscale removes it on its own once offline; to remove it now, delete ${hostname} in the Tailscale admin console` };
+      return loggedOut ? { removed: true, ...keep } : { ...keep, removed: false, detail: `the trial's Tailscale node ${hostname} could not be logged out. It is ephemeral, so Tailscale removes it on its own once offline; to remove it now, delete ${hostname} in the Tailscale admin console` };
     },
   };
 }
@@ -503,6 +519,17 @@ export async function startRoute({ route = 'auto', providers, gatePort, home, sa
   return attempt(named('cloudflare'));
 }
 
+// A trial constraint, not an OAuth rule: RFC 8414 lets an authorization server live on another origin. A trial's bridge serves its own
+// authorization server, so the check requires the issuer and every endpoint on the trial's public origin (a bare root issuer counts).
+export const TRIAL_ORIGIN_RULE = 'a trial constraint: the bridge serves its own authorization server on the public origin';
+export const onOrigin = (origin, value) => value === origin || value.startsWith(`${origin}/`);
+// RFC 8414 section 3.1: the well-known segment goes between the host and the issuer's path, and a terminal slash of that path is
+// dropped. The metadata's `issuer` is still compared to the issuer exactly as written.
+export function authorizationServerMetadataUrl(issuer) {
+  const url = new URL(issuer);
+  return `${url.origin}/.well-known/oauth-authorization-server${url.pathname.replace(/\/$/, '')}`;
+}
+
 // ---- readiness ---------------------------------------------------------------------------------------------------------
 // The public address answers as this bridge: trusted TLS (the platform's fetch checks it), discovery that names this origin and
 // resource, an OAuth challenge on an unauthenticated MCP request, and no owner route. The secret path is known only to this bridge,
@@ -516,15 +543,15 @@ export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clo
     const doc = await meta.json().catch(() => null);
     if (doc?.resource !== resource) return 'discovery names a different resource';
     if (!Array.isArray(doc.authorization_servers) || doc.authorization_servers.length === 0) return 'discovery names no authorization server';
-    if (!doc.authorization_servers.every(s => String(s).startsWith(`${origin}/`))) return 'discovery names a different issuer';
+    if (!doc.authorization_servers.every(s => onOrigin(origin, String(s)))) return `discovery names an issuer outside this origin (${TRIAL_ORIGIN_RULE})`;
     // The issuer's own metadata: the exact issuer, and https endpoints for sign-in, tokens and registration on this origin.
-    const issuer = String(doc.authorization_servers[0]), issuerUrl = new URL(issuer);
-    const asMeta = await fetchImpl(`${issuerUrl.origin}/.well-known/oauth-authorization-server${issuerUrl.pathname}`, { redirect: 'manual', signal: within(10_000) });
+    const issuer = String(doc.authorization_servers[0]);
+    const asMeta = await fetchImpl(authorizationServerMetadataUrl(issuer), { redirect: 'manual', signal: within(10_000) });
     if (asMeta.status !== 200) return `authorization-server metadata returned HTTP ${asMeta.status}`;
     const as = await asMeta.json().catch(() => null);
     if (as?.issuer !== issuer) return 'the authorization-server issuer does not match the issuer in discovery';
     for (const key of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) {
-      if (typeof as[key] !== 'string' || !as[key].startsWith(`${origin}/`)) return `the authorization server's ${key} is missing or is not an address on this origin`;
+      if (typeof as[key] !== 'string' || !onOrigin(origin, as[key])) return `the authorization server's ${key} is missing or is not an address on this origin (${TRIAL_ORIGIN_RULE})`;
     }
     const challenge = await fetchImpl(resource, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}', signal: within(10_000) });
     if (challenge.status !== 401 || !/^Bearer/i.test(challenge.headers.get('www-authenticate') ?? '')) return `an unauthenticated MCP request returned HTTP ${challenge.status}, not an OAuth challenge`;

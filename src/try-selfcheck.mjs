@@ -5,12 +5,19 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { safeDiagnostic } from './diagnostic.mjs';
 import { CLIENTS } from './try-hosted-clients.mjs';
+import { authorizationServerMetadataUrl, onOrigin, TRIAL_ORIGIN_RULE } from './try-exposure.mjs';
 
 const MCP_PROTOCOL = '2025-11-25';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, say = () => {}, approveWaitMs = 300_000, signal } = {}) {
-  const mcp = new URL(url);
+export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, say = () => {}, approveWaitMs = 300_000, requestMs = 30_000, signal } = {}) {
+  let mcp;
+  try { mcp = new URL(url); } catch { mcp = null; }
+  if (!mcp || !['https:', 'http:'].includes(mcp.protocol)) { // the message is fixed: the supplied text may be a credential
+    say('FAIL input: the trial URL is not a valid web address');
+    say('RESULT FAIL');
+    return { ok: false, results: [{ name: 'input', status: 'FAIL', detail: 'the trial URL is not a valid web address' }] };
+  }
   const callback = CLIENTS[client].callbacks.find(c => typeof c === 'string'); // the client's stable, published callback
   const results = [];
   let failed = false;
@@ -18,17 +25,19 @@ export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, 
     if (failed) { results.push({ name, status: 'SKIP' }); say(`SKIP ${name}`); return undefined; }
     try {
       const note = await fn();
-      results.push({ name, status: 'PASS' }); say(`PASS ${name}${note ? ` (${note})` : ''}`);
+      results.push({ name, status: 'PASS' }); say(`PASS ${name}${note ? ` (${scrub(note)})` : ''}`);
     } catch (error) {
-      failed = true; results.push({ name, status: 'FAIL', detail: String(error.message) });
-      say(`FAIL ${name}: ${scrub(safeDiagnostic(error.message, 200))}`);
+      const detail = scrub(safeDiagnostic(error?.name === 'AbortError' || error?.name === 'TimeoutError' ? 'cancelled or timed out' : error?.message, 200));
+      failed = true; results.push({ name, status: 'FAIL', detail });
+      say(`FAIL ${name}: ${detail}`);
     }
     return undefined;
   };
   // The secret path is part of the MCP URL; keep it, the origin-relative credentials and the full URL out of every line.
   const secretPath = mcp.pathname.split('/')[1] ?? '';
   const scrub = text => String(text).split(url).join('[url]').split(secretPath).join('[secret]');
-  const get = (u, init = {}) => fetchImpl(u, { redirect: 'manual', signal, ...init, headers: { connection: 'close', ...(init.headers ?? {}) } });
+  // Every request has its own deadline, so a server that never finishes its answer cannot outlast the check.
+  const get = (u, init = {}) => fetchImpl(u, { redirect: 'manual', ...init, signal: signal ? AbortSignal.any([AbortSignal.timeout(requestMs), signal]) : AbortSignal.timeout(requestMs), headers: { connection: 'close', ...(init.headers ?? {}) } });
   const json = async (res, label) => { try { return JSON.parse(await res.text()); } catch { throw new Error(`${label} is not JSON`); } };
   const ctx = {};
 
@@ -47,21 +56,20 @@ export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, 
     if (doc.resource !== url) throw new Error('the resource is not the MCP URL');
     if (!Array.isArray(doc.authorization_servers) || doc.authorization_servers.length === 0) throw new Error('no authorization server');
     ctx.issuer = String(doc.authorization_servers[0]);
-    if (!ctx.issuer.startsWith(`${mcp.origin}/`)) throw new Error('the issuer is on another origin');
+    if (!onOrigin(mcp.origin, ctx.issuer)) throw new Error(`the issuer is on another origin (${TRIAL_ORIGIN_RULE})`);
   });
   await step('metadata: the issuer matches exactly and every endpoint is on the public origin', async () => {
-    const issuer = new URL(ctx.issuer);
-    const res = await get(`${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname}`);
+    const res = await get(authorizationServerMetadataUrl(ctx.issuer));
     if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
     const meta = await json(res, 'authorization-server metadata');
     if (meta.issuer !== ctx.issuer) throw new Error('the issuer in the metadata differs from the issuer in discovery');
-    for (const key of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) if (typeof meta[key] !== 'string' || !meta[key].startsWith(`${mcp.origin}/`)) throw new Error(`${key} is missing or off this origin`);
+    for (const key of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) if (typeof meta[key] !== 'string' || !onOrigin(mcp.origin, meta[key])) throw new Error(`${key} is missing or off this origin (${TRIAL_ORIGIN_RULE})`);
     if (!meta.code_challenge_methods_supported?.includes('S256')) throw new Error('S256 is not supported');
     ctx.meta = meta;
   });
   await step(`registration: ${client}'s published callback is accepted as a public client`, async () => {
     const res = await get(ctx.meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redirect_uris: [callback], client_name: 'dalan self-check', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] }) });
+      body: JSON.stringify({ redirect_uris: [callback], client_name: 'dalan self-check', token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] }) });
     if (res.status !== 201) throw new Error(`HTTP ${res.status}`);
     const doc = await json(res, 'registration');
     if (doc.token_endpoint_auth_method !== 'none') throw new Error(`token_endpoint_auth_method is ${safeDiagnostic(doc.token_endpoint_auth_method, 40)}, not none`);
@@ -105,7 +113,8 @@ export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, 
     if (!ctx.code) throw new Error('no authorization code');
     const iss = back.searchParams.get('iss');
     if (iss !== null && iss !== ctx.issuer) throw new Error('the iss parameter differs from the issuer');
-    if (!back.href.startsWith(callback)) throw new Error('the redirect is not to the registered callback');
+    if (resume.status !== 302 && resume.status !== 303) throw new Error(`the redirect status is HTTP ${resume.status}`);
+    if (`${back.origin}${back.pathname}` !== callback) throw new Error('the redirect is not to the registered callback');
   });
   await step('token: the code is exchanged for a bearer token bound to this resource', async () => {
     const res = await get(ctx.meta.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },

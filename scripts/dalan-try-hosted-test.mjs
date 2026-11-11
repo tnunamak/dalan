@@ -3,7 +3,7 @@
 // stand in for the outside. The bridge, its OAuth server, its MCP tools and the CLI are the real ones.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -19,7 +19,7 @@ const { chooseMode } = tryHostedInternals;
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
 import { runSelfCheck } from '../src/try-selfcheck.mjs';
-import { CLOUDFLARED, HelperError, sweepTrialNodes, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { CLOUDFLARED, HelperError, sweepTrialNodes, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, authorizationServerMetadataUrl, parseQuickTunnelOrigin, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -333,6 +333,63 @@ test('the self-check stops at the first failing step, skips the rest and says FA
   assert.ok(!lines.join('\n').includes('a'.repeat(64)), 'the secret path is not printed');
 });
 
+async function liveSelfCheck(wrapFetch) {
+  const home = path.join(tmp, `sc-${Math.random().toString(16).slice(2, 8)}`);
+  const route = fakeRoute();
+  const input = new PassThrough(), controller = new AbortController();
+  let out = '';
+  const finished = runTry({ argv: ['--public', '--client', 'claude', '--home', home, '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, signal: controller.signal, errorContext: {},
+    hosted: { interactive: true, providers: [unreadyTailscale('x'), route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error);
+  try {
+    for (let i = 0; i < 400 && !/\/mcp$/m.test(out); i++) await sleepMs(50);
+    const url = /^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m.exec(out)[1];
+    const lines = [], sent = [];
+    const fetchImpl = wrapFetch((u, init) => { sent.push({ url: String(u), init }); return fetch(u, init); });
+    const checking = runSelfCheck({ url, client: 'claude', fetchImpl, approveWaitMs: 30_000, say: l => lines.push(l) });
+    for (let i = 0; i < 400 && !/Approve this connection\? \[y\/N\] /.test(out) && !/FAIL/.test(lines.join()); i++) await sleepMs(50);
+    input.write('y\n');
+    return { result: await checking, lines, sent, url };
+  } finally { controller.abort(); await finished; }
+}
+
+test('the self-check registers as an explicit public client and accepts only the exact registered callback', async () => {
+  const ok = await liveSelfCheck(f => f);
+  assert.equal(ok.result.ok, true, ok.lines.join('\n'));
+  const reg = ok.sent.find(s => s.init?.method === 'POST' && /\/oauth\/reg/.test(s.url));
+  assert.equal(JSON.parse(reg.init.body).token_endpoint_auth_method, 'none', 'the outbound registration asks for a public client');
+  // A redirect to the registered callback plus an extra path is not the registered callback.
+  const wrong = await liveSelfCheck(f => async (u, init) => {
+    const res = await f(u, init), location = res.headers.get('location');
+    if (location?.startsWith(CLAUDE_CALLBACK)) return new Response(null, { status: res.status, headers: { location: location.replace(CLAUDE_CALLBACK, `${CLAUDE_CALLBACK}/wrong`) } });
+    return res;
+  });
+  assert.equal(wrong.result.ok, false);
+  assert.match(wrong.lines.join('\n'), /FAIL callback: .*not to the registered callback/);
+  assert.ok(!wrong.sent.some(s => /\/oauth\/token/.test(s.url)), 'no code was exchanged');
+});
+
+test('the self-check refuses a malformed URL with a fixed message, and a failing request never echoes the URL or secret', async () => {
+  const lines = [];
+  const bad = await runSelfCheck({ url: 'https://exa mple.test/SECRETSECRETSECRET/mcp', say: l => lines.push(l) });
+  assert.equal(bad.ok, false);
+  assert.deepEqual(lines, ['FAIL input: the trial URL is not a valid web address', 'RESULT FAIL']);
+  assert.equal(JSON.stringify(bad).includes('SECRETSECRETSECRET'), false);
+  const text = [];
+  const url = 'https://demo.example/' + 'b'.repeat(64) + '/mcp';
+  const leaky = await runSelfCheck({ url, fetchImpl: async () => { throw new Error(`connect failed for ${url} with ${'b'.repeat(64)}`); }, say: l => text.push(l) });
+  assert.equal(leaky.ok, false);
+  assert.ok(!JSON.stringify(leaky).includes('b'.repeat(64)) && !text.join().includes('b'.repeat(64)), 'neither the lines nor the returned detail carry the secret');
+  // A server that never finishes answering ends at the request deadline, not at the approval wait.
+  const started = Date.now();
+  const hung = await runSelfCheck({ url, requestMs: 100, fetchImpl: (u, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason))), say() {} });
+  assert.equal(hung.ok, false);
+  assert.ok(Date.now() - started < 3000, 'bounded');
+  // The CLI prints a fixed line for a malformed credential and never the credential.
+  const cli = spawnSync(process.execPath, [path.join(repo, 'scripts/dalan-try-selfcheck.mjs'), '--client', 'claude'], { env: { PATH: process.env.PATH, DALAN_TRY_URL: 'https://exa mple.test/CLISECRETCLISECRET/mcp' }, encoding: 'utf8' });
+  assert.equal(cli.status, 1);
+  assert.doesNotMatch(cli.stdout + cli.stderr, /CLISECRET/);
+});
+
 // ---- route choice and the trial's own Tailscale node -----------------------------------------------------------------------
 const stubProvider = (name, { ok = true, busy, startError, line = `${name} line`, fix = `${name} fix` } = {}) => {
   const record = { started: 0, stopped: 0 };
@@ -535,6 +592,11 @@ test('the trial\'s own node: outputs wait for a late exit, and are kept for the 
   assert.equal(path.dirname(kept), path.join(homeN, 'tsnode'));
   assert.equal(fs.existsSync(kept), true, 'not removed without a confirmed exit');
   assert.match(lines.join('\n'), /did not stop \(termination not confirmed\)/);
+  // The node's own stop does not delete files of a child that has not exited: the rest of the node goes, its directory and record stay.
+  await never.node.stop();
+  assert.equal(fs.existsSync(kept), true, 'stop keeps the files of a cert child that never exited');
+  assert.deepEqual(fs.readdirSync(path.join(homeN, 'tsnode')), [path.basename(kept)], 'and removes the rest');
+  assert.deepEqual(fs.readdirSync(never.registry), ['dalan-trial-abc123.json'], 'the record stays, so the sweep finishes the job');
   const ended = await sweepTrialNodes({ registry: never.registry, processCmd: () => null, kill() {}, clock: { sleep: async () => {} } });
   assert.deepEqual(ended, ['dalan-trial-abc123']);
   assert.equal(fs.existsSync(kept), false, 'the sweep removed them');
@@ -766,6 +828,19 @@ test('a public address that never answers as this bridge stops the trial before 
   assert.equal(run.route.stopped, 1);
   assert.match(run.out, /TLS certificate: error \(fake\)/, 'the certificate check runs when the address never answers');
   assert.equal(run.route.diagnosed, 0, 'and it runs before the route is stopped');
+});
+
+test('hosted failure cleanup with the real node provider: a cert check that will not exit keeps only its files, everything else is removed', async () => {
+  const h = nodeHarness({ certBehaviour: 'immortal', certWaitMs: 30, killGraceMs: 30 });
+  const busy = { name: 'tailscale', probe: () => ({ ok: false, busy: true, line: 'busy', fix: 'free 443' }), start: async () => { throw new Error('must not start'); }, stop: async () => ({ removed: true }) };
+  const run = await hostedRun('nodecleanup', { clock: virtualClock(), fetchImpl: async () => { throw new Error('fetch failed'); }, providers: [busy, h.node] });
+  const result = await run.finished;
+  assert.match(result.error?.message ?? '', /The public route is not ready/);
+  const kept = path.dirname(h.events.cert.files[0]);
+  assert.match(run.out, /did not stop \(termination not confirmed\)/);
+  assert.equal(fs.existsSync(kept), true, 'the files of the still-running child were not deleted by the trial\'s own cleanup');
+  assert.deepEqual(fs.readdirSync(path.join(run.home, 'tsnode')), [path.basename(kept)]);
+  assert.equal(h.events.daemon.exitCode, 0, 'the daemon was ended');
 });
 
 test('Ctrl-C while the route diagnosis runs reaches it as a signal, so the trial stops at once', async () => {
@@ -1081,7 +1156,7 @@ test('public readiness: wrong resource, wrong issuer, an unauthenticated 200 or 
   const check = async overrides => verifyPublicReady({ origin, secret, fetchImpl: respond(overrides), clock: virtualClock(), timeoutMs: 6000 });
   assert.equal((await check({})).ready, true);
   assert.match((await check({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => Response.json({ resource: 'https://other/x', authorization_servers: [] }) })).last, /different resource/);
-  assert.match((await check({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => Response.json({ resource: good.meta.resource, authorization_servers: ['https://elsewhere.example/o'] }) })).last, /different issuer/);
+  assert.match((await check({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => Response.json({ resource: good.meta.resource, authorization_servers: ['https://elsewhere.example/o'] }) })).last, /outside this origin.*trial constraint/);
   assert.match((await check({ [`/${secret}/mcp`]: () => new Response('{}', { status: 200 }) })).last, /not an OAuth challenge/);
   // The discovery chain is checked to its end: a non-empty list, the issuer's own metadata with the exact issuer, and https endpoints on this origin.
   const prm = authorization_servers => ({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => Response.json({ resource: good.meta.resource, authorization_servers }) });
@@ -1092,6 +1167,20 @@ test('public readiness: wrong resource, wrong issuer, an unauthenticated 200 or 
   const { registration_endpoint, ...noReg } = good.as;
   assert.match((await check({ [asPath]: () => Response.json(noReg) })).last, /registration_endpoint/);
   assert.match((await check({ [asPath]: () => new Response('', { status: 404 }) })).last, /authorization-server metadata returned HTTP 404/);
+  // RFC 8414 section 3.1: a terminal slash of the issuer's path is dropped from the well-known URL, the issuer stays exact; a bare root issuer works.
+  const slashIssuer = `${issuer}/`, slashPath = `/.well-known/oauth-authorization-server/${secret}/oauth`;
+  const asSlash = { ...good.as, issuer: slashIssuer };
+  const lookups = [];
+  const viaSlash = fetchImpl => verifyPublicReady({ origin, secret, fetchImpl, clock: virtualClock(), timeoutMs: 6000 });
+  const slashFetch = async (url, init) => { const u = new URL(url); lookups.push(u.pathname); return u.pathname === slashPath ? Response.json(asSlash) : u.pathname.startsWith('/.well-known/oauth-protected') ? Response.json({ ...good.meta, authorization_servers: [slashIssuer] }) : respond()(url, init); };
+  assert.equal((await viaSlash(slashFetch)).ready, true, 'a trailing-slash issuer is looked up without the slash and compared exactly');
+  assert.ok(lookups.includes(slashPath) && !lookups.some(l => l.endsWith('/oauth/')), lookups.join(' '));
+  const bareFetch = async (url, init) => { const u = new URL(url); return u.pathname === '/.well-known/oauth-authorization-server' ? Response.json({ ...good.as, issuer: origin, authorization_endpoint: `${origin}/auth`, token_endpoint: `${origin}/token`, registration_endpoint: `${origin}/reg` }) : u.pathname.startsWith('/.well-known/oauth-protected') ? Response.json({ ...good.meta, authorization_servers: [origin] }) : respond()(url, init); };
+  assert.equal((await viaSlash(bareFetch)).ready, true, 'a bare root issuer is accepted');
+  const lastOf = fetchImpl => viaSlash(fetchImpl).then(r => r.last);
+  assert.match(await lastOf(async (url, init) => new URL(url).pathname === slashPath ? Response.json({ ...asSlash, issuer }) : slashFetch(url, init)), /does not match/, 'issuer equality stays exact, slash included');
+  assert.match(authorizationServerMetadataUrl('https://x.example/tenant/'), /oauth-authorization-server\/tenant$/);
+  assert.equal(authorizationServerMetadataUrl('https://x.example'), 'https://x.example/.well-known/oauth-authorization-server');
   assert.match((await check({ '/connect/pending': () => new Response('{}', { status: 200 }) })).last, /\/connect\/pending answers on the public address/);
   assert.match((await check({ [`/.well-known/oauth-protected-resource/${secret}/mcp`]: () => new Response('', { status: 503 }) })).last, /HTTP 503/);
 });

@@ -19,10 +19,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const HOSTED_WORKER = 'hosted';
 // Files that hold a credential of a finished trial. The job history stays.
 // A home that a restart reuses keeps the bridge's own config (its path secret); the others lose it.
-export function removeTrialSecrets(home, configDir, { keepConfig = false } = {}) {
+export function removeTrialSecrets(home, configDir, { keepConfig = false, keepNode = false } = {}) {
   for (const file of [path.join(home, 'resource-url'), ...(keepConfig ? [] : [path.join(configDir, 'env')])]) fs.rmSync(file, { force: true });
   fs.rmSync(path.join(home, 'cloudflared'), { recursive: true, force: true });
-  fs.rmSync(path.join(home, 'tsnode'), { recursive: true, force: true });
+  if (!keepNode) fs.rmSync(path.join(home, 'tsnode'), { recursive: true, force: true }); // else a child still holds files there: the next sweep removes them
 }
 const REPORT = 'bridge first report';
 
@@ -299,7 +299,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     await stopServer();
     await gate?.close();
     // The connector URL and the bridge's secrets are no use after the trial and stay on disk for nobody.
-    removeTrialSecrets(home, configDir, { keepConfig: STABLE_ORIGIN_ROUTES.has(route?.provider.name) });
+    removeTrialSecrets(home, configDir, { keepConfig: STABLE_ORIGIN_ROUTES.has(route?.provider.name), keepNode: Boolean(routeStopped?.keepNode) });
     cleaned = routeStopped ? routeStopped.removed : true;
     if (!cleaned) { process.exitCode = 1; out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n${routeStopped.command ? `Remove it with:\n${commandLine(routeStopped.command)}\n` : ''}`); }
   }
