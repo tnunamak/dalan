@@ -38,6 +38,7 @@ function fakeRoute(name = 'cloudflare') {
   const provider = {
     name,
     probe: () => ({ ok: true, origin: 'http://127.0.0.1:0' }),
+    async diagnose({ say }) { record.diagnosed = record.stopped; say('TLS certificate: error (fake)'); },
     async start({ gatePort }) {
       record.started++; record.gatePort = gatePort;
       const relay = http.createServer((req, res) => {
@@ -324,7 +325,7 @@ test('route choice: the computer\'s Tailscale on 443, else a node of its own, el
   assert.equal((await pick('cloudflare', [host, node, stubProvider('cloudflare')])).chosen, 'cloudflare');
 });
 
-function nodeHarness({ upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
+function nodeHarness({ certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
   const fake = fakeTailscale(host);
   const events = { spawned: [], daemon: null, envs: [], keyDuringUp: null };
   registry ??= fs.mkdtempSync(path.join(tmp, 'registry-'));
@@ -334,6 +335,16 @@ function nodeHarness({ upBehaviour = 'login-then-ok', host = {}, env = {}, login
       const child = new EventEmitter(); child.exitCode = null; child.signalCode = null; child.pid = 777; child.stdout = new PassThrough(); child.stderr = new PassThrough();
       child.kill = () => { child.exitCode = 0; child.emit('exit'); };
       events.daemon = child; setImmediate(() => { for (const chunk of daemonOutput) child.stderr.write(chunk); });
+      return child;
+    }
+    if (args.includes('cert')) {
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.signalCode = null;
+      child.kill = () => { child.signalCode = 'SIGTERM'; child.emit('exit', null); };
+      events.cert = { args, child, files: args.filter(a => /^--(cert|key)-file=/.test(a)).map(a => a.split('=')[1]) };
+      setImmediate(() => {
+        if (certBehaviour === 'ok') { for (const f of events.cert.files) fs.writeFileSync(f, '-----BEGIN PRIVATE KEY-----\nPRIVATE-KEY-BODY\n-----END PRIVATE KEY-----\n'); child.exitCode = 0; child.emit('exit', 0); }
+        if (certBehaviour === 'error') { child.stderr.write('500 Internal Server Error: no TailscaleVarRoot\n'); child.exitCode = 1; child.emit('exit', 1); }
+      });
       return child;
     }
     if (args.includes('up')) {
@@ -351,7 +362,7 @@ function nodeHarness({ upBehaviour = 'login-then-ok', host = {}, env = {}, login
     return fake.spawnChild(cmd, args, opts);
   };
   const lines = [];
-  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200 });
+  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200, certWaitMs });
   return { node, fake, events, lines, registry, say: l => lines.push(l) };
 }
 const liveProcess = marker => spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)', '--', marker], { stdio: 'ignore' });
@@ -365,7 +376,10 @@ test('the trial\'s own node: ephemeral userspace tailscaled, a one-time login li
   const started = await h.node.start({ gatePort: 6161, home, say: h.say });
   assert.equal(started.origin, 'https://box.tail1234.ts.net', '443 on the node\'s own address');
   const [daemon] = h.events.spawned;
-  assert.deepEqual(daemon, ['tailscaled', '--tun=userspace-networking', '--state=mem:', `--socket=${home}/tsnode/tailscaled.sock`, '--port=0'], 'in-memory state: Tailscale registers an ephemeral node and nothing is kept on disk');
+  // tailscaled keeps TLS certificates under its var root, which --state=mem: does not provide: a state directory of its own is
+  // needed or every first TLS hello fails with "no TailscaleVarRoot". It is inside tsnode, so it is deleted with it.
+  assert.deepEqual(daemon, ['tailscaled', '--tun=userspace-networking', '--state=mem:', `--statedir=${home}/tsnode/state`, `--socket=${home}/tsnode/tailscaled.sock`, '--port=0'], 'in-memory node state, a private directory for certificates');
+  assert.equal(fs.statSync(path.join(home, 'tsnode', 'state')).mode & 0o777, 0o700, 'the certificate directory is private');
   assert.ok(h.events.spawned.some(a => a[0] === 'tailscale' && a.includes('up') && a.includes('--hostname=dalan-trial-abc123')), 'its own hostname');
   assert.deepEqual(h.lines.filter(l => /login/.test(l)), ['This temporary Tailscale node needs a one-time sign-in. Open: https://login.tailscale.com/a/abc123'], 'one login line');
   const funnel = h.events.spawned.find(a => a.includes('funnel'));
@@ -377,6 +391,33 @@ test('the trial\'s own node: ephemeral userspace tailscaled, a one-time login li
   assert.equal(h.events.daemon.exitCode, 0, 'the daemon is ended');
   assert.equal(fs.existsSync(path.join(home, 'tsnode')), false, 'its directory is deleted');
   assert.deepEqual(fs.readdirSync(h.registry), []);
+});
+
+test('the trial\'s own node: a failed TLS certificate check prints one sanitized line, leaves no key material, and keeps the daemon log', async () => {
+  for (const [behaviour, expected] of [['ok', /^TLS certificate: ok$/], ['error', /^TLS certificate: error \(500 Internal Server Error: no TailscaleVarRoot\)$/], ['hang', /^TLS certificate: error \(no answer in 1 s\)$/]]) {
+    const h = nodeHarness({ certBehaviour: behaviour, certWaitMs: 1000, daemonOutput: ['2026/11/11 cert: tskey-auth-SECRETKEYVALUE failed\n', 'serve: TLS handshake error\n'] });
+    const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+    await h.node.start({ gatePort: 6161, home, say: h.say });
+    await sleepMs(30);
+    const lines = []; await h.node.diagnose({ home, say: l => lines.push(l) });
+    const certLines = lines.filter(l => l.startsWith('TLS certificate'));
+    assert.equal(certLines.length, 1, behaviour); assert.match(certLines[0], expected);
+    const cert = h.events.cert;
+    assert.deepEqual(cert.args.filter(a => !a.startsWith('--cert-file=') && !a.startsWith('--key-file=')), [`--socket=${home}/tsnode/tailscaled.sock`, 'cert', 'box.tail1234.ts.net'], 'the node\'s own DNS name, on the node\'s own socket');
+    const outDir = path.dirname(cert.files[0]);
+    assert.notEqual(outDir, path.join(home, 'tsnode'), 'a private temporary directory of its own');
+    assert.equal(fs.existsSync(outDir), false, 'the outputs are deleted');
+    assert.ok(!lines.join('\n').includes('PRIVATE-KEY-BODY'), 'key material is never printed');
+    const kept = fs.readFileSync(path.join(home, 'tailscaled.log'), 'utf8');
+    assert.match(kept, /TLS handshake error/); assert.ok(!kept.includes('SECRETKEYVALUE'), 'the kept log is masked');
+    assert.equal(fs.statSync(path.join(home, 'tailscaled.log')).mode & 0o777, 0o600);
+    await h.node.stop();
+    assert.equal(fs.existsSync(path.join(home, 'tsnode')), false);
+    assert.equal(fs.existsSync(path.join(home, 'tailscaled.log')), true, 'the copy outlives the node directory');
+    if (behaviour === 'hang') assert.equal(cert.child.signalCode, 'SIGTERM', 'a hung check is ended');
+  }
+  const idle = nodeHarness();
+  await idle.node.diagnose({ home: tmp, say: () => { throw new Error('nothing to say before a node exists'); } });
 });
 
 test('the trial\'s own node: an unfinished login is a clean failure; a long home path is refused; a failed logout is not reported as removed', async () => {
@@ -564,6 +605,8 @@ test('a public address that never answers as this bridge stops the trial before 
   assert.match(result.error?.message ?? '', /The public route is not ready \(.*\); the trial is stopping\./);
   assert.doesNotMatch(run.out, /Connector name:/);
   assert.equal(run.route.stopped, 1);
+  assert.match(run.out, /TLS certificate: error \(fake\)/, 'the certificate check runs when the address never answers');
+  assert.equal(run.route.diagnosed, 0, 'and it runs before the route is stopped');
 });
 
 test('a home set up for another public address is refused, not re-issued', async () => {

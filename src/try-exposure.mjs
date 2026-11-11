@@ -198,7 +198,7 @@ export async function sweepTrialNodes({ registry, processCmd = processCommand, k
 
 export function tailscaleNodeProvider({
   env = process.env, platform = process.platform, spawnChild = spawn, runCli = nodeCli, clock = { sleep }, which = name => whichOnPath(name, env),
-  newId = () => randomBytes(3).toString('hex'), loginWaitMs = 600_000, daemonWaitMs = 20_000, registry = defaultRegistry(env), processCmd = processCommand,
+  newId = () => randomBytes(3).toString('hex'), loginWaitMs = 600_000, daemonWaitMs = 20_000, certWaitMs = 60_000, registry = defaultRegistry(env), processCmd = processCommand,
 } = {}) {
   let node = null; // { dir, sock, hostname, daemon, daemonExited, run, inner, recordFile, signedIn }
   // The credential never reaches a child's environment: it travels only in a file read by `tailscale up`.
@@ -216,13 +216,18 @@ export function tailscaleNodeProvider({
       const dir = path.join(home, 'tsnode'), sock = path.join(dir, 'tailscaled.sock'), hostname = `dalan-trial-${newId()}`;
       if (Buffer.byteLength(sock) > SOCKET_PATH_LIMIT) throw new Error('the trial home path is too long for a Tailscale socket; choose a shorter --home');
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      // tailscaled keeps its TLS certificates under its var root (--statedir). --state=mem: gives it none, so without this directory
+      // every first TLS hello fails ("no TailscaleVarRoot") and the public address answers with a TLS internal error. It lives inside
+      // `tsnode`, so it goes with the node.
+      const stateDir = path.join(dir, 'state');
+      fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
       fs.mkdirSync(registry, { recursive: true, mode: 0o700 });
       const recordFile = path.join(registry, `${hostname}.json`);
       const writeRecord = pid => fs.writeFileSync(recordFile, JSON.stringify({ dir, sock, hostname, pid, home, owner: process.pid, ownerCmd: processCmd(process.pid), created_at: new Date().toISOString() }), { mode: 0o600 });
       writeRecord(null); // ownership is recorded before the first process exists
       const run = runCli(sock, childEnv);
       const logFile = path.join(dir, 'tailscaled.log');
-      const daemon = spawnChild('tailscaled', ['--tun=userspace-networking', '--state=mem:', `--socket=${sock}`, '--port=0'], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+      const daemon = spawnChild('tailscaled', ['--tun=userspace-networking', '--state=mem:', `--statedir=${stateDir}`, `--socket=${sock}`, '--port=0'], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
       const daemonLog = lineBuffer(line => { try { fs.appendFileSync(logFile, `${maskNodeText(line)}\n`, { mode: 0o600 }); } catch { /* the directory is gone */ } });
       for (const stream of [daemon.stdout, daemon.stderr]) { stream?.setEncoding?.('utf8'); stream?.on('data', daemonLog); stream?.on('end', () => daemonLog.end()); }
       const daemonExited = new Promise(resolve => { daemon.once('exit', resolve); daemon.once('error', resolve); });
@@ -260,6 +265,35 @@ export function tailscaleNodeProvider({
       if (!probe.ok) throw new Error(probe.fix);
       const started = await inner.start({ gatePort, home, signal });
       return { origin: started.origin, exited: Promise.race([started.exited, daemonExited]) };
+    },
+    // Called when the public address never answered: one bounded certificate request on the node's own socket says whether the
+    // node can get a TLS certificate at all, and a copy of the (already masked) daemon log survives the node's directory.
+    // Output: one line, never a key. The certificate files go to a private temporary directory that is deleted at once.
+    async diagnose({ home, say = () => {} } = {}) {
+      if (!node) return;
+      let verdict;
+      let dnsName = ''; try { dnsName = String(JSON.parse(node.run(['status', '--json']).stdout || '{}').Self?.DNSName ?? '').replace(/\.$/, ''); } catch { /* no status */ }
+      if (!dnsName) verdict = 'error (the node has no DNS name)';
+      else {
+        const out = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-tlscheck-'));
+        let timer = null, child = null;
+        try {
+          child = spawnChild('tailscale', [`--socket=${node.sock}`, 'cert', `--cert-file=${path.join(out, 'cert')}`, `--key-file=${path.join(out, 'key')}`, dnsName], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+          let said = '';
+          for (const stream of [child.stdout, child.stderr]) { stream?.setEncoding?.('utf8'); stream?.on('data', chunk => { if (said.length < 2000) said += chunk; }); }
+          const done = new Promise(resolve => { child.once('exit', code => resolve(code)); child.once('error', () => resolve(-1)); });
+          const code = await Promise.race([done, new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), certWaitMs); })]);
+          const first = said.split('\n').map(l => l.trim()).find(Boolean);
+          verdict = code === 0 ? 'ok' : code === 'timeout' ? `error (no answer in ${Math.round(certWaitMs / 1000)} s)` : `error (${first ? safeDiagnostic(first, 120) : `exit ${code}`})`;
+        } catch (error) { verdict = `error (${safeDiagnostic(error.message, 120)})`; }
+        finally {
+          clearTimeout(timer);
+          if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+          fs.rmSync(out, { recursive: true, force: true });
+        }
+      }
+      say(`TLS certificate: ${verdict}`);
+      try { fs.copyFileSync(path.join(node.dir, 'tailscaled.log'), path.join(home, 'tailscaled.log')); fs.chmodSync(path.join(home, 'tailscaled.log'), 0o600); } catch { /* no log to keep */ }
     },
     async stop() {
       if (!node) return { removed: true };
