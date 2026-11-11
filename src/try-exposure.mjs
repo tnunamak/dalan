@@ -175,6 +175,14 @@ const defaultRegistry = env => path.join(env.XDG_CACHE_HOME || path.join(os.home
 // A key, a login link or a node key never reaches the daemon log.
 export const maskNodeText = text => String(text).replace(/tskey-[A-Za-z0-9_-]+/g, '[key]').replace(/https:\/\/login\.tailscale\.com\/\S+/g, '[login link]').replace(/(nodekey|authkey)\S*/gi, '[secret]');
 
+// Device and tailnet names identify the owner's tailnet. A kept log or a printed line carries neither: any *.ts.net name, the
+// node's own DNS name and the tailnet's name (which can be an email address) become "[tailnet name]".
+export const redactTailnetNames = (text, names = []) => {
+  let out = String(text).replace(/[A-Za-z0-9][A-Za-z0-9.-]*\.ts\.net\b/gi, '[tailnet name]');
+  for (const name of names.filter(n => n.length >= 3).sort((a, b) => b.length - a.length)) out = out.split(name).join('[tailnet name]');
+  return out;
+};
+
 // Ends the daemons of trials that no longer run. A record is stale when its trial process is gone (or its PID now runs something
 // else); the daemon is ended only if its command line still names the socket this trial started it with.
 export async function sweepTrialNodes({ registry, processCmd = processCommand, kill = (pid, sig) => process.kill(pid, sig), clock = { sleep } }) {
@@ -198,7 +206,7 @@ export async function sweepTrialNodes({ registry, processCmd = processCommand, k
 
 export function tailscaleNodeProvider({
   env = process.env, platform = process.platform, spawnChild = spawn, runCli = nodeCli, clock = { sleep }, which = name => whichOnPath(name, env),
-  newId = () => randomBytes(3).toString('hex'), loginWaitMs = 600_000, daemonWaitMs = 20_000, certWaitMs = 60_000, registry = defaultRegistry(env), processCmd = processCommand,
+  newId = () => randomBytes(3).toString('hex'), loginWaitMs = 600_000, daemonWaitMs = 20_000, certWaitMs = 60_000, killGraceMs = 2000, registry = defaultRegistry(env), processCmd = processCommand,
 } = {}) {
   let node = null; // { dir, sock, hostname, daemon, daemonExited, run, inner, recordFile, signedIn }
   // The credential never reaches a child's environment: it travels only in a file read by `tailscale up`.
@@ -267,33 +275,50 @@ export function tailscaleNodeProvider({
       return { origin: started.origin, exited: Promise.race([started.exited, daemonExited]) };
     },
     // Called when the public address never answered: one bounded certificate request on the node's own socket says whether the
-    // node can get a TLS certificate at all, and a copy of the (already masked) daemon log survives the node's directory.
-    // Output: one line, never a key. The certificate files go to a private temporary directory that is deleted at once.
-    async diagnose({ home, say = () => {} } = {}) {
+    // node can get a TLS certificate at all, and a copy of the daemon log survives the node's directory.
+    // Output: one line, never a key. The certificate files go to a private directory inside `tsnode` (so the sweep of an
+    // abandoned trial removes them too) and are deleted once the child has exited. Names that identify the tailnet are redacted
+    // from the line and from the kept log.
+    async diagnose({ home, say = () => {}, signal } = {}) {
       if (!node) return;
+      let dnsName = '', tailnet = '';
+      try { const status = JSON.parse(node.run(['status', '--json']).stdout || '{}'); dnsName = String(status.Self?.DNSName ?? '').replace(/\.$/, ''); tailnet = String(status.CurrentTailnet?.Name ?? ''); } catch { /* no status */ }
+      const redact = text => redactTailnetNames(text, [dnsName, tailnet]);
       let verdict;
-      let dnsName = ''; try { dnsName = String(JSON.parse(node.run(['status', '--json']).stdout || '{}').Self?.DNSName ?? '').replace(/\.$/, ''); } catch { /* no status */ }
       if (!dnsName) verdict = 'error (the node has no DNS name)';
       else {
-        const out = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-tlscheck-'));
+        const out = fs.mkdtempSync(path.join(node.dir, 'tlscheck-'));
         let timer = null, child = null;
         try {
           child = spawnChild('tailscale', [`--socket=${node.sock}`, 'cert', `--cert-file=${path.join(out, 'cert')}`, `--key-file=${path.join(out, 'key')}`, dnsName], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
           let said = '';
           for (const stream of [child.stdout, child.stderr]) { stream?.setEncoding?.('utf8'); stream?.on('data', chunk => { if (said.length < 2000) said += chunk; }); }
-          const done = new Promise(resolve => { child.once('exit', code => resolve(code)); child.once('error', () => resolve(-1)); });
-          const code = await Promise.race([done, new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), certWaitMs); })]);
+          const exited = new Promise(resolve => { child.once('exit', code => resolve(code)); child.once('error', () => resolve(-1)); });
+          const aborted = new Promise(resolve => { if (signal?.aborted) resolve('aborted'); else signal?.addEventListener('abort', () => resolve('aborted'), { once: true }); });
+          const code = await Promise.race([exited, aborted, new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), certWaitMs); })]);
           const first = said.split('\n').map(l => l.trim()).find(Boolean);
-          verdict = code === 0 ? 'ok' : code === 'timeout' ? `error (no answer in ${Math.round(certWaitMs / 1000)} s)` : `error (${first ? safeDiagnostic(first, 120) : `exit ${code}`})`;
-        } catch (error) { verdict = `error (${safeDiagnostic(error.message, 120)})`; }
+          verdict = code === 0 ? 'ok' : code === 'aborted' ? 'error (cancelled)' : code === 'timeout' ? `error (no answer in ${Math.round(certWaitMs / 1000)} s)` : `error (${first ? redact(safeDiagnostic(first, 120)) : `exit ${code}`})`;
+          // A child that is still running is ended before its files are removed: SIGTERM, then SIGKILL after a short grace.
+          if (code === 'aborted' || code === 'timeout') {
+            for (const sig of ['SIGTERM', 'SIGKILL']) {
+              if (child.exitCode !== null || child.signalCode !== null) break;
+              child.kill(sig);
+              await Promise.race([exited, clock.sleep(killGraceMs)]);
+            }
+          }
+        } catch (error) { verdict = `error (${redact(safeDiagnostic(error.message, 120))})`; }
         finally {
           clearTimeout(timer);
-          if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+          if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
           fs.rmSync(out, { recursive: true, force: true });
         }
       }
       say(`TLS certificate: ${verdict}`);
-      try { fs.copyFileSync(path.join(node.dir, 'tailscaled.log'), path.join(home, 'tailscaled.log')); fs.chmodSync(path.join(home, 'tailscaled.log'), 0o600); } catch { /* no log to keep */ }
+      try {
+        const kept = path.join(home, 'tailscaled.log');
+        fs.writeFileSync(kept, fs.readFileSync(path.join(node.dir, 'tailscaled.log'), 'utf8').split('\n').map(redact).join('\n'), { mode: 0o600 });
+        fs.chmodSync(kept, 0o600);
+      } catch { /* no log to keep */ }
     },
     async stop() {
       if (!node) return { removed: true };

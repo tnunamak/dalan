@@ -18,7 +18,7 @@ import * as tryHostedInternals from '../src/try-hosted.mjs';
 const { chooseMode } = tryHostedInternals;
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
-import { CLOUDFLARED, HelperError, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { CLOUDFLARED, HelperError, sweepTrialNodes, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -325,7 +325,7 @@ test('route choice: the computer\'s Tailscale on 443, else a node of its own, el
   assert.equal((await pick('cloudflare', [host, node, stubProvider('cloudflare')])).chosen, 'cloudflare');
 });
 
-function nodeHarness({ certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
+function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
   const fake = fakeTailscale(host);
   const events = { spawned: [], daemon: null, envs: [], keyDuringUp: null };
   registry ??= fs.mkdtempSync(path.join(tmp, 'registry-'));
@@ -339,10 +339,15 @@ function nodeHarness({ certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 
     }
     if (args.includes('cert')) {
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.signalCode = null;
-      child.kill = () => { child.signalCode = 'SIGTERM'; child.emit('exit', null); };
-      events.cert = { args, child, files: args.filter(a => /^--(cert|key)-file=/.test(a)).map(a => a.split('=')[1]) };
+      events.cert = { args, child, signals: [], files: args.filter(a => /^--(cert|key)-file=/.test(a)).map(a => a.split('=')[1]) };
+      child.kill = sig => {
+        events.cert.signals.push(sig); events.cert.dirAtKill = fs.existsSync(path.dirname(events.cert.files[0]));
+        if (certBehaviour === 'stubborn' && sig !== 'SIGKILL') return true; // ignores SIGTERM
+        child.signalCode = sig; setTimeout(() => child.emit('exit', null), 10); return true;
+      };
       setImmediate(() => {
         if (certBehaviour === 'ok') { for (const f of events.cert.files) fs.writeFileSync(f, '-----BEGIN PRIVATE KEY-----\nPRIVATE-KEY-BODY\n-----END PRIVATE KEY-----\n'); child.exitCode = 0; child.emit('exit', 0); }
+        if (certBehaviour === 'error-named') { child.stderr.write('500 Internal Server Error: no cert for box.tail1234.ts.net (owner@example.com)\n'); child.exitCode = 1; child.emit('exit', 1); }
         if (certBehaviour === 'error') { child.stderr.write('500 Internal Server Error: no TailscaleVarRoot\n'); child.exitCode = 1; child.emit('exit', 1); }
       });
       return child;
@@ -362,7 +367,7 @@ function nodeHarness({ certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 
     return fake.spawnChild(cmd, args, opts);
   };
   const lines = [];
-  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200, certWaitMs });
+  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200, certWaitMs, killGraceMs });
   return { node, fake, events, lines, registry, say: l => lines.push(l) };
 }
 const liveProcess = marker => spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)', '--', marker], { stdio: 'ignore' });
@@ -418,6 +423,64 @@ test('the trial\'s own node: a failed TLS certificate check prints one sanitized
   }
   const idle = nodeHarness();
   await idle.node.diagnose({ home: tmp, say: () => { throw new Error('nothing to say before a node exists'); } });
+});
+
+test('the trial\'s own node: the certificate check ends on cancel, escalates past a child that ignores SIGTERM, and keeps its files under tsnode', async () => {
+  // 1. Ctrl-C during the check: it ends at once, not after the 60 s limit, and the child gets SIGTERM.
+  const a = nodeHarness({ certBehaviour: 'hang', certWaitMs: 60_000 });
+  const homeA = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await a.node.start({ gatePort: 6161, home: homeA, say: a.say });
+  const controller = new AbortController(), lines = [];
+  const began = Date.now(), pending = a.node.diagnose({ home: homeA, say: l => lines.push(l), signal: controller.signal });
+  await sleepMs(30);
+  // 3. The files live inside tsnode, so the sweep of an abandoned trial removes them (a SIGKILLed trial never reaches its cleanup).
+  const outDir = path.dirname(a.events.cert.files[0]);
+  assert.equal(path.dirname(outDir), path.join(homeA, 'tsnode'), 'inside the registered node directory');
+  assert.equal(fs.statSync(outDir).mode & 0o777, 0o700);
+  fs.writeFileSync(path.join(outDir, 'key'), 'PRIVATE-KEY-BODY');
+  controller.abort();
+  await pending;
+  assert.ok(Date.now() - began < 5000, 'cancel does not wait for the 60 s limit');
+  assert.deepEqual(a.events.cert.signals, ['SIGTERM']);
+  assert.match(lines.join('\n'), /TLS certificate: error \(cancelled\)/);
+  assert.equal(fs.existsSync(outDir), false);
+  await a.node.stop();
+  // The sweep: a record whose trial is gone loses its tsnode tree, including a key left by a killed check.
+  const b = nodeHarness({ certBehaviour: 'hang', certWaitMs: 60_000 });
+  const homeB = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await b.node.start({ gatePort: 6161, home: homeB, say: b.say });
+  const pendingB = b.node.diagnose({ home: homeB, say() {} });
+  await sleepMs(30);
+  const leftover = path.dirname(b.events.cert.files[0]); fs.writeFileSync(path.join(leftover, 'key'), 'PRIVATE-KEY-BODY');
+  const ended = await sweepTrialNodes({ registry: b.registry, processCmd: () => null, kill() {}, clock: { sleep: async () => {} } });
+  assert.deepEqual(ended, ['dalan-trial-abc123']);
+  assert.equal(fs.existsSync(leftover), false, 'the sweep removed the key');
+  b.events.cert.child.kill('SIGTERM'); await pendingB; await b.node.stop();
+  // 2. A child that ignores SIGTERM is killed, and the outputs are removed only after it has exited.
+  const c = nodeHarness({ certBehaviour: 'stubborn', certWaitMs: 50, killGraceMs: 50 });
+  const homeC = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await c.node.start({ gatePort: 6161, home: homeC, say: c.say });
+  const linesC = []; await c.node.diagnose({ home: homeC, say: l => linesC.push(l) });
+  assert.deepEqual(c.events.cert.signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(c.events.cert.dirAtKill, true, 'the outputs still existed when the child was killed');
+  assert.equal(c.events.cert.child.signalCode, 'SIGKILL');
+  assert.equal(fs.existsSync(path.dirname(c.events.cert.files[0])), false);
+  assert.match(linesC.join('\n'), /TLS certificate: error \(no answer in 0 s\)/);
+  await c.node.stop();
+});
+
+test('the trial\'s own node: tailnet and device names are redacted from the retained log and the certificate line', async () => {
+  const status = { ...readyStatus, CurrentTailnet: { MagicDNSEnabled: true, Name: 'owner@example.com' } };
+  const h = nodeHarness({ certBehaviour: 'error-named', host: { status }, daemonOutput: ['peer dalan-trial-abc123.tail1234.ts.net joined tailnet owner@example.com\n', 'serve: TLS handshake error for box.tail1234.ts.net\n'] });
+  const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await h.node.start({ gatePort: 6161, home, say: h.say });
+  await sleepMs(30);
+  const lines = []; await h.node.diagnose({ home, say: l => lines.push(l) });
+  const kept = fs.readFileSync(path.join(home, 'tailscaled.log'), 'utf8');
+  for (const secret of ['tail1234', 'ts.net', 'owner@example.com', 'box.']) { assert.ok(!kept.includes(secret), `${secret} not in the retained log`); assert.ok(!lines.join('\n').includes(secret), `${secret} not in the certificate line`); }
+  assert.match(kept, /TLS handshake error for \[tailnet name\]/);
+  assert.match(lines.join('\n'), /TLS certificate: error \(500 Internal Server Error: no cert for \[tailnet name\] \(\[tailnet name\]\)\)/);
+  await h.node.stop();
 });
 
 test('the trial\'s own node: an unfinished login is a clean failure; a long home path is refused; a failed logout is not reported as removed', async () => {
