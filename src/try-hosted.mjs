@@ -17,6 +17,13 @@ import { PUBLIC_READY_MS, cloudflareProvider, createGate, startRoute, tailscaleN
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const HOSTED_WORKER = 'hosted';
+// Files that hold a credential of a finished trial. The job history stays.
+// A home that a restart reuses keeps the bridge's own config (its path secret); the others lose it.
+export function removeTrialSecrets(home, configDir, { keepConfig = false } = {}) {
+  for (const file of [path.join(home, 'resource-url'), ...(keepConfig ? [] : [path.join(configDir, 'env')])]) fs.rmSync(file, { force: true });
+  fs.rmSync(path.join(home, 'cloudflared'), { recursive: true, force: true });
+  fs.rmSync(path.join(home, 'tsnode'), { recursive: true, force: true });
+}
 const REPORT = 'bridge first report';
 
 export const NOTICE = [
@@ -60,8 +67,11 @@ export function defaultProviders({ env, say, client, hostedDeps = {} }) {
   return [tailscaleProvider({ env, ...hostedDeps.tailscale }), tailscaleNodeProvider({ env, ...hostedDeps.tailscaleNode }), cloudflareProvider({ env, say, ...hostedDeps.cloudflare })];
 }
 
-// The restart command for a trial, with every selection, on one line.
-const restartCommand = ({ cli, home, shellQuote, client, route }) => `${cli} try --public --client ${client} --route ${route} --home ${shellQuote(home)}`;
+// The restart command for a trial, with every selection, on one line. Only the computer's own Tailscale keeps its address between
+// runs, so only that route may reuse the home: any other address is new, and a home refuses a new address. Those restarts get a
+// new home.
+const STABLE_ORIGIN_ROUTES = new Set(['tailscale']);
+export const restartCommand = ({ cli, home, shellQuote, client, route, provider }) => `${cli} try --public --client ${client} --route ${route}${STABLE_ORIGIN_ROUTES.has(provider) ? ` --home ${shellQuote(home)}` : ''}`;
 
 export async function runHosted({ options, env, out, input, signal, errorContext, clock = { now: Date.now, sleep }, deps = {}, helpers }) {
   const { prepareHome, portFree, socketAnswers, choosePort, shellQuote, commandLine, parsePending, describeAttempt, MARKER, DIAGNOSE_AFTER_MS, DIAGNOSE_EVERY_MS, DIAGNOSE_LIMIT, POLL_MS, repo } = helpers;
@@ -79,7 +89,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const logFile = path.join(home, 'server.log');
   errorContext.shellHome = shellQuote(home); errorContext.logFile = logFile; errorContext.shellLog = shellQuote(logFile);
   errorContext.tryFlags = ` --public --client ${client} --route ${routeChoice}`;
-  const retry = () => commandLine(restartCommand({ cli, home, shellQuote, client, route: routeChoice }));
+  const retry = () => commandLine(restartCommand({ cli, home, shellQuote, client, route: routeChoice, provider: route?.provider.name }));
 
   // A home that already has a bridge or another trial's profile is never reused silently.
   const adminSock = defaultPath(home, '.local/share/dot-bridge', 'admin.sock');
@@ -149,8 +159,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     for (const line of NOTICE) say(line);
     say('Checking public routes…');
     gate = await createGate();
-    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say }); }
-    catch (error) { if (error && typeof error === 'object') error.tryKind ??= 'route_start'; throw error; }
+    // A trial that was killed earlier may have left a Tailscale node of its own running; end it before this one starts.
+    for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended a Tailscale node left by an earlier trial (${ended.join(', ')}).`); }
+    signal?.throwIfAborted();
+    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal }); }
+    catch (error) { if (error && typeof error === 'object' && !signal?.aborted) error.tryKind ??= 'route_start'; throw error; }
     routeGone = route.exited ? route.exited.then(() => { routeDied = true; }) : routeGone;
     const origin = route.origin;
     say(`Public route ready (${route.provider.name}).`);
@@ -182,7 +195,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     fs.chmodSync(urlFile, 0o600);
 
     gate.open(bindPort);
-    const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS[route.provider.name], say });
+    const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS[route.provider.name], say, signal });
     if (!ready.ready) { const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
     say('Public HTTPS and OAuth discovery verified.');
 
@@ -285,11 +298,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     if (route) routeStopped = await route.stop().catch(error => ({ removed: false, detail: error.message }));
     await stopServer();
     await gate?.close();
+    // The connector URL and the bridge's secrets are no use after the trial and stay on disk for nobody.
+    removeTrialSecrets(home, configDir, { keepConfig: STABLE_ORIGIN_ROUTES.has(route?.provider.name) });
     cleaned = routeStopped ? routeStopped.removed : true;
     if (!cleaned) { process.exitCode = 1; out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n${routeStopped.command ? `Remove it with:\n${commandLine(routeStopped.command)}\n` : ''}`); }
   }
   if (cleaned) say('Public route removed. Bridge stopped.');
-  if (routeStopped?.note) say(routeStopped.note);
   say(`Trial history kept at ${home}`);
   say(`To run it again: ${retry().trim()}`);
 }

@@ -14,6 +14,22 @@ import {
 import { safeDiagnostic } from './diagnostic.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Cancellation: every wait in route startup ends when the caller's signal aborts, and an abort is never turned into a fallback.
+const abortReason = signal => signal.reason ?? Object.assign(new Error('stopped'), { name: 'AbortError', code: 'ABORT_ERR' });
+const raceAbort = (promise, signal) => !signal ? promise : Promise.race([promise, new Promise((_, reject) => {
+  if (signal.aborted) reject(abortReason(signal)); else signal.addEventListener('abort', () => reject(abortReason(signal)), { once: true });
+})]);
+// Complete lines from chunks that may split anywhere; `end()` hands over a last line that had no newline.
+export function lineBuffer(onLine, max = 65_536) {
+  let buf = '';
+  const push = chunk => {
+    buf += chunk;
+    for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) { onLine(buf.slice(0, i).replace(/\r$/, '')); buf = buf.slice(i + 1); }
+    if (buf.length > max) buf = buf.slice(-max);
+  };
+  push.end = () => { if (buf) onLine(buf); buf = ''; };
+  return push;
+}
 const PROBE_TIMEOUT_MS = 10_000;
 export const PUBLIC_READY_MS = { tailscale: 120_000, 'tailscale-node': 120_000, cloudflare: 60_000 };
 
@@ -103,7 +119,8 @@ export function tailscaleProvider({ port: wantedPort = TRIAL_PORT, name = 'tails
       } catch (error) { return { ok: false, ...explainTailscale(error) }; }
     },
     // A foreground rule on a free port, exactly ours: it is removed by Tailscale itself when the child ends, and again by `stop`.
-    async start({ gatePort, home }) {
+    async start({ gatePort, home, signal }) {
+      signal?.throwIfAborted();
       if (!plan) throw new Error('tailscale: probe() must succeed before start()');
       // Re-read just before applying: a port another rule took since the probe is not ours to share.
       const again = preflight({ tailscale, platform });
@@ -118,7 +135,7 @@ export function tailscaleProvider({ port: wantedPort = TRIAL_PORT, name = 'tails
         const status = JSON.parse(tailscale(funnelStatusArgs()).stdout || '{}');
         if (funnelRuleMatches(status, plan.dnsName, plan.port, gatePort)) break;
         if (waited >= 20_000 || child.exitCode !== null) throw new Error('tailscale funnel did not publish the rule');
-        await clock.sleep(500);
+        await raceAbort(clock.sleep(500), signal);
       }
       return { origin: plan.origin, exited };
     },
@@ -139,80 +156,109 @@ function recoverStaleFunnel(home, tailscale, recordName = 'trial') {
 }
 
 // ---- A Tailscale node of its own -----------------------------------------------------------------------------------------
-// When this computer's Tailscale has a rule on 443, the trial starts a second, userspace `tailscaled` under the trial home: its own
-// state directory, socket and hostname (dalan-trial-<id>), so it has its own address and its own :443 Funnel. It touches nothing of
-// the computer's Tailscale. `stop` ends the Funnel, logs the node out, ends the daemon and deletes the state directory.
+// When this computer's Tailscale has a rule on 443, the trial starts a second, userspace `tailscaled`: its own socket and hostname
+// (dalan-trial-<id>), so it has its own address and its own :443 Funnel. It touches nothing of the computer's Tailscale.
+// The node is EPHEMERAL: `--state=mem:` keeps no state on disk and registers the machine as an ephemeral node, so Tailscale
+// removes it by itself once the daemon is gone, even when this process was killed. `stop` ends the Funnel, logs out (which removes
+// it at once), ends the daemon and deletes the socket directory.
+// Every node is also listed in a registry that does not depend on the trial home. Any later trial sweeps it and ends daemons whose
+// trial is gone.
 const SOCKET_PATH_LIMIT = 100; // a unix socket path must fit sun_path (104 on macOS, 108 on Linux)
 const nodeCli = (sock, env) => args => spawnSync('tailscale', [`--socket=${sock}`, ...args], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
-const procCmdline = pid => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '); } catch { return null; } };
+// The command line of a process, or null. `ps` exists on Linux and macOS; /proc does not exist on macOS.
+export const processCommand = pid => {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const out = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 5000 });
+  return out.status === 0 && out.stdout.trim() ? out.stdout.trim() : null;
+};
+const defaultRegistry = env => path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'dalan', 'trial-nodes');
+// A key, a login link or a node key never reaches the daemon log.
+export const maskNodeText = text => String(text).replace(/tskey-[A-Za-z0-9_-]+/g, '[key]').replace(/https:\/\/login\.tailscale\.com\/\S+/g, '[login link]').replace(/(nodekey|authkey)\S*/gi, '[secret]');
 
-// A trial that was killed leaves its daemon and node behind. Its record names both; end exactly them, and only if the process is
-// still the daemon that was started for that state directory.
-function recoverStaleNode(home, { runCli = nodeCli, env }) {
-  const file = path.join(home, 'dot-bridge-trial-node.json');
-  let rec; try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
-  if (rec?.dir && rec?.sock) { try { runCli(rec.sock, env)(['logout']); } catch { /* the daemon is gone */ } }
-  if (Number.isInteger(rec?.pid) && procCmdline(rec.pid)?.includes(rec.dir)) { try { process.kill(rec.pid, 'SIGTERM'); } catch { /* already gone */ } }
-  if (rec?.dir && path.dirname(rec.dir) === home) fs.rmSync(rec.dir, { recursive: true, force: true });
-  fs.rmSync(file, { force: true });
+// Ends the daemons of trials that no longer run. A record is stale when its trial process is gone (or its PID now runs something
+// else); the daemon is ended only if its command line still names the socket this trial started it with.
+export async function sweepTrialNodes({ registry, processCmd = processCommand, kill = (pid, sig) => process.kill(pid, sig), clock = { sleep } }) {
+  let names = []; try { names = fs.readdirSync(registry).filter(n => n.endsWith('.json')); } catch { return []; }
+  const ended = [];
+  for (const name of names) {
+    const file = path.join(registry, name);
+    let rec; try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fs.rmSync(file, { force: true }); continue; }
+    if (Number.isInteger(rec.owner) && rec.owner !== process.pid && rec.ownerCmd && processCmd(rec.owner) === rec.ownerCmd) continue; // its trial still runs
+    if (Number.isInteger(rec.pid) && rec.sock && processCmd(rec.pid)?.includes(rec.sock)) {
+      try { kill(rec.pid, 'SIGTERM'); } catch { /* gone */ }
+      for (let i = 0; i < 20 && processCmd(rec.pid)?.includes(rec.sock); i++) await clock.sleep(100);
+      if (processCmd(rec.pid)?.includes(rec.sock)) { try { kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } }
+    }
+    if (rec.dir && path.basename(rec.dir) === 'tsnode') fs.rmSync(rec.dir, { recursive: true, force: true });
+    fs.rmSync(file, { force: true });
+    ended.push(rec.hostname ?? name);
+  }
+  return ended;
 }
 
 export function tailscaleNodeProvider({
   env = process.env, platform = process.platform, spawnChild = spawn, runCli = nodeCli, clock = { sleep }, which = name => whichOnPath(name, env),
-  newId = () => randomBytes(3).toString('hex'), loginWaitMs = 600_000, daemonWaitMs = 20_000,
+  newId = () => randomBytes(3).toString('hex'), loginWaitMs = 600_000, daemonWaitMs = 20_000, registry = defaultRegistry(env), processCmd = processCommand,
 } = {}) {
-  let node = null; // { dir, sock, hostname, daemon, daemonExited, run, inner, recordFile }
+  let node = null; // { dir, sock, hostname, daemon, daemonExited, run, inner, recordFile, signedIn }
+  // The credential never reaches a child's environment: it travels only in a file read by `tailscale up`.
+  const childEnv = Object.fromEntries(Object.entries(env).filter(([k]) => k !== 'DALAN_TS_AUTHKEY'));
   return {
     name: 'tailscale-node',
     probe() {
       if (!which('tailscaled') || !which('tailscale')) return { ok: false, line: 'tailscaled is not installed, so a separate Tailscale node cannot be started; using Cloudflare.', fix: 'Install Tailscale (it includes tailscaled) from https://tailscale.com/download, or free Funnel port 443 on this computer.' };
       return { ok: true };
     },
-    async start({ gatePort, home, say = () => {} }) {
-      recoverStaleNode(home, { runCli, env });
+    recover: () => sweepTrialNodes({ registry, processCmd, clock }),
+    async start({ gatePort, home, say = () => {}, signal }) {
+      signal?.throwIfAborted();
+      await sweepTrialNodes({ registry, processCmd, clock });
       const dir = path.join(home, 'tsnode'), sock = path.join(dir, 'tailscaled.sock'), hostname = `dalan-trial-${newId()}`;
       if (Buffer.byteLength(sock) > SOCKET_PATH_LIMIT) throw new Error('the trial home path is too long for a Tailscale socket; choose a shorter --home');
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const recordFile = path.join(home, 'dot-bridge-trial-node.json');
-      const writeRecord = pid => fs.writeFileSync(recordFile, JSON.stringify({ dir, sock, hostname, pid, created_at: new Date().toISOString() }), { mode: 0o600 });
+      fs.mkdirSync(registry, { recursive: true, mode: 0o700 });
+      const recordFile = path.join(registry, `${hostname}.json`);
+      const writeRecord = pid => fs.writeFileSync(recordFile, JSON.stringify({ dir, sock, hostname, pid, home, owner: process.pid, ownerCmd: processCmd(process.pid), created_at: new Date().toISOString() }), { mode: 0o600 });
       writeRecord(null); // ownership is recorded before the first process exists
-      const run = runCli(sock, env);
-      const logFd = fs.openSync(path.join(dir, 'tailscaled.log'), 'a', 0o600);
-      const daemon = spawnChild('tailscaled', ['--tun=userspace-networking', `--statedir=${dir}`, `--socket=${sock}`, '--port=0'], { env, stdio: ['ignore', logFd, logFd] });
-      fs.closeSync(logFd);
+      const run = runCli(sock, childEnv);
+      const logFile = path.join(dir, 'tailscaled.log');
+      const daemon = spawnChild('tailscaled', ['--tun=userspace-networking', '--state=mem:', `--socket=${sock}`, '--port=0'], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+      const daemonLog = lineBuffer(line => { try { fs.appendFileSync(logFile, `${maskNodeText(line)}\n`, { mode: 0o600 }); } catch { /* the directory is gone */ } });
+      for (const stream of [daemon.stdout, daemon.stderr]) { stream?.setEncoding?.('utf8'); stream?.on('data', daemonLog); stream?.on('end', () => daemonLog.end()); }
       const daemonExited = new Promise(resolve => { daemon.once('exit', resolve); daemon.once('error', resolve); });
-      node = { dir, sock, hostname, daemon, daemonExited, run, recordFile, inner: null };
+      node = { dir, sock, hostname, daemon, daemonExited, run, recordFile, inner: null, signedIn: false };
       writeRecord(daemon.pid ?? null);
       for (let waited = 0; ; waited += 250) {
         let up = false; try { up = Boolean(JSON.parse(run(['status', '--json']).stdout || '{}').BackendState); } catch { /* not ready */ }
         if (up) break;
         if (daemon.exitCode !== null || waited >= daemonWaitMs) throw new Error('tailscaled did not start for the trial node');
-        await clock.sleep(250);
+        await raceAbort(clock.sleep(250), signal);
       }
-      // One-time sign-in of the new node: a login URL on a terminal, or an auth key from DALAN_TS_AUTHKEY (kept in a 0600 file).
+      // One-time sign-in of the new node: a login URL on a terminal, or an auth key from DALAN_TS_AUTHKEY. The key is in a 0600 file
+      // only while `tailscale up` runs.
       const keyFile = path.join(dir, 'authkey');
       const upArgs = ['up', `--hostname=${hostname}`, '--accept-dns=false', '--accept-routes=false'];
       if (env.DALAN_TS_AUTHKEY) { fs.writeFileSync(keyFile, env.DALAN_TS_AUTHKEY, { mode: 0o600 }); upArgs.push(`--auth-key=file:${keyFile}`); }
-      const upChild = spawnChild('tailscale', [`--socket=${sock}`, ...upArgs], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-      let announced = false;
-      const scan = chunk => {
-        const url = !announced && /https:\/\/login\.tailscale\.com\/\S+/.exec(String(chunk))?.[0];
+      const upChild = spawnChild('tailscale', [`--socket=${sock}`, ...upArgs], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+      let announced = false, timer = null;
+      const scan = lineBuffer(line => {
+        const url = !announced && /https:\/\/login\.tailscale\.com\/\S+/.exec(line)?.[0];
         if (url) { announced = true; say(`This temporary Tailscale node needs a one-time sign-in. Open: ${url}`); say('Waiting for the sign-in…'); }
-      };
-      upChild.stdout?.on('data', scan); upChild.stderr?.on('data', scan);
-      const upDone = new Promise(resolve => { upChild.once('exit', code => resolve(code)); upChild.once('error', () => resolve(-1)); });
-      const code = await Promise.race([upDone, clock.sleep(loginWaitMs).then(() => 'timeout')]);
-      if (code !== 0) {
-        if (upChild.exitCode === null) upChild.kill('SIGTERM');
-        throw new Error(code === 'timeout' ? 'the one-time Tailscale sign-in was not completed in time' : 'the Tailscale node could not sign in');
-      }
+      });
+      for (const stream of [upChild.stdout, upChild.stderr]) { stream?.on('data', scan); stream?.on('end', () => scan.end()); }
+      const upDone = new Promise(resolve => { upChild.once('exit', code => { scan.end(); resolve(code); }); upChild.once('error', () => resolve(-1)); });
+      const timedOut = new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), loginWaitMs); });
+      let code;
+      try { code = await raceAbort(Promise.race([upDone, timedOut]), signal); }
+      finally { clearTimeout(timer); fs.rmSync(keyFile, { force: true }); if (upChild.exitCode === null && upChild.signalCode === null) upChild.kill('SIGTERM'); }
+      if (code !== 0) throw new Error(code === 'timeout' ? 'the one-time Tailscale sign-in was not completed in time' : 'the Tailscale node could not sign in');
       node.signedIn = true;
       const wrapSpawn = (cmd, args, opts) => spawnChild(cmd, [`--socket=${sock}`, ...args], opts);
-      const inner = tailscaleProvider({ tailscale: run, env, platform: 'linux', spawnChild: wrapSpawn, clock, which: () => true, name: 'tailscale-node', record: 'trial-node' });
+      const inner = tailscaleProvider({ tailscale: run, env: childEnv, platform: 'linux', spawnChild: wrapSpawn, clock, which: () => true, name: 'tailscale-node', record: 'trial-node' });
       node.inner = inner;
       const probe = inner.probe();
       if (!probe.ok) throw new Error(probe.fix);
-      const started = await inner.start({ gatePort, home });
+      const started = await inner.start({ gatePort, home, signal });
       return { origin: started.origin, exited: Promise.race([started.exited, daemonExited]) };
     },
     async stop() {
@@ -222,12 +268,13 @@ export function tailscaleNodeProvider({
       if (inner) result = await inner.stop();
       let loggedOut = true;
       if (node.signedIn) { try { loggedOut = run(['logout']).status === 0; } catch { loggedOut = false; } }
-      if (daemon.exitCode === null) { daemon.kill('SIGTERM'); await Promise.race([new Promise(resolve => daemon.once('exit', resolve)), clock.sleep(5000)]); if (daemon.exitCode === null) daemon.kill('SIGKILL'); }
+      if (daemon.exitCode === null && daemon.signalCode == null) { const gone = new Promise(resolve => daemon.once('exit', resolve)); daemon.kill('SIGTERM'); await Promise.race([gone, clock.sleep(5000)]); if (daemon.exitCode === null && daemon.signalCode == null) daemon.kill('SIGKILL'); }
       fs.rmSync(dir, { recursive: true, force: true });
       fs.rmSync(recordFile, { force: true });
       node = null;
       if (!result.removed) return result;
-      return { removed: true, ...(loggedOut ? {} : { note: `The trial's Tailscale node ${hostname} could not be logged out; remove it in the Tailscale admin console.` }) };
+      // Logout removes the node at once. If it failed, the node is still registered until Tailscale drops the ephemeral machine.
+      return loggedOut ? { removed: true } : { removed: false, detail: `the trial's Tailscale node ${hostname} could not be logged out. It is ephemeral, so Tailscale removes it on its own once offline; to remove it now, delete ${hostname} in the Tailscale admin console` };
     },
   };
 }
@@ -251,15 +298,16 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export class HelperError extends Error { constructor(message, code) { super(message); this.code = code; } }
 
 const defaultExtract = (archive, dir) => new Promise((resolve, reject) => execFile('tar', ['-xzf', archive, '-C', dir], { timeout: 60_000 }, error => error ? reject(error) : resolve()));
-const defaultDownload = async url => {
-  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120_000) });
+const defaultDownload = async (url, { signal } = {}) => {
+  const res = await fetch(url, { redirect: 'follow', signal: signal ? AbortSignal.any([AbortSignal.timeout(120_000), signal]) : AbortSignal.timeout(120_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 };
 
 // A `cloudflared` already on PATH is used as is. Otherwise the pinned download is cached in the user's cache directory and
 // checked again against its recorded hash on every reuse.
-export async function ensureCloudflared({ env = process.env, platform = process.platform, arch = process.arch, manifest = CLOUDFLARED, cacheRoot, download = defaultDownload, extract = defaultExtract, which = name => whichOnPath(name, env), say = () => {} } = {}) {
+export async function ensureCloudflared({ env = process.env, platform = process.platform, arch = process.arch, manifest = CLOUDFLARED, cacheRoot, download = defaultDownload, extract = defaultExtract, which = name => whichOnPath(name, env), say = () => {}, signal } = {}) {
+  signal?.throwIfAborted();
   const onPath = which('cloudflared');
   if (onPath) return { bin: onPath, source: 'path' };
   const asset = manifest.assets[`${platform}-${arch}`];
@@ -273,8 +321,9 @@ export async function ensureCloudflared({ env = process.env, platform = process.
   const work = fs.mkdtempSync(path.join(root, 'dl-'));
   try {
     let bytes;
-    try { bytes = await download(`${manifest.base}${asset.name}`); }
+    try { bytes = await download(`${manifest.base}${asset.name}`, { signal }); }
     catch (error) {
+      if (signal?.aborted) throw error;
       const brew = platform === 'darwin' && which('brew') ? ' Install it with: brew install cloudflared' : '';
       throw new HelperError(`Tunnel-helper download failed (${safeDiagnostic(error.message, 120)}).${brew}`, 'download');
     }
@@ -282,6 +331,7 @@ export async function ensureCloudflared({ env = process.env, platform = process.
     let file = path.join(work, asset.name);
     fs.writeFileSync(file, bytes, { mode: 0o600 });
     if (asset.archive) {
+      signal?.throwIfAborted();
       await extract(file, work);
       file = path.join(work, 'cloudflared');
       if (!fs.existsSync(file)) throw new HelperError('The tunnel helper archive did not contain cloudflared; public setup stopped.', 'archive');
@@ -307,8 +357,9 @@ export function cloudflareProvider({ env = process.env, platform = process.platf
   return {
     name: 'cloudflare',
     probe: () => ({ ok: true }),
-    async start({ gatePort, home }) {
-      const { bin } = await ensure({ env, platform, arch, say, ...helperDeps });
+    async start({ gatePort, home, signal }) {
+      const { bin } = await ensure({ env, platform, arch, say, signal, ...helperDeps });
+      signal?.throwIfAborted();
       // An existing named-tunnel configuration must not change this tunnel's target: the helper sees an empty home and config.
       const isolated = path.join(home, 'cloudflared');
       fs.mkdirSync(isolated, { recursive: true, mode: 0o700 });
@@ -319,13 +370,14 @@ export function cloudflareProvider({ env = process.env, platform = process.platf
       const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', resolve); });
       const origin = await new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('cloudflared did not report a public address in time')), startMs);
+        const onAbort = () => reject(abortReason(signal));
+        if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
         let tail = '';
-        const onData = chunk => {
-          tail = (tail + chunk).slice(-4000);
-          for (const line of String(chunk).split('\n')) { const found = parseQuickTunnelOrigin(line); if (found) { clearTimeout(timer); resolve(found); return; } }
-        };
-        for (const stream of [child.stdout, child.stderr]) stream?.setEncoding?.('utf8'), stream?.on('data', onData);
-        exited.then(() => { clearTimeout(timer); reject(new Error(`cloudflared exited before the tunnel was ready: ${safeDiagnostic(tail.trim().split('\n').slice(-2).join(' '), 200)}`)); });
+        const finish = fn => value => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); fn(value); };
+        const found = finish(resolve);
+        const onLine = line => { tail = `${tail}${line}\n`.slice(-4000); const origin = parseQuickTunnelOrigin(line); if (origin) found(origin); };
+        const sinks = [child.stdout, child.stderr].map(stream => { const buffer = lineBuffer(onLine); stream?.setEncoding?.('utf8'); stream?.on('data', buffer); stream?.on('end', () => buffer.end()); return buffer; });
+        exited.then(() => { for (const sink of sinks) sink.end(); finish(reject)(new Error(`cloudflared exited before the tunnel was ready: ${safeDiagnostic(tail.trim().split('\n').slice(-2).join(' '), 200)}`)); });
       });
       return { origin, exited };
     },
@@ -348,12 +400,13 @@ export function cloudflareProvider({ env = process.env, platform = process.platf
 // route with its provider name; the caller owns `stop()`.
 // Route choice, in order: this computer's Tailscale on :443 when no rule uses it; else a Tailscale node of the trial's own; else
 // Cloudflare. `tailscale` allows only the first two. A rule that already holds 443 is never changed.
-export async function startRoute({ route = 'auto', providers, gatePort, home, say }) {
+export async function startRoute({ route = 'auto', providers, gatePort, home, say, signal }) {
   const named = name => providers.find(p => p.name === name);
   // A start that fails is cleaned up before anything else happens, so a failed route never leaves a rule, node or process behind.
   const attempt = async provider => {
+    signal?.throwIfAborted();
     try {
-      const started = await provider.start({ gatePort, home, say });
+      const started = await provider.start({ gatePort, home, say, signal });
       return { provider, origin: started.origin, exited: started.exited, stop: () => provider.stop() };
     } catch (error) {
       const cleaned = await provider.stop().catch(e => ({ removed: false, detail: e.message }));
@@ -361,6 +414,7 @@ export async function startRoute({ route = 'auto', providers, gatePort, home, sa
       throw error;
     }
   };
+  signal?.throwIfAborted();
   if (route === 'cloudflare') return attempt(named('cloudflare'));
   const host = named('tailscale').probe();
   let choice = null, why = host.fix;
@@ -377,7 +431,7 @@ export async function startRoute({ route = 'auto', providers, gatePort, home, sa
   if (choice) {
     try { return await attempt(choice); }
     catch (error) {
-      if (error.cleanupFailed) throw error;
+      if (error.cleanupFailed || signal?.aborted) throw error; // a stop request is never answered by trying another route
       say(`Tailscale did not start (${safeDiagnostic(error.message, 120)}); using a temporary Cloudflare route.`);
     }
   }
@@ -388,18 +442,19 @@ export async function startRoute({ route = 'auto', providers, gatePort, home, sa
 // The public address answers as this bridge: trusted TLS (the platform's fetch checks it), discovery that names this origin and
 // resource, an OAuth challenge on an unauthenticated MCP request, and no owner route. The secret path is known only to this bridge,
 // so a matching discovery document also shows that the route reaches it and not another program.
-export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clock = { now: Date.now, sleep }, timeoutMs, say = () => {} }) {
+export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clock = { now: Date.now, sleep }, timeoutMs, say = () => {}, signal }) {
+  const within = ms => signal ? AbortSignal.any([AbortSignal.timeout(ms), signal]) : AbortSignal.timeout(ms);
   const resource = `${origin}/${secret}/mcp`;
   const check = async () => {
-    const meta = await fetchImpl(`${origin}/.well-known/oauth-protected-resource/${secret}/mcp`, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+    const meta = await fetchImpl(`${origin}/.well-known/oauth-protected-resource/${secret}/mcp`, { redirect: 'manual', signal: within(10_000) });
     if (meta.status !== 200) return `discovery returned HTTP ${meta.status}`;
     const doc = await meta.json().catch(() => null);
     if (doc?.resource !== resource) return 'discovery names a different resource';
     if (!Array.isArray(doc.authorization_servers) || !doc.authorization_servers.every(s => String(s).startsWith(`${origin}/`))) return 'discovery names a different issuer';
-    const challenge = await fetchImpl(resource, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}', signal: AbortSignal.timeout(10_000) });
+    const challenge = await fetchImpl(resource, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}', signal: within(10_000) });
     if (challenge.status !== 401 || !/^Bearer/i.test(challenge.headers.get('www-authenticate') ?? '')) return `an unauthenticated MCP request returned HTTP ${challenge.status}, not an OAuth challenge`;
     for (const owner of ['/admin', '/connect/pending', '/connect/list']) {
-      const res = await fetchImpl(`${origin}${owner}`, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+      const res = await fetchImpl(`${origin}${owner}`, { redirect: 'manual', signal: within(10_000) });
       if (res.status === 200) return `${owner} answers on the public address`;
     }
     return null;
@@ -407,10 +462,11 @@ export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clo
   const end = clock.now() + timeoutMs;
   let last = 'no answer yet', nextSay = clock.now() + 15_000;
   for (;;) {
+    signal?.throwIfAborted();
     try { last = await check(); if (last === null) return { ready: true }; }
-    catch (error) { last = safeDiagnostic(error.cause?.code ?? error.message, 120); }
+    catch (error) { if (signal?.aborted) throw error; last = safeDiagnostic(error.cause?.code ?? error.message, 120); }
     if (clock.now() >= end) return { ready: false, last };
     if (clock.now() >= nextSay) { say(`Still waiting for the public address to answer (${last})…`); nextSay += 15_000; }
-    await clock.sleep(2000);
+    await raceAbort(clock.sleep(2000), signal);
   }
 }

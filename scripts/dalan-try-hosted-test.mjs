@@ -3,6 +3,7 @@
 // stand in for the outside. The bridge, its OAuth server, its MCP tools and the CLI are the real ones.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -13,9 +14,10 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { beginPairing, openSession, workJob } from '../src/demo-worker.mjs';
 import { parseTryArgs, runTry, tryInternals } from '../src/try.mjs';
-import { chooseMode } from '../src/try-hosted.mjs';
+import * as tryHostedInternals from '../src/try-hosted.mjs';
+const { chooseMode } = tryHostedInternals;
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
-import { CLOUDFLARED, HelperError, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { CLOUDFLARED, HelperError, cloudflareProvider, createGate, ensureCloudflared, explainTailscale, parseQuickTunnelOrigin, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -119,7 +121,7 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
     run.input.write('y\n');
     await run.until(/Recorded as accepted\. The trial stays available until you press Ctrl-C\./);
     // The URL is a credential: it is on the terminal handoff once, and in the private file, nowhere else.
-    const secret = new URL(url).pathname.split('/')[1];
+    const secret = secretPath = new URL(url).pathname.split('/')[1];
     assert.equal(run.out.split(secret).length - 1, 1, 'the secret path is printed exactly once');
     const urlFile = path.join(run.home, 'resource-url');
     assert.equal(fs.statSync(urlFile).mode & 0o777, 0o600);
@@ -142,10 +144,20 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
   assert.match(run.out, /Public route removed\. Bridge stopped\./);
   assert.match(run.out, new RegExp(`Trial history kept at ${run.home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.equal(run.route.stopped, 1, 'the route was stopped exactly once');
-  assert.match(run.out, /try --public --client chatgpt --route auto --home /, 'the restart command keeps every selection');
+  assert.match(run.out, /To run it again: .*try --public --client chatgpt --route auto\n/, 'the restart command keeps every selection');
+  assert.doesNotMatch(run.out.split('To run it again:')[1], /--home/, 'a new address needs a new home, so the restart command names none');
+  // After a normal stop no credential is left in the trial home.
+  assert.equal(fs.existsSync(path.join(run.home, 'resource-url')), false, 'the connector URL file is removed');
+  assert.deepEqual(filesHolding(run.home, secretPath), [], 'the secret path is in no file after the stop');
   assert.equal(await closed(run.route.gatePort), true, 'the gate is closed');
 });
 
+let secretPath = null;
+const filesHolding = (root, needle) => {
+  const hits = [];
+  const walk = dir => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const f = path.join(dir, e.name); if (e.isDirectory()) walk(f); else if (e.isFile() && fs.readFileSync(f).includes(needle)) hits.push(path.relative(root, f)); } };
+  walk(root); return hits;
+};
 const closed = port => new Promise(resolve => { const s = net.connect(port, '127.0.0.1'); s.once('connect', () => { s.destroy(); resolve(false); }); s.once('error', () => resolve(true)); });
 
 test('a wrong phrase, a blocked outcome or an unapproved worker is not counted as the demo finishing', async () => {
@@ -298,21 +310,26 @@ test('route choice: the computer\'s Tailscale on 443, else a node of its own, el
   assert.equal((await pick('cloudflare', [host, node, stubProvider('cloudflare')])).chosen, 'cloudflare');
 });
 
-function nodeHarness({ upBehaviour = 'login-then-ok', host = {}, sockHome } = {}) {
+function nodeHarness({ upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
   const fake = fakeTailscale(host);
-  const events = { spawned: [], daemon: null };
+  const events = { spawned: [], daemon: null, envs: [], keyDuringUp: null };
+  registry ??= fs.mkdtempSync(path.join(tmp, 'registry-'));
   const spawnChild = (cmd, args, opts) => {
-    events.spawned.push([cmd, ...args]);
+    events.spawned.push([cmd, ...args]); events.envs.push(opts?.env);
     if (cmd === 'tailscaled') {
-      const child = new EventEmitter(); child.exitCode = null; child.pid = 777;
+      const child = new EventEmitter(); child.exitCode = null; child.signalCode = null; child.pid = 777; child.stdout = new PassThrough(); child.stderr = new PassThrough();
       child.kill = () => { child.exitCode = 0; child.emit('exit'); };
-      events.daemon = child; return child;
+      events.daemon = child; setImmediate(() => { for (const chunk of daemonOutput) child.stderr.write(chunk); });
+      return child;
     }
     if (args.includes('up')) {
-      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.signalCode = null;
       child.kill = () => { child.exitCode = 1; child.emit('exit', 1); };
-      queueMicrotask(() => {
-        if (upBehaviour === 'login-then-ok') { child.stderr.emit('data', Buffer.from('\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n')); setTimeout(() => { child.exitCode = 0; child.emit('exit', 0); }, 5); }
+      const keyArg = args.find(a => a.startsWith('--auth-key=file:'));
+      if (keyArg) events.keyDuringUp = fs.readFileSync(keyArg.slice('--auth-key=file:'.length), 'utf8');
+      events.up = child;
+      setImmediate(() => {
+        if (upBehaviour === 'login-then-ok') { for (const chunk of loginChunks) child.stderr.write(chunk); setTimeout(() => { child.exitCode = 0; child.emit('exit', 0); }, 5); }
         if (upBehaviour === 'ok') { child.exitCode = 0; child.emit('exit', 0); }
       });
       return child;
@@ -320,52 +337,166 @@ function nodeHarness({ upBehaviour = 'login-then-ok', host = {}, sockHome } = {}
     return fake.spawnChild(cmd, args, opts);
   };
   const lines = [];
-  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs: 200, daemonWaitMs: 200 });
-  return { node, fake, events, lines, say: l => lines.push(l) };
+  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200 });
+  return { node, fake, events, lines, registry, say: l => lines.push(l) };
 }
+const liveProcess = marker => spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)', '--', marker], { stdio: 'ignore' });
+const deadPid = () => new Promise(resolve => { const c = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' }); c.once('exit', () => resolve(c.pid)); });
+const isAlive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-test('the trial\'s own node: userspace tailscaled under the trial home, a one-time login line, a 443 Funnel, then logout and removal', async () => {
+test('the trial\'s own node: ephemeral userspace tailscaled, a one-time login line, a 443 Funnel, then logout and removal', async () => {
   const h = nodeHarness();
   assert.equal(h.node.probe().ok, true);
   const home = fs.mkdtempSync(path.join(tmp, 'node-'));
   const started = await h.node.start({ gatePort: 6161, home, say: h.say });
   assert.equal(started.origin, 'https://box.tail1234.ts.net', '443 on the node\'s own address');
   const [daemon] = h.events.spawned;
-  assert.deepEqual(daemon, ['tailscaled', '--tun=userspace-networking', `--statedir=${home}/tsnode`, `--socket=${home}/tsnode/tailscaled.sock`, '--port=0']);
+  assert.deepEqual(daemon, ['tailscaled', '--tun=userspace-networking', '--state=mem:', `--socket=${home}/tsnode/tailscaled.sock`, '--port=0'], 'in-memory state: Tailscale registers an ephemeral node and nothing is kept on disk');
   assert.ok(h.events.spawned.some(a => a[0] === 'tailscale' && a.includes('up') && a.includes('--hostname=dalan-trial-abc123')), 'its own hostname');
   assert.deepEqual(h.lines.filter(l => /login/.test(l)), ['This temporary Tailscale node needs a one-time sign-in. Open: https://login.tailscale.com/a/abc123'], 'one login line');
   const funnel = h.events.spawned.find(a => a.includes('funnel'));
   assert.deepEqual(funnel, ['tailscale', `--socket=${home}/tsnode/tailscaled.sock`, 'funnel', '--https=443', 'http://127.0.0.1:6161']);
-  assert.ok(fs.existsSync(path.join(home, 'dot-bridge-trial-node.json')), 'the node is recorded for recovery');
+  assert.deepEqual(fs.readdirSync(h.registry), ['dalan-trial-abc123.json'], 'the node is listed in the registry that any later trial reads');
   const stopped = await h.node.stop();
   assert.deepEqual(stopped, { removed: true });
   assert.equal(h.fake.state.loggedOut, true, 'the node is logged out');
   assert.equal(h.events.daemon.exitCode, 0, 'the daemon is ended');
-  assert.equal(fs.existsSync(path.join(home, 'tsnode')), false, 'its state directory is deleted');
-  assert.equal(fs.existsSync(path.join(home, 'dot-bridge-trial-node.json')), false);
+  assert.equal(fs.existsSync(path.join(home, 'tsnode')), false, 'its directory is deleted');
+  assert.deepEqual(fs.readdirSync(h.registry), []);
 });
 
-test('the trial\'s own node: an unfinished login is a clean failure; a stale node from a killed trial is cleared first; a long home path is refused', async () => {
+test('the trial\'s own node: an unfinished login is a clean failure; a long home path is refused; a failed logout is not reported as removed', async () => {
   const h = nodeHarness({ upBehaviour: 'hang' });
   const home = fs.mkdtempSync(path.join(tmp, 'node-'));
   await assert.rejects(h.node.start({ gatePort: 1, home, say: h.say }), /sign-in was not completed in time/);
-  assert.deepEqual(await h.node.stop(), { removed: true });
-  assert.equal(h.fake.state.loggedOut, undefined, 'a node that never signed in is not logged out');
+  assert.deepEqual(await h.node.stop(), { removed: true }, 'a node that never signed in has nothing registered');
+  assert.equal(h.fake.state.loggedOut, undefined);
   assert.equal(h.events.daemon.exitCode, 0);
   assert.equal(fs.existsSync(path.join(home, 'tsnode')), false);
-  // A killed trial left a directory and a record.
-  const again = nodeHarness({ upBehaviour: 'ok' });
-  const stale = fs.mkdtempSync(path.join(tmp, 'node-'));
-  fs.mkdirSync(path.join(stale, 'tsnode')); fs.writeFileSync(path.join(stale, 'tsnode', 'old-state'), 'x');
-  fs.writeFileSync(path.join(stale, 'dot-bridge-trial-node.json'), JSON.stringify({ dir: path.join(stale, 'tsnode'), sock: path.join(stale, 'tsnode', 'tailscaled.sock'), hostname: 'dalan-trial-old', pid: null }));
-  await again.node.start({ gatePort: 1, home: stale, say: again.say });
-  assert.equal(again.fake.state.loggedOut, true, 'the old node was logged out');
-  assert.equal(fs.existsSync(path.join(stale, 'tsnode', 'old-state')), false, 'its old state is gone');
-  await again.node.stop();
   const long = nodeHarness({ upBehaviour: 'ok' });
   await assert.rejects(long.node.start({ gatePort: 1, home: path.join(tmp, 'x'.repeat(120)), say() {} }), /path is too long for a Tailscale socket/);
   assert.equal(long.events.spawned.length, 0, 'no process starts');
   assert.equal(tailscaleNodeProvider({ which: () => null }).probe().ok, false);
+  // Logout fails: the daemon and files are still removed, but the result says the node may still be registered.
+  const bad = nodeHarness({ upBehaviour: 'ok' });
+  await bad.node.start({ gatePort: 1, home: fs.mkdtempSync(path.join(tmp, 'node-')), say() {} });
+  bad.fake.state.logoutFails = true;
+  const result = await bad.node.stop();
+  assert.equal(result.removed, false);
+  assert.match(result.detail, /dalan-trial-abc123 could not be logged out.*ephemeral.*admin console/);
+  assert.equal(bad.events.daemon.exitCode, 0, 'the daemon is ended even so');
+});
+
+test('the trial\'s own node: the auth key is in no argument or environment, only in a file that is gone once login ends; the daemon log is masked', async () => {
+  const h = nodeHarness({ upBehaviour: 'ok', env: { DALAN_TS_AUTHKEY: 'tskey-auth-SECRETSECRET' }, daemonOutput: ['boot with tskey-auth-SECRETSECRET\nvisit https://login.tailscale.com/a/LOGINTOKEN ok\n'] });
+  const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await h.node.start({ gatePort: 1, home, say: h.say });
+  assert.equal(h.events.keyDuringUp, 'tskey-auth-SECRETSECRET', 'tailscale up reads the key from a file');
+  assert.equal(fs.existsSync(path.join(home, 'tsnode', 'authkey')), false, 'the key file is deleted as soon as login ends, not at the end of the run');
+  assert.ok(!JSON.stringify(h.events.spawned).includes('SECRETSECRET'), 'never in an argument');
+  assert.ok(h.events.envs.every(e => e && !('DALAN_TS_AUTHKEY' in e)), 'never in a child environment');
+  const log = fs.readFileSync(path.join(home, 'tsnode', 'tailscaled.log'), 'utf8');
+  assert.match(log, /boot with \[key\]/);
+  assert.ok(!log.includes('SECRETSECRET') && !log.includes('LOGINTOKEN'), 'the daemon log holds no key or login token');
+  await h.node.stop();
+  assert.deepEqual(filesHolding(home, 'SECRETSECRET'), []);
+  assert.deepEqual(filesHolding(h.registry, 'SECRETSECRET'), []);
+});
+
+test('the trial\'s own node: a login URL split across output chunks is announced whole, once', async () => {
+  const h = nodeHarness({ loginChunks: ['To authenticate, visit:\n\n\thttps://login.tail', 'scale.com/a/ab', 'c123\n'] });
+  await h.node.start({ gatePort: 1, home: fs.mkdtempSync(path.join(tmp, 'node-')), say: h.say });
+  assert.deepEqual(h.lines.filter(l => /Open:/.test(l)), ['This temporary Tailscale node needs a one-time sign-in. Open: https://login.tailscale.com/a/abc123']);
+  await h.node.stop();
+});
+
+test('the trial\'s own node: after login no timer keeps the process alive', async () => {
+  const timers = () => process.getActiveResourcesInfo().filter(t => t === 'Timeout').length;
+  const h = nodeHarness();
+  const before = timers();
+  await h.node.start({ gatePort: 1, home: fs.mkdtempSync(path.join(tmp, 'node-')), say: h.say });
+  assert.equal(timers(), before, 'the login timeout was cleared when the login finished');
+  await h.node.stop();
+});
+
+test('leftover trial daemons are found in any later run, by registry and a portable process check; a live trial is left alone', async () => {
+  const registry = fs.mkdtempSync(path.join(tmp, 'registry-'));
+  const root = fs.mkdtempSync(path.join(tmp, 'left-'));
+  const mk = async (name, { ownerAlive }) => {
+    const dir = path.join(root, name, 'tsnode'), sock = path.join(dir, 'tailscaled.sock');
+    fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'left'), 'x');
+    const daemon = liveProcess(`--socket=${sock}`);
+    const owner = ownerAlive ? liveProcess(`--owner-${name}`) : null;
+    const ownerPid = owner ? owner.pid : await deadPid();
+    await sleepMs(150); // let `ps` see both command lines
+    fs.writeFileSync(path.join(registry, `${name}.json`), JSON.stringify({ dir, sock, hostname: name, pid: daemon.pid, owner: ownerPid, ownerCmd: processCommand(ownerPid) ?? `node -e 0 --owner-${name}`, home: path.join(root, name) }));
+    return { daemon, owner, dir };
+  };
+  const crashed = await mk('crashed', { ownerAlive: false });
+  const running = await mk('running', { ownerAlive: true });
+  try {
+    const h = nodeHarness({ upBehaviour: 'ok', registry });
+    // A trial in a DIFFERENT home sweeps the registry: the crashed trial's daemon ends, the running one stays.
+    const ended = await h.node.recover();
+    assert.deepEqual(ended, ['crashed']);
+    await sleepMs(200);
+    assert.equal(isAlive(crashed.daemon.pid), false, 'the crashed trial\'s daemon was ended');
+    assert.equal(fs.existsSync(crashed.dir), false, 'its directory is gone');
+    assert.equal(isAlive(running.daemon.pid), true, 'a trial whose process still runs is not touched');
+    assert.ok(fs.existsSync(path.join(registry, 'running.json')));
+    // A PID that now belongs to some other program is not killed.
+    const other = liveProcess('--unrelated');
+    await sleepMs(150);
+    fs.writeFileSync(path.join(registry, 'reused.json'), JSON.stringify({ dir: path.join(root, 'reused', 'tsnode'), sock: path.join(root, 'reused', 'tsnode', 'tailscaled.sock'), hostname: 'reused', pid: other.pid, owner: await deadPid(), ownerCmd: 'x' }));
+    await h.node.recover();
+    assert.equal(isAlive(other.pid), true, 'the daemon is ended only if its command line still names the trial\'s socket');
+    other.kill();
+  } finally { crashed.daemon.kill(); running.daemon.kill(); running.owner?.kill(); }
+});
+
+test('Ctrl-C during startup ends it at once: nothing waits for the login, the node is cleaned up and Cloudflare is not tried', async () => {
+  const h = nodeHarness({ upBehaviour: 'hang', loginWaitMs: 600_000 }); // the abort must come long before the login timeout
+  const long = h.node;
+  const cloudflare = stubProvider('cloudflare');
+  const controller = new AbortController();
+  const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+  const busy = { ok: false, busy: true, line: 'busy', fix: 'free it' };
+  const started = Date.now();
+  const pending = startRoute({ route: 'auto', providers: [stubProvider('tailscale', busy), long, cloudflare], gatePort: 1, home, say() {}, signal: controller.signal });
+  await sleepMs(80); controller.abort();
+  await assert.rejects(pending, error => error.name === 'AbortError');
+  assert.ok(Date.now() - started < 5000, 'it did not wait for the ten-minute login timeout');
+  assert.equal(cloudflare.record.started, 0, 'an abort is never answered by another route');
+  assert.equal(h.events.daemon.exitCode, 0, 'the daemon was ended');
+  assert.equal(fs.existsSync(path.join(home, 'tsnode')), false);
+  // Readiness and the helper download stop on abort too.
+  const gone = new AbortController(); gone.abort();
+  await assert.rejects(verifyPublicReady({ origin: 'https://x.example', secret: 's', fetchImpl: async () => { throw new Error('should not fetch'); }, timeoutMs: 60_000, signal: gone.signal }), error => error.name === 'AbortError');
+  const slow = new AbortController();
+  const cf = cloudflareProvider({ env: {}, ensure: ({ signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason))), spawnChild: () => { throw new Error('no spawn after abort'); } });
+  const waiting = cf.start({ gatePort: 1, home, signal: slow.signal });
+  slow.abort();
+  await assert.rejects(waiting, error => error.name === 'AbortError');
+});
+
+test('Cloudflare Quick Tunnel: an address split across two output chunks is still found', async () => {
+  const calls = [];
+  const spawnChild = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.exitCode = null; child.signalCode = null; child.pid = 1;
+    child.kill = () => { child.exitCode = 0; child.emit('exit'); }; calls.push(child);
+    setImmediate(() => { child.stderr.write('INF |  https://split-name-d'); setTimeout(() => child.stderr.write('emo.trycloudflare.com  |\n'), 10); });
+    return child;
+  };
+  const cf = cloudflareProvider({ env: {}, spawnChild, ensure: async () => ({ bin: '/x' }), startMs: 2000 });
+  const started = await cf.start({ gatePort: 1, home: fs.mkdtempSync(path.join(tmp, 'cf-')) });
+  assert.equal(started.origin, 'https://split-name-demo.trycloudflare.com');
+  await cf.stop();
+});
+
+test('the printed restart command: the same home only where the address is stable; a new home otherwise', () => {
+  const base = { cli: 'dalan', home: '/h', shellQuote: x => x, client: 'claude', route: 'auto' };
+  assert.equal(tryHostedInternals.restartCommand({ ...base, provider: 'tailscale' }), 'dalan try --public --client claude --route auto --home /h');
+  for (const provider of ['cloudflare', 'tailscale-node']) assert.equal(tryHostedInternals.restartCommand({ ...base, provider }), 'dalan try --public --client claude --route auto', `${provider}: its next address is new, so the home would refuse it`);
 });
 
 test('a route that fails to start names the real next steps, not a new home', async () => {
@@ -488,7 +619,7 @@ function fakeTailscale({ status = readyStatus, serve = {}, onFunnelOn, foreignFo
     state.calls.push(args.join(' '));
     const ok = value => ({ status: 0, stdout: JSON.stringify(value) });
     if (args[0] === 'status') return ok(status);
-    if (args[0] === 'logout') { state.loggedOut = true; return { status: 0, stdout: '' }; }
+    if (args[0] === 'logout') { if (state.logoutFails) return { status: 1, stdout: '' }; state.loggedOut = true; return { status: 0, stdout: '' }; }
     if (args[0] === 'serve') return ok({ ...state.serve, ...foregroundView(state) });
     if (args[0] === 'funnel' && args[1] === 'status') return ok({ Web: state.web, AllowFunnel: Object.fromEntries(Object.keys(state.web).map(k => [k, true])), ...foregroundView(state) });
     if (args[0] === 'funnel' && args.at(-1) === 'off') { delete state.web[`box.tail1234.ts.net:${args[1].split('=')[1]}`]; return { status: 0, stdout: '' }; }
