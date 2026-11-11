@@ -1,4 +1,4 @@
-// `dalan try --public`: the same trial, reached by a hosted client (ChatGPT or claude.ai). It starts a public route, a bridge whose
+// `dalan try --public`: the same trial, reached by a hosted MCP client (for example ChatGPT or claude.ai). It starts a public route, a bridge whose
 // OAuth issuer is that route's address, queues one demo job, prints the connector URL and the clicks, asks the owner to approve the
 // sign-in, and calls the trial a success only when the hosted client finishes that job. The local flow in try.mjs is unchanged.
 import { execFile, spawn } from 'node:child_process';
@@ -55,7 +55,7 @@ export async function chooseMode({ input, out, signal }) {
     }
   };
   try {
-    out.write(`Where will your worker run?\n  1. ChatGPT or claude.ai\n  2. Only on this computer\n`);
+    out.write(`Where will your worker run?\n  1. A hosted MCP client (for example ChatGPT or claude.ai)\n  2. Only on this computer\n`);
     const where = await pick('Choose [1]: ', 2);
     if (where === null) return { mode: 'local' };
     if (where === 2) return { mode: 'local' };

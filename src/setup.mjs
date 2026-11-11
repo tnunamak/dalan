@@ -7,7 +7,7 @@ import { readRouteSetting, writeRouteSetting } from './route-setting.mjs';
 
 // What this computer's Tailscale can do now: { ok, node } or { ok: false, installed, reason }.
 // The address is the OAuth issuer, so a new address is a new sign-in identity: nothing from a trial carries over.
-export const SWITCH_NOTE = 'Next: run `dalan try --public`, then in claude.ai or ChatGPT remove the trial connector and add the new URL it prints; a new address cannot reuse the trial sign-in.';
+export const SWITCH_NOTE = 'Next: run `dalan try --public`, then in your MCP client remove the trial connector and add the new URL it prints; a new address cannot reuse the trial sign-in.';
 
 export function detectTailscale({ env = process.env, tailscale = defaultTailscale, which = name => whichOnPath(name, env), platform = process.platform, mac } = {}) {
   if (!which('tailscale')) return { ok: false, installed: false, reason: 'Tailscale is not installed.' };
