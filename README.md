@@ -278,10 +278,10 @@ export DALAN_HOME
 printf 'Your task, on one line: '; IFS= read -r task
 ```
 
-Type the task and press Enter. The shell stores it as plain text, so quotes, `$` and backticks in it are safe. Replace `WORKER` with `hosted` for a hosted trial or `local` for a local trial, then submit it:
+Type the task and press Enter. The shell stores it as plain text, so quotes, `$` and backticks in it are safe. For a hosted trial, replace `local` below with `hosted`. Then submit it:
 
 ```sh
-dalan submit --worker WORKER --execution none --deliver none --brief "$task Do not read files, run commands or call external services."
+dalan submit --worker local --execution none --deliver none --brief "$task Do not read files, run commands or call external services."
 ```
 
 `--brief` makes a read-only job from the text. `submit` prints a `Request ID:` line and a `Send your worker:` line. Paste that prompt into your worker's session, then wait for the result in the same shell. Replace `REQUEST_ID` with the ID that `submit` printed:
