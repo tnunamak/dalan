@@ -29,21 +29,30 @@ function validRelease(value, { allowLocalTarball = false } = {}) {
 
 function requestJson(url, { timeout = TIMEOUT, socketPath, headers = {}, allowHttp = false } = {}) {
   return new Promise((resolve, reject) => {
+    let absoluteTimer, settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(absoluteTimer);
+      fn(value);
+    };
     const target = new URL(url);
     const transport = target.protocol === 'https:' ? https : http;
-    if (target.protocol !== 'https:' && !socketPath && !(allowHttp && target.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(target.hostname))) return reject(new Error('HTTPS required'));
+    if (target.protocol !== 'https:' && !socketPath && !(allowHttp && target.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(target.hostname))) return finish(reject, new Error('HTTPS required'));
     const req = transport.request({ ...(socketPath ? { socketPath, path: url } : { hostname: target.hostname, port: target.port || undefined, path: target.pathname + target.search }), method: 'GET', headers, timeout }, res => {
       const chunks = []; let size = 0;
       res.on('data', chunk => { size += chunk.length; if (size > 2 * 1024 * 1024) req.destroy(new Error('response too large')); else chunks.push(chunk); });
-      res.on('aborted', () => reject(new Error('response ended before completion')));
-      res.on('error', reject);
+      res.on('aborted', () => finish(reject, new Error('response ended before completion')));
+      res.on('error', error => finish(reject, error));
       res.on('end', () => {
-        if (res.statusCode !== 200) return reject(new Error(`request failed (${res.statusCode})`));
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(new Error('invalid JSON response')); }
+        if (res.statusCode !== 200) return finish(reject, new Error(`request failed (${res.statusCode})`));
+        try { finish(resolve, JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { finish(reject, new Error('invalid JSON response')); }
       });
     });
     req.on('timeout', () => req.destroy(new Error('request timed out')));
-    req.on('error', reject); req.end();
+    req.on('error', error => finish(reject, error));
+    absoluteTimer = setTimeout(() => req.destroy(new Error('request timed out')), timeout);
+    req.end();
   });
 }
 
@@ -130,19 +139,24 @@ function expectedProbe(home, receipt, repo) {
   return { expectedWorkers: Object.keys(workers), expectedVersion: manifest.version };
 }
 
-export async function probeService(home, _receipt) {
+export async function probeService(home, _receipt, options = {}) {
   const socketPath = defaultPath(home, '.local/share/dot-bridge', 'admin.sock');
   const operator = fs.readFileSync(defaultPath(home, '.config/dot-bridge', 'operator.key'), 'utf8').trim();
   if (!operator || operator.length > 1024) fail('service operator key is invalid');
-  const value = validateProbe(await requestJson('http://localhost/service-check', { socketPath, headers: { 'x-operator-key': operator } }), expectedProbe(home, _receipt));
-  await checkLoopback(value.port);
+  const timeout = options.timeout ?? TIMEOUT;
+  if (!Number.isFinite(timeout) || timeout <= 0) fail('service probe timeout must be positive');
+  const deadline = performance.now() + timeout;
+  const value = validateProbe(await requestJson('http://localhost/service-check', { socketPath, headers: { 'x-operator-key': operator }, timeout }), expectedProbe(home, _receipt));
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) fail('service probe timed out');
+  await checkLoopback(value.port, remaining);
   return value;
 }
 
-function checkLoopback(port) {
+function checkLoopback(port, timeout = 1500) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: '127.0.0.1', port });
-    const timer = setTimeout(() => socket.destroy(new Error('service listener check timed out')), 1500);
+    const timer = setTimeout(() => socket.destroy(new Error('service listener check timed out')), timeout);
     socket.once('connect', () => { clearTimeout(timer); socket.end(); resolve(); });
     socket.once('error', error => { clearTimeout(timer); reject(new Error(`reported loopback listener is unavailable: ${error.message}`)); });
   });

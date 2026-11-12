@@ -76,6 +76,25 @@ try {
   await new Promise((resolve, reject) => admin.listen(socketPath, error => error ? reject(error) : resolve()));
   await assert.rejects(probeService(home, { repo: candidate }), /self-check response/);
   await new Promise(resolve => admin.close(resolve));
+  const hanging = http.createServer((req, res) => {
+    const drip = setInterval(() => res.write(' '), 5);
+    res.on('close', () => clearInterval(drip));
+  });
+  await new Promise((resolve, reject) => hanging.listen(socketPath, error => error ? reject(error) : resolve()));
+  const started = Date.now();
+  const hangingProbe = probeService(home, { repo: candidate }, { timeout: 50 });
+  let raceTimer;
+  try {
+    const outcome = await Promise.race([hangingProbe.then(value => ({ value }), error => ({ error })), new Promise(resolve => { raceTimer = setTimeout(() => resolve(null), 500); })]);
+    assert.notEqual(outcome, null, 'admin probe ignored its absolute request deadline while response bytes continued');
+    assert.ok(outcome.error && /timed out/.test(outcome.error.message), 'admin probe must reject on its absolute request deadline');
+    assert.ok(Date.now() - started < 500, 'admin probe must honor its total request timeout');
+  } finally {
+    clearTimeout(raceTimer);
+    hanging.closeAllConnections();
+    await new Promise(resolve => hanging.close(resolve));
+    await hangingProbe.catch(() => {});
+  }
 
   const isolated = path.join(tmp, 'isolated-service');
   const isolatedConfig = path.join(isolated, '.config', 'dot-bridge');

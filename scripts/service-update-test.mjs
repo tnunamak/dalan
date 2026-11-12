@@ -156,6 +156,20 @@ try {
     assert.equal(fs.existsSync(path.join(f.home, '.config', 'dot-bridge', 'service-catalog.json')), false);
   }
   {
+    let candidateHealthAttempts = 0;
+    const timeouts = [];
+    const f = fixture({ probeService: async (home, receipt, options) => {
+      if (options?.timeout !== undefined) timeouts.push(options.timeout);
+      const version = JSON.parse(fs.readFileSync(path.join(receipt.repo, 'package.json'), 'utf8')).version;
+      if (version === '0.7.0') { candidateHealthAttempts++; throw new Error('candidate admin unavailable'); }
+      return { version: '0.6.0', catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } };
+    } });
+    await assert.rejects(updateService({ home: f.home, yes: true }, { ...f.seams, healthTimeoutMs: 80 }), /candidate admin unavailable/);
+    assert.ok(candidateHealthAttempts <= 3, `candidate health retried ${candidateHealthAttempts} times`);
+    assert.ok(timeouts.length > 0 && timeouts.every(timeout => timeout > 0 && timeout <= 1000));
+    assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
+  }
+  {
     let stopped = false;
     const f = fixture({ controlService: async (_receipt, action) => { f.events.push(action); if (action === 'stop' && !stopped) { stopped = true; throw new Error('stop failed'); } } });
     await assert.rejects(updateService({ home: f.home }, f.seams), /stop failed/);
@@ -178,7 +192,7 @@ try {
       probeService: async home => { if (++probes >= 3) throw new Error('old service unhealthy'); return { version: JSON.parse(fs.readFileSync(path.join(fs.realpathSync(path.join(home, 'current')), 'package.json'), 'utf8')).version, catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } }; },
       controlService: async (_receipt, action) => { f.events.push(action); if (action === 'restart' && f.events.filter(x => x === 'restart').length === 1) throw new Error('candidate restart failed'); },
     });
-    await assert.rejects(updateService({ home: f.home, yes: true }, f.seams), /rollback failed: old service unhealthy/);
+    await assert.rejects(updateService({ home: f.home, yes: true }, { ...f.seams, healthTimeoutMs: 100 }), /rollback failed: service health check timed out.*old service unhealthy/);
     assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
   }
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

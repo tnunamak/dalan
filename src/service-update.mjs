@@ -8,6 +8,7 @@ import { writeAtomic } from './as-files.mjs';
 import { latestRelease as defaultLatest, installRelease as defaultInstall, probeService as defaultProbe, probeCandidate as defaultCandidate, controlService as defaultControl } from './service-update-runtime.mjs';
 
 const PACKAGE = '@tnunamak/dalan';
+const HEALTH_TIMEOUT_MS = 30_000;
 const fail = message => { throw new Error(message); };
 const privateDir = dir => fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 function readReceipt(home) {
@@ -133,14 +134,21 @@ function prune(home, active, previous) {
   for (const name of dirs) { if (keep.size >= 3) break; keep.add(name); }
   for (const name of dirs) if (!keep.has(name)) fs.rmSync(path.join(root, name), { recursive: true, force: true });
 }
-async function probeReady(probe, home, receipt, attempts = 40) {
+async function probeReady(probe, home, receipt, healthTimeoutMs = HEALTH_TIMEOUT_MS) {
+  const deadline = performance.now() + healthTimeoutMs;
   let error;
-  for (let i = 0; i < attempts; i++) {
-    try { return await probe(home, receipt); } catch (e) { error = e; await new Promise(resolve => setTimeout(resolve, 150)); }
+  while (performance.now() < deadline) {
+    const remaining = deadline - performance.now();
+    try { return await probe(home, receipt, { timeout: Math.max(1, Math.min(remaining, 1000)) }); }
+    catch (e) {
+      error = e;
+      const delay = Math.min(150, Math.max(0, deadline - performance.now()));
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
-  throw error ?? new Error('service did not become ready');
+  throw new Error(`service health check timed out after ${healthTimeoutMs}ms${error ? `: ${error.message}` : ''}`);
 }
-async function recover(home, control, probe) {
+async function recover(home, control, probe, healthTimeoutMs) {
   const file = path.join(home, 'update-transaction.json');
   let txStat;
   try { txStat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
@@ -160,7 +168,7 @@ async function recover(home, control, probe) {
   }
   if (tx.phase === 'prepared') {
     await control(oldReceipt, 'restart');
-    const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo });
+    const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo }, healthTimeoutMs);
     if (live.version !== tx.oldVersion || tx.oldCatalogs && !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs))) fail('interrupted update recovery could not verify old service');
   }
   else {
@@ -169,7 +177,7 @@ async function recover(home, control, probe) {
     if (tx.unitFile && tx.oldUnit != null) atomic(tx.unitFile, tx.oldUnit);
     for (const item of ['.config', '.local']) replaceTree(path.join(tx.snapshot, item), path.join(home, item));
     await control(oldReceipt, 'daemon-reload'); await control(oldReceipt, 'restart');
-    const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo });
+    const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo }, healthTimeoutMs);
     if (tx.oldCatalogs && (live.version !== tx.oldVersion || !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs)))) fail('interrupted update recovery restored selection but old service health failed');
   }
   fs.rmSync(file, { force: true }); fs.rmSync(path.dirname(tx.snapshot), { recursive: true, force: true });
@@ -187,6 +195,8 @@ export async function updateService({ home, check = false, yes = false }, seams 
   const latest = seams.latestRelease ?? defaultLatest, install = seams.installRelease ?? defaultInstall;
   const probe = seams.probeService ?? defaultProbe, candidateProbe = seams.probeCandidate ?? defaultCandidate;
   const control = seams.controlService ?? defaultControl, pruneVersions = seams.pruneVersions ?? prune;
+  const healthTimeoutMs = seams.healthTimeoutMs ?? HEALTH_TIMEOUT_MS;
+  if (!Number.isFinite(healthTimeoutMs) || healthTimeoutMs <= 0) fail('healthTimeoutMs must be a positive finite duration');
   if (check) {
     const { value: receipt } = readReceipt(home), active = fs.existsSync(path.join(home, 'current')) ? fs.realpathSync(path.join(home, 'current')) : receipt.repo;
     if (!active) fail('current service repository is missing');
@@ -201,7 +211,7 @@ export async function updateService({ home, check = false, yes = false }, seams 
   const resultFile = path.join(home, 'update-result.json');
   let result;
   try {
-    await recover(home, control, probe);
+    await recover(home, control, probe, healthTimeoutMs);
     const { value: receipt, file: receiptFile } = readReceipt(home);
     let current = path.join(home, 'current');
     let oldRepo = fs.existsSync(current) ? fs.realpathSync(current) : receipt.repo;
@@ -247,7 +257,7 @@ export async function updateService({ home, check = false, yes = false }, seams 
       select(home, candidate);
       if (unitFile) rewriteUnit(unitFile, current);
       await control(receipt, 'daemon-reload'); await control(receipt, 'restart');
-      const live = await probeReady(probe, home, { ...receipt, repo: candidate });
+      const live = await probeReady(probe, home, { ...receipt, repo: candidate }, healthTimeoutMs);
       if (live.version !== r.version || !completeCatalogs(tested, live, workers) || !catalogsEqual(tested, live, workers)) fail('updated service health or worker catalogs failed');
       receipt.repo = candidate; receipt.version = r.version;
       atomic(receiptFile, JSON.stringify(receipt));
@@ -266,7 +276,7 @@ export async function updateService({ home, check = false, yes = false }, seams 
         await control(receipt, 'stop'); select(home, oldRepo); if (unitFile && tx.oldUnit != null) atomic(unitFile, tx.oldUnit);
         if (tx.phase === 'switched') for (const item of ['.config', '.local']) replaceTree(path.join(txDir, 'snapshot', item), path.join(home, item));
         await control(receipt, 'daemon-reload'); await control(receipt, 'restart');
-        const restored = await probeReady(probe, home, { ...receipt, repo: oldRepo });
+        const restored = await probeReady(probe, home, { ...receipt, repo: oldRepo }, healthTimeoutMs);
         if (restored.version !== oldVersion || !catalogsEqual(base, restored, workers)) fail('old service health verification failed');
         fs.rmSync(path.join(home, 'update-transaction.json'), { force: true }); fs.rmSync(txDir, { recursive: true, force: true });
       } catch (e) { rollbackError = e; }
