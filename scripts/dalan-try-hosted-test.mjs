@@ -3,7 +3,7 @@
 // stand in for the outside. The bridge, its OAuth server, its MCP tools and the CLI are the real ones.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -1517,6 +1517,7 @@ test('children of a trial that was killed are ended by the next trial, only when
 });
 
 // A real executable boundary: no Gozar, SSH or machine route state is used by these tests.
+const gozarPort = args => args[args.indexOf('--port') + 1];
 function fakeGozar(name, mode = 'success') {
   const dir = path.join(tmp, `fake-gozar-${name}`);
   fs.mkdirSync(dir);
@@ -1541,9 +1542,9 @@ else {
   return { binary, log, failStatus: () => fs.writeFileSync(failedStatus, ''), clearStatusFailure: () => fs.rmSync(failedStatus, { force: true }), setSnapshot: value => fs.writeFileSync(state, JSON.stringify(value)), calls: () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [], env: { PATH: dir } };
 }
 
-test('Gozar uses PATH before GOZAR_BIN, reads published origin and stops the exact gate port', async () => {
+test('Gozar falls back to PATH after an unavailable GOZAR_BIN, reads published origin and stops the exact gate port', async () => {
   const fake = fakeGozar('success');
-  const provider = gozarProvider({ env: { ...fake.env, GOZAR_BIN: '/missing' } });
+  const provider = gozarProvider({ resolveBundled: () => null, env: { ...fake.env, GOZAR_BIN: '/missing' } });
   assert.equal(provider.probe().ok, true);
   const route = await startRoute({ route: 'gozar', providers: [provider], gatePort: 45678, home: tmp });
   assert.equal(route.origin, 'https://trial.lhr.life');
@@ -1558,7 +1559,7 @@ test('Gozar refuses a preexisting session without exposing or stopping it', asyn
   for (const phase of ['published-ready', 'starting', 'cleanup-pending']) {
     const fake = fakeGozar(`existing-${phase}`);
     fake.setSnapshot({ sessionId: 'someone-else', phase, candidate: null, published: phase === 'published-ready' ? 'https://other.lhr.life' : null });
-    const provider = gozarProvider({ env: fake.env });
+    const provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
     await assert.rejects(startRoute({ route: 'gozar', providers: [provider], gatePort: 45679 }), /port 45679 already has a Gozar route; stop it first: gozar stop --port 45679/);
     assert.deepEqual(fake.calls().map(args => args[0]), ['status']);
   }
@@ -1567,7 +1568,7 @@ test('Gozar refuses a preexisting session without exposing or stopping it', asyn
 test('Gozar watcher detects route loss and replacement; cleanup leaves replacements alone', async () => {
   for (const change of ['stopped', 'replacement', 'origin', 'unavailable']) {
     const fake = fakeGozar(`watch-${change}`);
-    const provider = gozarProvider({ env: fake.env, pollMs: 10 });
+    const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, pollMs: 10 });
     provider.probe();
     const route = await provider.start({ gatePort: 45680 });
     try {
@@ -1585,7 +1586,7 @@ test('Gozar watcher detects route loss and replacement; cleanup leaves replaceme
 
 test('Gozar cleanup checks ownership again even before the next watcher poll', async () => {
   const fake = fakeGozar('cleanup-replacement');
-  const provider = gozarProvider({ env: fake.env });
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
   provider.probe();
   await provider.start({ gatePort: 45681 });
   fake.setSnapshot({ sessionId: 'replacement', phase: 'published-ready', candidate: null, published: 'https://other.lhr.life' });
@@ -1602,7 +1603,7 @@ test('Gozar invalid or failed status never acquires cleanup ownership', async ()
   for (const resources of [null, {}, [null], [{ cleanup: false }]]) malformed.push(JSON.stringify({ snapshot: { phase: 'stopped', candidate: null, published: null, resources } }));
   for (const output of malformed) for (const code of [0, 1]) {
     const calls = [];
-    const provider = gozarProvider({ which: () => 'fake', run: (binary, args, options, callback) => { calls.push(args[0]); callback(code ? Object.assign(new Error('status failed'), { code }) : null, output); } });
+    const provider = gozarProvider({ resolveBundled: () => null, which: () => 'fake', run: (binary, args, options, callback) => { calls.push(args[0]); callback(code ? Object.assign(new Error('status failed'), { code }) : null, output); } });
     await assert.rejects(startRoute({ route: 'gozar', providers: [provider], gatePort: 45682 }));
     assert.deepEqual(calls, ['status']);
   }
@@ -1610,7 +1611,7 @@ test('Gozar invalid or failed status never acquires cleanup ownership', async ()
 
 test('Gozar malformed cleanup status leaves the route untouched and reports unconfirmed cleanup', async () => {
   const fake = fakeGozar('malformed-cleanup');
-  const provider = gozarProvider({ env: fake.env });
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
   provider.probe();
   await provider.start({ gatePort: 45684 });
   try {
@@ -1632,7 +1633,7 @@ test('Gozar malformed cleanup status leaves the route untouched and reports unco
 
 test('Gozar exit-1 ready status withdraws readiness and cannot authorize cleanup', async () => {
   const fake = fakeGozar('failed-ready-status');
-  const provider = gozarProvider({ env: fake.env, pollMs: 10 });
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, pollMs: 10 });
   provider.probe();
   const route = await provider.start({ gatePort: 45683 });
   try {
@@ -1645,13 +1646,13 @@ test('Gozar exit-1 ready status withdraws readiness and cannot authorize cleanup
 
 test('Gozar route loss during approval revokes connections and closes bridge and gate', async () => {
   const fake = fakeGozar('approval-loss');
-  const provider = gozarProvider({ env: fake.env, pollMs: 20 });
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, pollMs: 20 });
   const run = await hostedRun('gozar-approval-loss', { argv: ['--route', 'gozar'], providers: [provider], fetchImpl: readyGozarFetch });
   const realFetch = globalThis.fetch;
   try {
     await run.until(/Waiting for sign-in/);
     const url = fs.readFileSync(path.join(run.home, 'resource-url'), 'utf8').trim();
-    const gatePort = Number(fake.calls().find(args => args[0] === 'expose')[2]);
+    const gatePort = Number(gozarPort(fake.calls().find(args => args[0] === 'expose')));
     // Stand in for Gozar's HTTPS transport and loopback Host; the gate and bridge are real.
     globalThis.fetch = (value, init = {}) => {
       const target = new URL(value);
@@ -1682,11 +1683,11 @@ test('Gozar route loss during approval revokes connections and closes bridge and
 });
 
 test('Gozar missing is actionable; GOZAR_BIN works when PATH has no gozar', async () => {
-  const missing = gozarProvider({ env: { PATH: '', GOZAR_BIN: '/missing' } });
+  const missing = gozarProvider({ resolveBundled: () => null, env: { PATH: '', GOZAR_BIN: '/missing' } });
   assert.equal(missing.probe().ok, false);
   await assert.rejects(startRoute({ route: 'gozar', providers: [missing], gatePort: 12345 }), /Install gozar on PATH or set GOZAR_BIN/);
   const fake = fakeGozar('env');
-  const provider = gozarProvider({ env: { PATH: '', GOZAR_BIN: fake.binary } });
+  const provider = gozarProvider({ resolveBundled: () => null, env: { PATH: '', GOZAR_BIN: fake.binary } });
   assert.equal(provider.probe().ok, true);
   assert.equal((await provider.start({ gatePort: 12345 })).origin, 'https://trial.lhr.life');
   assert.equal((await provider.stop()).removed, true);
@@ -1694,7 +1695,7 @@ test('Gozar missing is actionable; GOZAR_BIN works when PATH has no gozar', asyn
 
 test('Gozar error JSON and unpublished candidates fail and clean up without another route', async () => {
   for (const mode of ['error', 'candidate']) {
-    const fake = fakeGozar(mode, mode), provider = gozarProvider({ env: fake.env });
+    const fake = fakeGozar(mode, mode), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
     const fallback = fakeRoute();
     await assert.rejects(startRoute({ route: 'gozar', providers: [provider, fallback.provider], gatePort: 12346 }), mode === 'error' ? /trial route unavailable/ : /did not publish a ready HTTPS origin/);
     assert.deepEqual(fake.calls().filter(args => args[0] !== 'status').map(args => args[0]), ['expose', 'stop']);
@@ -1705,7 +1706,7 @@ test('Gozar error JSON and unpublished candidates fail and clean up without anot
 test('Gozar stop reports cleanup debt instead of claiming removal', async () => {
   const fake = fakeGozar('debt');
   let exposed = false;
-  const provider = gozarProvider({ env: fake.env, run: (binary, args, options, callback) => {
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, run: (binary, args, options, callback) => {
     if (args[0] === 'expose') exposed = true;
     callback(null, JSON.stringify(args[0] === 'stop' ? { snapshot: { sessionId: 'own', phase: 'cleanup-pending', published: null }, localCleanupFailures: ['ssh still running'] } : { snapshot: exposed ? { sessionId: 'own', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : { phase: 'unknown', candidate: null, published: null, limitations: ['Controller unavailable: ENOENT'] } }));
   } });
@@ -1723,7 +1724,7 @@ const readyGozarFetch = async value => {
 };
 
 test('auto prefers installed Gozar over the saved route and Ctrl-C removes it', async () => {
-  const fake = fakeGozar('auto'), provider = gozarProvider({ env: fake.env });
+  const fake = fakeGozar('auto'), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
   const fallback = fakeRoute();
   const run = await hostedRun('gozar-auto', { argv: ['--route', 'auto'], route: 'tailscale', providers: [provider, fallback.provider], fetchImpl: readyGozarFetch });
   try {
@@ -1737,19 +1738,19 @@ test('auto prefers installed Gozar over the saved route and Ctrl-C removes it', 
 
 test('auto without installed Gozar keeps the default trial route', async () => {
   const fallback = fakeRoute();
-  const run = await hostedRun('gozar-missing-auto', { providers: [gozarProvider({ env: { PATH: '' } }), fallback.provider] });
+  const run = await hostedRun('gozar-missing-auto', { providers: [gozarProvider({ resolveBundled: () => null, env: { PATH: '' } }), fallback.provider] });
   try { await run.handoff(); assert.equal(fallback.record.started, 1); }
   finally { await run.close(); }
 });
 
 test('Ctrl-C during Gozar expose waits for startup and stops the partial route', async () => {
   const fake = fakeGozar('sigint', 'slow');
-  const run = await hostedRun('gozar-sigint-home', { argv: ['--route', 'gozar'], providers: [gozarProvider({ env: fake.env })], fetchImpl: readyGozarFetch });
+  const run = await hostedRun('gozar-sigint-home', { argv: ['--route', 'gozar'], providers: [gozarProvider({ resolveBundled: () => null, env: fake.env })], fetchImpl: readyGozarFetch });
   try {
     for (let i = 0; !fake.calls().some(args => args[0] === 'expose'); i++) { assert.ok(i < 200, 'expose started'); await sleepMs(25); }
     await run.close(); // The same AbortSignal delivered by the CLI's Ctrl-C handler.
     assert.deepEqual(fake.calls().filter(args => args[0] !== 'status').map(args => args[0]), ['expose', 'stop']);
-    assert.equal(fake.calls().find(args => args[0] === 'expose')[2], fake.calls().find(args => args[0] === 'stop')[2]);
+    assert.equal(gozarPort(fake.calls().find(args => args[0] === 'expose')), gozarPort(fake.calls().find(args => args[0] === 'stop')));
     assert.doesNotMatch(run.out, /cleanup is unconfirmed|Waiting for sign-in/);
   } finally { await run.close(); }
 });
@@ -1773,4 +1774,52 @@ test('Gozar loopback Host normalization keeps the public host check and Origin h
     assert.equal(wrongHost, 421, 'an unrelated host is still rejected');
     assert.equal((await fetch(target, { headers: { origin: 'https://evil.example' } })).status, 403, 'Origin is preserved for Dalan to check');
   } finally { await gate.close(); await new Promise(resolve => upstream.close(resolve)); }
+});
+
+test('bundled Gozar wins over GOZAR_BIN and PATH and uses the running Node', async () => {
+  const bundled = fakeGozar('bundled'), override = fakeGozar('override'), onPath = fakeGozar('on-path');
+  const provider = gozarProvider({ resolveBundled: () => bundled.binary, env: { PATH: onPath.env.PATH, GOZAR_BIN: override.binary } });
+  assert.equal(provider.probe().ok, true);
+  await provider.start({ gatePort: 45684 });
+  await provider.stop();
+  assert.equal(bundled.calls()[1][0], 'expose');
+  assert.deepEqual(override.calls(), []);
+  assert.deepEqual(onPath.calls(), []);
+});
+
+test('GOZAR_BIN wins over PATH when the dependency is unavailable', async () => {
+  const override = fakeGozar('override-first'), onPath = fakeGozar('path-second');
+  const provider = gozarProvider({ resolveBundled: () => null, env: { PATH: onPath.env.PATH, GOZAR_BIN: override.binary } });
+  assert.equal(provider.probe().ok, true);
+  await provider.start({ gatePort: 45685 });
+  await provider.stop();
+  assert.equal(override.calls()[1][0], 'expose');
+  assert.deepEqual(onPath.calls(), []);
+});
+
+test('Gozar receives the trial remaining lifetime after the status check', async () => {
+  const fake = fakeGozar('remaining');
+  let now = 1000;
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, now: () => now, run: (binary, args, options, callback) => {
+    if (args[0] === 'status') now += 250;
+    execFile(binary, args, options, callback);
+  } });
+  assert.equal(provider.probe().ok, true);
+  const route = await startRoute({ route: 'gozar', providers: [provider], gatePort: 45686, lifetimeEndsAt: 10000 });
+  try { assert.deepEqual(fake.calls()[1].slice(0, 3), ['expose', '--lifetime-ms', '8750']); }
+  finally { await route.stop(); }
+});
+
+test('public with no route uses Gozar and forwards a bounded trial deadline', async () => {
+  const fake = fakeGozar('default-bundled');
+  const fallback = fakeRoute();
+  const run = await hostedRun('gozar-no-route', { providers: [gozarProvider({ resolveBundled: () => fake.binary, env: fake.env }), fallback.provider], fetchImpl: readyGozarFetch });
+  try {
+    await run.until(/Waiting for sign-in/);
+    assert.match(run.out, /Public route ready \(gozar\)/);
+    assert.equal(fallback.record.started, 0);
+    const args = fake.calls().find(args => args[0] === 'expose');
+    const lifetime = Number(args[args.indexOf('--lifetime-ms') + 1]);
+    assert.ok(lifetime > 0 && lifetime <= 3 * 60 * 60 * 1000);
+  } finally { await run.close(); }
 });

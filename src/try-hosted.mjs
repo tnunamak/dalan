@@ -101,7 +101,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const client = options.client ?? 'chatgpt';
   const say = line => out.write(`${terminalSafe(line)}\n`);
   const providers = deps.providers ?? defaultProviders({ env, say, client, hostedDeps: deps });
-  // An explicit route wins; auto prefers installed Gozar, otherwise preserves the saved/default route.
+  // An explicit route wins; auto prefers bundled Gozar, otherwise preserves the saved/default route.
   const saved = options.route === undefined || options.route === 'auto' ? readRouteSetting(env) : null;
   const automaticRoute = providers.find(provider => provider.name === 'gozar')?.probe().ok ? 'gozar' : saved === 'tailscale' ? 'tailscale' : 'localhost.run';
   const routeChoice = options.route && options.route !== 'auto' ? options.route : automaticRoute;
@@ -192,6 +192,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   };
 
   let gate = null, route = null, routeStopped = null, cleaned = true;
+  let trialEndsAt = null;
   let releaseHome;
   try { releaseHome = acquireHomeLock(home); } catch (error) { lines.close(); throw error; }
   try {
@@ -201,7 +202,8 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     // A trial that was killed earlier may have left a Tailscale node of its own running; end it before this one starts.
     for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended ${ended.join(', ')} left by an earlier trial.`); }
     signal?.throwIfAborted();
-    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal, client }); }
+    trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
+    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal, client, ...(trialEndsAt === null ? {} : { lifetimeEndsAt: trialEndsAt }) }); }
     catch (error) {
       if (error && typeof error === 'object' && !signal?.aborted) {
         error.tryKind ??= 'route_start';
@@ -255,14 +257,13 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     const job = async () => JSON.parse(await dalan(['get', requestId, '--json']));
     const pendingNow = async () => parsePending(JSON.parse(await dalan(['connect', 'pending', '--json'])));
 
-    const trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
     const trialOver = () => expired || (trialEndsAt !== null && clock.now() >= trialEndsAt);
     if (trialMs !== null) {
-      const expiry = new Promise(resolve => { expireTimer = setTimeout(() => { expired = true; resolve(); }, trialMs); expireTimer.unref?.(); });
+      const expiry = new Promise(resolve => { expireTimer = setTimeout(() => { expired = true; resolve(); }, Math.max(0, trialEndsAt - clock.now())); expireTimer.unref?.(); });
       routeGone = Promise.race([routeGone, expiry]);
     }
     const trialLeft = () => trialEndsAt === null ? '' : ` Temporary trial: ${timeLeft(trialEndsAt - clock.now())} left.`;
-    if (trialEndsAt !== null) say(`Temporary trial: this link stops in ${timeLeft(trialMs)} or sooner if the relay changes the address. Replace it with \`dalan setup\` for daily use.`);
+    if (trialEndsAt !== null) say(`Temporary trial: this link stops in ${timeLeft(trialEndsAt - clock.now())} or sooner if the relay changes the address. Replace it with \`dalan setup\` for daily use.`);
     say('');
     say(handoffText({ client, url: mcpUrl }));
     say('');

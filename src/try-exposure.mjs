@@ -2,6 +2,7 @@
 // or, for a trial, an anonymous localhost.run tunnel over `ssh`. Every process, file and rule here is
 // owned by one trial and removed by `stop()`. Every outside effect goes through a seam in `deps` so tests need no real route.
 import { spawn, spawnSync, execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -502,11 +503,19 @@ export function localhostRunProvider({ env = process.env, spawnChild = spawn, wh
 }
 
 // ---- Gozar (transport only; Dalan still owns sign-in and identity) --------------------------------------------------------
-export function gozarProvider({ env = process.env, which = name => whichOnPath(name, env), run = execFile, pollMs = 3000 } = {}) {
-  let binary = null, port = null, sessionId = null;
+const require = createRequire(import.meta.url);
+const bundledGozar = () => {
+  try { return require.resolve('@tnunamak/gozar/bin/gozar.mjs'); } catch (error) {
+    if (error.code === 'MODULE_NOT_FOUND') return null;
+    throw error;
+  }
+};
+
+export function gozarProvider({ env = process.env, which = name => whichOnPath(name, env), resolveBundled = bundledGozar, run = execFile, pollMs = 3000, now = Date.now } = {}) {
+  let binary = null, bundled = null, port = null, sessionId = null;
   let watching = false, timer = null, wakeWatcher = () => {}, watcher = Promise.resolve();
   const command = (args, { status = false } = {}) => new Promise((resolve, reject) => {
-    run(binary, args, { env, encoding: 'utf8', timeout: status ? 15_000 : 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+    run(binary, [...(bundled ? [bundled] : []), ...args], { env, encoding: 'utf8', timeout: status ? 15_000 : 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
       let reply;
       try { reply = JSON.parse(stdout); } catch { reject(new Error('Gozar did not return valid JSON')); return; }
       if (status && !validStatus(reply?.snapshot)) { reject(new Error('Gozar did not return valid status JSON')); return; }
@@ -538,13 +547,15 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
   return {
     name: 'gozar',
     probe() {
-      binary = which('gozar');
+      bundled = resolveBundled();
+      binary = bundled ? process.execPath : null;
       if (!binary && env.GOZAR_BIN) {
         try { fs.accessSync(env.GOZAR_BIN, fs.constants.X_OK); binary = env.GOZAR_BIN; } catch { /* unavailable */ }
       }
+      binary ??= which('gozar');
       return binary ? { ok: true } : { ok: false, line: 'Gozar is not installed', fix: 'Install gozar on PATH or set GOZAR_BIN to its executable path.' };
     },
-    async start({ gatePort, signal }) {
+    async start({ gatePort, signal, lifetimeEndsAt }) {
       signal?.throwIfAborted();
       if (!binary) throw new Error('gozar: probe() must succeed before start()');
       if (!Number.isInteger(gatePort) || gatePort < 1 || gatePort > 65535) throw new Error('the local gate port is not valid');
@@ -556,7 +567,8 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
       // Pin the trial adapter; never let auto recommendation select the machine's Tailscale.
       // Let expose settle before cleanup: it starts a background controller even if the caller cancels.
       let reply;
-      try { reply = await command(['expose', '--port', String(port), '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'localhost-run']); }
+      const lifetimeArgs = lifetimeEndsAt === undefined ? [] : ['--lifetime-ms', String(Math.max(1, Math.floor(lifetimeEndsAt - now())))];
+      try { reply = await command(['expose', ...lifetimeArgs, '--port', String(port), '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'localhost-run']); }
       catch (error) { sessionId = error.gozarReply?.snapshot?.sessionId ?? null; throw error; }
       sessionId = reply?.snapshot?.sessionId ?? null;
       signal?.throwIfAborted();
@@ -606,13 +618,13 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
 // `localhost.run` is the trial route (anonymous, automatic). `tailscale` is the real route: this computer's Tailscale on :443 when no
 // rule uses it, else a Tailscale node of the trial's own. An explicit route shows its own failure and never falls back to the other:
 // a real route never becomes a trial link without the owner choosing it. A rule that already holds 443 is never changed.
-export async function startRoute({ route = 'localhost.run', providers, gatePort, home, say, signal }) {
+export async function startRoute({ route = 'localhost.run', providers, gatePort, home, say, signal, lifetimeEndsAt }) {
   const named = name => providers.find(p => p.name === name);
   // A start that fails is cleaned up before anything else happens, so a failed route never leaves a rule, node or process behind.
   const attempt = async provider => {
     signal?.throwIfAborted();
     try {
-      const started = await provider.start({ gatePort, home, say, signal });
+      const started = await provider.start({ gatePort, home, say, signal, lifetimeEndsAt });
       return { provider, origin: started.origin, exited: started.exited, stop: () => provider.stop() };
     } catch (error) {
       const cleaned = await provider.stop().catch(e => ({ removed: false, detail: e.message }));
