@@ -38,12 +38,21 @@ test('an unreadable legacy waiter record remains in the drained slot', () => {
   const malformed = path.join(slot, 'broken.json'); fs.writeFileSync(malformed, '{');
   assert.throws(() => takeSlot(slot, { pid: 222, token: 'new' }, { isLive: () => false }), /invalid waiter entry/);
   assert.equal(fs.readFileSync(malformed, 'utf8'), '{', 'malformed waiter entry is retained');
+
+  const unreadableSlot = path.join(root, 'unreadable.json'); fs.mkdirSync(unreadableSlot);
+  const unreadable = path.join(unreadableSlot, '123-a.json'); fs.writeFileSync(unreadable, JSON.stringify({ pid: 123, token: 'a' }));
+  const readFile = fs.readFileSync;
+  fs.readFileSync = function (file, ...args) { if (file === unreadable) throw denied; return readFile.call(this, file, ...args); };
+  try { assert.throws(() => takeSlot(unreadableSlot, { pid: 222, token: 'new' }, { isLive: () => false }), /injected EIO/); }
+  finally { fs.readFileSync = readFile; }
+  assert.ok(fs.existsSync(unreadable), 'an unreadable waiter file is retained');
 });
 
 test('unknown waiter liveness keeps its entry', () => {
   const unknownSlot = path.join(root, 'unknown.json'); fs.mkdirSync(unknownSlot);
   const unknown = path.join(unknownSlot, '123-a.json'); fs.writeFileSync(unknown, JSON.stringify({ pid: 123, token: 'a' }));
-  assert.throws(() => takeSlot(unknownSlot, { pid: 222, token: 'new' }, { isLive: () => null }), /could not inspect waiter/);
+  const uncertain = entry => liveWaiter(entry, { platform: 'linux', probe() { throw denied; } });
+  assert.throws(() => takeSlot(unknownSlot, { pid: 222, token: 'new' }, { isLive: uncertain }), /could not inspect waiter/);
   assert.deepEqual(fs.readdirSync(unknownSlot), ['123-a.json'], 'unknown waiter liveness keeps its entry');
 });
 
