@@ -69,7 +69,9 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
     name: row.name, description: row.description, input_schema: JSON.parse(row.input_schema), class: toolClass(row), handler: JSON.parse(row.handler),
     caller: worker, grants: db.prepare('SELECT tool FROM tool_grants WHERE worker=? ORDER BY tool').all(worker).map(g => g.tool),
   }));
-  const view = (row, worker) => ({ name: row.name, description: row.description, input_schema: JSON.parse(row.input_schema), class: toolClass(row), schema_hash: callerHash(row, worker) });
+  // Owner views retain the registration/audit definition hash; only worker views pin caller grants.
+  // Never bind an absent owner caller to the worker-specific SQLite query.
+  const view = (row, worker) => ({ name: row.name, description: row.description, input_schema: JSON.parse(row.input_schema), class: toolClass(row), schema_hash: worker === undefined ? row.schema_hash : callerHash(row, worker) });
 
   // An authority change and the discarding of the messages queued under it commit together or not at all, so no crash can
   // leave an old message that a later register, grant or enable of the same tool would deliver.

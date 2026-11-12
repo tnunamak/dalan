@@ -24,7 +24,7 @@ const tmp = fs.mkdtempSync(path.join(tempRoot, 'dtry-'));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
 const realHome = path.join(tmp, 'real-home');
 fs.mkdirSync(realHome, { recursive: true });
-const cleanEnv = extra => ({ PATH: process.env.PATH, HOME: realHome, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}), ...extra });
+const cleanEnv = extra => ({ PATH: process.env.PATH, HOME: realHome, NODE_OPTIONS: '--disable-warning=ExperimentalWarning', ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}), ...extra });
 // DALAN_TRY_TEST_BIN points the same tests at an installed copy of the package (see the npm install proof in the PR).
 const dalanBin = process.env.DALAN_TRY_TEST_BIN ?? path.join(repo, 'bin/dalan.mjs');
 const runCwd = process.env.DALAN_TRY_TEST_BIN ? tmp : repo;

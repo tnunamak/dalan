@@ -92,6 +92,32 @@ test('register refuses bad schema, unknown handler kind, delete/overwrite handle
   assert.equal(registry.list().length, 1);
 });
 
+
+test('owner list uses registration hashes without weakening caller hashes or grants', async () => {
+  const { registry, store, calls } = fixture();
+  const registration = registry.register(spec());
+  assert.equal(registry.list()[0].schema_hash, registration.schema_hash);
+  registry.grant('echo_tool', 'dot');
+  registry.grant('echo_tool', 'other');
+  const dotHash = hashOf(registry, 'dot', 'echo_tool');
+  const otherHash = hashOf(registry, 'other', 'echo_tool');
+  assert.notEqual(dotHash, otherHash);
+  assert.notEqual(dotHash, registration.schema_hash);
+  assert.equal(registry.list()[0].schema_hash, registration.schema_hash);
+  assert.equal(store.db.prepare("SELECT schema_hash FROM tool_registry_log WHERE kind='register'").get().schema_hash, registration.schema_hash);
+  assert.equal(await code(dispatch(registry, { tool: 'echo_tool', args: { text: 'x' }, schema_hash: registration.schema_hash })), 'stale_registry');
+  assert.equal(await code(dispatch(registry, { tool: 'echo_tool', args: { text: 'x' }, schema_hash: otherHash })), 'stale_registry');
+  registry.register(spec({ name: 'second' }));
+  registry.grant('second', 'dot');
+  assert.notEqual(hashOf(registry, 'dot', 'echo_tool'), dotHash);
+  assert.equal(hashOf(registry, 'other', 'echo_tool'), otherHash);
+  assert.equal(registry.list()[0].schema_hash, registration.schema_hash);
+  assert.equal(await code(dispatch(registry, { tool: 'echo_tool', args: { text: 'x' }, schema_hash: dotHash })), 'stale_registry');
+  registry.revoke('echo_tool', 'dot');
+  assert.equal(await code(dispatch(registry, { tool: 'echo_tool', args: { text: 'x' }, schema_hash: dotHash })), 'tool_unavailable');
+  assert.equal(calls.length, 0, 'no handler ran for owner, foreign, stale or revoked authority');
+  assert.equal(registry.list()[0].schema_hash, registration.schema_hash);
+});
 test('handler failure is reported as handler_failed and results are redacted and capped', async () => {
   const secret = 'ghp_' + 'a'.repeat(36);
   const { registry } = fixture({ handlers: {
