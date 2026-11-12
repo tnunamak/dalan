@@ -1,21 +1,27 @@
-# Send a job from Codex CLI to Muse Spark
+# Send a job from Codex CLI to Muse
 
-Codex CLI submits a job through a local `dalan mcp` process. Muse Spark, Meta's hosted chat client, connects to the bridge over HTTPS and returns a report. You read it and record an accept or reject decision. The bridge queues work; you start the worker in Muse Spark.
+Codex CLI submits a job through a local `dalan mcp` process. Muse (muse.ai), a hosted cloud agent, connects to the bridge over HTTPS and returns a report. You read it and record an accept or reject decision. The bridge queues work; you start the worker in Muse.
 
 ## What you need
 
 - Linux with systemd user services, or macOS with launchd.
 - Node.js 24 or newer and npm.
 - Codex CLI installed and signed in on the bridge computer.
-- A Muse Spark account with remote MCP connections and tool calls available.
-- A public HTTPS address that Muse Spark can reach. This guide creates one with Tailscale Funnel. Install Tailscale, sign in, and enable MagicDNS, HTTPS certificates and Funnel for the machine first. On macOS, use the open-source `tailscaled`; the App Store and Standalone apps do not support Funnel.
+- A Muse account with remote MCP connections and tool calls available.
+- A public HTTPS address that Muse can reach. Tailscale is optional: either a Tailscale route or the Gozar relay can provide public HTTPS.
 - A free local port, here `8799`, and a new, short bridge-home path on local disk.
 
-Funnel makes the bridge reachable from the public internet. Its HTTPS certificate publishes the machine and tailnet DNS names in a public certificate ledger. Keep the full MCP URL private: its path contains a secret. Your Codex and Muse Spark accounts retain their own usage limits and charges.
+Both routes make the bridge reachable from the public internet. With `--route tailscale`, Tailscale cannot read the traffic; its HTTPS certificate publishes the machine and tailnet DNS names in a public certificate ledger. The Gozar relay terminates TLS and can read the connector URL and traffic. Keep the full MCP URL private: its path contains a secret. Your Codex and Muse accounts retain their own usage limits and charges.
 
 This first job uses no repository and runs no checks. Use a dedicated worker named `muse`. Do not reuse another worker's connection.
 
 ## 1. Start and expose the bridge
+
+Choose your public HTTPS route first. The README describes [`--route tailscale`](../README.md#use-a-tailscale-route) and the [Gozar relay with `--route gozar`](../README.md#choose-another-relay) for public trials, including relay consent and temporary-link limits. Those are trial options, not flags for the service setup command below. For an existing public HTTPS bridge, use its actual bridge home as `DALAN_HOME` and its private `resource-url`, with a dedicated worker named `muse`, then continue at step 2. Do not reuse another worker's connection.
+
+### Tailscale service option
+
+The following existing service recipe is one option, not a requirement for Muse. Install Tailscale, sign in, and enable MagicDNS, HTTPS certificates and Funnel for the machine first. On macOS, use the open-source `tailscaled`; the App Store and Standalone apps do not support Funnel.
 
 On the bridge computer, install Dalan:
 
@@ -37,11 +43,11 @@ Use the same `DALAN_HOME` in every owner shell below. The setup writes a service
 
 Open `$DALAN_HOME/resource-url` privately and use its entire URL in step 2. Do not substitute the public hostname alone or a loopback URL. If you already have an HTTPS reverse proxy, use the [service guide](service-setup.md) instead of setting up a second exposure.
 
-**Check:** setup prints `Resource URL file (private, mode 0600):` followed by the file path, and `PASS public HTTPS: GET /admin returned 404 from the bridge`. The status command returns a JSON status record. The public check proves reachability, not that Muse Spark has finished a job.
+**Check:** setup prints `Resource URL file (private, mode 0600):` followed by the file path, and `PASS public HTTPS: GET /admin returned 404 from the bridge`. The status command returns a JSON status record. The public check proves reachability, not that Muse has finished a job.
 
-## 2. Connect Muse Spark as the worker
+## 2. Connect Muse as the worker
 
-The bridge ships this exact Meta callback in its default allow-list:
+The bridge ships this exact callback in its default allow-list:
 
 ```text
 https://agent.meta.ai/api/hatch/oauth/callback
@@ -53,7 +59,7 @@ Start a pairing window:
 dalan connect start --worker muse
 ```
 
-In Muse Spark, add a remote MCP server with the complete URL from `resource-url`. Start its OAuth sign-in and leave the Dalan sign-in page open. These are general actions, not names of Muse Spark controls.
+In Muse, add a remote MCP server with the complete URL from `resource-url`. Start its OAuth sign-in and leave the Dalan sign-in page open. These are general actions, not names of Muse controls.
 
 On the bridge computer:
 
@@ -61,7 +67,7 @@ On the bridge computer:
 dalan connect pending
 ```
 
-Compare the code with the one in your browser. Check that the worker is `muse`, the redirect is the Meta callback above and the resource identifies your bridge. Check the scopes: ordinary jobs need `dalan.read` and `dalan.work`. The older `dot-bridge.read` and `dot-bridge.work` names are aliases. The bridge also advertises `t3.read` and `t3.write`; those names do not replace the Dalan job scopes. Do not approve an unexpected connection or rely on its client name, which the app supplies.
+Compare the code with the one in your browser. Check that the worker is `muse`, the redirect is the callback above and the resource identifies your bridge. Check the scopes: ordinary jobs need `dalan.read` and `dalan.work`. The older `dot-bridge.read` and `dot-bridge.work` names are aliases. The bridge also advertises `t3.read` and `t3.write`; those names do not replace the Dalan job scopes. Do not approve an unexpected connection or rely on its client name, which the app supplies.
 
 Replace `CODE` with your matching pending code:
 
@@ -70,9 +76,9 @@ dalan connect approve CODE --worker muse
 dalan connect list
 ```
 
-Complete the sign-in in the browser and return to Muse Spark. Do not add `--replace` to resolve a conflict casually: it transfers this worker's queued and future jobs to the new connection.
+Complete the sign-in in the browser and return to Muse. Do not add `--replace` to resolve a conflict casually: it transfers this worker's queued and future jobs to the new connection.
 
-**Check:** approval prints `Approved "CODE" for worker "muse".` with your actual code. The connection list contains worker `muse` with `revoked_at: null`. Ask Muse Spark to list pending Dalan jobs; a successful reply, even an empty list, confirms tool access.
+**Check:** approval prints `Approved "CODE" for worker "muse".` with your actual code. The connection list contains worker `muse` with `revoked_at: null`. Ask Muse to list pending Dalan jobs; a successful reply, even an empty list, confirms tool access.
 
 ## 3. Add the local requester to Codex
 
@@ -116,11 +122,11 @@ Ask Codex to call `dalan_submit` with this object. Replace the request ID with a
 }
 ```
 
-Read the returned verdict and request ID. If the tool returns an error with reasons, fix the submission before proceeding. A queued job does not launch Muse Spark. In your Muse Spark conversation, send this instruction with the returned ID:
+Read the returned verdict and request ID. If the tool returns an error with reasons, fix the submission before proceeding. A queued job does not launch Muse. In your Muse conversation, send this instruction with the returned ID:
 
 > Request REQUEST_ID is your only job: claim it with Dalan, do what its brief asks, report progress and finish it with the claim_id. Stop if it is missing or cancelled. Claim no other job.
 
-Allow the job tool calls in Muse Spark. Back in Codex, ask it to call `dalan_wait` with `{"request_id":"REQUEST_ID","timeout_seconds":120}`, then `dalan_result` with `{"request_id":"REQUEST_ID"}`.
+Allow the job tool calls in Muse. Back in Codex, ask it to call `dalan_wait` with `{"request_id":"REQUEST_ID","timeout_seconds":120}`, then `dalan_result` with `{"request_id":"REQUEST_ID"}`.
 
 A wait can stop for a question, blocker or cancellation as well as a result. Read the state. If it reports `timeout`, the job remains open; inspect it and wait again. The local tool defaults to 120 seconds and caps each wait at 300 seconds. This route defaults to no external result delivery, so read the result here.
 
@@ -149,10 +155,10 @@ Do not use `rejected`: it is not a supported decision word. This records your re
 ## Troubleshooting
 
 - **Public DNS or HTTPS check fails.** Setup prints `FAIL public DNS:` or `FAIL public HTTPS:`. Read its suggested next step. The service and home remain in place; use the printed retry-check command after fixing the issue, rather than rerunning setup against the same home.
-- **The sign-in page says `Not accepting connections` or `Connection attempt invalid or expired`.** Open a new pairing window with `dalan connect start --worker muse`, restart sign-in in Muse Spark, and compare the new code with `dalan connect pending`.
-- **The callback is refused.** The bridge can report `Callback not allowed` or refuse registration because the redirect does not match an allowed callback. Obtain the exact current callback from Muse Spark's connection flow or provider documentation. Verify that it belongs to the client before allowing it with `dalan connect allow-callback 'EXACT_HTTPS_CALLBACK'`, then restart sign-in. Do not broaden the allow-list to an entire domain.
+- **The sign-in page says `Not accepting connections` or `Connection attempt invalid or expired`.** Open a new pairing window with `dalan connect start --worker muse`, restart sign-in in Muse, and compare the new code with `dalan connect pending`.
+- **The callback is refused.** The bridge can report `Callback not allowed` or refuse registration because the redirect does not match an allowed callback. Obtain the exact current callback from Muse's connection flow or provider documentation. Verify that it belongs to the client before allowing it with `dalan connect allow-callback 'EXACT_HTTPS_CALLBACK'`, then restart sign-in. Do not broaden the allow-list to an entire domain.
 - **Codex cannot reach the bridge.** A CLI error beginning `cannot reach the bridge:` means the selected home's bridge is not running. Check the absolute `DALAN_HOME` in the Codex entry, then run `dalan status --json` in an owner shell with that same home and inspect the service. Do not register the public URL as Codex's requester endpoint.
-- **Approval says the worker already has an active connection.** Inspect `dalan connect list`. Continue with the existing intended Muse Spark connection, or deliberately revoke it before pairing again. Do not approve a different client just because it calls itself Muse Spark.
+- **Approval says the worker already has an active connection.** Inspect `dalan connect list`. Continue with the existing intended Muse connection, or deliberately revoke it before pairing again. Do not approve a different client just because it calls itself Muse.
 
 ## Removal
 
@@ -163,9 +169,9 @@ dalan connect revoke muse
 dalan connect stop
 ```
 
-Remove the remote MCP server from Muse Spark. Remove only the `mcp_servers.dalan` entry you added to Codex's configuration and start a new Codex session.
+Remove the remote MCP server from Muse. Remove only the `mcp_servers.dalan` entry you added to Codex's configuration and start a new Codex session.
 
-To remove this dedicated service and its recorded Funnel exposure:
+If you used the Tailscale service option, remove this dedicated service and its recorded Funnel exposure:
 
 ```sh
 node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" \

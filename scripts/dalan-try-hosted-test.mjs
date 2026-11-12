@@ -1213,7 +1213,7 @@ test('a Funnel that does not start stops the real route with its reason, after c
   await assert.rejects(startRoute({ route: 'tailscale', providers: [dead, fakeRoute().provider], gatePort: 1, home: tmp, say() {} }), /tailnet administrator can enable Funnel at https:\/\/console\.tailscale\.com\/admin\/acls/);
 });
 
-test('a Funnel rule that someone else replaced is left alone and reported with the exact command, not as removed', async () => {
+test('a Funnel rule that someone else replaced is left alone and reported without a removal command, not as removed', async () => {
   const other = fakeTailscale();
   const ts = provider(other);
   ts.probe();
@@ -1225,7 +1225,8 @@ test('a Funnel rule that someone else replaced is left alone and reported with t
   const refused = await ts.stop();
   assert.equal(refused.removed, false);
   assert.match(refused.detail, /no longer matches this setup; refusing to change it/);
-  assert.match(refused.command, /'\/usr\/bin\/tailscale' 'funnel' '--https=443' 'off'/);
+  assert.equal(refused.command, undefined, 'no port-wide off command is offered for a rule that is not ours');
+  assert.ok(!other.state.calls.some(call => call.endsWith('off')), 'tailscale was never asked to switch a port off');
   assert.ok(other.state.web['box.tail1234.ts.net:443'], 'the other rule survives');
   assert.ok(fs.existsSync(path.join(home, 'dot-bridge-trial.exposure.json')), 'the record stays for recovery');
 });
@@ -1240,15 +1241,17 @@ test('Tailscale recovery command runs the selected CLI with a clean PATH', async
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(cli, `#!/bin/sh\nprintf '%s\\n' "$*|$HOME|$XDG_CONFIG_HOME|$PATH" > '${invoked}'\n`, { mode: 0o700 });
   fs.chmodSync(cli, 0o700);
+  let statusFails = false;
   const ts = tailscaleProvider({
-    tailscale: fake.run, spawnChild: fake.spawnChild, platform: 'linux', env: { PATH: '', HOME: home, XDG_CONFIG_HOME: config }, which: () => cli,
+    tailscale: args => (statusFails && args[0] === 'funnel' && args[1] === 'status') ? { status: 1, stdout: '' } : fake.run(args),
+    spawnChild: fake.spawnChild, platform: 'linux', env: { PATH: '', HOME: home, XDG_CONFIG_HOME: config }, which: () => cli,
     clock: { sleep: async () => {} },
   });
   ts.probe();
   const trialHome = fs.mkdtempSync(path.join(tmp, 'ts-recovery-'));
   await ts.start({ gatePort: 5151, home: trialHome });
   fake.state.child.kill = () => { fake.state.child.exitCode = 0; fake.state.foreground = {}; fake.state.child.emit('exit'); };
-  fake.state.web['box.tail1234.ts.net:443'] = { Handlers: { '/': { Proxy: 'http://127.0.0.1:7777' } } };
+  statusFails = true; // the rule is still ours, but its removal cannot be confirmed from here
 
   const cleanup = await ts.stop();
   assert.equal(cleanup.removed, false);

@@ -10,6 +10,7 @@ import { defaultPath } from './paths.mjs';
 import { initAsFiles } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
+import { resolveGozarCommand } from './try-exposure.mjs';
 
 const REPO = fileURLToPath(new URL('..', import.meta.url));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/;
@@ -70,8 +71,8 @@ function parseOptions(argv, env) {
   }
   if (new Set(workers).size !== workers.length) fail('--worker names must be unique');
   if (parsed['--verify-cmd']?.length > 4096) fail('--verify-cmd is too long');
-  const gozarBin = parsed['--gozar-bin'] ?? env.GOZAR_BIN ?? 'gozar';
-  if (!gozarBin || gozarBin.startsWith('-')) fail('--gozar-bin must name a command');
+  const gozarBin = parsed['--gozar-bin'];
+  if (gozarBin !== undefined && (!gozarBin || gozarBin.startsWith('-'))) fail('--gozar-bin must name a command');
   return { home, origin, port, target, lanPort, enableWorkspace: parsed['--enable-workspace'] === true, enableT3: parsed['--enable-t3'] === true, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
     gozarBin, writeUnitsOnly: parsed['--write-units-only'] === true, json: parsed['--json'] === true };
 }
@@ -305,6 +306,35 @@ function socketIsReady(socketPath, timeoutMs = 30000) {
   });
 }
 
+// Gozar refuses a state path whose ancestors are writable by group or others, but only
+// when `service add` runs, after the bridge is already started. Apply the same rule first.
+function assertGozarStatePath(env) {
+  const stateHome = env.GOZAR_HOME ?? path.join(env.HOME ?? os.homedir(), '.local', 'state', 'gozar');
+  let canonical = path.resolve(stateHome);
+  const missing = [];
+  for (;;) {
+    try { canonical = path.join(fs.realpathSync(canonical), ...missing); break; }
+    catch (error) {
+      if (error.code !== 'ENOENT') return; // Gozar reports other failures itself.
+      const parent = path.dirname(canonical);
+      if (parent === canonical) return;
+      missing.unshift(path.basename(canonical));
+      canonical = parent;
+    }
+  }
+  const uid = process.getuid();
+  const chain = [];
+  for (let dir = canonical; ; dir = path.dirname(dir)) { chain.unshift(dir); if (path.dirname(dir) === dir) break; }
+  for (const dir of chain) {
+    let stat;
+    try { stat = fs.lstatSync(dir); } catch { return; }
+    const rootSticky = stat.uid === 0 && (stat.mode & 0o1000);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`Gozar refuses its state path: ${dir} must be a real directory. Set GOZAR_HOME to a private directory, then retry.`);
+    if (stat.uid !== 0 && stat.uid !== uid) fail(`Gozar refuses its state path: ${dir} must be owned by you or root. Set GOZAR_HOME to a directory you own, then retry.`);
+    if ((stat.mode & 0o022) && !rootSticky) fail(`Gozar refuses its state path: ${dir} is writable by group or others. Run: chmod go-w ${dir}   (then retry service install)`);
+  }
+}
+
 export async function installService(o, seams = {}) {
   const env = seams.env ?? process.env;
   if ((seams.platform ?? process.platform) !== 'linux') fail('dalan service install currently requires Linux with a systemd user manager');
@@ -331,6 +361,11 @@ export async function installService(o, seams = {}) {
     writeUnits(unitDir, files);
     return { schema_version: 1, home: o.home, unit: `${name}.service`, units: Object.keys(files), target: o.target.value, started: false, route: null };
   }
+  // An explicit --gozar-bin wins; otherwise the bundled Gozar, GOZAR_BIN, then PATH.
+  const gozar = o.gozarBin !== undefined ? { binary: o.gozarBin, args: [] }
+    : resolveGozarCommand({ env, resolveBundled: seams.resolveBundled, which: seams.which });
+  if (!gozar.binary) fail('Gozar is unavailable; reinstall @tnunamak/dalan with its dependencies, or install gozar on PATH or set GOZAR_BIN to an executable path, then retry service install.');
+  assertGozarStatePath(env);
   const spawn = seams.spawn ?? spawnSync;
   runCommand('systemctl', ['--user', 'show-environment'], { env, spawn });
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
@@ -345,7 +380,7 @@ export async function installService(o, seams = {}) {
   const gozarArgs = ['service', 'add', '--origin', o.origin, '--target', o.target.value];
   if (o.verifyCmd) gozarArgs.push('--verify-cmd', o.verifyCmd);
   gozarArgs.push('--json');
-  const output = runCommand(o.gozarBin ?? env.GOZAR_BIN ?? 'gozar', gozarArgs, { env, spawn, timeout: 120000 });
+  const output = runCommand(gozar.binary, [...gozar.args, ...gozarArgs], { env, spawn, timeout: 120000 });
   let routeReply;
   try { routeReply = JSON.parse(output); } catch { fail('Gozar returned invalid JSON for service add; the bridge is running but its route is unverified'); }
   if (routeReply?.schemaVersion !== 1 || routeReply?.route?.origin !== o.origin || routeReply?.route?.target !== o.target.value) {

@@ -10,7 +10,7 @@ Start from the section that matches your bridge:
 | `dalan try` is running on this computer | opencode on this computer | [opencode](#cli-worker-opencode) |
 | A bridge that you started by hand ([manual setup](manual-setup.md#step-by-step)) | Claude Code or Codex CLI on this computer | The same sections, "From a bridge you started by hand" |
 | A bridge with a public HTTPS address ([service guide](service-setup.md)) | A client on another computer | [Native client on a remote HTTPS bridge](#native-client-on-a-remote-https-bridge) |
-| A bridge with a public HTTPS address | ChatGPT, Muse Spark or Claude on the web | [Connect ChatGPT](connect-chatgpt.md), [Codex CLI to Muse Spark](codex-to-muse.md) or [Claude cloud worker](claude-worker-onboarding.md) |
+| A bridge with a public HTTPS address | ChatGPT, Muse (muse.ai), a hosted cloud agent, or Claude on the web | [Connect ChatGPT](connect-chatgpt.md), [Codex CLI to Muse](codex-to-muse.md) or [Claude cloud worker](claude-worker-onboarding.md) |
 
 Install your client and sign in to it first: [Claude Code](https://code.claude.com/docs/en/quickstart), [Codex CLI](https://developers.openai.com/codex/cli/) or opencode. Check that `claude --version` or `codex --version` works; Dalan does not require a particular client.
 

@@ -2,6 +2,14 @@
 
 This file lists user-visible changes, newest first. Check the section for your target release before you upgrade.
 
+## 0.6.1
+
+- `dalan service install` now uses the Gozar that ships with Dalan. A `gozar` command on `PATH` is no longer required. An explicit `--gozar-bin` still wins; otherwise Dalan uses the bundled copy, then `GOZAR_BIN`, then `PATH`. If none is found, the command stops before it creates any unit.
+- `dalan service install` now checks Gozar's state path before it creates units or starts anything. Gozar refuses a state directory with a group- or world-writable ancestor, such as `~/.local` at mode 775. Dalan now stops first with one line that names the directory and the `chmod go-w` command to run.
+- When another program replaces the Tailscale Funnel rule of a stopped trial, Dalan leaves it alone and no longer prints a command that would switch off that port.
+- Muse is now described as the cloud agent at muse.ai in the Muse and worker-client guides. These guides also say that either a Tailscale route or the Gozar relay can supply public HTTPS.
+- Documentation fixes: the generated service environment list in the upgrade guide is complete, the old-package command list matches the one at the top of that guide, and the local MCP guide tells you to use the Home line a public trial prints.
+
 ## 0.6.0
 
 - Run one long-lived bridge for several named workers with built-in OAuth and a stable worker catalog. `dalan service install` creates a systemd user service on Linux and registers an existing HTTPS origin with Gozar. See [service setup](docs/service-setup.md).

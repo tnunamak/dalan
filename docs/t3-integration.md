@@ -18,7 +18,7 @@ DOT_ACP_LABEL="ChatGPT worker"      # the label T3 shows
 DOT_ACP_SOCKET=/path/to/admin.sock  # the bridge's admin socket; the default is the default Dalan home, not DALAN_HOME
 ```
 
-Add one entry for each worker, so a ChatGPT worker and a Muse Spark worker each appear as a model. These adapter settings keep the `DOT_ACP_*` names. Builds also need `DALAN_ACP_BUILD_OWNERS`: see [Builds through the T3 worker provider](#builds-through-the-t3-worker-provider).
+Add one entry for each worker, so a ChatGPT worker and Muse (muse.ai), a hosted cloud agent, each appear as a model. These adapter settings keep the `DOT_ACP_*` names. Builds also need `DALAN_ACP_BUILD_OWNERS`: see [Builds through the T3 worker provider](#builds-through-the-t3-worker-provider).
 
 A separate, opt-in feature lets a worker list, read and write T3 threads. It gives the worker write and control access to your T3 threads, so read [T3 tools](t3-reverse-control.md) before you enable it.
 

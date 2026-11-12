@@ -153,7 +153,8 @@ export function tailscaleProvider({ port: wantedPort = TRIAL_PORT, name = 'tails
         const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
         const keys = ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'TMPDIR'];
         const assignments = keys.filter(key => env[key] !== undefined).map(key => `${key}=${quote(env[key])}`);
-        const command = cli && path.isAbsolute(cli)
+        // A rule that someone else replaced is not ours to switch off: offer no port-wide command for it.
+        const command = error.code !== 'FUNNEL_RULE_MISMATCH' && cli && path.isAbsolute(cli)
           ? `(unset ${keys.join(' ')} && ${[...assignments, quote(cli), ...funnelOffArgs(rule.port).map(quote)].join(' ')})`
           : null;
         return { removed: false, detail: error.message, ...(command ? { command } : {}) };
@@ -512,6 +513,18 @@ const bundledGozar = () => {
   }
 };
 
+export function resolveGozarCommand({ env = process.env, which = name => whichOnPath(name, env), resolveBundled = bundledGozar } = {}) {
+  const bundled = resolveBundled();
+  if (bundled) return { binary: process.execPath, args: [bundled] };
+  if (env.GOZAR_BIN) {
+    try {
+      fs.accessSync(env.GOZAR_BIN, fs.constants.X_OK);
+      return { binary: env.GOZAR_BIN, args: [] };
+    } catch { /* unavailable */ }
+  }
+  return { binary: which('gozar'), args: [] };
+}
+
 export function gozarProvider({ env = process.env, which = name => whichOnPath(name, env), resolveBundled = bundledGozar, run = execFile, pollMs = 3000, now = Date.now } = {}) {
   let binary = null, bundled = null, commandCwd = null, port = null, sessionId = null;
   let endReason = null;
@@ -559,12 +572,9 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
     name: 'gozar',
     probe() {
       commandCwd = process.cwd();
-      bundled = resolveBundled();
-      binary = bundled ? process.execPath : null;
-      if (!binary && env.GOZAR_BIN) {
-        try { fs.accessSync(env.GOZAR_BIN, fs.constants.X_OK); binary = env.GOZAR_BIN; } catch { /* unavailable */ }
-      }
-      binary ??= which('gozar');
+      const resolved = resolveGozarCommand({ env, which, resolveBundled });
+      binary = resolved.binary;
+      bundled = resolved.args[0] ?? null;
       return binary ? { ok: true } : { ok: false, line: 'Gozar is not installed', fix: 'Install gozar on PATH or set GOZAR_BIN to its executable path.' };
     },
     async start({ gatePort, signal, lifetimeEndsAt }) {

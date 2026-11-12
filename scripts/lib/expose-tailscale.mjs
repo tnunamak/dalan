@@ -350,7 +350,7 @@ export function removeExposure({ tailscale = defaultTailscale, file, log = conso
   const before = parseJsonOutput(runOrThrow(tailscale, funnelStatusArgs(), 'funnel status --json'), 'tailscale funnel status --json');
   if (funnelRulePresent(before, rec.dns_name, rec.public_port)) {
     if (!funnelRuleMatches(before, rec.dns_name, rec.public_port, rec.local_port)) {
-      throw new Error(`funnel rule ${rec.dns_name}:${rec.public_port} no longer matches this setup; refusing to change it. Inspect tailscale funnel status and remove the owned rule by hand if appropriate.`);
+      throw Object.assign(new Error(`funnel rule ${rec.dns_name}:${rec.public_port} no longer matches this setup; refusing to change it. Inspect tailscale funnel status and remove the owned rule by hand if appropriate.`), { code: 'FUNNEL_RULE_MISMATCH' });
     }
     runOrThrow(tailscale, funnelOffArgs(rec.public_port), `funnel --https=${rec.public_port} off`);
     const after = parseJsonOutput(runOrThrow(tailscale, funnelStatusArgs(), 'funnel status --json'), 'tailscale funnel status --json');
