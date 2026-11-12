@@ -452,14 +452,15 @@ async function main() {
       if(!dryRun&&!fs.existsSync(receiptPath(id))) {
         const policy=loadOwnerWorkers(readEnv('DALAN_WORKERS_FILE')||defaultPath(home,'.config/dot-bridge/workers.json'));
         const targets=routing?.allowed_workers??[submitTarget(policy,worker??undefined)??'dot'],inputs=body.inputs;
-        for(const target of targets) { if(routing&&!policy.workers.has(target))throw new Error('unknown eligible worker '+target);
-        if(Array.isArray(inputs)&&inputs.some(input=>input?.github_repo!==undefined)) {
-          const repoName=inputs[0]?.github_repo;
-          if(inputs.length!==1) throw new Error('one repository input per job; submit separate jobs for multiple repositories');
-          if(typeof repoName!=='string'||!policy.allowsRepo(target,repoName)) throw new Error(`repository ${typeof repoName==='string'?repoName:'(invalid repository)'} is not allowed for worker "${target}"; update it with dalan worker allow ${target} OWNER/REPO, or choose another worker`);
+        for(const target of targets) {
+          if(routing&&!policy.workers.has(target))throw new Error('unknown eligible worker '+target);
+          if(Array.isArray(inputs)&&inputs.some(input=>input?.github_repo!==undefined)) {
+            const repoName=inputs[0]?.github_repo;
+            if(inputs.length!==1) throw new Error('one repository input per job; submit separate jobs for multiple repositories');
+            if(typeof repoName!=='string'||!policy.allowsRepo(target,repoName)) throw new Error(`repository ${typeof repoName==='string'?repoName:'(invalid repository)'} is not allowed for worker "${target}"; update it with dalan worker allow ${target} OWNER/REPO, or choose another worker`);
+          }
         }
       }
-        }
       const token=randomBytes(32).toString('hex');
       const write=()=>writeReceipt(id,token,JSON.stringify(body),delivery,review,background,{...given,source:given.source??'agent'},producerId(),routing,destinationRevisions);
       let saved;
