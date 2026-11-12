@@ -51,7 +51,7 @@ This runs a self-check with a built-in demo worker and then lets you connect a c
 
 ## Use a Tailscale route
 
-`npx -y @tnunamak/dalan setup` saves a route choice for public trials. If Tailscale is ready for Funnel, setup asks whether to save Tailscale or Gozar for temporary links. If Tailscale is not ready, setup offers to install Tailscale or save Gozar. It does not install a background service or move a connector to a new address.
+`npx -y @tnunamak/dalan setup` saves a route choice for public trials. If Tailscale is ready for Funnel, setup asks whether to save Tailscale or Gozar for temporary links. If Tailscale is not ready, setup prints Tailscale installation instructions or lets you save Gozar. It does not install a background service or move a connector to a new address.
 
 Use Tailscale explicitly:
 

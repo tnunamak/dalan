@@ -114,7 +114,7 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
     const origin = new URL(url).origin;
     assert.notEqual(Number(new URL(origin).port), run.errorContext.bindPort, 'the public origin is not the bridge bind address');
     assert.match(run.out, /Public HTTPS, OAuth discovery and the authorization server's metadata verified\./);
-    assert.match(run.out, /^Temporary demo link\. It can change or stop without warning\. For a lasting address, use dalan setup\.$/m, 'one temporary-link notice before the URL');
+    assert.match(run.out, /^Temporary demo link\. It can change or stop without warning\. Run dalan setup to choose Tailscale when available, or keep using temporary Gozar links\. Setup does not install a background service\.$/m, 'one temporary-link notice before the URL');
     assert.ok(run.out.indexOf('Temporary demo link.') < run.out.indexOf('Paste this URL'));
     assert.equal(run.out.match(/Temporary demo link/g).length, 1);
     // The scripted client signs in through the public origin, the owner approves, the client works the job.

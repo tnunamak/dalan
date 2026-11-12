@@ -34,7 +34,7 @@ export async function runSetup({ env = process.env, out = process.stdout, input 
       const answer = ((await ask(`Use Tailscale (${found.node}) for a stable address? [Y/n] `)) ?? '').trim().toLowerCase();
       if (answer === '' || answer === 'y' || answer === 'yes') {
         writeRouteSetting('tailscale', env);
-        say('Saved. `dalan try --public` now uses your Tailscale address, which stays the same between runs. This is a real address, not a trial link.');
+        say('Saved Tailscale for public runs. Reuse the same node and public address to keep the connector identity; changing that address requires a new sign-in.');
         say(SWITCH_NOTE);
         return { route: 'tailscale', changed: saved !== 'tailscale' };
       }

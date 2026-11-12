@@ -51,8 +51,8 @@ export function acquireHomeLock(home) {
   throw busy();
 }
 
-// Said once, before any public address exists. A trial link is told apart from a real address in every line that names it.
-export const TRIAL_NOTICE = 'Temporary demo link. It can change or stop without warning. For a lasting address, use dalan setup.';
+// Said once, before any public address exists. Setup chooses a route; it does not install a service.
+export const TRIAL_NOTICE = 'Temporary demo link. It can change or stop without warning. Run dalan setup to choose Tailscale when available, or keep using temporary Gozar links. Setup does not install a background service.';
 // A trial's maximum local lifetime is a shutdown limit, not a promise that a public route will stay available.
 export const TRIAL_MS = 3 * 60 * 60 * 1000;
 export const timeLeft = ms => { const minutes = Math.max(0, Math.ceil(ms / 60_000)); return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min` : `${minutes} min`; };
@@ -330,7 +330,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       routeGone = Promise.race([routeGone, expiry]);
     }
     const trialLeft = () => trialEndsAt === null ? '' : ` Local shutdown limit: ${timeLeft(trialEndsAt - clock.now())}. The temporary link can stop earlier.`;
-    if (trialEndsAt !== null) say(`This trial has a local shutdown limit of ${timeLeft(trialEndsAt - clock.now())}; the temporary link can stop earlier or without warning. Use \`dalan setup\` for a lasting address.`);
+    if (trialEndsAt !== null) say(`This trial has a local shutdown limit of ${timeLeft(trialEndsAt - clock.now())}; the temporary link can stop earlier or without warning. Run \`dalan setup\` to choose Tailscale when available, or keep using temporary Gozar links. Setup does not install a background service.`);
     say('');
     say(handoffText({ client, url: mcpUrl }));
     say('');
@@ -416,7 +416,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       const error = new Error(`The temporary demo link ${changed ? 'changed its address' : 'stopped responding'}. The connector cannot use this URL; the trial is stopping. Its saved reports stay in the trial Home.`);
       error.tryKind = 'route_lost'; throw error;
     }
-    if (trialOver() && !stopRequested()) { const error = new Error(`The temporary trial reached its ${timeLeft(trialMs)} shutdown limit. Route cleanup will be attempted. Start a fresh trial for a new link, or run dalan setup for a lasting address.`); error.tryKind = 'route'; throw error; }
+    if (trialOver() && !stopRequested()) { const error = new Error(`The temporary trial reached its ${timeLeft(trialMs)} shutdown limit. Route cleanup will be attempted. Start a fresh trial for a new link, or run dalan setup to choose Tailscale when available. Setup does not install a background service.`); error.tryKind = 'route'; throw error; }
     if (exited && !stopRequested()) { const error = new Error('the bridge stopped unexpectedly'); error.tryKind = 'unexpected'; throw error; }
   } catch (error) {
     if (signal?.aborted) { /* a normal stop */ }
