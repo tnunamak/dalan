@@ -85,7 +85,7 @@ function open(extra, review = false) {
 async function check(a, checkId = 'default') {
   let r = await ws.check(a.id, a.claim, 'subject', checkId);
   for (let i = 0; i < 1200 && r.status === 'running'; i++) { await sleep(100); const j = store.db.prepare('SELECT status FROM check_jobs WHERE id=?').get(r.check_run_id); if (j.status !== 'running') r = { ...r, status: j.status }; }
-  const row = store.db.prepare('SELECT * FROM check_runs WHERE id=?').get(r.check_run_id);
+  const row = r.check_run_id ? store.db.prepare('SELECT * FROM check_runs WHERE id=?').get(r.check_run_id) : null;
   return { r, row, evidence: row ? JSON.parse(row.evidence) : null, text: row ? ws.artifact(row.output_artifact_id, a.id).bytes.toString() : '' };
 }
 // A one-hunk patch that replaces the whole of `file` (old text must be what the worktree holds).
