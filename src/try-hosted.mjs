@@ -215,6 +215,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       route = await startRoute({ selectedProvider, gatePort: gate.port, home, say, signal });
     }
     catch (error) {
+      routeStopped = error?.routeCleanup ?? routeStopped;
       if (error && typeof error === 'object' && !signal?.aborted) {
         error.tryKind ??= 'route_start';
         // A real route never turns into a trial link without the owner choosing it.
@@ -364,7 +365,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     // Close forwarding first, then end the connection while the bridge can still answer, then remove the route and stop the bridge.
     gate?.shut();
     if (errorContext.started && !exited) await dalan(['connect', 'revoke', HOSTED_WORKER], { abortable: false }).catch(() => {});
-    if (route) routeStopped = await route.stop().catch(error => ({ removed: false, detail: error.message }));
+    if (route) routeStopped = await route.stop().catch(error => ({ removed: false, keepNode: true, detail: error.message }));
     await stopServer();
     await gate?.close();
     // The connector URL and the bridge's secrets are no use after the trial and stay on disk for nobody.

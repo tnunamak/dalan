@@ -1908,3 +1908,45 @@ test('a Funnel port taken after route selection cannot move an ephemeral identit
     fs.rmSync(fakeHome, { recursive: true, force: true });
   }
 });
+
+test('failed hosted startup preserves a surviving daemon through the outer cleanup and a later sweep releases it', async () => {
+  const h = nodeHarness({ killGraceMs: 5 });
+  const originalExit = process.exitCode;
+  const provider = { ...h.node, async start(args) {
+    await h.node.start(args);
+    h.events.daemon.kill = () => false;
+    throw new Error('injected failure after daemon startup');
+  } };
+  const busy = { name: 'tailscale', probe: () => ({ ok: false, busy: true, line: 'busy', fix: 'free 443' }) };
+  const run = await hostedRun('failed-start-daemon', { argv: ['--route', 'tailscale'], providers: [busy, provider] });
+  try {
+    const result = await run.finished;
+    assert.match(result.error?.message ?? '', /injected failure after daemon startup/);
+    const dir = path.join(run.home, 'tsnode'), record = path.join(h.registry, 'dalan-trial-abc123.json');
+    assert.ok(fs.existsSync(dir), 'outer finally must honor the provider cleanup debt');
+    assert.ok(fs.existsSync(record), 'the later run can recover this node');
+    assert.match(run.out, /cleanup is unconfirmed/);
+    h.events.daemon.exitCode = 0; h.events.daemon.emit('exit', 0);
+    assert.deepEqual(await sweepTrialNodes({ registry: h.registry, processCmd: () => ({ state: 'absent' }) }), ['dalan-trial-abc123']);
+    assert.equal(fs.existsSync(dir), false); assert.equal(fs.existsSync(record), false);
+  } finally { await run.close(); process.exitCode = originalExit; }
+});
+
+test('failed hosted startup retains node files when cleanup reports writer debt or throws', async () => {
+  const originalExit = process.exitCode;
+  try {
+    for (const throws of [false, true]) {
+      let dir;
+      const provider = { name: 'tailscale-node', probe: () => ({ ok: true }), async start({ home }) {
+        dir = path.join(home, 'tsnode'); fs.mkdirSync(dir); fs.writeFileSync(path.join(dir, 'writer'), 'owned files');
+        throw new Error('injected startup failure');
+      }, async stop() { if (throws) throw new Error('cleanup inspection failed'); return { removed: true, keepNode: true }; } };
+      const busy = { name: 'tailscale', probe: () => ({ ok: false, busy: true, line: 'busy', fix: 'free 443' }) };
+      const run = await hostedRun(`failed-start-debt-${throws}`, { argv: ['--route', 'tailscale'], providers: [busy, provider] });
+      const result = await run.finished;
+      assert.match(result.error?.message ?? '', /injected startup failure/);
+      assert.equal(fs.readFileSync(path.join(dir, 'writer'), 'utf8'), 'owned files', `cleanup throws=${throws}`);
+      await run.close();
+    }
+  } finally { process.exitCode = originalExit; }
+});

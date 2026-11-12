@@ -618,16 +618,16 @@ export function selectRouteProvider({ route = 'localhost.run', providers, say = 
 }
 
 export async function startRoute({ route = 'localhost.run', providers, selectedProvider, gatePort, home, say, signal }) {
-  // A start that fails is cleaned up before anything else happens, so a failed route never leaves a rule, node or process behind.
+  // Clean a failed start before returning, and carry any retained files/debt to the caller's final cleanup.
   const attempt = async provider => {
     signal?.throwIfAborted();
     try {
       const started = await provider.start({ gatePort, home, say, signal });
       return { provider, origin: started.origin, exited: started.exited, stop: () => provider.stop() };
     } catch (error) {
-      const cleaned = await provider.stop().catch(e => ({ removed: false, detail: e.message }));
-      if (!cleaned.removed) throw Object.assign(new Error(`${provider.name} failed (${error.message}) and could not be removed: ${cleaned.detail}${cleaned.command ? `\nRemove it with:\n  ${cleaned.command}` : ''}`), { cleanupFailed: true });
-      throw error;
+      const cleaned = await provider.stop().catch(e => ({ removed: false, keepNode: true, detail: e.message }));
+      if (!cleaned.removed) throw Object.assign(new Error(`${provider.name} failed (${error.message}) and could not be removed: ${cleaned.detail}${cleaned.command ? `\nRemove it with:\n  ${cleaned.command}` : ''}`), { cleanupFailed: true, routeCleanup: cleaned });
+      throw Object.assign(error, { routeCleanup: cleaned });
     }
   };
   return attempt(selectedProvider ?? selectRouteProvider({ route, providers, say, signal }));
