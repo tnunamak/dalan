@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 // Worker isolation: two approved connections that share ONE token `sub` and differ only in `azp` must not see, claim,
 // read, touch or hear about each other's work. Every check is independent and reports PASS/FAIL, so the same file can be run
 // against code from before the change and show which assertions that code fails.
@@ -728,6 +730,7 @@ async function startServer(name, workers, { allowed = 'owner', rawWorkers = null
   fs.writeFileSync(path.join(config, 'alerts.env'), `NTFY_URL=http://127.0.0.1:${ntfy.address().port}/alert\n`, { mode: 0o600 });
   // An install that predates workers.json already has a database; a bare home does not (and must name its worker).
   if (!workers && !rawWorkers && !envOverrides.NO_EXISTING_DB) { fs.mkdirSync(path.join(home, '.local/share/dot-bridge'), { recursive: true }); { const fixture = new DatabaseSync(path.join(home, '.local/share/dot-bridge/bridge.db')); fixture.exec('PRAGMA user_version=1'); fixture.close(); } }
+  if(workers) for(const worker of Object.values(workers.workers)) worker.workspaceAllowed=true;
   if (workers || rawWorkers) fs.writeFileSync(path.join(config, 'workers.json'), rawWorkers ?? JSON.stringify(workers), { mode: 0o600 });
   fs.writeFileSync(path.join(home, 'bin/t3code'), `#!/usr/bin/env node\nconsole.log(JSON.stringify({ok:true,data:{threads:[{id:'thread_a',projectId:'project_fake',updatedAt:'2026-10-09T00:00:00.000Z'}]}}));\n`, { mode: 0o755 });
   }

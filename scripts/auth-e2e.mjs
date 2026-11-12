@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 import { reservedPort } from '../src/test-support/port.mjs';
 import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import http from 'node:http';import {spawn} from 'node:child_process';import {generateKeyPairSync,sign,randomUUID} from 'node:crypto';
 const home=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-bridge-auth-')),port=await reservedPort(),jwksPort=await reservedPort(),issuer=`http://127.0.0.1:${jwksPort}/realms/fake`,audience='https://dot-bridge.example.test';const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});const jwk={...publicKey.export({format:'jwk'}),kid:'test',alg:'RS256',use:'sig'};

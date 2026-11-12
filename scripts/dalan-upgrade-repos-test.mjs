@@ -1,3 +1,5 @@
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('fixture.invalid');
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';

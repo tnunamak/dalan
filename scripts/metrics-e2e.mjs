@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 // Lifecycle metrics through the real server: submit -> claim -> progress -> run_check (refused) -> wait (consumed) ->
 // finish -> accept -> integrate, then dot-worker metrics --json and status --explain.
 import assert from 'node:assert/strict';

@@ -78,6 +78,10 @@ try {
   assert.deepEqual(cliResult.units, [cliResult.unit]);
   assert.equal(fs.existsSync(path.join(cliHome, '.config/dalan/workers.json')), false, 'write-units-only does not create worker or auth state');
 
+  const missingLan = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), 'service', 'install', '--home', path.join(root, 'bad-lan'), '--public-url', 'https://cli.example.test', '--port', '8798', '--target', '192.0.2.10:8799', '--worker', 'dot', '--write-units-only'], { env, encoding: 'utf8' });
+  assert.notEqual(missingLan.status, 0);
+  assert.match(missingLan.stderr, /requires --lan-port/);
+
   const oldHome = path.join(root, 'existing-bridge-data');
   fs.mkdirSync(path.join(oldHome, '.local/share/dalan'), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(oldHome, '.local/share/dalan/bridge.db'), 'existing data');
@@ -122,6 +126,17 @@ try {
   assert.equal(retried.route.verification.status, 'verified', 'an exact own-install receipt permits a safe retry');
   await assert.rejects(installService({ home: retryHome, origin: 'https://changed.example.test', port: 8791,
     target: '127.0.0.1:8791', workers: [] }, { env, platform: 'linux' }), /belongs to a different service configuration/);
+
+  for (const field of ['origin', 'target']) {
+    const mismatchHome = path.join(root, `mismatch-${field}`);
+    await assert.rejects(installService({ home: mismatchHome, origin: route.origin, port: 8796,
+      target: route.target, workers: ['dot'], gozarBin: 'gozar' }, {
+      env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+      spawn: command => command === 'gozar'
+        ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route: { ...route, [field]: field === 'origin' ? 'https://wrong.example.test' : '192.0.2.11:8789' } }) }
+        : { status: 0, stdout: '' }, waitForSocket: async () => true,
+    }), /does not match/);
+  }
 
   const gozarFailureHome = path.join(root, 'gozar-failure');
   await assert.rejects(installService({ home: gozarFailureHome, origin: 'https://gozar-failure.example.test', port: 8796,

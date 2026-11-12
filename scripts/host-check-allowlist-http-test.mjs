@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 // Authenticated HTTP regression: a direct run_check call cannot use repository metadata
 // to launch an unallowlisted check or publish check output.
 import assert from 'node:assert/strict';
@@ -35,7 +37,7 @@ fs.writeFileSync(path.join(repo,'package-lock.json'),JSON.stringify({...manifest
 git('add', '.'); git('commit', '-qm', 'fixture');
 const base = git('rev-parse', 'HEAD');
 fs.writeFileSync(path.join(config, 'oauth.env'), `OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=${audience}\nOAUTH_JWKS_URI=http://127.0.0.1:${jwksPort}/jwks\nOAUTH_ALLOWED_SUBJECTS=dot\n`, { mode: 0o600 });
-fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{connections:[{issuer,subject:'dot',client_id:'fixture-client'}],repos:['example-owner/fixture']}}}),{mode:0o600});
+fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{workspaceAllowed:true,connections:[{issuer,subject:'dot',client_id:'fixture-client'}],repos:['example-owner/fixture']}}}),{mode:0o600});
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'host-policy-test', use: 'sig' };
 const jwks = http.createServer((req, res) => res.end(JSON.stringify({ keys: [jwk] })));

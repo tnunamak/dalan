@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 
-// Gozar's service-route wire contract. The same instance ID is returned through the target and public ingress.
+// Gozar PR #1 (254619f) service-route wire contract, kept local until its package exports this helper.
+// The same instance ID and HMAC proof are returned through the target and public ingress.
 // This endpoint carries no Dalan identity or authority. The server's public Host check must run first.
 export function createServiceVerifier() {
   const instanceId = randomUUID();

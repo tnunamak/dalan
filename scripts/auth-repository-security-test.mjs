@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('fixture.test');
 import assert from 'node:assert/strict';
 import { test, after } from 'node:test';
 import fs from 'node:fs';
@@ -444,7 +446,7 @@ test('I5: real MCP denials are bounded and rate-limited per principal before arg
   const config = path.join(home, '.config/dot-bridge'); fs.mkdirSync(config, { recursive: true });
   fs.writeFileSync(path.join(config, 'oauth.env'), `OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=https://fixture.test\nOAUTH_JWKS_URI=${issuer}/jwks\nOAUTH_ALLOWED_SUBJECTS=fixture-subject,trusted-subject,reader-subject\n`, { mode: 0o600 });
   fs.writeFileSync(path.join(config, 'workers.json'), JSON.stringify({ workers: {
-    dot: { connections: [{ issuer, subject: 'fixture-subject', client_id: 'fixture' }], capabilities: [] },
+    dot: { workspaceAllowed:true, connections: [{ issuer, subject: 'fixture-subject', client_id: 'fixture' }], capabilities: [] },
     trusted: { connections: [{ issuer, subject: 'trusted-subject', client_id: 'fixture' }, { issuer, subject: 'reader-subject', client_id: 'fixture' }], capabilities: ['t3'] },
   } }), { mode: 0o600 });
   const stub = path.join(home, 't3code');

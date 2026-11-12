@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dalan.example.test');
 // Scopes advertised per tool in tools/list (`securitySchemes`) must match the scopes the protected-resource
 // metadata advertises, in external-issuer mode. Checked for the default legacy names, the neutral opt-in,
 // and the frozen legacy-v46 catalog profile.

@@ -36,8 +36,8 @@ function parseTarget(value) {
 
 function parseOptions(argv, env) {
   const parsed = parseArgs(argv, {
-    values: ['--home', '--public-url', '--port', '--target', '--worker', '--verify-cmd', '--gozar-bin'],
-    flags: ['--write-units-only', '--json', '--help'],
+    values: ['--home', '--public-url', '--port', '--target', '--worker', '--verify-cmd', '--gozar-bin', '--lan-port'],
+    flags: ['--write-units-only', '--enable-workspace', '--enable-t3', '--json', '--help'],
   });
   if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
   if (parsed['--help']) return { help: true };
@@ -47,6 +47,11 @@ function parseOptions(argv, env) {
   const port = Number(parsed['--port']);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('--port must be a fixed port from 1024 through 65535');
   const target = parseTarget(parsed['--target']);
+  const lanPort = parsed['--lan-port'] === undefined ? null : Number(parsed['--lan-port']);
+  if (lanPort !== null && (!Number.isInteger(lanPort) || lanPort < 1024 || lanPort > 65535 || lanPort === port)) fail('--lan-port must be a distinct port from 1024 through 65535');
+  const direct = target.host === '127.0.0.1' && target.port === port;
+  if (!direct && lanPort !== target.port) fail('a forwarded --target requires --lan-port matching its port');
+  if (direct && lanPort !== null) fail('--lan-port needs a separate --target address and port');
   const workers = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--worker') workers.push(argv[++i]);
@@ -59,7 +64,7 @@ function parseOptions(argv, env) {
   if (parsed['--verify-cmd']?.length > 4096) fail('--verify-cmd is too long');
   const gozarBin = parsed['--gozar-bin'] ?? env.GOZAR_BIN ?? 'gozar';
   if (!gozarBin || gozarBin.startsWith('-')) fail('--gozar-bin must name a command');
-  return { home, origin, port, target, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
+  return { home, origin, port, target, lanPort, enableWorkspace: parsed['--enable-workspace'] === true, enableT3: parsed['--enable-t3'] === true, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
     gozarBin, writeUnitsOnly: parsed['--write-units-only'] === true, json: parsed['--json'] === true };
 }
 
@@ -102,8 +107,9 @@ function unitFiles(o, { home, repo = REPO, node = nodePath(process.execPath), pr
       `WorkingDirectory=${repo}`, `ExecStart=${node} ${path.join(repo, 'src/server.mjs')}`,
       `Environment=HOME=${home}`, 'Environment=NODE_ENV=production', 'Environment=DALAN_AUTH_MODE=builtin',
       'Environment=DALAN_BIND_HOST=127.0.0.1', 'Environment=DALAN_GOZAR_SERVICE=1', 'Environment=DALAN_CATALOG_PROFILE=stable',
+      `Environment=DALAN_ENABLE_WORKSPACE=${o.enableWorkspace ? '1' : '0'}`, `Environment=DALAN_ENABLE_T3_TOOLS=${o.enableT3 ? '1' : '0'}`,
       `Environment=DALAN_PORT=${o.port}`, `Environment=PATH=${[path.dirname(node), '/usr/local/bin', '/usr/bin', '/bin'].join(':')}`,
-      'UnsetEnvironment=OPENAI_API_KEY ANTHROPIC_API_KEY DALAN_LOOPBACK DOT_BRIDGE_LOOPBACK', 'Restart=on-failure', 'RestartSec=3', 'UMask=0077', '',
+      'UnsetEnvironment=OPENAI_API_KEY ANTHROPIC_API_KEY DALAN_LOOPBACK DOT_BRIDGE_LOOPBACK DALAN_WORKERS_FILE DOT_BRIDGE_WORKERS_FILE', 'Restart=on-failure', 'RestartSec=3', 'UMask=0077', '',
       '[Install]', 'WantedBy=default.target', '',
     ].join('\n'),
   };
@@ -147,12 +153,12 @@ function profileFor(home, workers) {
 }
 
 const POLICY_HOME_FILES = new Set([
-  'workers.json', 'workers-audit.jsonl', 'workers-audit-checkpoint.sqlite',
+  'service-migration.json', 'workers.json', 'workers-audit.jsonl', 'workers-audit-checkpoint.sqlite',
   'workers-audit-checkpoint.sqlite-wal', 'workers-audit-checkpoint.sqlite-shm', 'workers-repos.json',
 ]);
 
 function installReceipt(home, configDir, o, workers) {
-  return { schema_version: 1, home, origin: o.origin, port: o.port, target: o.target.value,
+  return { schema_version: 1, home, origin: o.origin, port: o.port, target: o.target.value, enable_workspace: !!o.enableWorkspace, enable_t3: !!o.enableT3,
     unit: unitName(home), workers: [...workers].sort(), created_at: new Date().toISOString() };
 }
 
@@ -183,7 +189,7 @@ function checkHomeScope(home, configDir, o, workers) {
     let existing;
     try { existing = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); } catch { fail(`${receiptFile} is not valid JSON`); }
     const wanted = installReceipt(home, configDir, o, workers);
-    for (const field of ['schema_version', 'home', 'origin', 'port', 'target', 'unit', 'workers']) {
+    for (const field of ['schema_version', 'home', 'origin', 'port', 'target', 'enable_workspace', 'enable_t3', 'unit', 'workers']) {
       if (JSON.stringify(existing[field]) !== JSON.stringify(wanted[field])) fail(`${receiptFile} belongs to a different service configuration (${field}); refusing to change it`);
     }
     if (rootEntries.includes('.local')) assertRealDirectoryPath(defaultPath(home, '.local/share/dot-bridge'));
@@ -321,7 +327,7 @@ export async function serviceMain(argv, seams = {}) {
     return migrationMain(args);
   }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]');
+    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]');
     return null;
   }
   if (action !== 'install') fail('use dalan service install or dalan service migrate-workers');

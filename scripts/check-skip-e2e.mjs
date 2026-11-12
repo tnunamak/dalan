@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('fixture.test');
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -67,7 +69,7 @@ if(process.argv.includes('--fixture-server')) {
   await new Promise(resolve=>jwks.listen(0,'127.0.0.1',resolve));
   const issuer=`http://127.0.0.1:${jwks.address().port}`;
   const port=await reservedPort();
-  fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{connections:[{issuer,subject:'fixture',client_id:'fixture-client'}],repos:['test/fixture']}}}),{mode:0o600});
+  fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{workspaceAllowed:true,connections:[{issuer,subject:'fixture',client_id:'fixture-client'}],repos:['test/fixture']}}}),{mode:0o600});
   fs.writeFileSync(path.join(config,'oauth.env'),`OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=https://fixture.test\nOAUTH_JWKS_URI=${issuer}/jwks\nOAUTH_ALLOWED_SUBJECTS=fixture\n`,{mode:0o600});
   const executions=path.join(home,'executions.jsonl'),env={...process.env,HOME:home,DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_AUTH_MODE:'oauth',DOT_BRIDGE_TEST_OAUTH:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'1',DALAN_HOST_CHECKS:'1',DOT_BRIDGE_MIN_FREE_BYTES:'0',DOT_BRIDGE_WORKSPACE_ROOT:path.join(home,'work'),DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE:repo,CHECK_SKIP_EXECUTIONS:executions};
   const service=spawn(process.execPath,['--experimental-test-module-mocks',fileURLToPath(import.meta.url),'--fixture-server'],{cwd:root,env,stdio:['ignore','pipe','pipe']});

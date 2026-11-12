@@ -310,7 +310,7 @@ function lintPlist(text, env) {
 }
 
 function runDotWorkerInit(options) {
-  return spawnSync(options.node, [path.join(options.repo, 'bin/dalan.mjs'), 'init', '--worker', options.worker, '--public-url', options.publicUrl, '--json'], {
+  return spawnSync(options.node, [path.join(options.repo, 'bin/dalan.mjs'), 'init', '--worker', options.worker, ...(options.repoTools?['--enable-workspace']:[]), '--public-url', options.publicUrl, '--json'], {
     cwd: options.repo, env: { ...process.env, HOME: options.home, NODE_ENV: 'production' }, encoding: 'utf8',
   });
 }

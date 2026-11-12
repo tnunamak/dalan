@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// One real built-in OAuth bridge serves four separately paired workers. Each worker sees the same stable catalog,
+// One real built-in OAuth bridge serves four separately paired workers with one stable catalog,
 // cannot claim another worker's assignment, and can claim its own. A wrong public Host is refused before MCP dispatch.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -22,6 +23,10 @@ fs.mkdirSync(stubBin, { recursive: true });
 fs.writeFileSync(path.join(stubBin, 't3code'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
 const home = path.join(root, 'home');
 const configDir = path.join(home, '.config/dot-bridge');
+let forwarder = null;
+const forwardedSockets = new Set();
+let forwardPort;
+let socketActivator = null;
 let child = null;
 let childExit = null;
 let stderr = '';
@@ -51,6 +56,7 @@ const serverEnv = {
   DALAN_TEST_OAUTH: '1',
   DALAN_CATALOG_PROFILE: 'stable',
   DALAN_ENABLE_T3_TOOLS: '1',
+  DALAN_ENABLE_WORKSPACE: '1',
   DALAN_GOZAR_SERVICE: '1',
   NODE_ENV: 'test',
 };
@@ -79,7 +85,7 @@ async function stop() {
 
 function rawRequest({ host, path: requestPath, method = 'POST', headers = {}, body = '' }) {
   return new Promise((resolve, reject) => {
-    const request = http.request({ host: '127.0.0.1', port, path: requestPath, method, headers: { host, ...headers } }, response => {
+    const request = http.request({ host: '127.0.0.1', port: forwardPort ?? port, path: requestPath, method, headers: { host, ...headers } }, response => {
       let text = '';
       response.setEncoding('utf8').on('data', chunk => { text += chunk; });
       response.on('end', () => resolve({ status: response.statusCode, text }));
@@ -125,11 +131,12 @@ function submit(requestId, worker) {
 async function main() {
   try {
     port = await reservedPort();
-    publicUrl = `http://127.0.0.1:${port}`;
+    forwardPort = await reservedPort();
+    publicUrl = `http://127.0.0.1:${forwardPort}`;
     serverEnv.DALAN_PORT = String(port);
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(configDir, 'workers.json'), JSON.stringify({
-      workers: Object.fromEntries(workers.map(worker => [worker, { capabilities: ['t3'] }])),
+      workers: Object.fromEntries(workers.map(worker => [worker, { capabilities: ['t3'], workspaceAllowed: ['dot', 'muse'].includes(worker) }])),
       default_execution: 'none',
     }, null, 2) + '\n', { mode: 0o600 });
 
@@ -142,10 +149,39 @@ async function main() {
 
     child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: serverEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     await waitForReady();
+    // Exercise the installed Linux forwarding program when available; other hosts use a transparent test forwarder.
+    if (process.platform === 'linux' && fs.existsSync('/usr/bin/systemd-socket-activate') && fs.existsSync('/usr/lib/systemd/systemd-socket-proxyd')) {
+      socketActivator = spawn('/usr/bin/systemd-socket-activate', ['-l', `127.0.0.1:${forwardPort}`, '/usr/lib/systemd/systemd-socket-proxyd', `127.0.0.1:${port}`], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let activationLog = '';
+      socketActivator.stderr.on('data', chunk => { activationLog += chunk; });
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (activationLog.includes('Listening on')) break;
+        assert.equal(socketActivator.exitCode, null, activationLog);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      assert.match(activationLog, /Listening on/, 'socket activation did not start');
+    } else {
+      forwarder = net.createServer(client => {
+        const upstream = net.connect(port, '127.0.0.1');
+        for (const socket of [client, upstream]) { forwardedSockets.add(socket); socket.on('close', () => forwardedSockets.delete(socket)); socket.on('error', () => { client.destroy(); upstream.destroy(); }); }
+        client.pipe(upstream); upstream.pipe(client);
+      });
+      await new Promise((resolve, reject) => { forwarder.once('error', reject); forwarder.listen(forwardPort, '127.0.0.1', resolve); });
+    }
     const envText = fs.readFileSync(path.join(configDir, 'env'), 'utf8');
     secret = envText.match(/^BRIDGE_PATH_SECRET=(.+)$/m)?.[1];
     assert.match(secret ?? '', /^[a-f0-9]{64}$/);
     resource = `${publicUrl}/${secret}/mcp`;
+    // Cheap topology checks run before any enrollment or job writes.
+    const exactHost = new URL(publicUrl).host;
+    const noAuth = await rawRequest({ host: exactHost, path: `/${secret}/mcp` });
+    assert.equal(noAuth.status, 401);
+    assert.equal((await rawRequest({ host: 'wrong.example', path: `/${secret}/mcp` })).status, 421);
+    const discovery = await rawRequest({ host: exactHost, method: 'GET', path: `/.well-known/oauth-protected-resource/${secret}/mcp` });
+    assert.equal(discovery.status, 200);
+    assert.equal(JSON.parse(discovery.text).resource, resource);
+    assert.equal((await rawRequest({ host: 'wrong.example', method: 'GET', path: `/.well-known/oauth-protected-resource/${secret}/mcp` })).status, 421);
+    console.log('PASS loopback builtin + transparent forwarder: exact Host, wrong Host, unauthenticated MCP and public discovery');
     const allowed = cli(['connect', 'allow-callback', CALLBACK, '--json']);
     assert.equal(allowed.code, 0, allowed.stderr + allowed.stdout);
     console.log('PASS one fixed-port bridge started with built-in OAuth and stable catalog');
@@ -190,6 +226,7 @@ async function main() {
     }
     console.log(`PASS all four workers received the same stable tools/list catalog (${baseline.length} tools)`);
 
+    const claims = new Map();
     for (const worker of workers) {
       const { access } = sessions.get(worker);
       for (const other of workers) {
@@ -200,8 +237,17 @@ async function main() {
       const own = await callTool(access, 'claim', { request_id: requestIds[worker], claimant: worker });
       assert.equal(own.ok, true, `${worker} could not claim its own assignment: ${own.error}`);
       assert.ok(own.value.claim_id, `${worker} claim had no claim_id`);
+      claims.set(worker, own.value);
     }
     console.log('PASS each worker was refused all three foreign claims and claimed its own job');
+
+    const duetClaim = claims.get('duet-default');
+    const workspaceRoot = path.join(home, '.local/share/dot-bridge/workspaces');
+    const refusedWorkspace = await callTool(sessions.get('duet-default').access, 'list_files', { request_id: requestIds['duet-default'], claim_id: duetClaim.claim_id });
+    assert.equal(refusedWorkspace.ok, false);
+    assert.match(refusedWorkspace.error, /capability_not_enabled/);
+    assert.equal(fs.existsSync(workspaceRoot), false, 'default-denied Duet workspace call created workspace data');
+    console.log('PASS per-worker workspace default deny: Duet gets capability_not_enabled and creates no workspace');
 
     const token = sessions.get('dot').access;
     const wrongHost = await rawRequest({
@@ -213,7 +259,7 @@ async function main() {
     assert.equal(wrongHost.status, 421, `configured Host check returned ${wrongHost.status}`);
     console.log('PASS MCP request with an unconfigured public Host was refused with 421');
 
-    const serviceProbe = async (nonce, host = `127.0.0.1:${port}`) => {
+    const serviceProbe = async (nonce, host = exactHost) => {
       const response = await rawRequest({ host, method: 'GET', path: `/.well-known/gozar/service?nonce=${nonce}` });
       return { ...response, value: response.text ? JSON.parse(response.text) : null };
     };
@@ -239,6 +285,13 @@ async function main() {
     assert.equal((await serviceProbe(nonceA, 'evil.example')).status, 421, 'Gozar verifier ignored the configured public Host');
     console.log('PASS unauthenticated Gozar verifier echoes valid nonces, keeps one instance ID, binds deterministic proofs to nonce, rejects bad nonce, and enforces Host');
   } finally {
+    if (socketActivator && socketActivator.exitCode === null && socketActivator.signalCode === null) {
+      const exited = new Promise(resolve => socketActivator.once('exit', resolve));
+      socketActivator.kill('SIGTERM');
+      await exited;
+    }
+    for (const socket of forwardedSockets) socket.destroy();
+    if (forwarder) await new Promise(resolve => forwarder.close(resolve));
     await stop();
     if (process.env.KEEP_TEST_FIXTURES !== '1') fs.rmSync(root, { recursive: true, force: true });
   }

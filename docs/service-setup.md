@@ -4,7 +4,7 @@ Use this guide after a first job works with `dalan try`, when you want a bridge 
 
 ## Install one bridge for several workers
 
-On Linux, `dalan service install` creates a systemd user service and registers its HTTPS origin as a Gozar service route. Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. The bridge uses built-in OAuth and the stable MCP catalog for every worker. Its auth keys, worker allowlists and job queue stay in one private home.
+On Linux, `dalan service install` creates a systemd user service and registers its HTTPS origin as a Gozar service route. Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. The bridge uses built-in OAuth. Moving a connector to the new URL requires reauthorization and a catalog refresh. All workers use the same stable catalog. The process-wide `legacy-v46` setting remains available for other installations. Its auth keys, worker allowlists and job queue stay in one private home.
 
 First prepare the public origin so it forwards to the address in `--target`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. The proxy must pass the secret MCP path, the OAuth discovery and authorization paths, `/signal/*` when used, and `/.well-known/gozar/service` with its query string. TLS terminates at the proxy. Keep the secret path out of proxy logs.
 
@@ -18,7 +18,9 @@ dalan service migrate-workers \
   --source "$HOME/OLD_BRIDGE_THREE/.config/dot-bridge/workers.json"
 ```
 
-The helper reads the source files without changing them. If an older home has no `workers.json`, it can read the adjacent `workers-repos.json` migration journal. It preserves worker names and repository allowlists, and copies supported worker capabilities and guidance. It does not copy OAuth registrations, tokens, jobs or results. The new bridge starts with `default_execution: none`. For a brand-new bridge, skip migration and pass `--worker NAME` once for each worker instead; those initial workers have empty repository allowlists, no capabilities, and no host execution.
+The helper reads the source files without changing them. If an older home has no `workers.json`, it can read the adjacent `workers-repos.json` migration journal. It preserves worker names and repository allowlists, and copies supported worker capabilities and guidance. It does not copy OAuth registrations, tokens, jobs or results. The new bridge starts with `default_execution: none`. Workspace access defaults to denied; add `--workspace-worker NAME` for each worker whose old bridge had an audited workspace grant. Existing explicit `workspaceAllowed` and T3 capability settings are retained. Destination declarations are copied, but old destination approvals bind old jobs and connections, so each new job requires a fresh approval.
+
+Optionally pass `--source-db PATH` for each old job database. The helper opens it read-only and writes a private `service-migration.json` checklist containing active subscription counts, callback origins and destination approval counts. It omits callback paths, query strings, signing secrets and encrypted records. This checklist grants no authority. Re-enrol every connector, call `events/subscribe` with a fresh signing key, and approve each new destination revision. Without `--source-db`, the checklist still records those required steps but has no old subscription inventory. For a brand-new bridge, skip migration and pass `--worker NAME` once for each worker instead; those initial workers have empty repository allowlists, no capabilities, and no host execution.
 
 Replace `192.0.2.10` below with the address configured on this computer, then run the install after the proxy route reaches the target:
 
@@ -27,10 +29,11 @@ dalan service install \
   --home "$HOME/.local/share/dalan-service" \
   --public-url https://bridge.example.com \
   --port 8787 \
-  --target 192.0.2.10:8789
+  --target 192.0.2.10:8789 \
+  --lan-port 8789
 ```
 
-The Dalan process listens on `127.0.0.1:8787`. When `--target` differs, systemd opens the requested target address and forwards it to that loopback listener. Use an address configured on this computer. If Gozar runs on the same computer and can reach loopback directly, set `--target 127.0.0.1:8787`. `gozar service add` runs after systemd starts the bridge; install succeeds only when Gozar returns a verified route. If the origin filters the Gozar verifier by source IP, pass the trusted host check with `--verify-cmd COMMAND`.
+The Dalan process listens on `127.0.0.1:8787`. With `--lan-port`, systemd opens the address and matching port in `--target` and forwards it to that loopback listener. A separate target requires this explicit option. Use an address configured on this computer. Add `--enable-workspace` or `--enable-t3` to enable those host capabilities; each worker must also have its own workspace or T3 grant. Without these options both host capabilities are disabled. If Gozar runs on the same computer and can reach loopback directly, set `--target 127.0.0.1:8787`. `gozar service add` runs after systemd starts the bridge; install succeeds only when Gozar returns a verified route. If the origin filters the Gozar verifier by source IP, pass the trusted host check with `--verify-cmd COMMAND`.
 
 Set `DALAN_HOME` to the selected home. The private MCP URL is stored in `$DALAN_HOME/resource-url` with mode 0600. Point the client's connector at that URL and sign in separately for each worker. Repository jobs remain blocked until their allowlists are present. Use the unit name printed by install with `systemctl --user status UNIT`, then confirm the public origin returns 404 for `/admin` and accepts the secret MCP path with its original Host header.
 
