@@ -76,7 +76,7 @@ try {
     const doctor=JSON.parse(run('doctor').stdout);
     assert.ok(doctor.repository_access.warnings.some(w=>/audit log/.test(w)&&/dalan worker allow/.test(w)),'doctor tells the operator how to re-approve');
     assert.match(JSON.parse(run('worker','list').stdout).workers[0].audit_integrity_error??'',/audit log/);
-    // Re-approval through the audited command resets the file to the audited grants and records a new baseline.
+    // Re-approval drops the untrusted grants, applies only the named grant and records a new baseline.
     const r=run('worker','allow','acme','octo/cli');assert.equal(r.status,0,r.stderr);
     const after=JSON.parse(fs.readFileSync(t.file,'utf8')).workers.acme.repos;
     assert.deepEqual(after,['octo/cli'],'the hand-added grant was not re-approved, so it is dropped');
