@@ -108,12 +108,14 @@ export function explainTailscale(error) {
 export const TRIAL_PORT = 443;
 export function tailscaleProvider({ port: wantedPort = TRIAL_PORT, name = 'tailscale', record: recordName = 'trial', tailscale: rawTailscale = tailscaleRunner(), env = process.env, platform = process.platform, spawnChild = spawn, clock = { sleep }, which = name => whichOnPath(name, env) } = {}) {
   const tailscale = seeForeground(rawTailscale);
-  let plan = null, child = null, record = null, rule = null;
+  let plan = null, child = null, record = null, rule = null, cli = null;
   return {
     name,
     // Read-only: inspects the daemon, DNS identity, capabilities and the ports other rules already use.
     probe() {
-      if (!which('tailscale')) return { ok: false, ...explainTailscale(new Error('Tailscale is not installed')) };
+      const found = which('tailscale');
+      if (!found) return { ok: false, ...explainTailscale(new Error('Tailscale is not installed')) };
+      cli = typeof found === 'string' ? path.resolve(found) : null;
       try {
         const state = preflight({ tailscale, platform });
         const port = choosePort({ requested: wantedPort, allowed: state.allowed, occupied: state.occupied });
@@ -132,7 +134,7 @@ export function tailscaleProvider({ port: wantedPort = TRIAL_PORT, name = 'tails
       recoverStaleFunnel(home, tailscale, recordName);
       writeExposureRecord({ file: record, worker: 'trial', dnsName: plan.dnsName, port: plan.port, localPort: gatePort, url: plan.origin });
       rule = { dnsName: plan.dnsName, port: plan.port, gatePort };
-      child = spawnChild('tailscale', funnelOnArgs(plan.port, gatePort).filter(arg => arg !== '--bg'), { env, stdio: 'ignore' });
+      child = spawnChild(cli ?? 'tailscale', funnelOnArgs(plan.port, gatePort).filter(arg => arg !== '--bg'), { env, stdio: 'ignore' });
       const exited = new Promise(resolve => { child.once('exit', resolve); child.once('error', resolve); });
       for (let waited = 0; ; waited += 500) {
         const status = JSON.parse(tailscale(funnelStatusArgs()).stdout || '{}');
@@ -147,7 +149,15 @@ export function tailscaleProvider({ port: wantedPort = TRIAL_PORT, name = 'tails
       if (!rule) return { removed: true };
       if (child && child.exitCode === null) { child.kill('SIGTERM'); await Promise.race([new Promise(resolve => child.once('exit', resolve)), clock.sleep(5000)]); if (child.exitCode === null) child.kill('SIGKILL'); }
       try { removeExposure({ tailscale, file: record, log: () => {} }); return { removed: true }; }
-      catch (error) { return { removed: false, detail: error.message, command: `tailscale ${funnelOffArgs(rule.port).join(' ')}` }; }
+      catch (error) {
+        const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
+        const keys = ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'TMPDIR'];
+        const assignments = keys.filter(key => env[key] !== undefined).map(key => `${key}=${quote(env[key])}`);
+        const command = cli && path.isAbsolute(cli)
+          ? `(unset ${keys.join(' ')} && ${[...assignments, quote(cli), ...funnelOffArgs(rule.port).map(quote)].join(' ')})`
+          : null;
+        return { removed: false, detail: error.message, ...(command ? { command } : {}) };
+      }
     },
   };
 }

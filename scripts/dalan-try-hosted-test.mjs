@@ -1169,7 +1169,7 @@ test('a ready Funnel is used on 443, and removed on stop; another rule is never 
   const home = fs.mkdtempSync(path.join(tmp, 'ts-'));
   const started = await ts.start({ gatePort: 5151, home });
   assert.equal(started.origin, probe.origin);
-  assert.deepEqual(fake.state.spawned, ['tailscale', 'funnel', '--https=443', 'http://127.0.0.1:5151'], 'a foreground rule to the gate, never --bg');
+  assert.deepEqual(fake.state.spawned, ['/usr/bin/tailscale', 'funnel', '--https=443', 'http://127.0.0.1:5151'], 'a foreground rule to the gate, never --bg');
   assert.ok(fs.existsSync(path.join(home, 'dot-bridge-trial.exposure.json')), 'ownership is recorded before the rule exists');
   assert.deepEqual(await ts.stop(), { removed: true });
   assert.equal(fs.existsSync(path.join(home, 'dot-bridge-trial.exposure.json')), false);
@@ -1225,9 +1225,38 @@ test('a Funnel rule that someone else replaced is left alone and reported with t
   const refused = await ts.stop();
   assert.equal(refused.removed, false);
   assert.match(refused.detail, /no longer matches this setup; refusing to change it/);
-  assert.equal(refused.command, 'tailscale funnel --https=443 off');
+  assert.match(refused.command, /'\/usr\/bin\/tailscale' 'funnel' '--https=443' 'off'/);
   assert.ok(other.state.web['box.tail1234.ts.net:443'], 'the other rule survives');
   assert.ok(fs.existsSync(path.join(home, 'dot-bridge-trial.exposure.json')), 'the record stays for recovery');
+});
+
+test('Tailscale recovery command runs the selected CLI with a clean PATH', async () => {
+  const fake = fakeTailscale();
+  const binDir = path.join(tmp, "recovery bin ' quoted");
+  const cli = path.join(binDir, 'tailscale');
+  const invoked = path.join(tmp, 'recovery-invoked');
+  const home = path.join(tmp, "caller home ' quoted");
+  const config = path.join(tmp, "caller config ' quoted");
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(cli, `#!/bin/sh\nprintf '%s\\n' "$*|$HOME|$XDG_CONFIG_HOME|$PATH" > '${invoked}'\n`, { mode: 0o700 });
+  fs.chmodSync(cli, 0o700);
+  const ts = tailscaleProvider({
+    tailscale: fake.run, spawnChild: fake.spawnChild, platform: 'linux', env: { PATH: '', HOME: home, XDG_CONFIG_HOME: config }, which: () => cli,
+    clock: { sleep: async () => {} },
+  });
+  ts.probe();
+  const trialHome = fs.mkdtempSync(path.join(tmp, 'ts-recovery-'));
+  await ts.start({ gatePort: 5151, home: trialHome });
+  fake.state.child.kill = () => { fake.state.child.exitCode = 0; fake.state.foreground = {}; fake.state.child.emit('exit'); };
+  fake.state.web['box.tail1234.ts.net:443'] = { Handlers: { '/': { Proxy: 'http://127.0.0.1:7777' } } };
+
+  const cleanup = await ts.stop();
+  assert.equal(cleanup.removed, false);
+  const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
+  assert.ok(cleanup.command.includes(quote(cli)), 'recovery uses the CLI selected during preflight');
+  const recovered = spawnSync('/bin/sh', ['-c', cleanup.command], { env: { PATH: '' }, encoding: 'utf8' });
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.equal(fs.readFileSync(invoked, 'utf8').trim(), `funnel --https=443 off|${home}|${config}|`, 'recovery retains the process configuration while PATH is empty');
 });
 
 // ---- the tunnel helper -------------------------------------------------------------------------------------------------
