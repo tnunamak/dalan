@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { installService } from '../src/service.mjs';
 import { updateService, serviceStatus } from '../src/service-update.mjs';
@@ -19,6 +19,13 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
   let child, errors = '', failRestart = false;
   const installOptions = { home, origin: 'https://update.example.test', port: 18791, target: '127.0.0.1:18791', workers: ['fern', 'muse'], enableWorkspace: true, enableT3: true, autoUpdate: false };
   const env = { ...process.env, XDG_CONFIG_HOME: path.join(root, 'xdg') };
+  const cli = args => {
+    const result = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args, '--json'], {
+      env: { ...env, DALAN_HOME: home }, encoding: 'utf8', timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    return JSON.parse(result.stdout);
+  };
   async function stop() {
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
     const exited = new Promise(resolve => child.once('exit', resolve));
@@ -65,6 +72,11 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
     const receipt = JSON.parse(fs.readFileSync(path.join(defaultPath(home, '.config/dot-bridge'), 'service-install.json')));
     const originalVersion = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'))).version;
     assert.deepEqual(Object.keys((await probeService(home, receipt)).catalogs).sort(), ['fern', 'muse']);
+    const assignment = path.join(root, 'queued-job.json'), requestId = 'req_update_journey';
+    fs.writeFileSync(assignment, JSON.stringify({ schema_version: 1, request_id: requestId,
+      brief: 'Keep this queued job across an update.', inputs: [], expected_output: 'one report', execution_scope: 'read-only' }));
+    cli(['submit', '--execution', 'worker', '--worker', 'fern', '--file', assignment]);
+    assert.equal(cli(['get', requestId]).status, 'queued');
     const candidate = packageFixture('0.7.0', true);
     const release = version => ({ name: '@tnunamak/dalan', version, dist: { integrity: 'sha512-Zml4dHVyZQ==', tarball: 'https://registry.npmjs.org/fixture.tgz' } });
     const seams = {
@@ -96,6 +108,7 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
     assert.equal(applied.outcome, 'updated');
     assert.equal((await probeService(home, { ...receipt, repo: candidate })).version, '0.7.0');
     assert.equal(serviceStatus({ home }).version, '0.7.0');
+    assert.equal(cli(['get', requestId]).status, 'queued', 'the update retains queued work and its owner receipt');
     const next = packageFixture('0.8.0', true);
     const sentinel = path.join(defaultPath(home, '.local/share/dot-bridge'), 'migration-sentinel');
     fs.writeFileSync(sentinel, 'saved'); failRestart = true;
@@ -104,5 +117,6 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
     assert.equal(fs.realpathSync(path.join(home, 'current')), candidate);
     assert.equal((await probeService(home, { ...receipt, repo: candidate })).version, '0.7.0');
     assert.equal(serviceStatus({ home }).version, '0.7.0');
+    assert.equal(cli(['get', requestId]).status, 'queued', 'rollback retains queued work and its owner receipt');
   } finally { await stop(); fs.rmSync(root, { recursive: true, force: true }); }
 });

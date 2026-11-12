@@ -262,7 +262,21 @@ export async function updateService({ home, check = false, yes = false }, seams 
       receipt.repo = candidate; receipt.version = r.version;
       atomic(receiptFile, JSON.stringify(receipt));
       fs.rmSync(defaultPath(home, '.config/dot-bridge', 'service-catalog.json'), { force: true });
-      tx.phase = 'committed'; atomic(path.join(home, 'update-transaction.json'), JSON.stringify(tx));
+      const committedTx = { ...tx, phase: 'committed' };
+      try { atomic(path.join(home, 'update-transaction.json'), JSON.stringify(committedTx)); }
+      catch (error) {
+        let journal;
+        try { journal = JSON.parse(fs.readFileSync(path.join(home, 'update-transaction.json'), 'utf8')); }
+        catch { error.preserveCandidate = true; throw error; }
+        if (journal.phase === 'committed' && journal.home === home) {
+          tx.phase = 'committed';
+          result = { outcome: 'updated', previous_version: oldVersion, version: r.version, cleanup_warning: `committed journal is visible but its durability check failed: ${error.message}; recovery data was preserved` };
+          return result;
+        }
+        if (journal.phase !== 'switched') { error.preserveCandidate = true; throw error; }
+        throw error;
+      }
+      tx.phase = 'committed';
       result = { outcome: 'updated', previous_version: oldVersion, version: r.version };
       const cleanupWarnings = [];
       try { fs.rmSync(path.join(home, 'update-transaction.json'), { force: true }); } catch (error) { cleanupWarnings.push(`transaction marker cleanup failed: ${error.message}`); }
@@ -270,6 +284,11 @@ export async function updateService({ home, check = false, yes = false }, seams 
       try { pruneVersions(home, r.version, oldVersion); } catch (error) { cleanupWarnings.push(`version pruning failed: ${error.message}`); }
       if (cleanupWarnings.length) result.cleanup_warning = cleanupWarnings.join('; ');
     } catch (error) {
+      if (error.preserveCandidate) {
+        const uncertain = new Error(`update commit state is uncertain; candidate and recovery data were preserved: ${error.message}`);
+        uncertain.updateOutcome = 'rollback_failed';
+        throw uncertain;
+      }
       let rollbackError;
       try {
         if (tx.phase === 'switched') validateSnapshot(tx);

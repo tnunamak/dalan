@@ -195,4 +195,72 @@ try {
     await assert.rejects(updateService({ home: f.home, yes: true }, { ...f.seams, healthTimeoutMs: 100 }), /rollback failed: service health check timed out.*old service unhealthy/);
     assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
   }
+  {
+    const f = fixture();
+    const marker = path.join(f.home, '.config', 'dot-bridge', 'mutable');
+    fs.writeFileSync(marker, 'old');
+    const rename = fs.renameSync;
+    fs.renameSync = function(source, destination) {
+      if (destination === path.join(f.home, 'update-transaction.json') && fs.existsSync(source) && JSON.parse(fs.readFileSync(source, 'utf8')).phase === 'committed') {
+        throw new Error('committed journal rename failed');
+      }
+      return rename.call(fs, source, destination);
+    };
+    try {
+      const seams = { ...f.seams, probeService: async (_home, receipt) => {
+        if (receipt.repo.includes('/0.7.0/')) fs.writeFileSync(marker, 'candidate mutation');
+        return { version: receipt.repo.includes('/0.7.0/') ? '0.7.0' : '0.6.0', catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } };
+      } };
+      await assert.rejects(updateService({ home: f.home }, seams), /committed journal rename failed/);
+    } finally { fs.renameSync = rename; }
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'old');
+    assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
+  }
+  {
+    const f = fixture();
+    const marker = path.join(f.home, '.config', 'dot-bridge', 'mutable'); fs.writeFileSync(marker, 'old');
+    const rename = fs.renameSync;
+    fs.renameSync = function(source, destination) {
+      if (destination === path.join(f.home, 'update-transaction.json') && fs.existsSync(source) && JSON.parse(fs.readFileSync(source, 'utf8')).phase === 'committed') {
+        rename.call(fs, source, destination);
+        throw new Error('committed journal directory sync failed');
+      }
+      return rename.call(fs, source, destination);
+    };
+    let result;
+    try {
+      const seams = { ...f.seams, probeService: async (_home, receipt) => {
+        if (receipt.repo.includes('/0.7.0/')) fs.writeFileSync(marker, 'candidate mutation');
+        return { version: receipt.repo.includes('/0.7.0/') ? '0.7.0' : '0.6.0', catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } };
+      } };
+      result = await updateService({ home: f.home }, seams);
+    } finally { fs.renameSync = rename; }
+    assert.equal(result.outcome, 'updated'); assert.match(result.cleanup_warning, /durability check failed/);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'candidate mutation');
+    assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(path.join(f.home, 'versions', '0.7.0', 'node_modules', '@tnunamak', 'dalan')));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, 'update-transaction.json'), 'utf8')).phase, 'committed');
+    assert.ok(fs.existsSync(path.join(f.home, 'update-backup', 'snapshot', '.snapshot-complete.json')));
+  }
+  {
+    const f = fixture();
+    const marker = path.join(f.home, '.config', 'dot-bridge', 'mutable'); fs.writeFileSync(marker, 'old');
+    const rename = fs.renameSync;
+    fs.renameSync = function(source, destination) {
+      if (destination === path.join(f.home, 'update-transaction.json') && fs.existsSync(source) && JSON.parse(fs.readFileSync(source, 'utf8')).phase === 'committed') {
+        fs.writeFileSync(destination, '{ambiguous journal');
+        throw new Error('committed journal visibility is ambiguous');
+      }
+      return rename.call(fs, source, destination);
+    };
+    try {
+      const seams = { ...f.seams, probeService: async (_home, receipt) => {
+        if (receipt.repo.includes('/0.7.0/')) fs.writeFileSync(marker, 'candidate mutation');
+        return { version: receipt.repo.includes('/0.7.0/') ? '0.7.0' : '0.6.0', catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } };
+      } };
+      await assert.rejects(updateService({ home: f.home }, seams), /commit state is uncertain/);
+    } finally { fs.renameSync = rename; }
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'candidate mutation');
+    assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(path.join(f.home, 'versions', '0.7.0', 'node_modules', '@tnunamak', 'dalan')));
+    assert.ok(fs.existsSync(path.join(f.home, 'update-backup', 'snapshot', '.snapshot-complete.json')));
+  }
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
