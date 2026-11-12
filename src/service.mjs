@@ -207,7 +207,7 @@ function checkHomeScope(home, configDir, o, workers) {
   if (!fs.existsSync(home)) return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
   const rootEntries = fs.readdirSync(home);
   if (!rootEntries.length) return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
-  const rootAllowed = ['.config', '.local', '.tmp', 'resource-url', 'current', 'versions', 'update-result.json', 'update-transaction.json', 'update-backup', 'update-lock.sqlite', 'update-lock.sqlite-journal'];
+  const rootAllowed = ['.config', '.local', '.tmp', 'resource-url', 'current', 'versions', 'update-result.json', 'update-failed.json', 'update-transaction.json', 'update-backup', 'update-lock.sqlite', 'update-lock.sqlite-journal'];
   if (rootEntries.some(name => !rootAllowed.includes(name))) fail(`${home} contains unrelated data; use a fresh home or one created by dalan service migrate-workers`);
   if (!rootEntries.includes('.config')) fail(`${home} has no Dalan config directory; refusing to adopt it`);
   const configRoot = path.join(home, '.config');
@@ -442,25 +442,26 @@ export async function serviceMain(argv, seams = {}) {
     return migrationMain(args);
   }
   if (['update', 'status', 'auto-update'].includes(action)) {
-    const parsed = parseArgs(args, { values: ['--home'], flags: ['--check', '--yes', '--json', '--help'] });
+    const parsed = parseArgs(args, { values: ['--home'], flags: ['--check', '--yes', '--retry', '--json', '--help'] });
     if (parsed['--help']) return serviceMain(['help'], seams);
     const home = path.resolve(parsed['--home'] ?? path.join(os.homedir(), '.local/share/dalan-service'));
     let result;
     if (action === 'auto-update') {
-      if (parsed._.length !== 1 || !['on', 'off'].includes(parsed._[0]) || parsed['--check'] || parsed['--yes']) fail('use dalan service auto-update on|off [--home DIR]');
+      if (parsed._.length !== 1 || !['on', 'off'].includes(parsed._[0]) || parsed['--check'] || parsed['--yes'] || parsed['--retry']) fail('use dalan service auto-update on|off [--home DIR]');
       result = await setAutoUpdate({ home, enabled: parsed._[0] === 'on' }, seams);
     } else {
       if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
+      if (parsed['--check'] && parsed['--retry']) fail('--check cannot be used with --retry');
       if (parsed['--check'] && parsed['--yes']) fail('--check cannot be used with --yes');
-      if (action === 'status' && (parsed['--check'] || parsed['--yes'])) fail('service status does not accept --check or --yes');
+      if (action === 'status' && (parsed['--check'] || parsed['--yes'] || parsed['--retry'])) fail('service status does not accept --check, --yes or --retry');
       const updater = await import('./service-update.mjs');
-      result = await updater[action === 'status' ? 'serviceStatus' : 'updateService']({ home, check: !!parsed['--check'], yes: !!parsed['--yes'] }, seams);
+      result = await updater[action === 'status' ? 'serviceStatus' : 'updateService']({ home, check: !!parsed['--check'], yes: !!parsed['--yes'], retry: !!parsed['--retry'] }, seams);
     }
     (seams.out ?? console.log)(parsed['--json'] ? JSON.stringify(result) : JSON.stringify(result, null, 2));
     return result;
   }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Linux systemd only.');
+    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. --retry retries a release that was rolled back. Linux systemd only.');
     return null;
   }
   if (action !== 'install') fail('use dalan service install, update, auto-update, status or migrate-workers');

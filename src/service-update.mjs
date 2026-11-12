@@ -60,6 +60,13 @@ function releaseVersion(r, current) {
 function atomic(file, text) {
   privateDir(path.dirname(file)); writeAtomic(file, text);
 }
+const failedFile = home => path.join(home, 'update-failed.json');
+function readFailed(home) {
+  try {
+    const v = JSON.parse(fs.readFileSync(failedFile(home), 'utf8'));
+    return typeof v?.version === 'string' && typeof v.integrity === 'string' ? v : null;
+  } catch { return null; }
+}
 function copyTree(src, dst) {
   const st = fs.lstatSync(src);
   if (st.isSymbolicLink()) { fs.symlinkSync(fs.readlinkSync(src), dst); return; }
@@ -190,7 +197,8 @@ function actualWorkers(home) {
   if (!workers.length) fail('configured worker set is empty');
   return workers;
 }
-export async function updateService({ home, check = false, yes = false }, seams = {}) {
+export async function updateService({ home, check = false, yes = false, retry = false }, seams = {}) {
+  if (check && retry) fail('--retry cannot be used with --check');
   home = path.resolve(home ?? fail('home is required'));
   const latest = seams.latestRelease ?? defaultLatest, install = seams.installRelease ?? defaultInstall;
   const probe = seams.probeService ?? defaultProbe, candidateProbe = seams.probeCandidate ?? defaultCandidate;
@@ -209,7 +217,7 @@ export async function updateService({ home, check = false, yes = false }, seams 
   privateDir(home);
   const releaseLock = acquireUpdateLock(home);
   const resultFile = path.join(home, 'update-result.json');
-  let result;
+  let result, attempted;
   try {
     await recover(home, control, probe, healthTimeoutMs);
     const { value: receipt, file: receiptFile } = readReceipt(home);
@@ -220,6 +228,12 @@ export async function updateService({ home, check = false, yes = false }, seams 
     const workers = actualWorkers(home);
     const r = await latest(receipt), forward = releaseVersion(r, oldVersion);
     if (!forward) { result = { outcome: 'up_to_date', current_version: oldVersion, latest_version: r.version }; return result; }
+    const failed = readFailed(home);
+    if (!retry && failed && failed.version === r.version && failed.integrity === r.dist.integrity) {
+      result = { outcome: 'skipped_failed_release', current_version: oldVersion, latest_version: r.version, failed_version: failed.version, message: `Release ${r.version} was rolled back earlier; not retrying automatically. Run dalan service update --retry to try it again.` };
+      return result;
+    }
+    attempted = r;
     const installed = await install(home, r);
     const candidate = path.resolve(installed), versions = path.resolve(home, 'versions');
     if (candidate !== path.join(versions, r.version, 'node_modules', '@tnunamak', 'dalan') || !candidate.startsWith(`${versions}${path.sep}`) || fs.realpathSync(candidate) !== candidate) fail('candidate repository does not match exact package version path');
@@ -270,6 +284,7 @@ export async function updateService({ home, check = false, yes = false }, seams 
         catch { error.preserveCandidate = true; throw error; }
         if (journal.phase === 'committed' && journal.home === home) {
           tx.phase = 'committed';
+          try { fs.rmSync(failedFile(home), { force: true }); } catch { /* see above */ }
           result = { outcome: 'updated', previous_version: oldVersion, version: r.version, cleanup_warning: `committed journal is visible but its durability check failed: ${error.message}; recovery data was preserved` };
           return result;
         }
@@ -278,6 +293,7 @@ export async function updateService({ home, check = false, yes = false }, seams 
       }
       tx.phase = 'committed';
       result = { outcome: 'updated', previous_version: oldVersion, version: r.version };
+      try { fs.rmSync(failedFile(home), { force: true }); } catch { /* stale record only skips the same release */ }
       const cleanupWarnings = [];
       try { fs.rmSync(path.join(home, 'update-transaction.json'), { force: true }); } catch (error) { cleanupWarnings.push(`transaction marker cleanup failed: ${error.message}`); }
       try { fs.rmSync(txDir, { recursive: true, force: true }); } catch (error) { cleanupWarnings.push(`backup cleanup failed: ${error.message}`); }
@@ -306,6 +322,9 @@ export async function updateService({ home, check = false, yes = false }, seams 
     return result;
   } catch (error) {
     result = { outcome: error.updateOutcome ?? 'failed', error: error.message };
+    if (attempted && (result.outcome === 'rolled_back' || result.outcome === 'rollback_failed')) {
+      try { atomic(failedFile(home), JSON.stringify({ version: attempted.version, integrity: attempted.dist.integrity, outcome: result.outcome, timestamp: new Date().toISOString() })); } catch { /* best effort */ }
+    }
     throw error;
   } finally {
     try { if (result) atomic(resultFile, JSON.stringify({ ...result, timestamp: new Date().toISOString() })); }
@@ -320,5 +339,5 @@ export function serviceStatus({ home }) {
   if (fs.existsSync(current)) version = JSON.parse(fs.readFileSync(path.join(fs.realpathSync(current), 'package.json'), 'utf8')).version;
   let last_result = null;
   try { last_result = JSON.parse(fs.readFileSync(path.join(home, 'update-result.json'), 'utf8')); } catch { /* no update attempt */ }
-  return { version, auto_update: receipt.auto_update ?? false, last_result };
+  return { version, auto_update: receipt.auto_update ?? false, last_result, failed_release: readFailed(home)?.version ?? null };
 }
