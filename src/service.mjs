@@ -400,7 +400,11 @@ export async function installService(o, seams = {}) {
   if (needsEnrollmentRestart) {
     writeAtomic(receiptFile, `${JSON.stringify({ ...previous, repo: previous.repo ?? repo, node, unit_dir: unitDir, auto_update: autoUpdate, enrollment_pending: true }, null, 2)}\n`);
   }
-  if (replaceLegacyUnit) fs.writeFileSync(path.join(unitDir, `${name}.service`), files[`${name}.service`]);
+  if (replaceLegacyUnit) {
+    const file = path.join(unitDir, `${name}.service`), mode = fs.statSync(file).mode & 0o777;
+    writeAtomic(file, files[`${name}.service`]);
+    fs.chmodSync(file, mode);
+  }
   writeUnits(unitDir, files);
   runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn });
   runCommand('systemctl', ['--user', 'enable', '--now', ...enable], { env, spawn });
