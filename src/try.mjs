@@ -29,7 +29,7 @@ const BRIEF = 'Report the exact phrase: bridge first report. Do not read files, 
 const REPORT = 'bridge first report';
 const MARKER = '.dalan-trial';
 const DEFAULT_CALLBACKS = ['http://127.0.0.1/callback', 'http://localhost/callback'];
-const USAGE = 'usage: dalan try [--local | --public [--client chatgpt|claude] [--route auto|gozar|localhost.run|tailscale]] [--home DIR] [--port N] [--callback PATTERN]...';
+const USAGE = 'usage: dalan try [--local | --public [--route NAME]] [--home DIR] [--port N] [--callback PATTERN]...';
 const DEMO_REPO = 'dalan-demo/hello';
 const DENIED_REPO = 'dalan-demo/other';
 const DEMO_TITLE = 'Hello from the Dalan demo repository';
@@ -82,7 +82,7 @@ function formatTryError(error, context, alternate = null) {
   if (error?.tryKind === 'route_start') {
     // The route, not the home, failed: the same home retries cleanly, and the other route or a local trial are the real alternatives.
     const freshRelayHome = shellQuote(path.join(os.homedir(), '.local/share', `dalan-hosted-${randomUUID()}`));
-    const otherRoute = /--route tailscale\b/.test(flags) ? commandBlock('Or make a temporary public demo link with Gozar:', `${cli} try${flags.replace('--route tailscale', '--route gozar')} --home ${freshRelayHome}`) : null;
+    const otherRoute = /--route\b/.test(flags) ? commandBlock('Or let Gozar pick a route for this trial:', `${cli} try${flags.replace(/\s--route\s+\S+/, '')} --home ${freshRelayHome}`) : null;
     return [`${cause}\nThe public route did not start, so the bridge was not started.`, commandBlock('Try again with:', `${cli} try${flags} --home ${context.shellHome}`), otherRoute,
       commandBlock('Or try on this computer only:', `${cli} try --local`)].filter(Boolean).join('\n');
   }
@@ -100,26 +100,22 @@ export async function describeTryError(error, context) {
 
 export function parseTryArgs(argv) {
   const out = { home: null, port: null, callbacks: [] };
-  const choices = { '--client': ['chatgpt', 'claude'], '--route': ['auto', 'gozar', 'localhost.run', 'tailscale'] };
   for (let i = 0; i < argv.length; i++) {
     const [flag, value] = [argv[i], argv[i + 1]];
     if (flag === '--local' || flag === '--public') { out.mode = flag.slice(2); continue; }
-    if (!['--home', '--port', '--callback', '--client', '--route'].includes(flag)) throw new Error(`unknown option ${JSON.stringify(flag)}\n${USAGE}`);
+    if (!['--home', '--port', '--callback', '--route'].includes(flag)) throw new Error(`unknown option ${JSON.stringify(flag)}\n${USAGE}`);
     if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value\n${USAGE}`);
     i++;
     if (flag === '--home') out.home = value;
     else if (flag === '--callback') out.callbacks.push(value);
-    else if (flag in choices) {
-      if (!choices[flag].includes(value)) throw new Error(`${flag} must be one of: ${choices[flag].join(', ')}`);
-      out[flag.slice(2)] = value;
-    } else if (/^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536) out.port = Number(value);
+    else if (flag === '--route') out.route = value; // the owner's Gozar route name, passed through exactly
+    else if (/^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536) out.port = Number(value);
     else throw new Error('--port requires a number from 1 to 65535');
   }
   // Conflicts are refused here, before any file, process or route exists. --client and --route only make sense for a public trial.
-  const hostedOnly = ['client', 'route'].filter(key => out[key] !== undefined);
-  if (out.mode === 'local' && hostedOnly.length) throw new Error(`--local cannot be combined with --${hostedOnly[0]}; those options are for a public trial`);
-  if (hostedOnly.length && !out.mode) out.mode = 'public';
-  if (out.mode === 'public' && out.callbacks.length) throw new Error('--callback is for a local client; a public trial uses the selected client\'s own callback');
+  if (out.mode === 'local' && out.route !== undefined) throw new Error('--local cannot be combined with --route; that option is for a public trial');
+  if (out.route !== undefined && !out.mode) out.mode = 'public';
+  if (out.mode === 'public' && out.callbacks.length) throw new Error('--callback is for a local client; a public trial uses the MCP client\'s own callback');
   return out;
 }
 
@@ -270,7 +266,7 @@ export async function runTry({ argv = [], env = process.env, out = process.stdou
     if (!options.mode) Object.assign(options, await hostedMode.chooseMode({ input, out, signal }));
     if (options.mode === 'public') {
       const cli = errorContext.cli ?? `node ${errorContext.shellCli ?? shellQuote(path.join(repo, 'bin/dalan.mjs'))}`;
-      if (!interactive) throw new Error(`Hosted setup needs an interactive terminal for the URL and connection approval. Run this in an interactive terminal:\n${commandLine(`${cli} try --public --client ${options.client ?? 'chatgpt'}`)}`);
+      if (!interactive) throw new Error(`Hosted setup needs an interactive terminal for the URL and connection approval. Run this in an interactive terminal:\n${commandLine(`${cli} try --public${options.route !== undefined ? ` --route ${shellQuote(options.route)}` : ''}`)}`);
       return hostedMode.runHosted({ options, env, out, input, signal, errorContext, clock, deps: hosted, helpers: tryInternals });
     }
   }

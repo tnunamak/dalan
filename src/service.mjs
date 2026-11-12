@@ -10,7 +10,7 @@ import { defaultPath } from './paths.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
-import { resolveGozarCommand } from './try-exposure.mjs';
+import { buildQuery, ensureDurableRoute, gozarHomeFor, registerExternalService, resolveGozar } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 
 const REPO = fileURLToPath(new URL('..', import.meta.url));
@@ -49,7 +49,7 @@ function validateTopology({ port, target, lanPort = null, verifyCmd }) {
 
 function parseOptions(argv, env) {
   const parsed = parseArgs(argv, {
-    values: ['--home', '--public-url', '--port', '--target', '--worker', '--verify-cmd', '--gozar-bin', '--lan-port'],
+    values: ['--home', '--public-url', '--port', '--target', '--worker', '--verify-cmd', '--route', '--lan-port'],
     flags: ['--write-units-only', '--enable-workspace', '--enable-t3', '--auto-update', '--no-auto-update', '--json', '--help'],
   });
   if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
@@ -73,10 +73,10 @@ function parseOptions(argv, env) {
   }
   if (new Set(workers).size !== workers.length) fail('--worker names must be unique');
   if (parsed['--verify-cmd']?.length > 4096) fail('--verify-cmd is too long');
-  const gozarBin = parsed['--gozar-bin'];
-  if (gozarBin !== undefined && (!gozarBin || gozarBin.startsWith('-'))) fail('--gozar-bin must name a command');
+  const route = parsed['--route'];
+  if (route !== undefined && (!route || route.startsWith('-'))) fail('--route must name a Gozar route');
   return { home, origin, port, target, lanPort, enableWorkspace: parsed['--enable-workspace'] === true, enableT3: parsed['--enable-t3'] === true, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
-    gozarBin, autoUpdate: parsed['--auto-update'] ? true : parsed['--no-auto-update'] ? false : undefined,
+    route, autoUpdate: parsed['--auto-update'] ? true : parsed['--no-auto-update'] ? false : undefined,
     writeUnitsOnly: parsed['--write-units-only'] === true, json: parsed['--json'] === true };
 }
 
@@ -386,10 +386,7 @@ export async function installService(o, seams = {}) {
     writeUnits(unitDir, files);
     return { schema_version: 1, home: o.home, unit: `${name}.service`, units: Object.keys(files), target: o.target.value, started: false, route: null };
   }
-  // An explicit --gozar-bin wins; otherwise the bundled Gozar, GOZAR_BIN, then PATH.
-  const gozar = o.gozarBin !== undefined ? { binary: o.gozarBin, args: [] }
-    : resolveGozarCommand({ env, resolveBundled: seams.resolveBundled, which: seams.which });
-  if (!gozar.binary) fail('Gozar is unavailable; reinstall @tnunamak/dalan with its dependencies, or install gozar on PATH or set GOZAR_BIN to an executable path, then retry service install.');
+  const gozar = seams.gozar ?? await resolveGozar();
   assertGozarStatePath(env);
   const needsEnrollmentRestart = replaceLegacyUnit || !!previous && (!previous.repo || previous.enrollment_pending === true);
   const spawn = seams.spawn ?? spawnSync;
@@ -413,18 +410,18 @@ export async function installService(o, seams = {}) {
   const dataDir = defaultPath(o.home, '.local/share/dot-bridge');
   const ready = await (seams.waitForSocket ?? socketIsReady)(path.join(dataDir, 'admin.sock'), seams.socketTimeoutMs ?? 30000);
   if (!ready) fail(`Dalan did not start on its admin socket; the unit and home remain for inspection: systemctl --user status ${name}.service`);
-  const gozarArgs = ['service', 'add', '--origin', o.origin, '--target', o.target.value];
-  if (o.verifyCmd) gozarArgs.push('--verify-cmd', o.verifyCmd);
-  gozarArgs.push('--json');
-  const output = runCommand(gozar.binary, [...gozar.args, ...gozarArgs], { env, spawn, timeout: 120000 });
+  const gozarHome = gozarHomeFor(env);
   let routeReply;
-  try { routeReply = JSON.parse(output); } catch { fail('Gozar returned invalid JSON for service add; the bridge is running but its route is unverified'); }
-  if (routeReply?.schemaVersion !== 1 || routeReply?.route?.origin !== o.origin || routeReply?.route?.target !== o.target.value) {
-    fail('Gozar returned a service route that does not match the requested origin and target; the bridge is running but its route is unverified');
+  if (o.route !== undefined) {
+    // A named Gozar route: Gozar allocates or adopts it and pins the origin; nothing here interprets the name.
+    const query = buildQuery({ home: gozarHome, target: o.target.value, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, origin: o.origin, address: 'stable' });
+    const view = await ensureDurableRoute({ gozar, query, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
+    if (view.origin !== o.origin) fail(`Gozar pinned ${view.origin}, not the requested ${o.origin}; the bridge is running but its route needs repair`);
+    routeReply = view;
+  } else {
+    routeReply = (await registerExternalService({ gozar, home: gozarHome, origin: o.origin, target: o.target.value, ...(o.verifyCmd ? { verifyCmd: o.verifyCmd } : {}) })).route;
   }
-  if (routeReply.route.verification?.status !== 'verified') {
-    fail(`Gozar did not verify the service route; the bridge is running and the service route needs repair: ${JSON.stringify(routeReply).slice(0, 1500)}`);
-  }
+  if (routeReply.verification?.status !== 'verified') fail(`Gozar did not verify the route; the bridge is running and the route needs repair: ${JSON.stringify(routeReply).slice(0, 1500)}`);
   await setAutoUpdate({ home: o.home, enabled: autoUpdate }, { ...seams, env, spawn });
   if (needsEnrollmentRestart) {
     const enrolled = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
@@ -433,7 +430,7 @@ export async function installService(o, seams = {}) {
   }
   return { schema_version: 1, home: o.home, unit: `${name}.service`, units: Object.keys(files), port: o.port,
     workers: profile.workers, public_url: `${o.origin}/<secret>/mcp`, resource_url_file: homeFiles.resourceFile,
-    target: o.target.value, started: true, route: routeReply.route, auto_update: autoUpdate };
+    target: o.target.value, started: true, route: routeReply, auto_update: autoUpdate };
 }
 
 export async function serviceMain(argv, seams = {}) {
@@ -472,7 +469,7 @@ export async function serviceMain(argv, seams = {}) {
     return result;
   }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Linux systemd only.');
+    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--route NAME] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Linux systemd only.');
     return null;
   }
   if (action !== 'install') fail('use dalan service install, update, auto-update, status, recover or migrate-workers');

@@ -15,8 +15,57 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from './live-trial/common.mjs';
 import { loadKeys } from '../src/as-files.mjs';
 import { writeWorkerInstructions } from '../src/worker-instructions.mjs';
-// Tailscale Funnel exposure (--expose tailscale). All of it lives in lib/expose-tailscale.mjs.
-import * as expose from './lib/expose-tailscale.mjs';
+import https from 'node:https';
+import { Resolver } from 'node:dns/promises';
+import { buildQuery, ensureDurableRoute, gozarHomeFor, resolveGozar, describeCandidate, describeDisclosure } from '../src/gozar-routes.mjs';
+
+// ---- checking the public address ---------------------------------------------------------------------------------------------------
+// Public DNS through three resolvers in parallel (one can keep a negative-cached NXDOMAIN for a new name for >10 min).
+const PUBLIC_DNS_SERVERS = ['1.1.1.1', '8.8.8.8', '9.9.9.9'];
+const DNS_WAIT_MS = 600_000, DNS_PROGRESS_MS = 30_000, HTTPS_WAIT_MS = 120_000;
+function makePublicResolver(resolvers = PUBLIC_DNS_SERVERS.map(server => { const resolver = new Resolver({ timeout: 3000, tries: 1 }); resolver.setServers([server]); return { server, resolver }; })) {
+  return name => new Promise(resolve => {
+    let pending = resolvers.length;
+    const settle = () => { if (--pending === 0) resolve(null); };
+    for (const { server, resolver } of resolvers) resolver.resolve4(name).then(addresses => (addresses[0] ? resolve({ address: addresses[0], server }) : settle()), settle);
+  });
+}
+// GET /admin pinned to the address DNS returned. The bridge answers 404 on its unauthenticated path.
+function fetchPinned(url, address, { timeoutMs = 15_000 } = {}) {
+  const u = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = https.request({ hostname: u.hostname, port: u.port || 443, path: '/admin', method: 'GET', timeout: timeoutMs,
+      lookup: (_host, options, cb) => (options?.all ? cb(null, [{ address, family: 4 }]) : cb(null, address, 4)) }, res => { res.resume(); resolve(res.statusCode); });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+export async function verifyPublic({ url, dnsName, resolve4, request = fetchPinned, sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now, timeoutMs = DNS_WAIT_MS, intervalMs = 5_000, progressMs = DNS_PROGRESS_MS, log = console.log }) {
+  const secs = ms => Math.round(ms / 1000);
+  const start = now(), end = start + timeoutMs;
+  let nextProgress = progressMs, found = null;
+  while (!found) {
+    found = await resolve4(dnsName);
+    if (found) break;
+    const elapsed = now() - start;
+    if (elapsed >= nextProgress && elapsed < timeoutMs) { log(`waiting for public DNS of ${dnsName} … ${secs(elapsed)} s / ${secs(timeoutMs)} s`); nextProgress += progressMs; }
+    if (now() >= end) break;
+    await sleep(intervalMs);
+  }
+  if (!found) { log(`FAIL public DNS: no A record for ${dnsName} from 1.1.1.1, 8.8.8.8 or 9.9.9.9 after ${secs(timeoutMs)} s. Next: run \`dig @8.8.8.8 ${dnsName} A\` (also try @1.1.1.1 and @9.9.9.9), check the route's state with Gozar, then retry.`); return false; }
+  log(`PASS public DNS: ${dnsName} -> ${found.address} (via ${found.server})`);
+  const httpsEnd = now() + HTTPS_WAIT_MS;
+  let nextHttpsProgress = now() + progressMs, last;
+  for (;;) {
+    try { const code = await request(url, found.address); if (code === 404) break; last = `GET /admin returned ${code}, expected 404 from the bridge`; } catch (e) { last = e.message; }
+    if (now() >= httpsEnd) { log(`FAIL public HTTPS: ${last} (still failing after ${secs(HTTPS_WAIT_MS)} s). Likely cause: the route is not active yet, or a different service answers on this address. Next: check the route's state with Gozar and the local port, then retry.`); return false; }
+    if (now() >= nextHttpsProgress) { log(`waiting for public HTTPS of ${dnsName} … last result: ${last}`); nextHttpsProgress += progressMs; }
+    await sleep(intervalMs);
+  }
+  log('PASS public HTTPS: GET /admin returned 404 from the bridge');
+  return true;
+}
 
 const REPO = fileURLToPath(new URL('..', import.meta.url));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/; // no space, quote, %, $ or newline: the value goes into a unit or plist as is
@@ -46,7 +95,7 @@ function stableNode(execPath) {
 
 function parseOptions(argv, platform) {
   const args = parseArgs(argv, {
-    values: ['--worker', '--public-url', '--port', '--home', '--lan-forward', '--expose', '--funnel-port', '--ngrok-domain'],
+    values: ['--worker', '--public-url', '--port', '--home', '--lan-forward', '--route'],
     flags: ['--persistent', '--write-units-only', '--no-repo-tools', '--start', '--help', '--remove', '--purge-home', '--retry-public-check', '--repoint'],
   });
   if (args._.length) fail(`unexpected argument ${args._[0]}`);
@@ -56,7 +105,7 @@ function parseOptions(argv, platform) {
   const home = path.resolve(args['--home'] ?? path.join(os.homedir(), '.local/share/dbm'));
   if (args['--retry-public-check'] && args['--remove']) fail('--retry-public-check cannot be combined with --remove');
   if (args['--repoint']) {
-    const others = ['--remove', '--retry-public-check', '--start', '--write-units-only', '--public-url', '--port', '--home', '--lan-forward', '--expose', '--funnel-port', '--ngrok-domain', '--purge-home', '--no-repo-tools', '--persistent'].filter(flag => args[flag] !== undefined && args[flag] !== false);
+    const others = ['--remove', '--retry-public-check', '--start', '--write-units-only', '--public-url', '--port', '--home', '--lan-forward', '--route', '--purge-home', '--no-repo-tools', '--persistent'].filter(flag => args[flag] !== undefined && args[flag] !== false);
     if (others.length) fail(`--repoint takes only --worker; remove ${others.join(' ')}`);
     const repo = REPO.replace(/\/$/, '');
     if (!SAFE_PATH.test(repo)) fail(`repo path contains a character that is not safe in a unit file: ${JSON.stringify(repo)}`);
@@ -64,23 +113,16 @@ function parseOptions(argv, platform) {
   }
   if (args['--remove']) {
     // Users rerun their install command with --remove appended, so install-only flags are ignored, not refused.
-    const ignored = ['--public-url', '--port', '--lan-forward', '--write-units-only', '--start', '--no-repo-tools', '--expose', '--funnel-port', '--ngrok-domain'].filter(flag => args[flag] !== undefined && args[flag] !== false);
+    const ignored = ['--public-url', '--port', '--lan-forward', '--write-units-only', '--start', '--no-repo-tools', '--route'].filter(flag => args[flag] !== undefined && args[flag] !== false);
     if (ignored.length) console.error(`worker-bridge-setup: ignoring install-only flags with --remove: ${ignored.join(' ')}`);
     return { remove: true, worker, home, purge: !!args['--purge-home'] };
   }
   if (args['--purge-home']) fail('--purge-home is only valid with --remove');
-  const mode = args['--expose'];
-  if (args['--retry-public-check'] && (mode || args['--start'] || args['--write-units-only'] || args['--remove'])) fail('--retry-public-check takes --public-url and checks an existing service; omit --expose, --start, --write-units-only and --remove');
-  if (mode !== undefined && mode !== 'tailscale' && mode !== 'ngrok') fail('--expose only supports "tailscale" (default on Linux and macOS) or "ngrok" (fallback)');
-  if (args['--funnel-port'] !== undefined && mode !== 'tailscale') fail('--funnel-port needs --expose tailscale');
-  if (args['--ngrok-domain'] !== undefined && mode !== 'ngrok') fail('--ngrok-domain needs --expose ngrok');
-  if (mode === 'ngrok' && args['--ngrok-domain'] === undefined) fail('--expose ngrok needs --ngrok-domain <assigned-domain> (the static domain from your ngrok dashboard)');
-  const ngrokDomain = args['--ngrok-domain'];
-  if (ngrokDomain !== undefined && !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(ngrokDomain)) fail('--ngrok-domain must be a bare host name such as your-name.ngrok-free.app (no https:// and no path)');
-  if (mode && args['--public-url'] !== undefined) fail(`--public-url is derived with --expose ${mode}; do not pass both`);
-  const funnelPort = args['--funnel-port'] === undefined ? undefined : Number(args['--funnel-port']);
-  if (funnelPort !== undefined && (!Number.isInteger(funnelPort) || funnelPort < 1 || funnelPort > 65535)) fail('--funnel-port must be a port number');
-  const publicUrl = mode ? null : parsePublicUrl(args['--public-url']);
+  const route = args['--route'];
+  if (route !== undefined && (!route || route.startsWith('-'))) fail('--route needs the name of a Gozar route');
+  if (args['--retry-public-check'] && (route || args['--start'] || args['--write-units-only'] || args['--remove'])) fail('--retry-public-check takes --public-url and checks an existing service; omit --route, --start, --write-units-only and --remove');
+  if (route !== undefined && args['--public-url'] !== undefined) fail('--public-url comes from the Gozar route with --route; do not pass both');
+  const publicUrl = route !== undefined ? null : parsePublicUrl(args['--public-url']);
   const port = Number(args['--port']);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('--port N is required (1024-65535)');
   const node = stableNode(process.execPath);
@@ -104,7 +146,7 @@ function parseOptions(argv, platform) {
   return {
     worker, publicUrl, port, home, socketPath, node, repo, lan, writeUnitsOnly: !!args['--write-units-only'], start: !!args['--start'],
     repoTools: !args['--no-repo-tools'], retryPublicCheck: !!args['--retry-public-check'],
-    expose: mode === 'tailscale' ? { mode, funnelPort } : mode === 'ngrok' ? { mode, domain: ngrokDomain } : null,
+    route,
   };
 }
 
@@ -712,17 +754,6 @@ function verifyRetryTarget(o, { platform, env }) {
   if(saved.origin!==o.publicUrl||saved.pathname!==`/${saved.pathname.split('/')[1]}/mcp`||!/^\/[a-f0-9]{64}\/mcp$/.test(saved.pathname)) fail('--retry-public-check refused: --public-url does not match this home resource URL');
   if(saved.pathname!==`/${secretMatch[1]}/mcp`) fail('--retry-public-check refused: the saved resource URL does not match this home path secret');
   if(as.public_url!==o.publicUrl) fail('--retry-public-check refused: --public-url does not match this home issuer');
-  const exposureFile=expose.recordPath(o.home,o.worker);
-  const exposure=JSON.parse(readOwnedFile(o.home,exposureFile,'exposure record'));
-  const publicPort=Number(new URL(o.publicUrl).port||443);
-  if(exposure.worker!==o.worker||exposure.public_url!==o.publicUrl||exposure.local_port!==o.port) fail('--retry-public-check refused: --public-url or --port does not match this worker exposure record');
-  if (exposure.mode === 'tailscale') {
-    if(exposure.dns_name!==saved.hostname||exposure.public_port!==publicPort) fail('--retry-public-check refused: --public-url or --port does not match this worker exposure record');
-  } else if (exposure.mode === 'ngrok') {
-    const configFile=expose.ngrokConfigPath(o.home,o.worker);
-    const config=readOwnedFile(o.home,configFile,'ngrok config');
-    if(exposure.domain!==saved.hostname||exposure.ngrok_config!==configFile||config!==expose.ngrokConfigText({worker:o.worker,domain:exposure.domain,localPort:o.port})) fail('--retry-public-check refused: ngrok domain or config does not match this worker exposure record');
-  } else fail('--retry-public-check refused: exposure record has an unsupported mode');
   const dir=unitDirFor(platform,env), unit=platform==='darwin'?path.join(dir,`${launchLabel(o.worker)}.plist`):path.join(dir,`dot-bridge-${o.worker}.service`);
   const configRoot=platform==='darwin'?(env.HOME||os.homedir()):(env.XDG_CONFIG_HOME&&path.isAbsolute(env.XDG_CONFIG_HOME)?env.XDG_CONFIG_HOME:path.join(os.homedir(),'.config'));
   assertOwnedPath(configRoot,dir,'directory','service unit directory');
@@ -760,22 +791,19 @@ function waitForStartedBridge(o, env, platform, waitForSocket) {
   fail(`the service was started but the bridge did not answer on its admin socket ${o.socketPath} within ${Math.round(budget / 1000)} s. Read the service log with ${where}. Generated state is left in place; remove this install with: ${recoveryCommand(o)}`);
 }
 
-function runUnlocked(argv, { platform = process.platform, env = process.env, log = console.log, verifyPublic = expose.verifyPublic, resolve4 = expose.makePublicResolver(), preflight = expose.preflight, applyFunnel = expose.applyFunnel, initHome, spawn = spawnSync, tailscale, waitForSocket = waitForAdminSocket, holderProbe } = {}, parsed = null) {
+function runUnlocked(argv, { platform = process.platform, env = process.env, log = console.log, verifyPublic: verify = verifyPublic, resolve4 = makePublicResolver(), initHome, spawn = spawnSync, waitForSocket = waitForAdminSocket, holderProbe } = {}, parsed = null) {
   const o = parsed ?? parseOptions(argv, platform);
   if (o.help) {
     log('usage: node scripts/worker-bridge-setup.mjs --worker NAME --public-url https://HOST --port N [--home DIR] [--lan-forward ADDR:PORT] [--write-units-only] [--start] [--no-repo-tools]');
-    log('   or: node scripts/worker-bridge-setup.mjs --worker NAME --port N --expose tailscale [--funnel-port 443|8443|10000] [--start]');
-    log('   or: node scripts/worker-bridge-setup.mjs --worker NAME --port N --expose ngrok --ngrok-domain ASSIGNED-DOMAIN [--start]');
+    log('   or: node scripts/worker-bridge-setup.mjs --worker NAME --port N --route GOZAR-ROUTE-NAME [--start]');
     log('       node scripts/worker-bridge-setup.mjs --retry-public-check --worker NAME --public-url https://HOST --port N [--home DIR]');
     log('       node scripts/worker-bridge-setup.mjs --repoint --worker NAME   (point an existing service at this copy of the code)');
-    log('       node scripts/worker-bridge-setup.mjs --remove --worker NAME [--home DIR] [--purge-home]   (also turns off a recorded Funnel rule)');
+    log('       node scripts/worker-bridge-setup.mjs --remove --worker NAME [--home DIR] [--purge-home]');
     return;
   }
   if (o.repoint) return repointUnit(o, { platform, env, log });
   if (o.remove) {
-    // The exposure record lives in the bridge home; turn our Funnel rule off before the unit and (optionally) the home go.
-    const record = expose.recordPath(o.home, o.worker);
-    if (fs.existsSync(record)) expose.removeExposure({ file: record, log, ...(tailscale ? { tailscale } : {}) });
+    // A durable Gozar route is the owner's; removing a worker never closes it.
     return removeUnit(o, { platform, env, log, spawn, ...(holderProbe ? { holderProbe } : {}) });
   }
   const linux = platform === 'linux', darwin = platform === 'darwin';
@@ -786,13 +814,8 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
   if(o.retryPublicCheck) {
     const {url,dnsName}=verifyRetryTarget(o,{platform,env});
     if(readEnv('DALAN_EXPOSE_SKIP_PUBLIC_CHECK',env)==='1') { log('SKIPPED public check (DALAN_EXPOSE_SKIP_PUBLIC_CHECK=1; tests only)'); return; }
-    const exposureFile=expose.recordPath(o.home,o.worker);
-    const retryRecord=JSON.parse(readOwnedFile(o.home,exposureFile,'exposure record'));
-    if(retryRecord.mode==='ngrok') expose.updateExposureState(exposureFile,'unverified');
-    return verifyPublic({url,dnsName,resolve4,log}).then(ok=>{
+    return verify({url,dnsName,resolve4,log}).then(ok=>{
       if(!ok) fail(`public verification failed; the service, home and keys were left in place. Retry after the public route is ready with: ${publicRetryCommand(o,url)}. To remove this install: ${recoveryCommand(o)}`);
-      const record=JSON.parse(readOwnedFile(o.home,exposureFile,'exposure record'));
-      if(record.mode==='ngrok') expose.updateExposureState(exposureFile,'verified');
     });
   }
 
@@ -805,19 +828,8 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
   }
   if (unitDir) for (const f of Object.keys(files)) if (fs.existsSync(path.join(unitDir, f))) fail(`${path.join(unitDir, f)} already exists; refusing to overwrite it`);
   if (darwin && !lintPlist(files[`${launchLabel(o.worker)}.plist`], env)) log('plutil not found: skipped the plist lint');
-  // --expose tailscale: read-only preflight and port choice. Nothing above or below writes until this passes.
-  let exposure = null;
-  if (o.expose?.mode === 'tailscale') {
-    const pf = preflight({ platform });
-    for (const w of pf.warnings) log(`WARN ${w}`);
-    const port = expose.choosePort({ requested: o.expose.funnelPort, allowed: pf.allowed, occupied: pf.occupied });
-    o.publicUrl = expose.publicUrl(pf.dnsName, port);
-    exposure = { mode: 'tailscale', dnsName: pf.dnsName, port, url: o.publicUrl, file: expose.recordPath(o.home, o.worker) };
-  } else if (o.expose?.mode === 'ngrok') {
-    // Nothing is run here. The URL is derived from the assigned domain; the config and commands come after the units.
-    o.publicUrl = `https://${o.expose.domain}`;
-    exposure = { mode: 'ngrok', domain: o.expose.domain, url: o.publicUrl, file: expose.recordPath(o.home, o.worker) };
-  }
+  // --route: Gozar allocated or adopted the route before this point (see run()); only the public address is used here.
+  const exposure = o.route !== undefined ? { route: o.route, url: o.publicUrl, dnsName: new URL(o.publicUrl).hostname } : null;
 
   if (o.start) checkStartReadiness(platform, env);
   if (o.start) warnIfLingeringDisabled(platform, env, log, spawn);
@@ -853,26 +865,7 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
       log(`To stop: ${stop}`);
     } else log(`Not started. To start:\n  launchctl bootstrap ${domain} ${plist}\nTo stop:\n  ${stop}`);
   }
-  // Tailscale Funnel: our own rule on our own port, then proof that it maps exactly that port to the bridge.
-  if (exposure?.mode === 'tailscale') {
-    try { expose.writeExposureRecord({ file: exposure.file, worker: o.worker, dnsName: exposure.dnsName, port: exposure.port, localPort: o.port, url: exposure.url }); }
-    catch (error) { throw new Error(`${error.message}. Generated state is left in place; remove this install with: ${recoveryCommand(o)}`); }
-    try {
-      applyFunnel({ dnsName: exposure.dnsName, port: exposure.port, localPort: o.port });
-      expose.updateExposureState(exposure.file, 'active');
-    } catch (error) {
-      throw new Error(`${error.message}. Funnel intent is recorded; remove this exact owned rule and install with: ${recoveryCommand(o)}`);
-    }
-    log(`Funnel: ${exposure.url} -> http://127.0.0.1:${o.port} (tailscale funnel --https=${exposure.port}); record ${exposure.file}`);
-  } else if (exposure?.mode === 'ngrok') {
-    let configFile;
-    try { configFile = expose.writeNgrokExposure({ home: o.home, worker: o.worker, domain: exposure.domain, localPort: o.port, file: exposure.file }); }
-    catch (error) { throw new Error(`${error.message}. Generated state is left in place; remove this install with: ${recoveryCommand(o)}`); }
-    log(`ngrok config: ${configFile} (mode 0600, no authtoken in it); record ${exposure.file}`);
-    log(`Public URL: ${exposure.url} -> http://127.0.0.1:${o.port}. ngrok was NOT run. Run these yourself:`);
-    for (const c of expose.ngrokCommands(configFile)) log(`  ${c}`);
-    log(`QUOTA WARNING: ${expose.NGROK_QUOTA_WARNING}`);
-  }
+  if (exposure) log(`Route: ${exposure.url} -> http://127.0.0.1:${o.port} (Gozar route ${exposure.route})`);
   if (o.lan) log(`LAN forwarder: ${o.lan.address}:${o.lan.port} -> 127.0.0.1:${o.port}. Point the reverse proxy there; anything on that network can reach it.`);
   log(`Resource URL file (private, mode 0600): ${urlFile}`);
   const dw = `dalan() { HOME=${shellQuote(o.home)} ${shellQuote(o.node)} ${shellQuote(path.join(o.repo, 'bin/dalan.mjs'))} "$@"; }`;
@@ -883,10 +876,6 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
   log(`  dalan connect approve CODE --worker ${o.worker}`);
   log('  dalan connect signal-token    # save wake URL privately for hook-driven workers; print path; --rotate replaces it');
   if (!exposure) return undefined;
-  if (exposure.mode === 'ngrok') {
-    log(`Public status: unverified until the ngrok service is started and --retry-public-check succeeds. ngrok was not started. After starting it, verify with: ${publicRetryCommand(o, exposure.url)}`);
-    return undefined;
-  }
   // Public check only after the bridge starts. Returns a promise; the entry point awaits it and exits 1 on failure.
   const { dnsName, url } = exposure;
   if (!o.start) {
@@ -894,15 +883,36 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
     return undefined;
   }
   if (readEnv('DALAN_EXPOSE_SKIP_PUBLIC_CHECK',env) === '1') { log('SKIPPED public check (DALAN_EXPOSE_SKIP_PUBLIC_CHECK=1; tests only)'); return undefined; }
-  return verifyPublic({ url, dnsName, resolve4, log }).then(ok => {
+  return verify({ url, dnsName, resolve4, log }).then(ok => {
     if (!ok) fail(`public verification failed; the service, home and keys were left in place. Retry the check with: ${publicRetryCommand(o,url)}. To remove this install: ${recoveryCommand(o)}`);
   });
+}
+
+// With --route, Gozar allocates (or finds) the durable route first; its origin is the bridge's public address. Nothing is written
+// before Gozar answers, and an owner who declines leaves nothing behind.
+async function allocateRoute(parsed, seams) {
+  const env = seams.env ?? process.env;
+  const gozar = seams.gozar ?? await resolveGozar();
+  const query = buildQuery({ home: gozarHomeFor(env), target: `127.0.0.1:${parsed.port}`, route: parsed.route, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${parsed.worker}` } });
+  const consent = seams.consent ?? (async candidate => {
+    if (!process.stdin.isTTY) fail('this route needs your approval; run this in a terminal, or run `dalan setup --route NAME` first');
+    for (const line of [...describeCandidate(candidate), ...describeDisclosure(candidate)]) console.log(line);
+    const rl = (await import('node:readline')).createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise(resolve => rl.question('Use this route? [y/N] ', resolve)); rl.close();
+    return ['y', 'yes'].includes(answer.trim().toLowerCase());
+  });
+  parsed.publicUrl = (await ensureDurableRoute({ gozar, query, consent })).origin;
 }
 
 export function run(argv, seams = {}) {
   if (argv.includes('--help')) return runUnlocked(argv, seams);
   // Reject malformed arguments before creating the per-home lock directory.
   const parsed = parseOptions(argv, seams.platform ?? process.platform);
+  if (parsed.route !== undefined) return allocateRoute(parsed, seams).then(() => runLocked(argv, seams, parsed));
+  return runLocked(argv, seams, parsed);
+}
+
+function runLocked(argv, seams, parsed) {
   // The lock is per user and host-wide by default, so installers with different HOME values still serialize on one unit directory.
   // DALAN_SETUP_LOCK_DIR (an absolute path) moves it, for example so concurrent test runs do not collide.
   const envRoot = (seams.env ?? process.env).DALAN_SETUP_LOCK_DIR;

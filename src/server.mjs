@@ -2,6 +2,7 @@ import { updateWindowOpen, refuseDuringUpdate } from './service-update-gate.mjs'
 import {routingPolicy,PULL_PAGE_PREFIX} from './pull-queue.mjs';
 import {inspect} from 'node:util';
 import { loopbackRequestAllowed } from './loopback.mjs';
+import { normalizeRequestHost } from './gozar-routes.mjs';
 import { defaultPath,workspaceRoot,rootWarnings } from './paths.mjs';
 import { readEnv } from './env.mjs';
 import http from 'node:http';
@@ -967,6 +968,7 @@ const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)
     if(updateWindowOpen()) return refuseDuringUpdate(res);
     if(loopback && !loopbackRequestAllowed(req, `http://127.0.0.1:${port}`)) { log({kind:'mcp_inbound',status:403,route:'loopback',ua:uaToken(req)}); res.writeHead(403); res.end(); return; }
     // Both authentication modes serve only the configured public Host, including discovery and verifier routes.
+    if(as||oauth) normalizeRequestHost(req,new URL(as?as.publicUrl:oauth.OAUTH_AUDIENCE).origin); // a route may send the default port written out (name:443)
     if(as ? !as.hostOk(req) : oauth&&req.headers.host!==new URL(oauth.OAUTH_AUDIENCE).host) { log({kind:'mcp_inbound',status:421,route:'host',ua:uaToken(req)}); res.writeHead(421); res.end(); return; }
     if(verifyService?.(req,res)) return;
     if(!as && req.url==='/.well-known/oauth-protected-resource' && oauthMetadata && req.method==='GET') return json(res,200,protectedResource(oauthMetadata));
