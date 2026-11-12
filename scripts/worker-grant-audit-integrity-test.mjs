@@ -112,7 +112,7 @@ try {
     t.load();assert.equal(t.events().length,1,'idempotent');
     assert.equal(inspectGrantAudit(t.file).integrity_error??null,null);
   }
-  // 6. A reset after a failed integrity check only drops grants. A forged log that lists an extra repository does not add it.
+  // 6. A reset after a failed integrity check drops grants not independently trusted by a pending seed.
   {
     const t=fresh();dirs.push(t.dir);
     t.save({workers:{acme:{repos:[]}}});
@@ -120,11 +120,18 @@ try {
     const forged={event_id:randomUUID(),at:new Date().toISOString(),actor:{host_uid:null},worker:'acme',before:{mode:'exact',repos:[]},after:{mode:'exact',repos:['octo/a','octo/zzz']}};
     fs.writeFileSync(t.auditFile,JSON.stringify(forged)+'\n',{mode:0o600});
     assert.ok(inspectGrantAudit(t.file).integrity_error,'the forged log fails its checkpoint');
+    const beforeRecovery=t.load();
+    assert.equal(beforeRecovery.allowsRepo('acme','octo/a'),false,'a valid-looking event in a changed prefix cannot retain A');
+    assert.equal(beforeRecovery.allowsRepo('acme','octo/b'),false,'a valid-looking event in a changed prefix cannot retain B');
     updateWorkerRepoPolicy(t.file,'acme','allow','octo/c');
     const repos=JSON.parse(fs.readFileSync(t.file,'utf8')).workers.acme.repos;
     assert.ok(!repos.includes('octo/zzz'),'a repository only the forged log lists is not added');
-    assert.ok(!repos.includes('octo/b'),'a grant the surviving log does not list is dropped');
-    assert.deepEqual(repos,['octo/a','octo/c']);
+    assert.ok(!repos.includes('octo/a')&&!repos.includes('octo/b'),'untrusted prior grants are dropped on recovery');
+    assert.deepEqual(repos,['octo/c'],'only the explicit re-approval survives');
+    const afterRecovery=t.load();
+    assert.equal(afterRecovery.allowsRepo('acme','octo/c'),true);
+    assert.equal(afterRecovery.allowsRepo('acme','octo/a'),false,'recovery cannot make a forged earlier event authoritative again');
+    assert.equal(afterRecovery.allowsRepo('acme','octo/b'),false);
   }
 
   // 7. A hand-added repository gets its own reconcile event before `worker allow` records its own change.

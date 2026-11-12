@@ -329,26 +329,29 @@ function integrityFailure(history,checkpoint) {
 function auditedRepoState(workersFile,db) {
   const auditFile=auditFileOf(workersFile);
   const history=readWorkerRepoHistory(auditFile,{workersFile,maxBytes:Infinity,keepRaw:true});
-  const state=new Map();
-  for(const event of history.events) if(event.after.mode==='exact') state.set(event.worker,event.after.repos);
-  let pending=new Set();
-  try {pending=new Set((readRepoMigration(workersFile)?.entries??[]).filter(entry=>entry.kind==='profile'&&!entry.complete).map(entry=>entry.worker));}
-  catch {/* readWorkerRepoHistory already reports an unreadable journal as incomplete */}
   const checkpoint=readCheckpoint(workersFile,db);
-  return {auditFile,history,state,pending,checkpoint,integrity_error:integrityFailure(history,checkpoint)};
+  const integrity_error=integrityFailure(history,checkpoint);
+  let events=history.events;
+  if(integrity_error) {
+    // A failed checkpoint cannot vouch for the audit log. Only an unfinished profile seed remains
+    // independent evidence: its validated journal event is the source for the pending publication.
+    try {events=(readRepoMigration(workersFile)?.entries??[]).filter(entry=>entry.kind==='profile'&&!entry.complete).map(entry=>entry.event);}
+    catch {events=[];}
+  }
+  const state=new Map();
+  for(const event of events) if(event.after.mode==='exact') state.set(event.worker,event.after.repos);
+  return {auditFile,history,state,checkpoint,integrity_error};
 }
 const repoKey=repo=>repo.toLowerCase();
 const diffRepos=(from,to)=>{const keys=new Set(from.map(repoKey));return to.filter(repo=>!keys.has(repoKey(repo)));};
 function evaluateGrants(workersFile,current,write,db) {
-  const {auditFile,history,state,pending,checkpoint,integrity_error}=auditedRepoState(workersFile,db);
+  const {auditFile,history,state,checkpoint,integrity_error}=auditedRepoState(workersFile,db);
   const applied=new Map(),unaudited=[];
   let needsWrite=false;
   for(const [worker,repos] of current) {
     const audited=state.get(worker)??[];
     const added=diffRepos(audited,repos),removed=diffRepos(repos,audited);
-    // A pending migration's list comes from its own journal event, which readRepoMigration validates and
-    // seedWorkerRepos publishes before it marks the worker complete: the journal is the audit record for that list.
-    if(pending.has(worker)||(!added.length&&!removed.length)) {applied.set(worker,[...repos]);continue;}
+    if(!added.length&&!removed.length) {applied.set(worker,[...repos]);continue;}
     let recorded=false;
     if(write&&history.complete&&!integrity_error) {
       needsWrite=true;
