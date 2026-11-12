@@ -6,12 +6,17 @@ import { docsUrl } from './docs-url.mjs';
 // commands without a group only appear under `dalan help --all`, and internal maintenance commands only under
 // `dalan help --internal`. Every command runs and has its own help either way.
 export const COMMANDS = [
-  { name: 'try', group: 'start', summary: 'Run a private trial bridge and finish a first job', usage: 'dalan try [--home DIR] [--port N] [--callback PATTERN]...',
-    detail: ['Starts a bridge and a built-in demo worker in a private trial home and runs a self-check: the demo worker finishes one job,',
-      'and a repository grant is tested. In an interactive terminal it then waits for you to connect your own worker; press Ctrl-C to stop.',
-      'With standard input closed (dalan try < /dev/null) it stops after the self-check. Nothing outside the trial home is touched.', '',
-      'Options:', '  --home DIR          trial home (default: DALAN_HOME if set, else ~/.local/share/dalan-trial)', '  --port N            bridge port (default: the home\'s previous port, else 8799 or the next free port)', '  --callback PATTERN  allow one more OAuth callback pattern; repeatable', '',
-      'Example: dalan try', `Then connect your worker and review its first result: ${docsUrl('README.md', 'connect-your-own-worker')}`] },
+  { name: 'try', group: 'start', summary: 'Try Dalan with a hosted MCP client, or on this computer only', usage: 'dalan try [--local | --public [--client chatgpt|claude] [--route auto|localhost.run|tailscale]] [--home DIR] [--port N] [--callback PATTERN]...',
+    detail: ['In an interactive terminal, asks where your worker runs. Choose a hosted MCP client such as ChatGPT or claude.ai (the default): it opens a trial link through localhost.run (automatic, no account; a third-party relay that can see the traffic, and the address changes within hours; or your saved Tailscale address from `dalan setup`), prints the connector URL and the clicks to add it, asks you to approve the sign-in,',
+      'and confirms that your client finished a demo job. Ctrl-C stops the run and removes its route. A localhost.run trial link ends after 3 hours at most and can fail sooner; keep private work out of it, because the relay ends TLS and can read the secret connector URL and traffic. A saved Tailscale route is not that temporary link. Choose this computer only, or pass --local, for a',
+      'self-check with a built-in demo worker; then connect a local client. With no terminal (dalan try < /dev/null) it runs the local self-check and never opens a route.', '',
+      'Options:', '  --local             this computer only', '  --public            public trial with the chatgpt or claude sign-in profile (other clients: see Connect any MCP worker in the README)', '  --client NAME       chatgpt (default) or claude; implies --public',
+      '  --route NAME        auto (default: your saved route, else a trial link), localhost.run or tailscale; implies --public', '  --home DIR          bridge home; otherwise DALAN_HOME if set (defaults by mode below)',
+      '  --port N            bridge port (default: the home\'s previous port, else 8799 or the next free port)', '  --callback PATTERN  local mode only: allow one more OAuth callback pattern; repeatable', '',
+      'Example: dalan try', 'Use the Home this run prints for follow-up commands. With no --home or DALAN_HOME, local mode uses ~/.local/share/dalan-trial, a public trial creates a new home, and a saved Tailscale route uses ~/.local/share/dalan-hosted-<client>. A home is reused only at the same public address. --port is the local bridge port, never the public port.', `In local mode, connect your own worker and review its first result: ${docsUrl('README.md', 'connect-your-own-worker')}`] },
+  { name: 'setup', group: 'start', summary: 'Save Tailscale as the route for public runs', usage: 'dalan setup',
+    detail: ['Saves a route choice. It does not move a trial\'s client connection or install a background service; a new address needs a new client sign-in. If Tailscale is installed and ready for Funnel, it asks one question and saves your answer.', 'If not, it lists the choices (install Tailscale, or keep trial links) and saves nothing until you choose.',
+      'Afterwards `dalan try --public` asks no route question (Tailscale login, client sign-in and approval can still be asked). A saved Tailscale route never falls back to a trial link on its own.', '', 'Example: dalan setup'] },
   { name: 'init', group: 'start', summary: 'Create a bridge home and its first worker profile', usage: 'dalan init --public-url URL (--worker NAME | --legacy) [--json]',
     detail: ['Writes the built-in authorization server files and the first worker profile into the bridge home (DALAN_HOME).', 'It needs no running bridge.', '',
       'Options:', '  --public-url URL  the address clients will use to reach the bridge: https://HOST, or',
@@ -24,7 +29,7 @@ export const COMMANDS = [
       '  add-client --redirect-uri URI [--name NAME] [--json]   register an OAuth client', '  clients [--json]                    list OAuth clients', '  remove-client CLIENT_ID [--json]    remove an OAuth client',
       '  allow-callback PATTERN              allow another OAuth callback pattern', '  signal-token [--worker NAME] [--rotate] [--json]       show or rotate a worker signal token', '',
       'Examples (pair a worker named local):', '  dalan connect start --worker local', '  dalan connect pending', '  dalan connect approve CODE --worker local --confirm-redirect URI',
-      'Replace CODE with the code that pending and the browser page both show, and URI with the', 'redirect that pending shows.'] },
+      'Replace CODE with the code that pending and the browser page both show.', 'For URI, use the callback you expect from your client\'s own configuration and compare it', 'with pending: do not approve when they differ or you cannot verify it.'] },
   { name: 'submit', group: 'everyday', summary: 'Queue a job for a worker', usage: 'dalan submit (--file PATH | --stdin | --brief TEXT) [options]',
     detail: ['Queues a job. Give it a JSON assignment (request_id, inputs, brief, ...) or, with --brief, plain text for a question that needs no files.', 'Prints the request ID.', '',
       'Options:', '  --file PATH | --stdin | --brief TEXT', '                            where the job comes from (exactly one). --brief makes a read-only job with', '                            no repository from TEXT, used exactly as typed', '  --worker NAME             queue for a named worker (default: the profile\'s only worker;', '                            required when the profile has several)',
@@ -101,7 +106,7 @@ export function shortHelp() {
   return ['Dalan: hand bounded jobs to a worker agent, follow their progress and review the results.', '',
     'Usage: dalan <command> [options]', '',
     ...GROUPS.flatMap(([key, title]) => [...section(title, COMMANDS.filter(c => c.group === key)), '']),
-    'Environment:', '  DALAN_HOME   bridge home that commands use; for the trial: export DALAN_HOME=~/.local/share/dalan-trial', '',
+    'Environment:', '  DALAN_HOME   bridge home commands use: the Home line a run prints (local: ~/.local/share/dalan-trial)', '',
     'Start here:  dalan try',
     'Details:     dalan <command> --help', 'More:        dalan help --all', 'Version:     dalan --version', ''].join('\n').trimEnd();
 }

@@ -1,12 +1,12 @@
 # Dalan
 
-Dalan is a job queue between your shell or coding agent and a separate AI worker. A small local service, the *bridge*, holds the jobs; the worker connects to it over MCP. You submit a bounded task, follow its progress, and review the worker's report or patch before you accept it. Start with a local demo that needs no account, then connect your own worker.
+Give a bounded job to an MCP worker and review its report in your terminal. The worker can be a hosted chat client, a CLI agent or your own MCP client. Dalan holds the queue; your selected client does the work. A small service on your computer, the *bridge*, holds the jobs; the worker connects to it over MCP. You submit a bounded task, follow its progress, and review the worker's report or patch before you accept it.
 
 Use it when you want a second agent, a second account or another computer to do a job while you keep the accept or reject decision: for example, your coding agent hands a code review to an agent signed in to another account, and you read its report before you accept it.
 
 - **Repository access starts denied.** A new worker can use no repository through Dalan until you grant one. Finishing a job does not accept its result: acceptance is a separate owner decision.
 - **Any MCP client can be the worker.** Claude Code, Codex CLI, ChatGPT, Muse Spark (Meta) or your own agent connect over MCP (Model Context Protocol) with OAuth sign-in. Dalan does not run a model itself. See [Connect any MCP worker](#connect-any-mcp-worker) and [Connect ChatGPT](docs/connect-chatgpt.md). [T3 Code](docs/t3-integration.md#use-dalan-from-t3-code) can delegate to any of them.
-- **The bridge listens only on your computer** until you choose to expose it.
+- **The bridge listens only on your computer.** A hosted trial puts a temporary public route in front of it, only after you choose a hosted MCP client, and removes the route when you stop.
 
 **Not for:** Dalan does not run, schedule or start agents for you, and it does not merge code. It queues work and returns reports for you to review.
 
@@ -14,26 +14,107 @@ Use it when you want a second agent, a second account or another computer to do 
 
 <a id="quickstart"></a>
 
-## Quick start
+## Try it with your MCP client
 
-You need:
+> **Release status.** The hosted trial is unreleased: the version on npm (0.5.2) does not have it yet, so `npx -y @tnunamak/dalan try` will not show these prompts until the next release. To try the unreleased flow, check the prerequisites below (including Git), then run it from a checkout of this branch:
+>
+> ```sh
+> git clone --branch feat/try-public-one-paste https://github.com/tnunamak/dalan.git && cd dalan && npm ci && node bin/dalan.mjs try
+> ```
+>
+> Until the release is published, the hosted trial runs only from this checkout. Use that checkout in every new terminal, write `node bin/dalan.mjs` wherever a command says `dalan` or `npx -y @tnunamak/dalan`, and do not install npm 0.5.2 for these steps. After the release, use the `npx` commands and this note goes.
+
+Before you start:
+
+- **Git, for the unreleased checkout.** Run `git --version`; install Git if it is missing. The released npm path will not need Git to open a hosted trial.
+- **Node.js 24 or newer.** Run `node --version`. If it is missing or older than v24, install it from the [official download page](https://nodejs.org/en/download) and reopen your terminal.
+- **Linux or macOS, with `ssh`.** Use your normal terminal. macOS and most Linux systems already include `ssh`. On Windows, [install WSL](https://learn.microsoft.com/windows/wsl/install) and use its Linux shell.
+- **A hosted client that allows custom MCP connectors.** Use an account or workspace that permits them. If the option is missing, ask the workspace administrator before you start.
+
+**Choose your path before you run anything.** *ChatGPT or claude.ai:* continue with the hosted trial below; those are the two built-in sign-in profiles. *Another hosted or remote MCP client:* first [expose a stable HTTPS bridge](#expose-the-bridge-to-other-machines), then follow [Connect any MCP worker](#connect-any-mcp-worker) and verify your client's exact OAuth callback; do not pick another client's profile to get past setup. *A client on this computer:* use the [local trial](#local-trial).
+
+Run:
+
+```sh
+npx -y @tnunamak/dalan try
+```
+
+Press Enter twice to take the default profile, ChatGPT (type `2` for claude.ai). The temporary relay needs no account and there is no route to choose, but your MCP client still needs an eligible account or workspace, and its model use is billed there. Dalan starts a trial link by itself and prints one line first:
+
+> Trial link via localhost.run, a third-party relay that can see this traffic; the address changes within hours. For daily use: dalan setup
+
+The relay ends TLS, so it can read the connector URL (which holds a secret) and everything sent through it. Keep private work out of the demo. The trial ends after 3 hours and can fail sooner.
+
+Then:
+
+1. **Add the connector.** Dalan prints your complete connector URL, a click path for your client and one prompt to paste. In your MCP client, add a custom connector (a remote MCP server) with that URL and start its sign-in. The URL is a secret: it is printed once on your terminal and kept in a private file in the trial home.
+2. **Approve in this terminal.** Dalan shows a pairing code. Compare it with the one on the sign-in page, then answer `y` in the terminal. Nothing is granted until you do.
+3. **Send the prompt.** In a chat with the connector enabled, paste the printed prompt. The client lists the pending jobs, claims the demo job and finishes it with a report. Success is the report appearing in your terminal, followed by the accept or reject question.
+
+Keep the terminal open. Ctrl-C stops the trial and removes the link. The trial grants no repository access. The output says "Temporary trial" and shows the time left: a trial link works for 3 hours at most, then the trial ends and removes it. If the relay gives it a new address, the trial stops and says so, because the sign-in is tied to the first address: start a fresh trial and replace the connector URL. The demo runs on your own ChatGPT or claude.ai account with its normal limits; Dalan runs no model.
+
+If the connection fails, keep the terminal open and match what you see:
+
+| What you see | Next step |
+| --- | --- |
+| No sign-in request appears | Check that the client has the complete connector URL and that its sign-in (OAuth) is on. |
+| The code expired | Start sign-in again in the client and approve only the new matching code. |
+| The trial says the route stopped or the address changed | Start a fresh trial and replace the connector URL. |
+| Anything else | Use [Still stuck?](#still-stuck) with the Home line this run printed, and share only the failing step and its error, with private URLs and codes removed. |
+
+For other options, see `npx -y @tnunamak/dalan help try`. Skip the question with `npx -y @tnunamak/dalan try --public --client chatgpt` (or `--client claude`).
+
+> **Not yet tested with a real client.** The authorization and tool-call steps of this link pass the developer self-check, but a live connection from a hosted MCP client (ChatGPT and claude.ai are the ones to try first) through a trial link has not been confirmed. If yours fails, the failing step helps most.
+
+### Use a stable address
+
+A trial link is for a first look. For continued use you want an address that stays the same. `dalan setup` saves your route choice; it does not install a background service, so keep the `try` terminal open while you use the connector. Run:
+
+```sh
+npx -y @tnunamak/dalan setup
+```
+
+`dalan setup` looks for [Tailscale](https://tailscale.com/download). If it finds it ready, it asks one question, "Use Tailscale (your-machine) for a stable address? [Y/n]", and saves your answer. If not, it prints a short list: install Tailscale (`tailscale up`, then run `dalan setup` again) or keep using trial links. Later public runs reuse that choice and ask no route question. They use your Tailscale address and a home saved at `~/.local/share/dalan-hosted-<client>`, so the address and the sign-in survive a restart and you add the connector once. This holds when your Tailscale can serve Funnel on port 443; if another rule holds that port, the address is a per-run node and changes (see the details below). Tailscale login, client sign-in and your approval can still be asked. The run says "This is not a trial link." If Tailscale fails, Dalan stops and tells you why; it never switches to a trial link on its own.
+
+Switching changes your public address, and the address is part of the sign-in identity, so the trial's client registration and sign-in do not carry over. Stop the running `try` with Ctrl-C, then start the stable run from the same checkout: `node bin/dalan.mjs try --public --client chatgpt` (use `--client claude` for claude.ai; after the release, `npx -y @tnunamak/dalan try --public --client chatgpt`). Confirm the new URL before you change the connector, and keep that terminal open: `setup` saved a route choice, not a background service. If your client allows two connectors, add and test the new one, then remove the trial one; otherwise remove the trial connector, add the new URL and sign in again. Reports from the trial stay in the trial's Home until you delete it. Dalan never reuses a trial's sign-in under a new address; a home from a different address is refused. `dalan setup` says this in one line.
+
+<details>
+<summary>How the temporary address works, and developer diagnostics</summary>
+
+**The trial link.** `ssh -R 80:localhost:<port> nokey@localhost.run` forwards a public `https://<id>.lhr.life` address to a small gate on your computer. No account or key is used, and Dalan does not read your SSH config, agent or keys. The first connection trusts the relay's host key (trust on first use), kept in a file in the trial home. The relay ends TLS, so it can see the traffic; the connector URL's secret is part of every request path, which is why the disclaimer is there. Dalan checks the discovery and sign-in pages through the link before it prints the URL.
+
+**The real route.** Used after `dalan setup`, or with `--route tailscale`. It is always on port 443, because some hosted clients (claude.ai, for one) reach nothing else.
+- It uses your computer's Tailscale Funnel on 443 when no other rule holds that port.
+- If another rule holds 443, that rule is left alone and the trial starts its own temporary Tailscale node (`dalan-trial-<id>`, userspace, in the trial home). A new node asks for a one-time sign-in, whose link Dalan prints (set `DALAN_TS_AUTHKEY` to skip it).
+- The node keeps its daemon state in memory and uses a temporary directory inside the trial home for TLS certificates. Tailscale drops the ephemeral node when it goes offline, even after a crash, and Ctrl-C also logs it out. A later trial ends any daemon a crashed trial left. If a certificate check cannot be confirmed stopped, cleanup keeps its files for the next run instead of deleting them under a live process.
+- If Tailscale is missing or not ready for Funnel, Dalan says why in one line and does not start a trial link.
+
+**Self-check (source checkout only).** The developer self-check needs the repository files, so npm users do not run it. From a checkout, in a second terminal, run `node scripts/dalan-try-selfcheck.mjs --home <the Home line printed by the trial> --client claude`. It acts as a real OAuth client (discovery, registration with the client's published callback, PKCE sign-in, token, then an MCP `initialize`, `tools/list` and one read-only call), waits for you to approve in the trial terminal, and prints one PASS, FAIL or SKIP line per step. It prints no token, code, secret path or URL. The self-check and the readiness check require the authorization server and all its endpoints on the trial's public origin (a bare root issuer counts) and look the metadata up by the RFC 8414 rule: the well-known path goes before the issuer's path without a terminal slash, and the metadata's `issuer` must equal the issuer exactly. That origin rule is a trial constraint, not an OAuth rule, because the trial's bridge serves its own authorization server. Every request has its own deadline; Ctrl-C stops the check.
+
+</details>
+
+<a id="local-trial"></a>
+
+## Try it on this computer only
+
+Run `npx -y @tnunamak/dalan try --local` for a self-check with no account, no MCP client and no public route. You need:
 
 - **Linux or macOS.** On Windows, [install WSL](https://learn.microsoft.com/windows/wsl/install) and run every command in the WSL shell.
 - **Node.js 24 or newer.** Run `node --version`; it must print `v24` or higher. If it does not, install Node.js from the [official download page](https://nodejs.org/en/download) and open a new shell.
 - **Optional: Git and Python 3.8 or newer**, for the repository part of the demo. Run `git --version` and `python3 --version`. Without them, the demo skips that part and says so.
 
-The demo needs no AI account and no MCP client. The shell examples in this README use POSIX shell syntax (bash or zsh). Start the demo with one command:
+The shell examples in this README use POSIX shell syntax (bash or zsh). Start the local demo with one command:
 
 ```sh
-npx @tnunamak/dalan try
+npx -y @tnunamak/dalan try --local
 ```
 
 To run from a checkout instead, see [Install from source](#from-source).
 
-`try` starts a bridge on `127.0.0.1` and runs a built-in demo worker against it. The first run takes about half a minute. npx asks once to install the package; answer `y`. A first run prints this (the request ID is shortened):
+`try` starts a bridge on `127.0.0.1` and runs a built-in demo worker against it. The first run takes about half a minute. The `-y` option accepts npm's package-install prompt; leave it out if you want npm to ask first. A first run prints this (the request ID is shortened):
 
 ```text
-$ npx @tnunamak/dalan try
+$ npx @tnunamak/dalan try --local
 Need to install the following packages:
 @tnunamak/dalan@0.5.2
 Ok to proceed? (y) y
@@ -117,11 +198,12 @@ Each row starts from a working trial.
 
 | To do this | Go to |
 |---|---|
-| Run `dalan` commands against the trial bridge | Run `npm install -g @tnunamak/dalan`. In each shell, set `DALAN_HOME` to the **Home** printed by the running trial; the usual default is `~/.local/share/dalan-trial`. Then run `dalan status` and `dalan inbox --all`. |
+| Run `dalan` commands against the trial bridge | In a second terminal, open the same checkout (until the release; after it, `npm install -g @tnunamak/dalan`) and set `DALAN_HOME` to the exact **Home** printed by the running trial. Run `node bin/dalan.mjs status`, then `node bin/dalan.mjs inbox --all`. A public trial makes a new home each run; do not use the local-trial default for it. |
 | Give your worker a task of your own, with no file to write | [Your own first job](#your-own-first-job) |
 | Give your worker a job on a real repository | [Give a worker a repository job](#separate-repository-assignment) |
 | Let a coding agent submit and read jobs as tool calls | [`dalan mcp`](docs/local-agent-mcp.md) |
-| Connect a worker on another computer, or a hosted client such as ChatGPT | [Expose the bridge](#expose-your-bridge), then [Connect any MCP worker](#connect-any-mcp-worker) |
+| Try it with your MCP client | [Try it with your MCP client](#quickstart) |
+| Connect a worker on another computer, or keep a hosted connection running | [Expose the bridge](#expose-your-bridge), then [Connect any MCP worker](#connect-any-mcp-worker) |
 | Keep a bridge running as a service | [Run Dalan as a service](docs/service-setup.md) |
 | Delegate T3 Code tasks to your worker, or give a worker T3 tools | [T3 and orchestration integration](docs/t3-integration.md#use-dalan-from-t3-code) and [T3 tools](docs/t3-reverse-control.md) |
 | See every command | `dalan help --all` |
@@ -130,15 +212,13 @@ Each row starts from a working trial.
 
 ### Your own first job
 
-This gives your connected worker a task of your own, with no file to write and no JSON. Leave `try` running and use a second shell. First install the CLI and select the exact **Home** printed by the running trial. The export below shows the usual default; replace it before running the block if `try` used `--home DIR` or an existing `DALAN_HOME`. Then type your task:
+This gives your connected worker a task of your own, with no file to write and no JSON. Leave `try` running and use a second shell in the same checkout (until the release, write `node bin/dalan.mjs` wherever a command below says `dalan`; after it, install the CLI with `npm install -g @tnunamak/dalan`, and if that fails with `EACCES`, do not use `sudo`: [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally) or write `npx @tnunamak/dalan` instead). Select the exact **Home** printed by the running trial, then type your task:
 
 ```sh
-npm install -g @tnunamak/dalan
-export DALAN_HOME=~/.local/share/dalan-trial
+printf 'Paste the Home printed by try: '; IFS= read -r DALAN_HOME
+export DALAN_HOME
 printf 'Your task, on one line: '; IFS= read -r task
 ```
-
-If `npm install -g @tnunamak/dalan` fails with `EACCES`, npm cannot write to its global install directory. Do not use `sudo`; [change npm's default directory](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally), or skip the install and write `npx @tnunamak/dalan` wherever this section says `dalan`.
 
 Type the task and press Enter. The shell stores it as plain text, so quotes, `$` and backticks in it are safe. Then submit it:
 
@@ -182,7 +262,7 @@ The repository can come from GitHub or from a clone on this computer:
 - **A clone on this computer (no GitHub login).** Pick a name `OWNER/REPO` for it, for example `local/my-project`. Start the bridge with a variable named `DALAN_GITHUB_URL_` plus that name in capitals, with every other character replaced by `_`, set to the clone's absolute path. For `local/my-project` the variable is `DALAN_GITHUB_URL_LOCAL_MY_PROJECT`. To use the trial bridge, stop `try` with Ctrl-C and start it again with the variable:
 
   ```sh
-  DALAN_GITHUB_URL_LOCAL_MY_PROJECT=/path/to/my-project npx @tnunamak/dalan try
+  DALAN_GITHUB_URL_LOCAL_MY_PROJECT=/path/to/my-project npx @tnunamak/dalan try --local
   ```
 
   The restart replaces your worker's connection with the demo worker again, so sign your worker in again as in [Connect your own worker](#connect-your-own-worker). For a bridge you started by hand, add the same variable to the server command instead. Use `local/my-project` wherever the steps below say `OWNER/REPO`. The clone needs at least one commit.
@@ -240,6 +320,8 @@ Repository workspaces and host checks (tests that the bridge runs) are separate 
 
 ## Expose the bridge to other machines
 
+To try a hosted client once, run `npx -y @tnunamak/dalan try` ([above](#quickstart)); it opens and removes its own public route. This section sets up a separate, permanent bridge.
+
 A worker connects from wherever its MCP client runs. `127.0.0.1` reaches only the bridge computer. A worker on another computer needs a network route to the bridge, and a hosted client such as ChatGPT needs a public HTTPS address.
 
 For this, set up a separate, long-running bridge with a stable HTTPS address. The setup script writes a systemd user service (Linux) or a launchd agent (macOS). The default route is [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), which needs no reverse proxy and no domain of your own:
@@ -280,20 +362,22 @@ Start each new worker by hand for its first job. Dalan never starts a worker, in
 
 ## The trial home
 
-`try` keeps everything in one private directory, the trial home: `--home DIR` if you pass it, else `DALAN_HOME` if it is set, else `~/.local/share/dalan-trial`.
+`try` keeps everything in one private directory, its home, and prints the exact Home line on every run: use that value for follow-up commands. The home is `--home DIR` if you pass it, else `DALAN_HOME` if it is set. Otherwise local mode uses `~/.local/share/dalan-trial`, a public trial makes a new home each run, and a public run on a saved Tailscale route uses `~/.local/share/dalan-hosted-<client>`.
 
 - **What `try` refuses.** It refuses your real home directory and any non-empty directory without a `.dalan-trial` marker file, so it cannot take over an existing bridge home.
 - **Keep it dedicated.** A directory that has the marker is reused without checking its other files. On exit, `try` deletes `demo/` and every `req_*.json` request file in the home, revokes the demo grant and deletes the demo repository. A run that was killed is cleaned up at the next start.
-- **Use a short path on a local disk.** The bridge's admin socket path has a length limit, and network or FUSE file systems are not supported. If a home is too long or not on a local disk, use a new short directory: `npx @tnunamak/dalan try --home /short/local/path`. Do not use an existing bridge home.
-- **A second run reuses the home**, its worker profile, job history and port. It first replaces the worker's connection with the demo worker, so sign in again in your client and approve it again after the demo.
+- **Use a short path on a local disk.** The bridge's admin socket path has a length limit, and network or FUSE file systems are not supported. If a home is too long or not on a local disk, use a new short directory: `npx @tnunamak/dalan try --local --home /short/local/path`. Do not use an existing bridge home.
+- **In local mode a second run reuses the home**, its worker profile, job history and port (a public trial gets a new home; see above, and never point a new address at an old home to get past a refusal). It first replaces the worker's connection with the demo worker, so sign in again in your client and approve it again after the demo.
 - **To start over**, stop `try` and delete the trial home.
 - **For scripts**, run `dalan try < /dev/null`: with standard input closed, `try` runs the self-check and stops.
 
-`try` takes three options:
+`try` takes these options:
 
+- `--local`: this computer only (the self-check above). `--public`: a hosted MCP client through a public route. With neither, a terminal is asked; with no terminal, `try` runs the local self-check and never opens a route.
+- `--client chatgpt|claude` and `--route auto|localhost.run|tailscale`: the hosted client and public route. Each implies `--public`. `auto` is a trial link (localhost.run) unless `dalan setup` saved Tailscale. A public trial gets a new trial home on every run unless you pass `--home`; its address is part of its sign-in identity, so a home is reused only at the same address.
 - `--home DIR`: the trial home.
-- `--port N`: the bridge port. The default is the port that the home used before, otherwise 8799 or the next free port. A home keeps its port; for another port, start a separate trial with `--home NEW_DIR --port N`.
-- `--callback PATTERN`: allow one more OAuth callback pattern; repeatable.
+- `--port N`: the bridge port on this computer (for a public trial, never the public port). The default is the port that the home used before, otherwise 8799 or the next free port. A home keeps its port; for another port, start a separate trial with `--home NEW_DIR --port N`.
+- `--callback PATTERN`: local mode only: allow one more OAuth callback pattern; repeatable.
 
 `try` turns repository workspaces on (with at least 256 MiB of free disk) and makes only the demo repository available locally. Every other repository stays denied until you grant it. `try` does not turn on host checks.
 
@@ -321,7 +405,7 @@ It has three parts: [owner and requester setup](docs/manual-setup.md#owner-and-r
 - **Before you change a deployed bridge**, read [operations](docs/operations.md). Before an upgrade, read the [release notes](CHANGELOG.md) and follow [upgrade and rollback](docs/operations.md#upgrade-and-rollback): older code can refuse an upgraded database.
 - **Backups.** Stop every process that writes to the bridge, then follow the [backup checklist](docs/dalan-upgrade.md#pre-upgrade-checklist). Back up receipts, artifacts and encryption keys with the databases. After a restore of older authorization state, a worker's newer token can fail with `invalid_grant`; connect that worker again.
 - **Optional integrations.** Besides [T3 Code](docs/t3-integration.md#use-dalan-from-t3-code), the [setup reference](docs/setup-reference.md) lists the other optional integrations, and ordinary jobs need none of them.
-- **Uninstall a trial.** Stop `dalan try` (Ctrl-C) and remove the connection from your client: `claude mcp remove --scope user local` or `codex mcp remove local`. Remove the `dalan` command as the [removal table](docs/operations.md#remove-an-installation) describes. The trial home holds private keys, connections and receipts: delete it only when you no longer need them. For a generated service, follow [service removal](docs/service-setup.md#remove-a-generated-service).
+- **Uninstall a trial.** Stop `dalan try` (Ctrl-C) and remove its exact entry in the client you used: a hosted client's connector settings, or for a local Claude Code or Codex entry named `local`, `claude mcp remove --scope user local` or `codex mcp remove local`. Remove the `dalan` command as the [removal table](docs/operations.md#remove-an-installation) describes. The trial home holds private keys, connections and receipts: delete it only when you no longer need them. For a generated service, follow [service removal](docs/service-setup.md#remove-a-generated-service).
 
 <a id="repository-layout"></a>
 

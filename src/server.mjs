@@ -34,7 +34,7 @@ import { admitImplementation } from './check-readiness.mjs';
 import { parseExecution, parseRequiredCapabilities, admitHostExecution, withEvidence } from './execution.mjs';
 import { loadCapacity } from './projects.mjs';
 import { authConfig, assertPublicRouteAuth, isLoopbackBindHost, protectedResource, challenge, verifyBearer, needScope } from './auth.mjs';
-import { beginMcpOutcome, recordMcpResponse, pathShape } from './mcp-outcome.mjs';
+import { beginMcpOutcome, recordMcpResponse, pathShape, uaToken } from './mcp-outcome.mjs';
 import { lifecycleMetrics, retainLifecycle } from './lifecycle.mjs';
 import { normalizeMeta } from './objectives.mjs';
 import { createRequestLog } from './request-log.mjs';
@@ -826,15 +826,15 @@ async function dispatch(message,principal) {
 const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)=>{
   const outcome=req.url===publicPath?beginMcpOutcome(req,res,log,toolNames,!!oauth):null;
   try {
-    if(loopback && !loopbackRequestAllowed(req, `http://127.0.0.1:${port}`)) { log({kind:'mcp_inbound',status:403,route:'loopback'}); res.writeHead(403); res.end(); return; }
+    if(loopback && !loopbackRequestAllowed(req, `http://127.0.0.1:${port}`)) { log({kind:'mcp_inbound',status:403,route:'loopback',ua:uaToken(req)}); res.writeHead(403); res.end(); return; }
     // Built-in mode serves only its configured host, which also blocks DNS rebinding of the loopback listener.
-    if(as&&!as.hostOk(req)) { log({kind:'mcp_inbound',status:421,route:'host'}); res.writeHead(421); res.end(); return; }
+    if(as&&!as.hostOk(req)) { log({kind:'mcp_inbound',status:421,route:'host',ua:uaToken(req)}); res.writeHead(421); res.end(); return; }
     if(!as && req.url==='/.well-known/oauth-protected-resource' && oauthMetadata && req.method==='GET') return json(res,200,protectedResource(oauthMetadata));
     // RFC 9728 / MCP auth: clients first try metadata suffixed with the MCP path, whose resource is the exact MCP URL.
-    if(req.url===`/.well-known/oauth-protected-resource${publicPath}` && oauthMetadata && req.method==='GET') { if(as)res.setHeader('Cache-Control','no-store'); return json(res,200,protectedResource(oauthMetadata,new URL(publicPath,oauthMetadata.OAUTH_AUDIENCE).href)); }
+    if(req.url===`/.well-known/oauth-protected-resource${publicPath}` && oauthMetadata && req.method==='GET') { if(as)res.setHeader('Cache-Control','no-store'); log({kind:'mcp_inbound',status:200,route:'resource_metadata',http_method:req.method,auth_header_present:false,ua:uaToken(req)}); return json(res,200,protectedResource(oauthMetadata,new URL(publicPath,oauthMetadata.OAUTH_AUDIENCE).href)); }
     if(signal&&signal.handle(req,res)) return;
     if(as&&await as.handle(req,res)) return;
-    if(req.url!==publicPath) { log({kind:'mcp_inbound',status:404,route:'other',http_method:req.method,path_shape:pathShape(req.url),auth_header_present:(req.headers.authorization??'').startsWith('Bearer ')}); res.writeHead(404); res.end(); return; }
+    if(req.url!==publicPath) { log({kind:'mcp_inbound',status:404,route:'other',http_method:req.method,path_shape:pathShape(req.url),auth_header_present:(req.headers.authorization??'').startsWith('Bearer '),ua:uaToken(req)}); res.writeHead(404); res.end(); return; }
     let principal={local:true,subject:'local-principal',scopes:new Set(ADVERTISED_SCOPES)};
     if(oauth) { try { principal=as?await as.verifyBearer(req.headers.authorization,outcome.state):await verifyBearer(req.headers.authorization,oauth,outcome.state); } catch { res.writeHead(401,{'WWW-Authenticate':challenge(oauth)});res.end();return; } }
     try { principal.worker=resolveWorker(workers,principal); } catch(error) {
@@ -850,7 +850,7 @@ const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)
     if(!rpc||typeof rpc!=='object'||Array.isArray(rpc)||rpc.jsonrpc!=='2.0'||typeof rpc.method!=='string') return json(res,400,rpcError(rpc?.id??null,-32600,'Invalid Request'));
     outcome.identify(rpc);
     // Metadata only: bodies can carry webhook secrets and worker results.
-    log({kind:'mcp_inbound',call_id:outcome.state.call_id,rpc_method:outcome.state.rpc_method,tool:outcome.state.tool});
+    log({kind:'mcp_inbound',call_id:outcome.state.call_id,rpc_method:outcome.state.rpc_method,tool:outcome.state.tool,ua:uaToken(req)});
     if(!Object.hasOwn(rpc,'id')) { res.writeHead(202); res.end(); return; }
     outcome.state.phase='dispatch';
     try { json(res,200,{jsonrpc:'2.0',id:rpc.id,result:{resultType:'complete',...await dispatch(rpc,principal)}}); }

@@ -218,6 +218,27 @@ try {
     assert.equal(unauth.status, 401); assert.match(unauth.headers.get('www-authenticate'), /resource_metadata=.*oauth-protected-resource/);
   });
 
+  await check('P0b', 'registration agrees with the metadata: an omitted or unsupported token_endpoint_auth_method is registered as none, with no client_secret (RFC 7591 s2, s3.2.1)', async () => {
+    const reg = body => fetch(`${main.oauth}/reg`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [CALLBACK], ...body }) });
+    for (const [label, extra] of [['omitted', {}], ['client_secret_basic', { token_endpoint_auth_method: 'client_secret_basic' }], ['client_secret_post with a secret', { token_endpoint_auth_method: 'client_secret_post', client_secret: 'x' }], ['none', { token_endpoint_auth_method: 'none' }]]) {
+      const res = await reg(extra); const doc = await res.json();
+      assert.equal(res.status, 201, `${label}: ${JSON.stringify(doc)}`);
+      assert.equal(doc.token_endpoint_auth_method, 'none', label);
+      assert.equal(Object.hasOwn(doc, 'client_secret'), false, `${label}: no client_secret is issued`);
+      assert.equal(Object.hasOwn(doc, 'client_secret_expires_at'), false, label);
+    }
+    assert.equal((await fetch(`${main.oauth}/reg`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json' })).status, 400, 'a body that is not JSON is still refused');
+    const raw = (body, type = 'application/json') => fetch(`${main.oauth}/reg`, { method: 'POST', headers: { 'content-type': type }, body });
+    const inner = JSON.stringify({ redirect_uris: [CALLBACK] });
+    for (const [label, body] of [['a JSON string holding serialized JSON', JSON.stringify(inner)], ['an array', '[]'], ['null', 'null'], ['a number', '1']]) {
+      const res = await raw(body); const doc = await res.json();
+      assert.equal(res.status, 400, `${label} is refused, not parsed a second time: ${JSON.stringify(doc)}`); assert.equal(doc.error, 'invalid_request', label);
+    }
+    assert.equal((await raw(inner, 'application/json; charset=latin1')).status, 400, 'a declared charset other than UTF-8 is refused');
+    assert.equal((await raw(Buffer.from([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d]))).status, 400, 'bytes that are not UTF-8 are refused');
+    assert.equal((await raw(inner, 'application/json; charset=UTF-8')).status, 201, 'a declared UTF-8 charset is accepted');
+  });
+
   let lark, duet;
   await check('P1', 'positive flow: DCR, PKCE, CLI approval, token, worker resolution, only that worker\'s job, refresh, revoke, next call refused', async () => {
     lark = await vendor.connect('lark');

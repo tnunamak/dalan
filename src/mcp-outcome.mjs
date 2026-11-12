@@ -3,6 +3,15 @@ import { performance } from 'node:perf_hooks';
 import { redactNote } from './alerts.mjs';
 
 const responses = new WeakMap();
+
+// The caller's class, never its text: a User-Agent can hold anything, including a credential, so only a name from this fixed
+// list is logged ("other" for the rest, null when absent). That is enough to tell an Anthropic or OpenAI caller from a generic one.
+const UA_CLASSES = [['Claude-User', /^claude-user/i], ['ClaudeBot', /^claudebot/i], ['anthropic-ai', /^anthropic-ai/i], ['ChatGPT-User', /^chatgpt-user/i], ['OAI-SearchBot', /^oai-searchbot/i],
+  ['node', /^node(?![A-Za-z0-9._-])/i], ['undici', /^undici/i], ['curl', /^curl/i], ['python', /^python/i], ['Mozilla', /^mozilla/i]];
+export const uaToken = req => {
+  const ua = String(req.headers?.['user-agent'] ?? '');
+  return ua === '' ? null : (UA_CLASSES.find(([, pattern]) => pattern.test(ua))?.[0] ?? 'other');
+};
 const methods = new Set(['server/discover', 'initialize', 'ping', 'tools/list', 'tools/call', 'events/list', 'events/subscribe', 'events/unsubscribe', 'notifications/initialized', 'notifications/cancelled']);
 
 // Log only declared protocol names and numeric outcomes. RPC IDs, arguments,
@@ -22,7 +31,7 @@ export function beginMcpOutcome(req, res, log, toolNames, authRequired) {
     response_kind: 'empty', error_type: null,
   };
   responses.set(res, state);
-  log({ kind: 'mcp_received', call_id: state.call_id, http_method: state.http_method });
+  log({ kind: 'mcp_received', call_id: state.call_id, http_method: state.http_method, ua: uaToken(req) });
   let recorded = false;
   const complete = completion => {
     if (recorded) return;

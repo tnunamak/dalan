@@ -28,7 +28,7 @@ const BRIEF = 'Report the exact phrase: bridge first report. Do not read files, 
 const REPORT = 'bridge first report';
 const MARKER = '.dalan-trial';
 const DEFAULT_CALLBACKS = ['http://127.0.0.1/callback', 'http://localhost/callback'];
-const USAGE = 'usage: dalan try [--home DIR] [--port N] [--callback PATTERN]...';
+const USAGE = 'usage: dalan try [--local | --public [--client chatgpt|claude] [--route auto|localhost.run|tailscale]] [--home DIR] [--port N] [--callback PATTERN]...';
 const DEMO_REPO = 'dalan-demo/hello';
 const DENIED_REPO = 'dalan-demo/other';
 const DEMO_TITLE = 'Hello from the Dalan demo repository';
@@ -64,17 +64,24 @@ async function alternateTrial(preferPort) {
 function formatTryError(error, context, alternate = null) {
   const cause = safeDiagnostic(error?.message ?? String(error), 4000);
   const cli = context.cli ?? `node ${context.shellCli}`;
-  const newHome = label => alternate && commandBlock(label, `${cli} try --home ${shellQuote(alternate.home)}${alternate.port ? ` --port ${alternate.port}` : ''}`);
+  const flags = context.tryFlags ?? ''; // a public trial restarts as a public trial
+  const newHome = label => alternate && commandBlock(label, `${cli} try${flags} --home ${shellQuote(alternate.home)}${alternate.port ? ` --port ${alternate.port}` : ''}`);
   const recover = (head, withNewHome) => [`${cause}${head}`, commandBlock('Read the log with:', `cat ${context.shellLog}`),
-    commandBlock('Retry this home with:', `${cli} try --home ${context.shellHome}`), withNewHome ? newHome('To try again in a new home instead, run:') : null].filter(Boolean).join('\n');
+    commandBlock('Retry this home with:', `${cli} try${flags} --home ${context.shellHome}`), withNewHome ? newHome('To try again in a new home instead, run:') : null].filter(Boolean).join('\n');
   if (error?.tryKind === 'startup') return recover(`\nThe bridge did not start. Full log: ${context.logFile}`, true);
   if (context.started) {
     const invariant = error?.tryKind === 'invariant' ? '\nStop and report this failure; do not grant broader access.' : '';
     return recover(`${invariant}\nServer log: ${context.logFile}`, error?.tryKind === 'unexpected');
   }
   if (error?.tryKind === 'already_running') return cause;
+  if (error?.tryKind === 'route_start') {
+    // The route, not the home, failed: the same home retries cleanly, and the other route or a local trial are the real alternatives.
+    const otherRoute = /--route tailscale\b/.test(flags) ? commandBlock('Or make a trial link (localhost.run) instead:', `${cli} try${flags.replace('--route tailscale', '--route localhost.run')} --home ${context.shellHome}`) : null;
+    return [`${cause}\nThe public route did not start, so the bridge was not started.`, commandBlock('Try again with:', `${cli} try${flags} --home ${context.shellHome}`), otherRoute,
+      commandBlock('Or try on this computer only:', `${cli} try --local`)].filter(Boolean).join('\n');
+  }
   const notStarted = `${cause}\nThe server has not started; no server log was created for this attempt.`;
-  if (error?.freePort && context.shellHome) return `${notStarted}\n${commandBlock('Stop that program, or run the trial on a free port:', `${cli} try --home ${context.shellHome} --port ${error.freePort}`)}`;
+  if (error?.freePort && context.shellHome) return `${notStarted}\n${commandBlock('Stop that program, or run the trial on a free port:', `${cli} try${flags} --home ${context.shellHome} --port ${error.freePort}`)}`;
   return `${notStarted}\nFix the problem above, then run the command again.${alternate ? ` ${newHome('Or start a trial in a new home:')}` : ''}`;
 }
 
@@ -87,16 +94,26 @@ export async function describeTryError(error, context) {
 
 export function parseTryArgs(argv) {
   const out = { home: null, port: null, callbacks: [] };
+  const choices = { '--client': ['chatgpt', 'claude'], '--route': ['auto', 'localhost.run', 'tailscale'] };
   for (let i = 0; i < argv.length; i++) {
     const [flag, value] = [argv[i], argv[i + 1]];
-    if (!['--home', '--port', '--callback'].includes(flag)) throw new Error(`unknown option ${JSON.stringify(flag)}\n${USAGE}`);
+    if (flag === '--local' || flag === '--public') { out.mode = flag.slice(2); continue; }
+    if (!['--home', '--port', '--callback', '--client', '--route'].includes(flag)) throw new Error(`unknown option ${JSON.stringify(flag)}\n${USAGE}`);
     if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value\n${USAGE}`);
     i++;
     if (flag === '--home') out.home = value;
     else if (flag === '--callback') out.callbacks.push(value);
-    else if (/^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536) out.port = Number(value);
+    else if (flag in choices) {
+      if (!choices[flag].includes(value)) throw new Error(`${flag} must be one of: ${choices[flag].join(', ')}`);
+      out[flag.slice(2)] = value;
+    } else if (/^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536) out.port = Number(value);
     else throw new Error('--port requires a number from 1 to 65535');
   }
+  // Conflicts are refused here, before any file, process or route exists. --client and --route only make sense for a public trial.
+  const hostedOnly = ['client', 'route'].filter(key => out[key] !== undefined);
+  if (out.mode === 'local' && hostedOnly.length) throw new Error(`--local cannot be combined with --${hostedOnly[0]}; those options are for a public trial`);
+  if (hostedOnly.length && !out.mode) out.mode = 'public';
+  if (out.mode === 'public' && out.callbacks.length) throw new Error('--callback is for a local client; a public trial uses the selected client\'s own callback');
   return out;
 }
 
@@ -229,8 +246,19 @@ async function prepareDemoRepository(home, signal, tryAgain) {
 // The worker wrote the report; it reaches the terminal only through terminalSafe, right before the acceptance prompt.
 export function finishedNotice(jobId, job) { return terminalSafe(`\n✔ Your worker finished ${jobId}. Report:\n${job.report?.result ?? '(empty)'}`); }
 
-export async function runTry({ argv = [], env = process.env, out = process.stdout, input = process.stdin, signal, pickPort = choosePort, errorContext = {}, clock = { now: Date.now, sleep }, beforeCommand = null } = {}) {
+export async function runTry({ argv = [], env = process.env, out = process.stdout, input = process.stdin, signal, pickPort = choosePort, errorContext = {}, clock = { now: Date.now, sleep }, beforeCommand = null, hosted = {} } = {}) {
   const options = parseTryArgs(argv);
+  // The mode is asked only on a terminal. A pipe, CI or `< /dev/null` never opens a public route: it runs the local self-check.
+  const interactive = hosted.interactive ?? Boolean(input.isTTY && out.isTTY);
+  if (options.mode === 'public' || (!options.mode && interactive)) {
+    const hostedMode = await import('./try-hosted.mjs');
+    if (!options.mode) Object.assign(options, await hostedMode.chooseMode({ input, out, signal }));
+    if (options.mode === 'public') {
+      const cli = errorContext.cli ?? `node ${errorContext.shellCli ?? shellQuote(path.join(repo, 'bin/dalan.mjs'))}`;
+      if (!interactive) throw new Error(`Hosted setup needs an interactive terminal for the URL and connection approval. Run this in an interactive terminal:\n${commandLine(`${cli} try --public --client ${options.client ?? 'chatgpt'}`)}`);
+      return hostedMode.runHosted({ options, env, out, input, signal, errorContext, clock, deps: hosted, helpers: tryInternals });
+    }
+  }
   const realHome = fs.realpathSync(os.homedir());
   const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share/dalan-trial'), realHome);
   errorContext.home = home;
@@ -575,6 +603,9 @@ export async function runTry({ argv = [], env = process.env, out = process.stdou
 }
 
 export { cliCommand };
+
+// What the hosted flow shares with this one: the same home, port, quoting, approval and error rules.
+export const tryInternals = { prepareHome, portFree, socketAnswers, choosePort, shellQuote, commandLine, commandBlock, MARKER, WORKER, parsePending, describeAttempt, formatTryError, alternateTrial, DIAGNOSE_AFTER_MS, DIAGNOSE_EVERY_MS, DIAGNOSE_LIMIT, POLL_MS, repo };
 
 export async function main() {
   const controller = new AbortController();

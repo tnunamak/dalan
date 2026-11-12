@@ -74,7 +74,7 @@ test('per-command help prints usage and does not run the command', () => {
 
 test('every command the CLI dispatches has a help entry', () => {
   const source = fs.readFileSync('bin/dot-worker.mjs', 'utf8');
-  const dispatched = new Set(['try', 'mcp']); // bin/dalan.mjs dispatches these before the CLI loads
+  const dispatched = new Set(['try', 'setup', 'mcp']); // bin/dalan.mjs dispatches these before the CLI loads
   for (const line of source.match(/^ {4}case '[a-z-]+'(?:: case '[a-z-]+')*/gm)) for (const m of line.matchAll(/'([a-z-]+)'/g)) dispatched.add(m[1]);
   const documented = new Set(COMMANDS.map(c => c.name));
   for (const name of dispatched) assert.ok(documented.has(name), `${name} has no entry in src/cli-help.mjs`);
@@ -164,7 +164,7 @@ test('try help describes the self-check and the wait for your worker, not a prin
 
 test('top-level help names DALAN_HOME before "Start here"', () => {
   const text = dalan('--help').stdout;
-  const line = '  DALAN_HOME   bridge home that commands use; for the trial: export DALAN_HOME=~/.local/share/dalan-trial';
+  const line = '  DALAN_HOME   bridge home commands use: the Home line a run prints (local: ~/.local/share/dalan-trial)';
   assert.ok(text.split('\n').includes(line), text);
   assert.match(text, /^Environment:$/m);
   assert.ok(text.indexOf('Environment:') < text.indexOf('Start here:'));

@@ -20,6 +20,7 @@
     "!packages/job-core/test/",
     "integrations/t3/acp-kit/src/",
     "scripts/daily-selfcheck.mjs",
+    "scripts/dalan-try-selfcheck.mjs",
     "scripts/monitor-targets.mjs",
     "scripts/worker-bridge-setup.mjs",
     "scripts/upgrade-drain.mjs",
