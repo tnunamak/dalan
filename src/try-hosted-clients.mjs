@@ -14,7 +14,7 @@ export const CLIENTS = {
     steps: [
       'Open ChatGPT, then Settings → Apps (older accounts: Settings → Connectors → Advanced → Developer mode), and choose Create or Add a custom MCP server.',
       `Name it "${CONNECTOR_NAME}", paste the URL above, choose OAuth (automatic registration if asked), accept the notice and create it.`,
-      `Open a new chat, enable "${CONNECTOR_NAME}" from the + menu, and send the prompt below. Sign in when ChatGPT asks.`,
+      `Open a new chat, enable "${CONNECTOR_NAME}" from the + menu, start sign-in, and approve the matching code in this terminal.`,
     ],
   },
   claude: {
@@ -23,7 +23,7 @@ export const CLIENTS = {
     steps: [
       'Open claude.ai, then Customize → Connectors → + → Add custom connector. (If your organization manages connectors, an owner adds it under Organization settings → Connectors first.)',
       `Name it "${CONNECTOR_NAME}", paste the URL above, leave the OAuth client fields empty (automatic registration), then Add and sign in.`,
-      `Open a chat, enable "${CONNECTOR_NAME}" from the + → Connectors menu, and send the prompt below.`,
+      `Approve the matching code in this terminal when Dalan asks.`,
     ],
   },
 };
@@ -37,10 +37,10 @@ export const hostedPrompt = (requestId, requestPhrase) =>
 
 // The connector handoff: every value is filled in. `url` is a credential, so the caller writes this text to the owner's terminal
 // only, never to a log.
-export function handoffText({ client, url, requestId, requestPhrase }) {
+export function handoffText({ client, url }) {
   const spec = CLIENTS[client];
   return [
     `Connector name: ${CONNECTOR_NAME}`, 'Paste this URL into your connector (it is a secret; it stays on this terminal and in the private resource-url file):', url, '',
-    spec.label, ...spec.steps.map((step, i) => `${i + 1}. ${step}`), '', 'Paste this into the chat:', hostedPrompt(requestId, requestPhrase),
+    spec.label, ...spec.steps.map((step, i) => `${i + 1}. ${step}`),
   ].map(line => terminalSafe(line)).join('\n');
 }

@@ -16,7 +16,7 @@ import { beginPairing, openSession, workJob } from '../src/demo-worker.mjs';
 import { parseTryArgs, runTry, tryInternals } from '../src/try.mjs';
 import * as tryHostedInternals from '../src/try-hosted.mjs';
 const { chooseMode } = tryHostedInternals;
-import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
+import { handoffText, hostedPrompt, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
 import { runSelfCheck } from '../src/try-selfcheck.mjs';
 import { sweepTrialNodes, gozarProvider, localhostRunProvider, parseLocalhostRunOrigins, createGate, explainTailscale, authorizationServerMetadataUrl, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
@@ -81,12 +81,12 @@ async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: 
     return run.out.match(pattern);
   };
   run.close = async () => { run.controller.abort(); return run.finished; };
-  // The handoff: the URL line, the request id and the phrase the prompt asks for.
-  run.handoff = async () => {
-    const url = (await run.until(/^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m))[1];
+  // Sign-in needs only the URL; the job prompt becomes available after approval.
+  run.handoff = async () => ({ url: (await run.until(/^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m))[1] });
+  run.prompt = async () => {
     const requestId = (await run.until(/claim only (req_[0-9a-f-]+),/))[1];
     const phrase = (await run.until(/requested report \((bridge first report [0-9a-f]{8})\)/))[1];
-    return { url, requestId, phrase };
+    return { requestId, phrase };
   };
   return run;
 }
@@ -99,13 +99,13 @@ const approveAs = async (run, { callback = CHATGPT_CALLBACK, answer = 'y\n' } = 
 test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a stand-in hosted client', async () => {
   const run = await hostedRun('e2e');
   try {
-    const { url, requestId, phrase } = await run.handoff();
-    // Every value is filled in: no placeholder, and the handoff names the connector, the steps and the prompt.
+    const { url } = await run.handoff();
+    // Every value is filled in: no placeholder, and the handoff names the connector and the sign-in steps.
     const handoff = run.out.slice(run.out.indexOf('Connector name:'));
     assert.doesNotMatch(handoff, /<[A-Za-z _-]+>|PATTERN|NAME|PORT|HOME_PATH|YOUR_/, 'the handoff has no placeholder');
     assert.match(handoff, /Connector name: Dalan Trial/);
     for (const step of CLIENTS.chatgpt.steps) assert.ok(handoff.includes(step), step);
-    assert.ok(handoff.includes('Paste this into the chat:'));
+    assert.doesNotMatch(handoff, /Paste this into the chat:|claim only req_|bridge first report/);
     const origin = new URL(url).origin;
     assert.notEqual(Number(new URL(origin).port), run.errorContext.bindPort, 'the public origin is not the bridge bind address');
     assert.match(run.out, /Public HTTPS, OAuth discovery and the authorization server's metadata verified\./);
@@ -120,7 +120,9 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
     assert.match(run.out, new RegExp(`resource    "${origin}/<secret>/mcp"`));
     run.input.write('y\n');
     const token = await pairing.complete();
-    await run.until(/Connection approved\. Waiting for the client to claim the demo job/);
+    await run.until(/Connection approved\./);
+    const { requestId, phrase } = await run.prompt();
+    assert.ok(run.out.indexOf('Connection approved.') < run.out.indexOf('Paste this into the chat:'));
     // Approval alone is not a finished job.
     assert.doesNotMatch(run.out, /Hosted worker completed/);
     await workJob(url, token, requestId, { claimant: 'ChatGPT', report: phrase });
@@ -172,12 +174,13 @@ const closed = port => new Promise(resolve => { const s = net.connect(port, '127
 test('a wrong phrase, a blocked outcome or an unapproved worker is not counted as the demo finishing', async () => {
   const run = await hostedRun('proof');
   try {
-    const { url, requestId, phrase } = await run.handoff();
+    const { url } = await run.handoff();
     const pairing = await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
     await run.until(/Approve this connection\? \[y\/N\] /);
     run.input.write('y\n');
     const token = await pairing.complete();
     await run.until(/Connection approved/);
+    const { requestId, phrase } = await run.prompt();
     const call = await openSession(url, token);
     const { claim_id } = await call('claim', { request_id: requestId, claimant: 'dalan-demo' });
     await call('finish', { request_id: requestId, claim_id, outcome: 'completed', summary: 'x', result: 'bridge first report 00000000' });
@@ -191,11 +194,12 @@ test('a wrong phrase, a blocked outcome or an unapproved worker is not counted a
 test('a blocked report with the right phrase is not a completed demo', async () => {
   const run = await hostedRun('blocked');
   try {
-    const { url, requestId, phrase } = await run.handoff();
+    const { url } = await run.handoff();
     const pairing = await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
     await run.until(/Approve this connection\? \[y\/N\] /);
     run.input.write('y\n');
     const token = await pairing.complete();
+    const { requestId, phrase } = await run.prompt();
     const call = await openSession(url, token);
     const { claim_id } = await call('claim', { request_id: requestId, claimant: 'x' });
     await call('finish', { request_id: requestId, claim_id, outcome: 'blocked', summary: phrase, result: phrase }).catch(() => null);
@@ -216,8 +220,10 @@ test('the default answer is No, and another client\'s callback is never offered 
     const pairing = await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
     await run.until(/Approve this connection\? \[y\/N\] /);
     run.input.write('\n');
-    await run.until(/Not approved\. Approve later with:/);
-    assert.doesNotMatch(run.out, /Connection approved/);
+    await run.until(/Not approved\./);
+    assert.doesNotMatch(run.out, /Approve later with:/);
+    assert.match(run.out, /Start sign-in again in ChatGPT; approve the new matching code here to get the demo prompt\./);
+    assert.doesNotMatch(run.out, /Connection approved|Paste this into the chat:|claim only req_|bridge first report/);
     assert.ok(pairing.code);
   } finally { await run.close(); }
 });
@@ -235,11 +241,13 @@ test('the Claude profile uses its own callback and its own steps', async () => {
     for (let i = 0; i < 400 && !/\/mcp$/m.test(out); i++) await sleepMs(50);
     const url = /^(http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\/mcp)$/m.exec(out)[1];
     assert.match(out, /Customize → Connectors/);
-    assert.doesNotMatch(out, /Settings → Apps/);
+    assert.doesNotMatch(out, /Settings → Apps|Paste this into the chat:|claim only req_|bridge first report/);
     const pairing = await beginPairing(url, { redirect: CLAUDE_CALLBACK, clientName: 'claude' });
     for (let i = 0; i < 400 && !/Approve this connection\? \[y\/N\] /.test(out); i++) await sleepMs(50);
     input.write('y\n');
     await pairing.complete();
+    for (let i = 0; i < 400 && !out.includes('Paste this into the chat:'); i++) await sleepMs(50);
+    assert.ok(out.indexOf('Connection approved.') >= 0 && out.indexOf('Paste this into the chat:') > out.indexOf('Connection approved.'));
     assert.match(out, new RegExp(CLAUDE_CALLBACK.replace(/[./]/g, '\\$&')));
   } finally { controller.abort(); await finished; }
 });
@@ -1178,10 +1186,51 @@ test('public readiness: wrong resource, wrong issuer, an unauthenticated 200 or 
 
 test('handoff text: the same text for the same inputs, with no unfilled value', () => {
   for (const client of Object.keys(CLIENTS)) {
-    const text = handoffText({ client, url: 'https://x.trycloudflare.com/s/mcp', requestId: 'req_1', requestPhrase: 'bridge first report abcd1234' });
-    assert.doesNotMatch(text, /<[^>]+>|PATTERN|NAME\b|PORT\b/);
-    assert.ok(text.includes('https://x.trycloudflare.com/s/mcp') && text.includes('claim only req_1,') && text.includes('(bridge first report abcd1234)'));
+    const text = handoffText({ client, url: 'https://x.trycloudflare.com/s/mcp' });
+    assert.doesNotMatch(text, /<[^>]+>|PATTERN|NAME\b|PORT\b|undefined|null/);
+    assert.ok(text.includes('https://x.trycloudflare.com/s/mcp'));
+    assert.doesNotMatch(text, /Paste this into the chat:|claim only|bridge first report|prompt below/);
+    assert.match(hostedPrompt('req_1', 'bridge first report abcd1234'), /claim only req_1,.*\(bridge first report abcd1234\)/);
   }
+});
+
+for (const client of Object.keys(CLIENTS)) test(`${client}: the demo prompt waits for approval and is repeated when the approved client has not claimed`, async () => {
+  let now = 0;
+  const run = await hostedRun(`prompt-order-${client}`, { argv: ['--client', client], clock: { now: () => now, sleep: sleepMs } });
+  try {
+    const { url } = await run.handoff();
+    run.input.write('help\n');
+    now += 60_000;
+    await run.until(/No sign-in request yet/);
+    assert.doesNotMatch(run.out, /Paste this into the chat:|claim only req_|bridge first report|prompt below/);
+    const pairingOptions = { redirect: CLIENTS[client].callbacks[0], clientName: CLIENTS[client].label };
+    await beginPairing(url, pairingOptions);
+    await run.until(/Approve this connection\? \[y\/N\] /);
+    run.input.write('n\n');
+    await run.until(/Not approved\./);
+    assert.ok(run.out.includes(`Start sign-in again in ${CLIENTS[client].label}; approve the new matching code here to get the demo prompt.`));
+    assert.doesNotMatch(run.out, /Approve later with:|Paste this into the chat:|claim only req_|bridge first report/);
+    const afterRefusal = run.out.length;
+    const pairing = await beginPairing(url, pairingOptions);
+    for (let i = 0; !/Approve this connection\? \[y\/N\] /.test(run.out.slice(afterRefusal)); i++) { assert.ok(i < 400, 'new approval question appears'); await sleepMs(25); }
+    assert.doesNotMatch(run.out, /Paste this into the chat:|claim only req_|bridge first report/);
+    run.input.write('y\n');
+    await pairing.complete();
+    const { requestId, phrase } = await run.prompt();
+    const prompt = hostedPrompt(requestId, phrase);
+    assert.ok(run.out.indexOf('Connection approved.') < run.out.indexOf(prompt));
+    assert.equal(run.out.split(prompt).length - 1, 1);
+    const afterApproval = run.out.length;
+    run.input.write('help\n');
+    for (let i = 0; !run.out.slice(afterApproval).includes(prompt); i++) { assert.ok(i < 200, 'help repeats the prompt'); await sleepMs(25); }
+    assert.equal(run.out.split(prompt).length - 1, 2);
+    assert.doesNotMatch(run.out.slice(afterApproval), /https?:\/\/|undefined|null/);
+    const afterHelp = run.out.length;
+    now += tryInternals.DIAGNOSE_EVERY_MS;
+    await run.until(/send this prompt/);
+    assert.ok(run.out.slice(afterHelp).includes(prompt), 'the reminder repeats the exact prompt in new output');
+    assert.equal(run.out.split(prompt).length - 1, 3);
+  } finally { await run.close(); }
 });
 
 test('uaToken names a known caller class and never echoes the caller\'s own text', () => {
