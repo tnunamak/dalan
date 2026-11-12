@@ -8,21 +8,25 @@ Every candidate must already have access to the job's repository. Listing and
 acquisition both check the current repository grant and approved destination.
 Listing a job does not reserve it or authorize work to start.
 
-For workers without a destination declaration, give the assignment an explicit
-`valid_until` deadline and submit:
+For workers without a destination declaration, put an explicit `valid_until`
+deadline inside the assignment file itself (the `review.json` passed to `--file`
+carries a `valid_until` field), then submit:
 
 ```sh
 dalan submit --file review.json --eligible alpha,beta --execution worker
 ```
 
 The assignment must use `execution_scope: "read-only"`. Version 1 accepts
-`execution=none` or `execution=worker`, one result slot and explicit worker names.
-It rejects host execution, protocol jobs, fan-out, worker classes, superseding,
-command keys and backend capability requirements. The effective deadline is the
-earlier of the policy deadline and the assignment's `valid_until`.
+`execution=none` or `execution=worker`, one result only (a single worker's report,
+not several) and explicit worker names. It rejects host execution, protocol jobs,
+fan-out greater than 1, worker classes, superseding, command keys and backend
+capability requirements (the `--require-capability` option is for direct host
+jobs, not pool jobs). The effective deadline is the earlier of the policy
+deadline and the assignment's `valid_until`.
 
-For declared destinations, start with a policy file containing this routing
-object:
+For workers with a declared destination, start with a policy file containing this
+routing object (a destination is declared in the worker's profile; the dry-run
+preview below shows each candidate's destination disclosure):
 
 ```json
 {
@@ -64,7 +68,8 @@ a destination revision. The owner can use `get`, `wait`, `inbox` and `cancel` wi
 the submitted request ID before or after acquisition. Reports and decisions use
 that same request ID and the same saved owner capability.
 
-## Worker flow without a connector refresh
+## Worker flow without a connector refresh (for workers connected over MCP —
+`list_pending` and `claim` here are MCP tools, not `dalan` commands)
 
 1. Call `list_pending`. Its existing `assignments` list is unchanged. The new
    `policy_work.items` field contains up to 50 eligible work orders, with priority,
