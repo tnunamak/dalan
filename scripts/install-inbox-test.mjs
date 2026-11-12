@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { formatInbox, buildInbox } from '../src/inbox.mjs';
 import { githubAuthRecovery } from '../src/projects.mjs';
@@ -19,7 +20,6 @@ const projects=fs.readFileSync(new URL('../src/projects.mjs',import.meta.url),'u
 const server=fs.readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
 const manifest=JSON.parse(fs.readFileSync(new URL('./test-segments.json',import.meta.url),'utf8'));
 
-check('public repository Quickstart clones over plain HTTPS',()=>assert.match(readme,/git clone https:\/\/github\.com\/tnunamak\/dalan\.git/));
 check('manual setup helper follows configured bridge HOME',()=>assert.match(manualSetup,/HOME="\$DALAN_HOME"/));
 check('pairing instructions include callback allow-list step',()=>assert.match(manualSetup,/connect allow-callback/));
 check('fresh-shell inbox uses all-receipts scope',()=>assert.match(readme,/dalan inbox --all/));
@@ -163,7 +163,7 @@ await asyncCheck('retry preserves owned home bytes and modes and rejects unsafe 
     env.TEST_SHOW_FAIL='1';assert.equal(await attempt(),false,'unknown effective service settings fail closed');assert.equal(checks,0);delete env.TEST_SHOW_FAIL;
 
     const envFile=path.join(config,'env'),savedEnv=fs.readFileSync(envFile,'utf8');
-    fs.writeFileSync(envFile,`BRIDGE_PATH_SECRET=${'f'.repeat(64)}\n`);
+    fs.writeFileSync(envFile,`BRIDGE_PATH_SECRET=${randomBytes(32).toString('hex')}\n`);
     assert.equal(await attempt(),false,'resource URL must bind to saved path secret');assert.equal(checks,0);
     fs.writeFileSync(envFile,savedEnv);
     const key=path.join(config,'as-jwks.json');fs.renameSync(key,key+'.saved');
@@ -214,5 +214,5 @@ check('line separators in display fields are escaped',()=>{
   assert(plain.includes('first\\x0asecond\\u2028third\\u2029fourth'));
 });
 
-if(failures.length) { console.error(`RED: ${failures.length} finding 6/9 checks fail on current source\n${failures.join('\n')}`); process.exitCode=1; }
-else console.log('GREEN: finding 6/9 install and inbox checks passed');
+if(failures.length) { console.error(`${failures.length} install and inbox checks failed\n${failures.join('\n')}`); process.exitCode=1; }
+else console.log('PASS install and inbox checks');

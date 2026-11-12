@@ -15,7 +15,7 @@ const profile=parseWorkers({workers:{alpha:{repos:['acme/repo']},beta:{repos:['a
 const assignment=id=>({schema_version:1,request_id:id,brief:'Inspect the supplied text.',inputs:[],expected_output:'One report.',execution_scope:'read-only',valid_until:new Date(Date.now()+3600000).toISOString()});
 const policy={version:1,allowed_workers:['alpha','beta'],fan_out:1};
 const options={delivery:{mode:'none'},environmentId:'',execution:'worker',review:false,priority:'normal',meta:null};
-const owner='owner-capability';
+const owner=randomUUID();
 let store;
 const put=(id,extra={},opts=options)=>{const payload={...assignment(id),...extra};return store.pullQueue.submit(payload,payload,opts,routingPolicy(policy,payload),{},owner);};
 const admit=(worker,payload)=>{for(const input of payload.inputs)if(input.github_repo&&!profile.allowsRepo(worker,input.github_repo))throw new Error('repository denied');};
