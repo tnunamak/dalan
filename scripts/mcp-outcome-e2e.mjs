@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('bridge.example');
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -111,7 +113,7 @@ try {
   jwksDelay = 150;
   const beforeAuthClose = outcomes().length;
   const beforeJwks = jwksRequests;
-  const authClosed = http.request(endpoint, { method: 'POST', headers: { authorization: `Bearer ${bearer}` } });
+  const authClosed = http.request(endpoint, { method: 'POST', headers: { host:'bridge.example', authorization: `Bearer ${bearer}` } });
   authClosed.on('error', () => {});
   authClosed.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }));
   await waitFor(() => jwksRequests > beforeJwks);
@@ -207,7 +209,7 @@ try {
 
   const count = outcomes().length;
   const received = logs().filter(row => row.kind === 'mcp_received').length;
-  const aborted = http.request(endpoint, { method: 'POST', headers: { authorization: `Bearer ${bearer}`, 'content-length': 10000 } });
+  const aborted = http.request(endpoint, { method: 'POST', headers: { host:'bridge.example', authorization: `Bearer ${bearer}`, 'content-length': 10000 } });
   aborted.on('error', () => {});
   aborted.write('{"jsonrpc":');
   await waitFor(() => logs().filter(row => row.kind === 'mcp_received').length === received + 1);

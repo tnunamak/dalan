@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 // Claim-authority build (compatible immediate rule + worker-get redaction).
 // Part 1 pins the legacy claim matrix at Store level with a fake clock:
 // exact nonempty retries return the grant; omitted/different acquisitions
@@ -203,6 +205,7 @@ async function startServer(name, workers) {
   fs.writeFileSync(path.join(config, 'oauth.env'), `OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=${audience}\nOAUTH_JWKS_URI=${issuer.replace('/realm', '/jwks')}\nOAUTH_ALLOWED_SUBJECTS=owner\n`, { mode: 0o600 });
   fs.writeFileSync(path.join(config, 'limits.json'), JSON.stringify({ max_claimed_outer_assignments: 10 }), { mode: 0o600 }); // claiming checks below each keep their claim open; 10 is the largest allowed cap
   fs.writeFileSync(path.join(config, 'alerts.env'), `NTFY_URL=http://127.0.0.1:${ntfy.address().port}/alert\n`, { mode: 0o600 });
+  if(workers) for(const worker of Object.values(workers.workers)) worker.workspaceAllowed=true;
   if (workers) fs.writeFileSync(path.join(config, 'workers.json'), JSON.stringify(workers), { mode: 0o600 });
   fs.writeFileSync(path.join(home, 'bin/t3code'), `#!/usr/bin/env node\nconsole.log(JSON.stringify({ok:true,data:{threads:[]}}));\n`, { mode: 0o755 });
   // the stable catalog hides ask_question; questions-v1 adds only ask_question and consume_answer

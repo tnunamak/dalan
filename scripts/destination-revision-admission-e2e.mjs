@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('fixture.invalid');
 // Local-only HTTP acceptance journey. The gh binary is an inert fixture, never a network client.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

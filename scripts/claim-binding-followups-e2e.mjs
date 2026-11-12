@@ -179,8 +179,8 @@ childProcess.execFile=fixtureExec;syncBuiltinESMExports();
   return {auth,connect,submit,submitRaw,rpc,heldRpc,mutationState,snapshot,claimRow,revision,ownerPost,claimArgs,state,writeWorkers,workersFile,home,config,stop,start,getOutput:()=>stdout+stderr,logFile:path.join(home,'.local/state/dalan/requests.jsonl')};
 }
 
-const baseWorkers=(over={})=>({default_execution:'worker',workers:{dot:{destination:declaration(),repos:[REPO],...over},other:{}}});
-const noDestination=()=>({default_execution:'worker',workers:{dot:{repos:[REPO]},other:{}}});
+const baseWorkers=(over={})=>({default_execution:'worker',workers:{dot:{destination:declaration(),repos:[REPO],workspaceAllowed:true,...over},other:{}}});
+const noDestination=()=>({default_execution:'worker',workers:{dot:{repos:[REPO],workspaceAllowed:true},other:{}}});
 
 // ---- Finding 1: configuration errors reach a worker only as the generic error ----------------------------------
 

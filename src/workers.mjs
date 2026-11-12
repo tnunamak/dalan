@@ -62,7 +62,7 @@ export function parseWorkers(value,{builtin=false,builtinConnectionIds}={}) {
     if(name==='pool'||name==='unknown') fail(`worker name "${name}" is reserved and unsupported`);
     if(!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) fail('invalid worker name');
     if(Object.hasOwn(config??{},'pool')) fail(`${name}.pool is not supported`);
-    object(config,['connections','capabilities','guidance','repos','repo_access','denied_repos','destination']);
+    object(config,['connections','capabilities','guidance','repos','repo_access','denied_repos','destination','workspaceAllowed']);
     const repoSettings=normalizeRepoSettings(config,name);
     if(config.guidance!==undefined&&config.guidance!=='resume') fail(`${name}.guidance may only be "resume"`);
     if(builtin&&config.connections!==undefined&&!(Array.isArray(config.connections)&&!config.connections.length)) fail(`${name}.connections must be absent in built-in mode; connections are recorded by dalan connect approve`);
@@ -78,9 +78,10 @@ export function parseWorkers(value,{builtin=false,builtinConnectionIds}={}) {
       if(!result.connection_id) text(result.client_id);
       return result;
     });
+    if(config.workspaceAllowed!==undefined&&typeof config.workspaceAllowed!=='boolean') fail(`${name}.workspaceAllowed must be boolean`);
     const caps=config.capabilities??[];
     if(!Array.isArray(caps)||caps.some(c=>c!=='t3')) fail('capabilities may only contain t3');
-    workers.set(name,{connections,capabilities:new Set(caps),...(config.guidance?{guidance:config.guidance}:{}),...repoSettings,
+    workers.set(name,{connections,capabilities:new Set(caps),...(config.workspaceAllowed!==undefined?{workspaceAllowed:config.workspaceAllowed}:{}),...(config.guidance?{guidance:config.guidance}:{}),...repoSettings,
       ...(Object.hasOwn(config,'destination')?{destination:parseDestinationDeclaration(config.destination)}:{})});
   }
   if(!workers.size) fail('workers must not be empty');
@@ -204,10 +205,10 @@ export function assertTarget(profile,worker) {
   return worker;
 }
 // One source of truth for a fresh generic host: one named worker, no t3 capability, no host execution. Never overwrites.
-export function writeGenericProfile(file,name) {
+export function writeGenericProfile(file,name,{workspaceAllowed=false}={}) {
   parseWorkers({workers:{[name]:{}}},{builtin:true});
   fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});
-  try { fs.writeFileSync(file,`${JSON.stringify({workers:{[name]:{repos:[]}},default_execution:'none'},null,2)}\n`,{mode:0o600,flag:'wx'}); }
+  try { fs.writeFileSync(file,`${JSON.stringify({workers:{[name]:{repos:[],...(workspaceAllowed?{workspaceAllowed:true}:{})}},default_execution:'none'},null,2)}\n`,{mode:0o600,flag:'wx'}); }
   catch(error) { if(error.code==='EEXIST') throw new Error(`${file} already exists; init does not overwrite a worker profile`); throw error; }
   fs.chmodSync(file,0o600);
   return file;

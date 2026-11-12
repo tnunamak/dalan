@@ -130,6 +130,8 @@ In a second terminal, use the CLI from `npm install -g @tnunamak/dalan`. Set `DA
 
 ### Use a stable address
 
+For a bridge that runs in the background on Linux, use [`dalan service install`](docs/service-setup.md). It installs a systemd user service at a fixed port and registers an existing HTTPS origin with Gozar. One bridge can serve several workers with built-in sign-in and the stable catalog; the migration helper imports repository allowlists into a new home.
+
 A trial link is for a first look. For continued use you want an address that stays the same. `npx -y @tnunamak/dalan setup` saves your route choice; it does not install a background service, so keep the `try` terminal open while you use the connector. Run:
 
 ```sh

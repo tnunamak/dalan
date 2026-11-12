@@ -181,7 +181,7 @@ export class DotBridgeAdapter {
     return `${input}.${sign('RSA-SHA256', Buffer.from(input), this.privateKey).toString('base64url')}`;
   }
   async mcp(subject, name, args, { signal } = {}) {
-    const r = await request({ port: this.port, method: 'POST', pathName: `/${this.secret}/mcp`, signal, headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token(subject)}` }, body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } });
+    const r = await request({ port: this.port, method: 'POST', pathName: `/${this.secret}/mcp`, signal, headers: { host:new URL(AUDIENCE).host, 'content-type': 'application/json', authorization: `Bearer ${this.token(subject)}` }, body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } });
     let j; try { j = JSON.parse(r.text); } catch { return this.note({ kind: 'mcp', name, args, error: `http ${r.status}: ${r.text.slice(0, 200)}` }, { error: `http ${r.status}` }); }
     if (j.error) return this.note({ kind: 'mcp', name, args, error: j.error.message }, { error: j.error.message });
     if (j.result.isError) return this.note({ kind: 'mcp', name, args, error: j.result.content[0].text }, { error: j.result.content[0].text });

@@ -51,7 +51,7 @@ async function fixture(t) {
   const env={...process.env};for(const k of Object.keys(env))if(k.startsWith('DALAN_')||k.startsWith('DOT_BRIDGE_'))delete env[k];
   Object.assign(env,{HOME:home,NODE_ENV:'test',DALAN_LOOPBACK:'1',DALAN_AUTH_MODE:'builtin',DALAN_PORT:String(port),DALAN_ENABLE_WORKSPACE:'1'});
   fs.mkdirSync(config,{recursive:true,mode:0o700});
-  fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'worker',workers:{dot:{destination:declaration},other:{}}}),{mode:0o600});
+  fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'worker',workers:{dot:{workspaceAllowed:true,destination:declaration},other:{}}}),{mode:0o600});
   execFileSync(process.execPath,['bin/dalan.mjs','as-init','--public-url',`http://127.0.0.1:${port}`],{cwd:code,env,stdio:'pipe',timeout:INIT_MS,killSignal:'SIGKILL'});
   child=spawn(process.execPath,['--import',path.join(repo,'scripts/claim-statechart-barrier.mjs'),'src/server.mjs'],{cwd:code,env,stdio:['ignore','pipe','pipe','ipc']});
   let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);

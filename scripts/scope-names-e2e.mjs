@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('bridge.example');
 // Scope names a client sees in the 401 challenge and the protected-resource metadata, in external-issuer mode.
 // Default: the legacy `dot-bridge.*` names, so an issuer that defines only those keeps working with no edit.
 // OAUTH_SCOPE_NAMES=neutral in oauth.env opts in to `dalan.*`. The frozen legacy-v46 catalog always uses the legacy names.

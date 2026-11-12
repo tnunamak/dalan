@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 // Lifecycle metrics through the real server: submit -> claim -> progress -> run_check (refused) -> wait (consumed) ->
 // finish -> accept -> integrate, then dot-worker metrics --json and status --explain.
 import assert from 'node:assert/strict';
@@ -22,7 +24,7 @@ fs.writeFileSync(path.join(fixture,'.dot-bridge.json'),JSON.stringify({checks:{d
 git(['add','.'],fixture); git(['commit','-qm','base'],fixture);
 const base=git(['rev-parse','HEAD'],fixture);
 fs.writeFileSync(path.join(config,'oauth.env'),`OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=${aud}\nOAUTH_JWKS_URI=http://127.0.0.1:${jwksPort}/jwks\nOAUTH_ALLOWED_SUBJECTS=dot\n`,{mode:0o600});
-fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{connections:[{issuer,subject:'dot',client_id:'fixture-client'}],repos:['example-owner/fixture']}}}),{mode:0o600});
+fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{workspaceAllowed:true,connections:[{issuer,subject:'dot',client_id:'fixture-client'}],repos:['example-owner/fixture']}}}),{mode:0o600});
 fs.writeFileSync(path.join(config,'limits.json'),JSON.stringify({worker_lane_capacity:3,max_claimed_outer_assignments:5}),{mode:0o600});
 const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048}), jwk={...publicKey.export({format:'jwk'}),kid:'test',use:'sig'};
 const jwks=http.createServer((req,res)=>res.end(JSON.stringify({keys:[jwk]})));

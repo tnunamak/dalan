@@ -80,7 +80,7 @@ childProcess.execFile=fixtureExec;syncBuiltinESMExports();
   fs.mkdirSync(config,{recursive:true,mode:0o700});
   fs.writeFileSync(path.join(config,'limits.json'),JSON.stringify({max_claimed_outer_assignments:6}),{mode:0o600});
   const workersFile=path.join(config,'workers.json');
-  fs.writeFileSync(workersFile,JSON.stringify({default_execution:'worker',workers:{dot:{destination:declaration,repos:[REPO]},other:{}}}),{mode:0o600});
+  fs.writeFileSync(workersFile,JSON.stringify({default_execution:'worker',workers:{dot:{destination:declaration,repos:[REPO],workspaceAllowed:true},other:{}}}),{mode:0o600});
   execFileSync(process.execPath,['bin/dalan.mjs','as-init','--public-url',`http://127.0.0.1:${port}`],{cwd:code,env,stdio:'pipe'});
   let stdout='',stderr='',auth;
   const child=spawn(process.execPath,['--import',preload,'src/server.mjs'],{cwd:code,env,stdio:['ignore','pipe','pipe']});

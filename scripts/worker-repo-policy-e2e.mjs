@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('bridge.example.test');
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -39,7 +41,7 @@ const token=worker=>{
 const config=path.join(root,'home','.config/dot-bridge');
 fs.mkdirSync(config,{recursive:true,mode:0o700});
 const profile={workers:{
-  alpha:{connections:[{issuer,subject:'owner',client_id:'client-alpha'}],repos:['acme/project'],guidance:'resume'},
+  alpha:{workspaceAllowed:true,connections:[{issuer,subject:'owner',client_id:'client-alpha'}],repos:['acme/project'],guidance:'resume'},
   beta:{connections:[{issuer,subject:'owner',client_id:'client-beta'}],repos:[],capabilities:[]},
 },default_execution:'none'};
 const workersFile=path.join(config,'workers.json');

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 // A fresh install works with T3 absent. HOME is new, PATH holds node, git and coreutils but no t3code, and workers.json
 // (profile mode) names one generic worker w1. The real server, the real dot-worker CLI and an MCP-over-HTTP worker run one
 // job and one cancel without any step needing T3, and no user-visible text talks about T3. Every check reports PASS/FAIL, so the

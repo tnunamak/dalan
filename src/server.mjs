@@ -45,6 +45,7 @@ import { acquireAsOwner, loadAsConfig, loadKeys } from './as-files.mjs';
 import { createSignal } from './signal.mjs';
 import { adminSocketPathError } from './admin-socket.mjs';
 import { createToolRegistry, createT3PostHandler, RegistryError } from './tool-registry.mjs';
+import { createServiceVerifier } from './service-verifier.mjs';
 
 export async function main({protocolServiceAdapters,loopbackOnly=false}={}) {
 if(typeof loopbackOnly!=='boolean')throw new Error('loopbackOnly must be boolean');
@@ -221,7 +222,8 @@ function mayPrepareCheckMetadata(response,worker,subject=null) {
   return response.status==='claimed'&&!response.cancelled_at&&claim?.state==='active'&&claim.worker===target&&
     (subject===null||claim.subject===subject)&&!store.leaseExpired(claim);
 }
-function withAvailableChecks(response,workerSurface=false,worker='dot',subject=null) {
+function workerWorkspaceAllowed(worker,requestId=null) { const policy=repoPolicyFor({request_id:requestId});return policy.legacy||policy.workers.get(worker)?.workspaceAllowed===true; }
+function withAvailableChecks(response,workerSurface=false,worker='dot',subject=null,workspaceAllowed=null) {
   response=withoutT3(response);
   const artifacts=store.sealedUploads(response.request_id,{clientIds:workerSurface});
   // origin_claim_id is a claim capability: worker replies never carry it, and the owner surface keeps it.
@@ -230,7 +232,7 @@ function withAvailableChecks(response,workerSurface=false,worker='dot',subject=n
   const checks=store.db.prepare("SELECT j.id check_run_id,j.check_id,CASE WHEN j.status='completed' THEN COALESCE(r.diff_sha256,j.diff_sha256) ELSE j.diff_sha256 END diff_sha256,j.status,j.error,j.output_preview,r.exit_code,r.timed_out,r.output_artifact_id,r.output_sha256,r.duration_ms,r.evidence FROM check_jobs j LEFT JOIN check_runs r ON r.id=j.id WHERE j.request_id=? ORDER BY j.started_at").all(response.request_id).map(withEvidence);
   const blocker=workerSurface?null:queuedRepositoryBlocker(response);
   const enriched={...response,artifacts,checks,...(blocker?{queue_blocker:blocker}:{}),...(checks.some(c=>c.evidence)?{not_identified:NOT_IDENTIFIED}:{})};
-  if(!workspaceEnabled||response.assignment?.execution_scope!=='implementation') return enriched;
+  if(!workspaceEnabled||workerSurface&&!(workspaceAllowed??workerWorkspaceAllowed(worker,response.request_id))||response.assignment?.execution_scope!=='implementation') return enriched;
   const target=store.db.prepare('SELECT target_worker FROM assignments WHERE request_id=?').get(response.request_id)?.target_worker??worker;
   if(!mayPrepareCheckMetadata(response,target,subject)) return {...enriched,available_checks:[],available_checks_error:'repository_policy_denied'};
   const execution=response.execution??store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(response.request_id).execution;
@@ -605,7 +607,7 @@ function assertRepoAllowed(worker,assignment) {
   }
 }
 function admitPolicyWorker(worker,assignment,execution,approvedRevision) {
-  assertTarget(currentRepoPolicy(),worker);
+  assertTarget(repoPolicyFor(assignment),worker);
   assertRepoAllowed(worker,assignment);
   const snapshot=store.destinationSnapshot(worker,execution,assignment);
   if((snapshot?.revision??null)!==(approvedRevision??null)||snapshot&&!snapshot.policy.allowed||snapshot?.connections_digest==='sha256:'+createHash('sha256').update('[]').digest('hex')) throw new Error('policy destination approval changed or unavailable');
@@ -657,6 +659,8 @@ async function submitPolicy(body,req,dryRun) {
 
 // Record the call on the claim it names (one UPDATE); a thrown error or a structured {error} result is kept as the last tool error.
 async function tool(name,a,principal,notifyMeta) {
+  if(!toolNames.has(name)) throw new Error('unknown tool');
+  // Refuse hidden names before audits, lease touches, sweeps or repository preparation.
   if(name==='claim'&&typeof a?.request_id==='string'&&store.hasAssignment(a.request_id)&&store.mayAct(principal.worker,a.request_id)&&
     !holdsLiveGrant(principal.worker,a.request_id,a.claimant,principal.subject,a.acquisition_id)) {
     assertRepoAllowed(principal.worker,store.get(a.request_id).assignment);
@@ -675,6 +679,7 @@ async function tool(name,a,principal,notifyMeta) {
   }
 }
 async function dispatchTool(name,a,principal,notifyMeta) {
+  const workerWorkspaceEnabled=workspaceEnabled&&workerWorkspaceAllowed(principal.worker,a?.request_id);
   const t3Audit=(t3Tools.has(name)||notifyTools.has(name))?await loadT3Audit():null;
   if(t3Audit) t3Audit.admitT3Audit(store.db,principal.worker,principal.subject);
   store.recordWorkerCall(principal.subject,toolNames.has(name)?name:'unknown',principal.worker);
@@ -734,7 +739,7 @@ async function dispatchTool(name,a,principal,notifyMeta) {
   a=repaired.args;
   validate(name,a);
   if(oauth) needScope(principal,scopeFor(name));
-  if(disabled.has(name)&&!workspaceEnabled) throw new Error('capability_not_enabled');
+  if(disabled.has(name)&&!workerWorkspaceEnabled) throw new Error('capability_not_enabled');
   if(a.request_id===absentId&&disabled.has(name)) throw new Error('assignment not found');
   const subject=principal.subject,connectionId=principal.builtin?(principal.connection_id??''):null;
   const strictJob=typeof a.request_id==='string'&&store.isProtocolJob(a.request_id);
@@ -792,13 +797,13 @@ async function dispatchTool(name,a,principal,notifyMeta) {
       const claimed=store.claim(requestId,claimant,subject,claimCapacity,preflight,worker,a.acquisition_id,a.lease_ms,ctx,principal.builtin?(principal.connection_id??''):null);
       const grant=store.db.prepare('SELECT * FROM claims WHERE request_id=?').get(requestId);
       const {free_lanes,queued}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
-      return withAvailableChecks({...claimed,lease_expires_at:claimed.lease_expires_at??store.leaseExpiresAt(grant),queued_after_claim:queued,free_lanes,...store.nextQueued(free_lanes,requestId,worker),guidance:`${claimed.guidance} ${claimMoreGuidance}`},true,worker,subject);
+      return withAvailableChecks({...claimed,lease_expires_at:claimed.lease_expires_at??store.leaseExpiresAt(grant),queued_after_claim:queued,free_lanes,...store.nextQueued(free_lanes,requestId,worker),guidance:`${claimed.guidance} ${claimMoreGuidance}`},true,worker,subject,workerWorkspaceEnabled);
     }
     case 'renew_claim': {
       if(!strictJob) throw new Error('renew_claim requires a protocol job');
       return store.renewClaim(id(a.request_id),id(a.claim_id,'claim_id'),a.lease_ms,commandContext('renew',{leaseMs:a.lease_ms}),subject,worker,connectionId);
     }
-    case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject)),guidance:store.guidanceFor(worker)}; }
+    case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject,workerWorkspaceEnabled)),guidance:store.guidanceFor(worker)}; }
     case 'ack_message': {const message=store.ackMessage(id(a.message_id,'message_id'),worker);log({kind:'message_acknowledged',message_id:message.message_id});return {kind:'message',message};}
     case 'progress': {
       const requestId=id(a.request_id),note=str(a.note,'note',4096),receipt=store.progress(requestId,id(a.claim_id,'claim_id'),note,subject,a.blocker===true,worker,null,commandContext('progress',{note,blocker:a.blocker===true}),connectionId);
@@ -820,13 +825,13 @@ async function dispatchTool(name,a,principal,notifyMeta) {
         let captureEvidence=null;
         if(!existing) {
           store.assertQuestionsResolved(requestId,claimId,a.outcome);
-          if(a.artifact_ids?.length) { if(!workspaceEnabled) throw new Error('capability_not_enabled'); store.assertSealedArtifacts(requestId,claimId,a.artifact_ids); }
+          if(a.artifact_ids?.length) { if(!workerWorkspaceEnabled) throw new Error('capability_not_enabled'); store.assertSealedArtifacts(requestId,claimId,a.artifact_ids); }
           const request=store.get(requestId);
-          if(workspaceEnabled) await workspace.makeRoom(requestId);
+          if(workerWorkspaceEnabled) await workspace.makeRoom(requestId);
           // Recheck after the last await. The evidence capture below runs inside the finish transaction, after finishOnce's own
           // connection check, so a patch artifact is never committed for a holder that lost the connection.
           workspaceFence();
-          if(workspaceEnabled&&request.status==='claimed'&&(request.assignment.execution_scope==='implementation'||request.assignment.output_paths?.length))
+          if(workerWorkspaceEnabled&&request.status==='claimed'&&(request.assignment.execution_scope==='implementation'||request.assignment.output_paths?.length))
             captureEvidence=onRollback=>workspace.snapshotInTransaction(requestId,claimId,subject,worker,onRollback);
           if(request.status==='claimed'&&request.assignment.execution_scope==='read-only') {
             const archiveWorkspace=workspace??new Workspace(store,false),snapshot=captureEvidence;
@@ -896,12 +901,14 @@ async function dispatch(message,principal) {
     default: throw Object.assign(new Error('method not found'),{code:-32601});
   }
 }
+const verifyService=builtinMode&&readEnv('DALAN_GOZAR_SERVICE')==='1'?createServiceVerifier():null;
 const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)=>{
   const outcome=req.url===publicPath?beginMcpOutcome(req,res,log,toolNames,!!oauth):null;
   try {
     if(loopback && !loopbackRequestAllowed(req, `http://127.0.0.1:${port}`)) { log({kind:'mcp_inbound',status:403,route:'loopback',ua:uaToken(req)}); res.writeHead(403); res.end(); return; }
-    // Built-in mode serves only its configured host, which also blocks DNS rebinding of the loopback listener.
-    if(as&&!as.hostOk(req)) { log({kind:'mcp_inbound',status:421,route:'host',ua:uaToken(req)}); res.writeHead(421); res.end(); return; }
+    // Both authentication modes serve only the configured public Host, including discovery and verifier routes.
+    if(as ? !as.hostOk(req) : oauth&&req.headers.host!==new URL(oauth.OAUTH_AUDIENCE).host) { log({kind:'mcp_inbound',status:421,route:'host',ua:uaToken(req)}); res.writeHead(421); res.end(); return; }
+    if(verifyService?.(req,res)) return;
     if(!as && req.url==='/.well-known/oauth-protected-resource' && oauthMetadata && req.method==='GET') return json(res,200,protectedResource(oauthMetadata));
     // RFC 9728 / MCP auth: clients first try metadata suffixed with the MCP path, whose resource is the exact MCP URL.
     if(req.url===`/.well-known/oauth-protected-resource${publicPath}` && oauthMetadata && req.method==='GET') { if(as)res.setHeader('Cache-Control','no-store'); log({kind:'mcp_inbound',status:200,route:'resource_metadata',http_method:req.method,auth_header_present:false,ua:uaToken(req)}); return json(res,200,protectedResource(oauthMetadata,new URL(publicPath,oauthMetadata.OAUTH_AUDIENCE).href)); }

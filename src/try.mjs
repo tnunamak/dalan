@@ -418,7 +418,7 @@ export async function runTry({ argv = [], env = process.env, out = process.stdou
     for (let attempt = 1; ; attempt++) {
       port = await pickPort({ requested: options.port, stored: storedPort, skip: tried });
       tried.add(port);
-      if (freshHome) await dalan(['init', '--worker', WORKER, '--public-url', `http://127.0.0.1:${port}`]);
+      if (freshHome) await dalan(['init', '--worker', WORKER, '--enable-workspace', '--public-url', `http://127.0.0.1:${port}`]);
       startServer();
       if (await waitForListening()) break;
       const logged = fs.readFileSync(logFile, 'utf8').trim();

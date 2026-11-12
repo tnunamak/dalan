@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 import './require-host-checks.mjs';
 import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import {spawn,spawnSync} from 'node:child_process';import {generateKeyPairSync,sign,randomUUID,createHash} from 'node:crypto';import http from 'node:http';
 const home=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-bridge-http-')),repo=path.join(home,'repo'),config=path.join(home,'.config/dot-bridge'),port=8801,jwksPort=8802,issuer=`http://127.0.0.1:${jwksPort}/realm`,aud='https://dot-bridge.example.test';fs.mkdirSync(repo);fs.mkdirSync(config,{recursive:true});

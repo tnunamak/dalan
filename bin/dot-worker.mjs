@@ -659,15 +659,16 @@ async function main() {
     // Built-in authorization server. init writes local files only (no running bridge needed); connect talks to the owner socket.
     case 'init': case 'as-init': {
       const publicUrl=option('--public-url'), legacy=args.includes('--legacy'), name=option('--worker'), profiled=command==='init';
-      const flagged=['--json','--public-url','--worker','--legacy'];
-      const usage='usage: dalan init --public-url https://HOST (--worker NAME | --legacy)';
+      const flagged=['--json','--public-url','--worker','--legacy','--enable-workspace'];
+      const usage='usage: dalan init --public-url https://HOST (--worker NAME [--enable-workspace] | --legacy)';
       if(!publicUrl||args.some((a,i)=>!flagged.includes(a)&&!['--public-url','--worker'].includes(args[i-1]))||(!profiled&&(legacy||name))) throw new Error(profiled?usage:'usage: dalan as-init --public-url https://HOST');
+      if(args.includes('--enable-workspace')&&(!profiled||legacy)) throw new Error('--enable-workspace requires init --worker NAME');
       if(profiled&&legacy&&name) throw new Error('init takes --worker NAME or --legacy, not both');
       if(profiled&&!legacy&&(!name||name.startsWith('--'))) throw new Error(`init needs --worker NAME to create the first worker profile (or --legacy for an older single-worker host); ${usage}`);
       const config=defaultPath(home,'.config/dot-bridge'), workersFile=path.join(config,'workers.json');
       if(profiled&&!legacy) { parseWorkers({workers:{[name]:{}}},{builtin:true}); if(fs.existsSync(workersFile)) throw new Error(`${workersFile} already exists; init does not overwrite a worker profile`); }
       result=initAsFiles(config,{publicUrl,loopback:readEnv('DALAN_LOOPBACK')==='1',allowHttp:process.env.NODE_ENV!=='production'&&readEnv('DALAN_TEST_OAUTH')==='1'});
-      if(profiled&&!legacy) result={...result,workers_profile:{file:writeGenericProfile(workersFile,name),worker:name,default_execution:'none'}};
+      if(profiled&&!legacy) result={...result,workers_profile:{file:writeGenericProfile(workersFile,name,{workspaceAllowed:args.includes('--enable-workspace')}),worker:name,default_execution:'none'}};
       else if(profiled) { writeLegacyMarker(config); result={...result,workers_profile:null,legacy_profile:path.join(config,'legacy-profile')}; console.error('dalan: --legacy wrote no workers.json; it wrote a legacy-profile marker so the server starts in legacy mode. Legacy mode (implicit default worker, t3 capability, host execution) is for older single-worker hosts; new hosts should use --worker NAME.'); }
       break;
     }

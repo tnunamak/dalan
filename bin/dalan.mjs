@@ -24,6 +24,9 @@ if (help) {
   await (await import('../src/mcp-stdio.mjs')).main();
 } else if (process.argv[2] === 'setup') {
   await (await import('../src/setup.mjs')).main();
+} else if (process.argv[2] === 'service') {
+  try { await (await import('../src/service.mjs')).serviceMain(process.argv.slice(3)); }
+  catch (error) { process.stderr.write(`dalan: service: ${error.message}\n`); process.exitCode = 1; }
 } else if (process.argv[2] === 'try') {
   await (await import('../src/try.mjs')).main();
 } else {
