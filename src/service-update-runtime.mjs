@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { defaultPath } from './paths.mjs';
+import { initAsFiles } from './as-files.mjs';
 
 const PACKAGE = '@tnunamak/dalan';
 const PUBLIC_REGISTRY = 'https://registry.npmjs.org';
@@ -162,18 +163,20 @@ function checkLoopback(port, timeout = 1500) {
   });
 }
 
-function copyAllowedConfig(from, to) {
+// The candidate runs before promotion and may be incompatible or hostile. It receives configuration shape (workers, public origin)
+// but never a live secret: signing keys, cookie keys, the storage key and the operator key are generated fresh for each probe.
+function prepareProbeConfig(from, to) {
   const source = defaultPath(from, '.config/dot-bridge'), target = defaultPath(to, '.config/dot-bridge');
   fs.mkdirSync(target, { recursive: true, mode: 0o700 });
-  for (const name of ['workers.json', 'workers-repos.json', 'as.json', 'as-jwks.json', 'as-cookie-keys.json', 'as-storage.key']) {
+  for (const name of ['workers.json', 'workers-repos.json']) {
     const a = path.join(source, name); if (!fs.existsSync(a)) continue;
     const stat = fs.lstatSync(a); if (!stat.isFile() || stat.isSymbolicLink()) continue;
     fs.copyFileSync(a, path.join(target, name), fs.constants.COPYFILE_EXCL); fs.chmodSync(path.join(target, name), stat.mode & 0o777);
   }
-  fs.copyFileSync(defaultPath(from, '.config/dot-bridge', 'operator.key'), defaultPath(to, '.config/dot-bridge', 'operator.key'), fs.constants.COPYFILE_EXCL);
-  fs.chmodSync(defaultPath(to, '.config/dot-bridge', 'operator.key'), 0o600);
   const origin = JSON.parse(fs.readFileSync(path.join(source, 'as.json'), 'utf8'));
+  initAsFiles(target, { publicUrl: origin.public_url });
   fs.writeFileSync(path.join(target, 'as.json'), JSON.stringify({ ...origin, public_url: origin.public_url }), { mode: 0o600 });
+  fs.writeFileSync(path.join(target, 'operator.key'), `${randomBytes(32).toString('hex')}\n`, { mode: 0o600 });
 }
 
 async function stopChild(child) {
@@ -216,7 +219,7 @@ export async function probeCandidate(home, receipt, repo, options = {}) {
   fs.chmodSync(scratch, 0o700);
   let child;
   try {
-    copyAllowedConfig(home, scratch);
+    prepareProbeConfig(home, scratch);
     const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: scratch, NODE_ENV: 'production', DALAN_AUTH_MODE: 'builtin', DALAN_BIND_HOST: '127.0.0.1', DALAN_PORT: '0', DALAN_CATALOG_PROFILE: 'stable', DALAN_ENABLE_WORKSPACE: receipt.enable_workspace ? '1' : '0', DALAN_ENABLE_T3_TOOLS: receipt.enable_t3 ? '1' : '0' };
     const configDir = defaultPath(scratch, '.config/dot-bridge');
     const pinFile = path.join(configDir, 'service-catalog.json');

@@ -211,7 +211,6 @@ const protocolServices=catalogProfile==='protocol-v0'?createProtocolServices(sto
 const iconBytes=fs.readFileSync(new URL('../docs/t3-connector-icon.png',import.meta.url));
 const iconSource=`data:image/png;base64,${iconBytes.toString('base64')}`;
 if(Buffer.byteLength(iconSource)>10000) throw new Error('server icon exceeds 10 KB');
-const serverInfo={name:catalogProfile==='legacy-v46'?'dot-bridge':'dalan',version:catalogProfile==='legacy-v46'?'0.2.0':'0.6.1',icons:[{src:iconSource,mimeType:'image/png',sizes:['128x128']}]};
 const packageVersion=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 const serverInfo={name:catalogProfile==='legacy-v46'?'dot-bridge':'dalan',version:catalogProfile==='legacy-v46'?'0.2.0':packageVersion,icons:[{src:iconSource,mimeType:'image/png',sizes:['128x128']}]};
 // A quiet-delivery job in profile mode has no T3 thread; its response must not carry the T3 fields. Legacy profile keeps them.

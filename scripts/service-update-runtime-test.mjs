@@ -106,9 +106,18 @@ try {
   fs.writeFileSync(path.join(isolatedConfig, 'workers.json'), JSON.stringify({ workers: { codex: { repos: [] }, claude: { repos: [] } } }), { mode: 0o600 });
   initAsFiles(isolatedConfig, { publicUrl: 'https://service-check.example.test' });
   fs.writeFileSync(path.join(isolatedConfig, 'operator.key'), 'isolated-operator-key\n', { mode: 0o600 });
+  fs.writeFileSync(path.join(isolatedConfig, 'as-storage.key'), Buffer.from('LIVE-STORAGE-KEY-0123456789abcde'), { mode: 0o600 });
+  // Production secrets must never reach a candidate: record every byte it can read in its scratch HOME at each spawn.
+  const liveSecrets = ['as-jwks.json', 'as-cookie-keys.json', 'as-storage.key', 'operator.key'].map(name => ({ name, bytes: fs.readFileSync(path.join(isolatedConfig, name)) }));
+  const scratchReadable = [];
+  const recordScratch = home => {
+    const walk = dir => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) { const file = path.join(dir, entry.name); entry.isDirectory() ? walk(file) : scratchReadable.push(fs.readFileSync(file)); } };
+    walk(home);
+  };
   let unauthorizedStatus = null, unauthorizedError = null, unauthorizedCheck = Promise.resolve(), candidateStarts = 0;
   const candidateSpawn = (command, args, options) => {
     candidateStarts++;
+    recordScratch(options.env.HOME);
     const child = spawn(command, args, options);
     if (candidateStarts === 1) return child;
     unauthorizedCheck = (async () => {
@@ -128,6 +137,13 @@ try {
   const probe = await probeCandidate(isolated, { node: process.execPath, enable_workspace: true, enable_t3: true }, fileURLToPath(new URL('..', import.meta.url)), { spawn: candidateSpawn });
   await unauthorizedCheck;
   assert.equal(probe.self_check, true);
+  assert.ok(candidateStarts >= 2 && scratchReadable.length > 0, 'the candidate scratch HOME was inspected at every spawn');
+  // Compare distinguishing material (key ids, private values, whole raw keys), not the JSON framing that every key file shares.
+  for (const secret of liveSecrets) {
+    const tokens = secret.name.endsWith('.json') ? [...secret.bytes.toString('utf8').matchAll(/[A-Za-z0-9_-]{20,}/g)].map(match => Buffer.from(match[0])) : [Buffer.from(secret.bytes.toString('latin1').trim(), 'latin1')];
+    assert.ok(tokens.length > 0);
+    for (const token of tokens) assert.ok(!scratchReadable.some(bytes => bytes.includes(token)), `candidate scratch HOME exposes production ${secret.name}`);
+  }
   assert.deepEqual(Object.keys(probe.catalogs).sort(), ['claude', 'codex']);
   assert.equal(unauthorizedError, null);
   assert.ok(unauthorizedStatus !== null && unauthorizedStatus !== 200, `wrong operator key returned ${unauthorizedStatus}`);
