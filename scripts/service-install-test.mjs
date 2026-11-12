@@ -120,6 +120,18 @@ try {
   assert.equal(fs.lstatSync(path.join(worktree, 'repo-link')).isSymbolicLink(), true, 'repository symlinks inside a workspace are not treated as service-home aliases');
 
   const runtimeInstallState = privateState(home);
+  const askpassFile = generatedRuntime.askpass;
+  fs.chmodSync(askpassFile, 0o600);
+  await assert.rejects(retryServiceInstall(), /must be a private regular Dalan file/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'unsafe runtime helper mode refusal preserves service state');
+  fs.chmodSync(askpassFile, 0o700);
+  const savedAskpass = path.join(root, 'saved-askpass');
+  fs.renameSync(askpassFile, savedAskpass);
+  fs.symlinkSync(savedAskpass, askpassFile);
+  await assert.rejects(retryServiceInstall(), /must be a private regular Dalan file/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'runtime helper symlink refusal preserves service state');
+  fs.rmSync(askpassFile);
+  fs.renameSync(savedAskpass, askpassFile);
 
   const unrelatedScratch = path.join(home, '.tmp/other');
   fs.mkdirSync(unrelatedScratch, { mode: 0o700 });
