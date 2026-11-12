@@ -1237,7 +1237,7 @@ test('a real route reuses one home per client, so its address and sign-in surviv
       const run = await hostedRun(name, { noHome: true, route, providers: [unreadyTailscale('x'), fakeRoute().provider] });
       for (let waited = 0; !run.errorContext.home && waited < 5000; waited += 20) await sleepMs(20);
       if (!route) await run.close(); else await run.finished;
-      assert.ok(run.errorContext.home, 'the home is chosen before anything else happens');
+      assert.ok(run.errorContext.home, `the home is chosen before anything else happens: ${(await run.finished).error?.message}`);
       homes.push(run.errorContext.home);
     }
     assert.equal(homes[0], homes[1]);
