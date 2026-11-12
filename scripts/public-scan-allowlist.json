@@ -7,7 +7,7 @@
 
   {"rule": "worker-nickname", "token": "dot-bridge|dot-worker|dot-deadman|dot-heartbeat|dot-alert|dot-acp|dot-pr-reviewer|dot-launcher", "reason": "Legacy install paths, systemd units, executable aliases, environment-file names, OAuth scope names and stored format labels that existing installs depend on."},
   {"rule": "worker-nickname", "token": "dot-(decision|build|context|fix|apply|host)", "reason": "Literal protocol markers and stored labels that older clients and databases use."},
-  {"rule": "worker-nickname", "path": "^src/workspace\\.mjs$", "token": "dot-last-used", "reason": "Marker file inside repository mirrors that existing installs already hold; mirror eviction reads it by this name."},
+  {"rule": "worker-nickname", "path": "^(src/workspace\\.mjs|scripts/workspace-inspection-cleanup-test\\.mjs)$", "token": "dot-last-used", "reason": "Marker file inside repository mirrors that existing installs already hold; mirror eviction and its cleanup regression fixture use this exact name."},
   {"rule": "worker-nickname", "path": "\\.(mjs|py|json)$", "line": "['\"`]dot['\"`]", "reason": "The legacy first-worker name `dot`. Databases made before 0.4.0 store it and the bridge maps it; code and tests name it literally."},
   {"rule": "worker-nickname", "path": "\\.md$", "line": "['\"`]dot['\"`]", "reason": "Docs name the legacy first-worker value `dot`: the default worker of an install with no workers.json, the value older databases store, and the value in rollback SQL."},
   {"rule": "worker-nickname", "path": "^docs/operations\\.md$", "line": "older rows may carry `dot:<subject>`|`dot_breaks`|skipped_by_dot_at", "reason": "Migration notes name the legacy actor prefix and the table and column names that schema 65 renamed."},
