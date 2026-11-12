@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/tnunamak/dalan/src/client-conveniences.schema.json",
+  "title": "Dalan client conveniences",
+  "description": "Display-only hints for known MCP clients: curated name, icon, setup steps and an optional install link. Nothing in this file selects, allows or denies any client; it holds no auth settings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "clients"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "clients": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/definitions/client" }
+    }
+  },
+  "definitions": {
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "icon", "verifiedRedirectOrigins", "deepLink", "setupHints", "evidence"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 .+_-]{0,59}$" },
+        "icon": {
+          "description": "Inline data: image or a local icons/ path. Never a remote URL.",
+          "type": "string",
+          "maxLength": 20000,
+          "pattern": "^(?:data:image/(?:png|svg\\+xml|webp|jpeg|gif);base64,[A-Za-z0-9+/]+={0,2}|icons/[a-z0-9][a-z0-9._-]*\\.(?:png|svg|webp))$"
+        },
+        "verifiedRedirectOrigins": {
+          "description": "Exact HTTPS origins only: no path, port 443, credentials, query, fragment, wildcard, regex, IP address or localhost.",
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/httpsOrigin" }
+        },
+        "deepLink": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/deepLink" }]
+        },
+        "setupHints": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/definitions/hint" }
+        },
+        "evidence": { "$ref": "#/definitions/evidence" }
+      }
+    },
+    "httpsOrigin": {
+      "type": "string",
+      "maxLength": 262,
+      "pattern": "^https://(?!\\d+\\.\\d+\\.\\d+\\.\\d+(?::|$))(?![^:]*:443$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?$"
+    },
+    "deepLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["template", "encoding", "sourceUrl", "checkedAt"],
+      "properties": {
+        "template": {
+          "description": "App-scheme URL. The only placeholders are {endpoint}, {name} and {config}. Web schemes are refused because they would send the endpoint to a remote server.",
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^(?!(?:https?|javascript|data|file|vbscript|blob|ftp|wss?):)(?=.*\\{(?:endpoint|name|config)\\})[a-z][a-z0-9+.-]*:(?:[^\\s{}$]|\\{(?:endpoint|name|config)\\})*$"
+        },
+        "encoding": { "enum": ["url-component", "base64-json"] },
+        "sourceUrl": { "$ref": "#/definitions/sourceUrl" },
+        "checkedAt": { "$ref": "#/definitions/isoDate" }
+      }
+    },
+    "hint": {
+      "description": "Plain text. No markup, control characters, links, or words that suggest credentials.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "pattern": "^(?!.*://)(?!.*(?:[Aa]uthorization|AUTHORIZATION|[Bb]earer|BEARER|[Tt]oken|TOKEN|[Ss]ecret|SECRET|[Pp]assword|PASSWORD))[^\\u0000-\\u001f\\u007f<>\\[\\]`]+$"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceUrl", "checkedAt", "runtimeTested"],
+      "properties": {
+        "sourceUrl": { "$ref": "#/definitions/sourceUrl" },
+        "checkedAt": { "$ref": "#/definitions/isoDate" },
+        "runtimeTested": { "type": "boolean" }
+      }
+    },
+    "sourceUrl": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^https://[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[^\\s]*)?$"
+    },
+    "isoDate": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$"
+    }
+  }
+}

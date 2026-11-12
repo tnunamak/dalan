@@ -1,6 +1,6 @@
 # Claude cloud worker: manual first connection
 
-This recipe connects a Claude-hosted conversation to the bridge's built-in authorization server through a remote MCP custom connector. It is not Claude Code's local MCP/requester flow or a Messages API integration. Start with **one repository-free text assignment, execution none, triggered manually**. Do not enable a schedule, hosted background feature or signal hook for the first smoke.
+This recipe connects a Claude-hosted conversation to the bridge's built-in authorization server through a remote MCP custom connector. Dalan's flow is generic: any MCP client that supports OAuth with Dynamic Client Registration (DCR) and PKCE can connect, and the owner approves it by matching the code. The Claude steps here are optional vendor notes. It is not Claude Code's local MCP/requester flow or a Messages API integration. Start with **one repository-free text assignment, execution none, triggered manually**. Do not enable a schedule, hosted background feature or signal hook for the first smoke.
 
 For a new hosted-worker installation, begin with [Run Dalan as a service](service-setup.md#owner-setup), using a public HTTPS origin and your selected worker `NAME`. A provider-hosted connector cannot reach the README's loopback trial. Install the checkout using [owner and requester setup](manual-setup.md#owner-and-requester-setup), then follow the service guide rather than starting the loopback server. Keep the service's bridge home and worker identity throughout pairing, submission and result retrieval.
 
@@ -14,7 +14,7 @@ The owner completes the setup and first-job checks below on the intended account
 - Supply the public **HTTPS resource URL** from the private `<bridge-home>/resource-url` file, including its secret path and `/mcp`. Do not use the origin, an OAuth endpoint or localhost. Claude's remote connector traffic originates from Anthropic infrastructure, even when the UI is on a local device. [Network requirements](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp#network-requirements)
 - Prefer public HTTPS port 443 as a simple trial default, not an asserted Claude port restriction. Have the owner verify path-suffixed resource/authorization discovery (200), tokenless MCP (401), and unsuffixed discovery/root/`/admin` (404) from outside the private network. The [public-surface checker](https://github.com/tnunamak/dalan/blob/main/scripts/live-trial/README.md#3-verify-from-outside-the-tailnet) consumes a private resource-file value; do not reuse an unrelated example job.
 
-## 2. Allow the sourced callback, then choose registration
+## 2. Check the redirect, then choose registration
 
 Anthropic documents this exact callback for hosted Claude surfaces:
 
@@ -22,20 +22,21 @@ Anthropic documents this exact callback for hosted Claude surfaces:
 https://claude.ai/api/mcp/auth_callback
 ```
 
-Claude Code uses a different loopback flow; do not weaken the bridge's HTTPS callback policy to accommodate it in this cloud-worker recipe. [Official callback URLs](https://claude.com/docs/connectors/building/authentication#callback-urls)
+Claude Code uses a different loopback flow with a changing port; this cloud-worker recipe does not cover it. [Official callback URLs](https://claude.com/docs/connectors/building/authentication#callback-urls)
 
-On the bridge host, **before registration**:
+No callback list needs editing. On the bridge host, open the pairing window **before** you start the connection in Claude:
 
 ```sh
-dalan connect allow-callback 'https://claude.ai/api/mcp/auth_callback'
 dalan connect start --worker NAME
 ```
+
+When Claude registers, compare the redirect in the pending attempt with the value above. A curated Claude name and icon appear only when the redirect's exact origin is `https://claude.ai`; a lookalike host, another port or plain HTTP shows only the generic label. The label is a convenience and never replaces the code match.
 
 The current custom-connector UI distinguishes automatic registration, a published Client ID Metadata Document (CIMD), and a supplied OAuth client. Choose **Register automatically** for this Dynamic Client Registration (DCR) recipe, not the published-identity default simply because it is recommended in the UI. [Connector setup](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 
 DCR discovers `registration_endpoint` and creates the client. A static OAuth client requires the owner to register the exact redirect first and supply the matching client ID/authentication credentials; it is not a static request-header token. CIMD is another identity method, not DCR. [Claude authentication](https://claude.com/docs/connectors/building/authentication#register-claude-as-an-oauth-client)
 
-This recipe covers automatic client registration; other registration methods need separate instructions from the owner. If automatic registration is absent or fails, stop and ask for an owner-validated variant; do not invent client credentials, switch to no-auth, add bearer headers, change issuers or broaden callback patterns. Verify a differing callback against current official hosted-surface documentation before making any allowlist change.
+This recipe covers automatic client registration; other registration methods need separate instructions from the owner. If automatic registration is absent or fails, stop and ask for an owner-validated variant; do not invent client credentials, switch to no-auth, add bearer headers or change issuers. If the redirect differs from the documented hosted-surface value, do not approve; verify it against current official documentation first.
 
 ## 3. Add, pair and inspect the connector
 

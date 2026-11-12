@@ -1,6 +1,6 @@
 # ChatGPT cloud worker: manual first connection
 
-This recipe is for a ChatGPT-hosted worker using a remote MCP connector with the bridge's built-in authorization server. It is not a Codex CLI requester setup, an API integration, or a claim that every paid account can run an unattended worker. The first acceptance test is **one repository-free text assignment, execution none, triggered manually**. No schedule or signal hook is part of onboarding.
+This recipe is for a ChatGPT-hosted worker using a remote MCP connector with the bridge's built-in authorization server. Dalan's flow is generic: any MCP client that supports OAuth with Dynamic Client Registration (DCR) and PKCE can connect, and the owner approves it by matching the code. The ChatGPT steps here are optional vendor notes. It is not a Codex CLI requester setup, an API integration, or a claim that every paid account can run an unattended worker. The first acceptance test is **one repository-free text assignment, execution none, triggered manually**. No schedule or signal hook is part of onboarding.
 
 The owner completes the setup and first-job checks below on the intended account and computer. The commands below are for a separately authorized operator.
 
@@ -12,9 +12,9 @@ The owner completes the setup and first-job checks below on the intended account
 - Use the existing public **HTTPS resource URL**, including its secret path and `/mcp`, from `<bridge-home>/resource-url` (mode 0600); never substitute the host root or an authorization endpoint. Prefer standard public port 443 for the trial. This is a conservative deployment choice, not a claim that OpenAI forbids other ports. OpenAI documents public HTTPS and authentication discovery for this path. [Endpoint requirements](https://developers.openai.com/plugins/deploy/connect-chatgpt#prepare-the-endpoint)
 - Before account linking, have the owner verify the public surface from outside the private network: path-suffixed resource/authorization discovery returns 200; tokenless MCP returns 401; unsuffixed discovery, root and `/admin` return 404. The existing [live-trial public check](https://github.com/tnunamak/dalan/blob/main/scripts/live-trial/README.md#3-verify-from-outside-the-tailnet) reads the resource URL from a private file. Reuse its check, but not its job: that job is not this smoke.
 
-## 2. Resolve the exact callback before registration
+## 2. Check the redirect before approval
 
-**Do not paste a callback template.** OpenAI directs operators to copy the exact production redirect URI from the MCP server's management page. Current documentation distinguishes callback-ID-specific `https://chatgpt.com/connector/oauth/{callback_id}` from stable `https://chatgpt.com/connector_platform_oauth_redirect`; stable selection depends on issuer-identification support, with an older-server exception. This recipe does not assume which mode the pinned bridge will select. [Redirect rules](https://developers.openai.com/plugins/build/auth#redirect-url)
+**Do not paste a callback template, and do not edit any callback list.** The bridge accepts a structurally valid HTTPS redirect from a registering client and shows you the full redirect when you approve. Your job is to compare it. OpenAI directs operators to the exact production redirect shown on the MCP server's management page. Current documentation distinguishes callback-ID-specific `https://chatgpt.com/connector/oauth/{callback_id}` from stable `https://chatgpt.com/connector_platform_oauth_redirect`; stable selection depends on issuer-identification support, with an older-server exception. This recipe does not assume which mode the pinned bridge will select. [Redirect rules](https://developers.openai.com/plugins/build/auth#redirect-url)
 
 The same source documents protected-resource discovery, Dynamic Client Registration (DCR) through `registration_endpoint`, and Client ID Metadata Documents (CIMD) as a different client-identity path. DCR registers a client; CIMD does not. A predefined/static OAuth client instead requires an already registered ID and matching client-authentication method. A static client secret is not a bearer token. [OAuth/client registration](https://developers.openai.com/plugins/build/auth#oauth-flow)
 
@@ -22,19 +22,15 @@ For this built-in recipe, use DCR only if offered and compatible. This recipe co
 
 Owner sequence:
 
-1. For a normal first connection, follow [Connect ChatGPT](connect-chatgpt.md). Fresh initialization includes the documented ChatGPT callback patterns. If you need to add a callback to an existing installation, obtain the complete redirect from ChatGPT's connection settings or current official instructions before adding it. If you cannot establish the exact value, stop rather than guessing.
-2. Verify HTTPS, exact vendor host and full path, including any connection-specific suffix. The bridge refuses callback queries, fragments and credentials. The `as_registration_refused` log records no callback details; it is not a callback source. [Bridge callback handling](https://github.com/tnunamak/dalan/blob/main/scripts/live-trial/README.md#4-pair-fixture-a-and-allow-its-callback)
-3. On the bridge host, allow that value **before DCR**, then open the short pairing window:
+1. For a normal first connection, follow [Connect ChatGPT](connect-chatgpt.md). Open the short pairing window on the bridge host:
 
    ```sh
-   printf 'Exact verified ChatGPT callback: '
-   IFS= read -r CALLBACK_URL
-   dalan connect allow-callback "$CALLBACK_URL"
-   unset CALLBACK_URL
    dalan connect start --worker NAME
    ```
 
-If the callback differs from the source or the bridge rejects it, stop; do not broaden the allowlist or change auth mode. Record the callback that ChatGPT showed so you can check the allowlist against it later.
+2. When ChatGPT registers, read the redirect in the pending attempt. Check HTTPS, the exact host `chatgpt.com` and the full path, including any connection-specific suffix. A curated ChatGPT name or icon appears only when the redirect's exact origin is `https://chatgpt.com`; a lookalike host, another port or plain HTTP shows only the generic label. The label is a convenience and never a reason to approve. The bridge refuses callback queries that change the redirect, fragments and credentials. The `as_registration_refused` log records no callback details; it is not a callback source. [Bridge callback handling](https://github.com/tnunamak/dalan/blob/main/scripts/live-trial/README.md#4-pair-fixture-a-and-allow-its-callback)
+
+If the redirect differs from what ChatGPT showed, do not approve; restart the connection. Record the redirect that ChatGPT showed so you can compare it with the pending attempt.
 
 ## 3. Add, pair and inspect the connector
 
@@ -48,7 +44,7 @@ During the owner-initiated browser flow:
 dalan connect pending
 ```
 
-Compare the browser pairing code **exactly** with the local pending code. Check the expected worker, client ID, full callback, resource and scopes; a familiar client name or vendor callback does not establish which account initiated the flow. Approve only the matching code, within the 10-minute window:
+Compare the browser pairing code **exactly** with the local pending code. Check the expected worker, client ID, full callback, resource and scopes; a familiar client name, curated label or vendor redirect does not establish which account initiated the flow. Approve only the matching code, within the 10-minute window:
 
 ```sh
 dalan connect approve CODE --worker NAME
@@ -105,7 +101,7 @@ Confirm that the job's status is `finished` and its report outcome is `completed
 
 ## 5. Limits and owner acceptance record
 
-Keep a redacted ledger with date, account/workspace feature availability, bridge commit, worker profile, public-surface results, exact callback **source**, chosen registration method, matching-code result, displayed tool names/schema, request ID, manual trigger time, claim/finish result and owner `get` result. Keep resource URLs, private URLs, codes, claim/acquisition IDs, tokens and client secrets out of shared evidence.
+Keep a redacted ledger with date, account/workspace feature availability, bridge commit, worker profile, public-surface results, exact redirect **source**, chosen registration method, matching-code result, displayed tool names/schema, request ID, manual trigger time, claim/finish result and owner `get` result. Keep resource URLs, private URLs, codes, claim/acquisition IDs, tokens and client secrets out of shared evidence.
 
 Do not mark the journey accepted until the owner completes every required check on the intended account and computer. This recipe covers manual jobs with Dynamic Client Registration on ChatGPT web. Other registration methods, mobile or older UI variants, long-lived refresh and unattended wake need separate setup instructions.
 
