@@ -60,7 +60,7 @@ try {
     const breakId = insertBreak(old.db);
     old.db.close();
     const upgraded = new Store(file);
-    assert.equal(upgraded.db.prepare('PRAGMA user_version').get().user_version, 65);
+    assert.equal(upgraded.db.prepare('PRAGMA user_version').get().user_version, 66);
     assert.deepEqual(rows(upgraded.db, 'SELECT request_id, target_worker FROM assignments ORDER BY request_id'),
       [{ request_id: 'req_old_1', target_worker: 'dot' }, { request_id: 'req_old_2', target_worker: 'dot' }], 'rows from before schema 35 keep the one worker they had');
     assert.deepEqual(rows(upgraded.db, 'SELECT message_id, target_worker FROM messages'), [{ message_id: 'msg_old_1', target_worker: 'dot' }]);
@@ -82,7 +82,7 @@ try {
       PRAGMA writable_schema=OFF;`);
     raw.close();
     const old = new Store(file);
-    old.db.exec('ALTER TABLE worker_breaks RENAME TO dot_breaks; ALTER TABLE assignments RENAME COLUMN skipped_at TO skipped_by_dot_at; PRAGMA user_version=62;');
+    old.db.exec('DROP TABLE policy_work_orders; ALTER TABLE worker_breaks RENAME TO dot_breaks; ALTER TABLE assignments RENAME COLUMN skipped_at TO skipped_by_dot_at; PRAGMA user_version=62;');
     assert.match(old.db.prepare("SELECT sql FROM sqlite_master WHERE name='assignments'").get().sql, /target_worker TEXT NOT NULL DEFAULT 'dot'/, 'fixture carries the earlier default');
     insertAssignment(old.db, 'req_dot', 'dot', AT);
     insertAssignment(old.db, 'req_acme', 'acme');
@@ -91,7 +91,7 @@ try {
     const breakId = insertBreak(old.db);
     old.db.close();
     const upgraded = new Store(file);
-    assert.equal(upgraded.db.prepare('PRAGMA user_version').get().user_version, 65);
+    assert.equal(upgraded.db.prepare('PRAGMA user_version').get().user_version, 66);
     assert.deepEqual(rows(upgraded.db, 'SELECT request_id, target_worker, skipped_at FROM assignments ORDER BY request_id'),
       [{ request_id: 'req_acme', target_worker: 'acme', skipped_at: null }, { request_id: 'req_dot', target_worker: 'dot', skipped_at: AT }], 'each row keeps its worker');
     assert.deepEqual(rows(upgraded.db, 'SELECT message_id, target_worker FROM messages ORDER BY message_id'), [{ message_id: 'msg_acme', target_worker: 'acme' }, { message_id: 'msg_dot', target_worker: 'dot' }]);

@@ -16,7 +16,7 @@ try {
   const s=new Store(path.join(home,'bridge.db'),{now:()=>now,capacity:2,limits});
   const ws=new Workspace(s,false);
   s.submit({schema_version:1,request_id:'req_prov',brief:'provenance',inputs:[],expected_output:'one',execution_scope:'read-only'},{mode:'none'},'','owner');
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66);
   const one=s.claim('req_prov','worker-a','sub-a',2), bytes=Buffer.from('sealed by epoch one');
   ws.chunk('req_prov',one.claim_id,'sub-a','art_provenance01',0,bytes.toString('base64'),true,createHash('sha256').update(bytes).digest('hex'));
   let [a]=s.sealedUploads('req_prov',{clientIds:true});

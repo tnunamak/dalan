@@ -25,7 +25,7 @@ function add(n, { kind = 'review', finishedAt = new Date(t0).toISOString() } = {
 const events = (n, type) => db.prepare('SELECT reason FROM lifecycle_events WHERE request_id=? AND type=? ORDER BY id').all(rid(n), type).map(e => e.reason);
 const rowsOf = n => db.prepare('SELECT decision,actor,via FROM decisions WHERE request_id=? ORDER BY id').all(rid(n)).map(r => ({ ...r }));
 
-assert.equal(db.prepare('PRAGMA user_version').get().user_version,65);
+assert.equal(db.prepare('PRAGMA user_version').get().user_version,66);
 assert.deepEqual(decisionTypes, ['accepted', 'applied', 'useful_no_change', 'useful_negative', 'not_useful', 'stale']);
 for (let n = 1; n <= 12; n++) add(n, { kind: n <= 6 ? 'review' : 'build' });
 
@@ -141,7 +141,7 @@ for (const version of [42, 43]) {
   assert.deepEqual(s.db.prepare('PRAGMA foreign_key_check').all(), []);
   assert.equal(s.latestDecision('orphan').decision, 'accepted', 'read-only legacy projection remains unchanged');
   assert.deepEqual(projectionRows(s.db), expectedHistory, 'upgrade must persist the existing legacy projection');
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.equal(s.latestDecision('history').decision, 'not_useful', 'source ID order, not timestamp order, determines latest');
   assert.equal(s.latestDecision('unknown'), null, 'read/completion/integration do not imply a decision');
   assert.equal(s.ownerInbox('history').decision, 'not_useful');

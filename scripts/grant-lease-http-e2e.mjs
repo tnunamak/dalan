@@ -76,7 +76,7 @@ try {
   side.submit(payload(defaultId),{mode:'none'},null,'owner');
   await tool('claim',{request_id:defaultId,claimant:'default-holder'});
   assert.equal(side.db.prepare('SELECT lease_ms FROM claims WHERE request_id=?').get(defaultId).lease_ms,60000,'omitted duration did not use configured default');
-  assert.equal(side.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(side.db.prepare('PRAGMA user_version').get().user_version,66);
   console.log('grant-lease-http-e2e ok: real HTTP expiry, invalid requests, shorter rival, retry retention, default and cap');
 } finally {
   try { side?.db.close(); } catch {}

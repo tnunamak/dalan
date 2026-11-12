@@ -209,7 +209,7 @@ try {
     const before=snapshot();
     s.db.exec('DROP TABLE destination_blocks; DROP TABLE destination_approvals; ALTER TABLE claims DROP COLUMN connection_id; ALTER TABLE claims DROP COLUMN destination_revision; ALTER TABLE assignments DROP COLUMN expiry_requeues; PRAGMA user_version=58;');s.db.close();
     s=new Store(file,{now:()=>now,limits});
-    assert(s.db.prepare('PRAGMA user_version').get().user_version===65&&snapshot()===before,'F6 v58 rows changed');
+    assert(s.db.prepare('PRAGMA user_version').get().user_version===66&&snapshot()===before,'F6 v58 rows changed');
     assert(s.db.prepare('SELECT expiry_requeues FROM assignments').all().every(r=>r.expiry_requeues===0),'F6 existing rows not initialized');
     s.progress('mg_claimed',c.claim_id,'claim survived migration','local-principal');s.db.close();
     s=new Store(file,{now:()=>now,limits});assert(s.get('mg_queued').expiry_requeues===0&&s.get('mg_finished').report.outcome==='completed','F6 reopen lost data');s.db.close();
@@ -219,7 +219,7 @@ try {
   // migration 59 on a fresh database: column present, existing rows default to 0.
   {
     const s=fresh('migration');
-    assert(s.db.prepare('PRAGMA user_version').get().user_version===65,'schema 65 after migration 59');
+    assert(s.db.prepare('PRAGMA user_version').get().user_version===66,'schema 66 after migration 59');
     assert(s.db.prepare("SELECT name FROM pragma_table_info('assignments') WHERE name='expiry_requeues'").get(),'expiry_requeues column missing');
     s.submit(payload('mg_job',iso(now+HOUR)),{mode:'none'},'','owner');
     assert(s.get('mg_job').expiry_requeues===0,'fresh row default: '+s.get('mg_job').expiry_requeues);

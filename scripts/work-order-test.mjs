@@ -91,7 +91,7 @@ try {
   dropEmptyPost54FixtureState(store.db);
   store.db.exec('ALTER TABLE assignments DROP COLUMN valid_until_source; PRAGMA user_version=44;'); store.db.close();
   const upgraded=new Store(path.join(home,'queue.db'),{now:()=>now,capacity:50,backgroundMaxInFlight:50});
-  assert.equal(upgraded.db.prepare('PRAGMA user_version').get().user_version,65); upgraded.migrate(); assert.equal(upgraded.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(upgraded.db.prepare('PRAGMA user_version').get().user_version,66); upgraded.migrate(); assert.equal(upgraded.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.equal(upgraded.db.prepare("SELECT name FROM pragma_table_info('assignments') WHERE name='valid_until_source'").get().name,'valid_until_source');
   assert.ok(upgraded.db.prepare('SELECT request_id,valid_until FROM assignments LIMIT 1').get());
   assert.equal(upgraded.db.prepare('SELECT valid_until_source FROM assignments WHERE valid_until IS NOT NULL LIMIT 1').get().valid_until_source,null,'historical deadline provenance remains NULL');

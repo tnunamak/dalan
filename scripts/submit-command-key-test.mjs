@@ -96,7 +96,7 @@ if(process.argv[2]==='--race-child') {
         await Promise.allSettled(children.map(child=>child.done));
       }
     }
-    assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65);
+    assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66);
     console.log('submit-command-key-test ok: exact durable receipt, intent and owner binding, legacy compatibility, atomic rollback, 12 concurrent SQLite writers');
   } finally { s.db.close(); fs.rmSync(root,{recursive:true,force:true}); }
 }

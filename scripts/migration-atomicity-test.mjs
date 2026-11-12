@@ -40,11 +40,11 @@ async function midMigrationFailure(name, file, seed) {
     assert.deepEqual(snapshot(db), before, 'failed migration must roll back every schema, attribution and version write');
     db.exec('DROP TABLE worker_calls_v35'); db.close(); db = null;
     current = new Store(file);
-    assert.equal(current.db.prepare('PRAGMA user_version').get().user_version, 65);
+    assert.equal(current.db.prepare('PRAGMA user_version').get().user_version, 66);
     assert.equal(current.get(payload.request_id).claim.claim_id, claim.claim_id);
     assert.equal(current.get(payload.request_id).assignment.brief, payload.brief);
     assert.doesNotThrow(() => current.progress(payload.request_id, claim.claim_id, 'continued after retry', 'subject'));
-    console.log(`PASS mid-DDL failure: ${name}: the schema-34 database and claim survive; a retry reaches schema 65 and continues the claim`);
+    console.log(`PASS mid-DDL failure: ${name}: the schema-34 database and claim survive; a retry reaches schema 66 and continues the claim`);
   } finally { db?.close(); current?.db.close(); }
 }
 try {
@@ -66,7 +66,7 @@ try {
     assert.equal(fixture.db.prepare("SELECT 1 FROM pragma_table_info('claims') WHERE name='connection_id'").get(), undefined,
       'schema-34 fixture must not retain the schema-61 connection column');
     fixture.migrate();
-    assert.equal(fixture.db.prepare('PRAGMA user_version').get().user_version,65);
+    assert.equal(fixture.db.prepare('PRAGMA user_version').get().user_version,66);
     assert.ok(fixture.db.prepare("SELECT 1 FROM pragma_table_info('claims') WHERE name='connection_id'").get(),
       'migration 61 recreates the connection column');
   } finally { fixture.db.close(); }

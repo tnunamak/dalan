@@ -207,7 +207,7 @@ try {
     s.db.close();
     now+=HOUR;
     s=open('backfill');
-    assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65);
+    assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66);
     const rows=s.db.prepare('SELECT * FROM lifecycle_events ORDER BY id').all();
     assert.ok(rows.every(e=>e.source==='backfill'&&e.actor==='system'),'backfilled rows not marked');
     assert.deepEqual(types(s,'req_b1'),['queued','claimed','working','waiting','completed','blocked','delivery_uncertain','reconciled','delivery_sent']);

@@ -143,7 +143,7 @@ function acquisitionRegressions() {
     migrating.db.close();
     const migrated=new Store(migratingFile,{workers,now:()=>now});
     try {
-      assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,65);
+      assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,66);
       assert.equal(migrated.get('req_legacy').claim.activity.acquisition_id,null);
       assert.equal(migrated.get('req_legacy').claim.claim_id,legacyClaim.claim_id);
       assert.equal(migrated.progress('req_legacy',legacyClaim.claim_id,'still valid','sub',false,'lark').recorded,true);

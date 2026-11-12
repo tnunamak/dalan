@@ -40,7 +40,7 @@ try {
     raw.close();
     now+=2*LEASE; // req_old_idle is far past its lease when the migration runs
     s=open('migrate');
-    assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65);
+    assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66);
     for(const [id,c] of [['req_old_fresh',fresh],['req_old_idle',idle]]) {
       const r=row(s,id);
       assert.equal(r.claim_id,c.claim_id,'migration changed a claim_id');assert.equal(r.epoch,1);assert.equal(r.state,'active');assert.equal(r.abandoned_at,null);
@@ -54,7 +54,7 @@ try {
     assert.equal(s.claims().find(c=>c.request_id==='req_old_idle').expired,false,'progress inside the lease extends it');
     assert.equal(s.claim('req_old_fresh','dot','subject_a',6).claim_id,fresh.claim_id,'pre-migration claim retry changed the claim_id');
     s.db.close();
-    s=open('migrate');assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65);s.db.close();
+    s=open('migrate');assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66);s.db.close();
   }
   pass('v19 migration keeps claim_ids valid at epoch 1, abandons nothing, reopens cleanly');
 

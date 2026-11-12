@@ -12,7 +12,7 @@ const subject='subject',worker='dot',owner='owner-capability';
 try{
  const open=()=>new Store(file,{now:()=>now});
  store=open();
- assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,65);
+ assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,66);
  const submit=p=>store.submit(p,{mode:'none'},null,owner,false,null,'normal',null,p,null,worker,'worker');
  const claim=(id,key,revision,acquisition='acquisition',lease=100,who=subject,w=worker)=>store.claim(id,'fixture',who,10,null,w,acquisition,lease,{key,revision});
  const row=id=>store.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id);

@@ -64,7 +64,7 @@ try {
   assert.equal(fs.existsSync(path.join(guardHome,'.config')),false,'refusal created key/config files');
   const nondefault=path.join(guardHome,'fixtures/nondefault.db');dbFixture(nondefault,0);
   const migrate=await run(['--input-type=module','-e',`import {Store} from ${JSON.stringify(path.join(root,'src/store.mjs'))}; new Store(${JSON.stringify(nondefault)}).db.close();`],{HOME:guardHome});
-  assert.equal(migrate.code,0,migrate.stderr);assert.equal(version(nondefault),65);
+  assert.equal(migrate.code,0,migrate.stderr);assert.equal(version(nondefault),66);
   for(const defaultIsSymlink of [true,false]) {
     const linkedHome=makeHome(),relocated=path.join(linkedHome,'relocated'),defaultLink=path.join(linkedHome,'.local/share/dot-bridge');
     fs.mkdirSync(path.dirname(defaultLink),{recursive:true});
@@ -81,7 +81,7 @@ try {
   const currentHome=makeHome(),currentDb=path.join(currentHome,'.local/share/dot-bridge/bridge.db');
   fs.mkdirSync(path.dirname(currentDb),{recursive:true});
   const current=await run(['--input-type=module','-e',`import {Store} from ${JSON.stringify(path.join(root,'src/store.mjs'))}; new Store(${JSON.stringify(currentDb)},{allowDefaultHomeMigration:true}).db.close(); new Store(${JSON.stringify(currentDb)}).db.close(); new Store(':memory:').db.close();`],{HOME:currentHome});
-  assert.equal(current.code,0,current.stderr);assert.equal(version(currentDb),65);
+  assert.equal(current.code,0,current.stderr);assert.equal(version(currentDb),66);
 
   const badKeysHome=makeHome(),badKeysConfig=path.join(badKeysHome,'.config/dot-bridge');
   initAsFiles(badKeysConfig,{publicUrl:'http://127.0.0.1:9',allowHttp:true});fs.chmodSync(asFiles(badKeysConfig).jwks,0o644);
@@ -97,7 +97,7 @@ try {
   let serviceOut='',serviceErr='';service.stdout.setEncoding('utf8').on('data',s=>serviceOut+=s);service.stderr.setEncoding('utf8').on('data',s=>serviceErr+=s);
   try {
     const started=await new Promise(resolve=>{const timer=setTimeout(()=>resolve(false),8000);service.stdout.on('data',()=>{if(serviceOut.includes('MCP listening')){clearTimeout(timer);resolve(true);}});service.once('exit',()=>{clearTimeout(timer);resolve(false);});});
-    assert.equal(started,true,serviceErr||serviceOut);assert.equal(version(serviceDb),65);
+    assert.equal(started,true,serviceErr||serviceOut);assert.equal(version(serviceDb),66);
   } finally {await stopChild(service);}
   console.log('PASS import is inert; invalid auth preserves schema 53; default-home guard refuses; current, nondefault and authorized migrations work');
 } finally {clean();}

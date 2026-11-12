@@ -1,3 +1,4 @@
+import {routingPolicy,PULL_PAGE_PREFIX} from './pull-queue.mjs';
 import {inspect} from 'node:util';
 import { loopbackRequestAllowed } from './loopback.mjs';
 import { defaultPath,workspaceRoot,rootWarnings } from './paths.mjs';
@@ -12,7 +13,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { loadWorkers, hasInstalledDatabase, legacyMarkerPath, seedWorkerRepos, resolveWorker, hasCapability, assertTarget, submitTarget } from './workers.mjs';
-import { Store, validateProtocol, loadRedeliveryLimits, resumeNudge } from './store.mjs';
+import { Store, nonterminalOutcome, validateProtocol, loadRedeliveryLimits, resumeNudge } from './store.mjs';
 import {protocolArtifactChunk} from './protocol-artifact-commands.mjs';
 import { sendWebhook, validSecret } from './webhooks.mjs';
 import { checkAlerts, publishAlert, redactNote } from './alerts.mjs';
@@ -575,7 +576,7 @@ function holdsLiveGrant(worker,requestId,claimant,subject,acquisitionId) {
   return held?.worker===worker&&store.isExactClaimRetry(held,claimant,subject,acquisitionId??null);
 }
 function queuedRepositoryBlocker(row) {
-  if(row.status!=='queued') return null;
+  if(row.status!=='queued'||row.work_order_id&&!row.target_worker) return null;
   const repo=row.assignment?.inputs?.find(input=>input?.github_repo!==undefined)?.github_repo;
   if(!repo) return null;
   const worker=row.target_worker??'dot';
@@ -596,6 +597,57 @@ function assertRepoAllowed(worker,assignment) {
     throw new Error(`repository ${repo} is not allowed for worker "${worker}"; update it with dalan worker allow ${worker} OWNER/REPO, or choose another worker${!fs.existsSync(workersFile)?'; no workers.json: see docs/operations.md#legacy-repository-policy-migration':''}`);
   }
 }
+function admitPolicyWorker(worker,assignment,execution,approvedRevision) {
+  assertTarget(currentRepoPolicy(),worker);
+  assertRepoAllowed(worker,assignment);
+  const snapshot=store.destinationSnapshot(worker,execution,assignment);
+  if((snapshot?.revision??null)!==(approvedRevision??null)||snapshot&&!snapshot.policy.allowed||snapshot?.connections_digest==='sha256:'+createHash('sha256').update('[]').digest('hex')) throw new Error('policy destination approval changed or unavailable');
+}
+const policyPage=(worker,cursor=null)=>store.pullQueue.list(worker,admitPolicyWorker,cursor);
+async function submitPolicy(body,req,dryRun) {
+  if(req.method!=='POST')throw new Error('policy submit requires POST');
+  if(body.background!==undefined&&typeof body.background!=='boolean'||body.review!==undefined&&typeof body.review!=='boolean'||body.allow_main!==undefined&&typeof body.allow_main!=='boolean')throw new Error('invalid policy submit flags');
+  if(body.worker!==undefined||body.command_key!==undefined||body.supersedes!==undefined||body.required_capabilities!==undefined||body.max_queued!==undefined||body.defer_queued!==undefined||body.destination_revision!==undefined) throw new Error('routing v1 cannot combine single-target, command, supersede or capacity options');
+  if(!body.assignment||typeof body.assignment!=='object'||Array.isArray(body.assignment)||typeof body.assignment.request_id!=='string'||!/^[-\w]{8,128}$/.test(body.assignment.request_id)||body.assignment.request_id.startsWith(PULL_PAGE_PREFIX)) throw new Error('invalid assignment request_id');
+  if(!Array.isArray(body.assignment.inputs)) throw new Error('invalid assignment inputs');
+  if(body.assignment.schema_version!==1||typeof body.assignment.brief!=='string'||!body.assignment.brief.trim()||typeof body.assignment.expected_output!=='string'||typeof body.assignment.execution_scope!=='string')throw new Error('invalid assignment: needs schema_version 1, brief, inputs, expected_output and execution_scope');
+  const identity=renderAssignment(body.assignment),routing=routingPolicy(body.routing,identity),owner=str(body.owner_token,'owner_token',128);
+  const old=store.pullQueue.row(identity.request_id),oldOptions=old?JSON.parse(old.options):null;
+  const execution=body.execution===undefined?oldOptions?.execution??workers.defaultExecution:parseExecution(body.execution);
+  if(execution==='host')throw new Error('routing v1 supports execution none or worker only');
+  const delivery=parseDelivery(body.delivery??'none'),destination=await destinations.for(delivery);
+  if(body.allow_main===true)adminOperator(req);
+  destination.admit(delivery,{allowMain:body.allow_main===true});
+  if(delivery.mode==='t3'&&!legacyProfile&&!(await (await import('./t3.mjs')).t3Available()))throw new Error('delivery t3 needs T3 Code on the bridge host');
+  const meta=normalizeMeta(body.meta),priority=body.background===true?'background':'normal';
+  for(const [value,label] of [[body,'submit request'],[body.meta,'meta'],[body.assignment,'assignment']]) assertNoDeclaredConsumer(value,label,meta.source??'agent');
+  if(!old) { const refused=unprovenSource({request_id:identity.request_id,payload:identity,meta},priority);if(refused)throw new Error(refused); }
+  const approvals=body.destination_revisions??{};
+  if(!approvals||typeof approvals!=='object'||Array.isArray(approvals)||Object.keys(approvals).some(worker=>!routing.allowed_workers.includes(worker)))throw new Error('invalid destination_revisions');
+  const options={delivery,environmentId:oldOptions?.environmentId??'',execution,review:body.review===true,priority,meta};
+  if(old)return store.pullQueue.submit(JSON.parse(old.payload),identity,options,routing,approvals,owner,{dryRun});
+  let payload=identity,preflight=null;
+  // Validate scope under each candidate's current repository policy. No candidate
+  // is allowed to learn the title or brief before its exact approval is bound.
+  const disclosures={};
+  for(const worker of routing.allowed_workers) {
+    assertTarget(currentRepoPolicy(),worker);assertRepoAllowed(worker,payload);
+    payload=await validateSubmissionAsync(identity,{worker,review:body.review===true,warnings:[],excludeSensitive:body.exclude_sensitive===true,sensitiveScopeOverride:body.sensitive_scope_override??null});
+    assertRepoAllowed(worker,payload);
+    disclosures[worker]=store.destinationSnapshot(worker,execution,payload);
+    if(!dryRun)admitPolicyWorker(worker,payload,execution,approvals[worker]);
+  }
+  preflight=await preflightPR(payload);
+  options.environmentId=(await destination.validate(delivery)).environmentId??'';
+  for(const worker of routing.allowed_workers)if(!dryRun)admitPolicyWorker(worker,payload,execution,approvals[worker]);
+  if(dryRun)return {...store.pullQueue.submit(payload,identity,options,routing,approvals,owner,{dryRun:true}),destination_disclosures:disclosures};
+  // Synchronous checks immediately precede the transaction; acquisition repeats
+  // them in its write transaction after its own async preflight.
+  const result=store.pullQueue.submit(payload,identity,options,routing,approvals,owner);
+  log({kind:'policy_work_submitted',request_id:identity.request_id,work_order_id:result.work_order_id});
+  return {...result,execution};
+}
+
 // Record the call on the claim it names (one UPDATE); a thrown error or a structured {error} result is kept as the last tool error.
 async function tool(name,a,principal,notifyMeta) {
   if(name==='claim'&&typeof a?.request_id==='string'&&store.hasAssignment(a.request_id)&&store.mayAct(principal.worker,a.request_id)&&
@@ -653,6 +705,20 @@ async function dispatchTool(name,a,principal,notifyMeta) {
     }
   }
   const worker=principal.worker;
+  const policyRow=typeof a?.request_id==='string'?store.pullQueue.row(a.request_id):null;
+  const isPolicyPage=name==='get'&&typeof a?.request_id==='string'&&a.request_id.startsWith(PULL_PAGE_PREFIX);
+  const isPolicyClaim=policyRow&&name==='claim'&&(!policyRow.child_request_id||a.acquisition_id===policyRow.acquisition_id);
+  const isPolicyGet=policyRow&&name==='get'&&!store.hasAssignment(a.request_id);
+  if(isPolicyPage||isPolicyClaim||isPolicyGet) {
+    validate(name,a);if(oauth)needScope(principal,scopeFor(name));
+    if(name==='get')return a.request_id.startsWith(PULL_PAGE_PREFIX)?{policy_work:policyPage(worker,a.request_id)}:store.pullQueue.get(a.request_id,worker,admitPolicyWorker);
+    const offered=policyRow.child_request_id?null:store.pullQueue.get(a.request_id,worker,admitPolicyWorker);
+    const preflight=offered?await preflightPR(offered.assignment):null;
+    const claimed=store.pullQueue.acquire(a.request_id,{worker,subject:principal.subject,connectionId:principal.builtin?(principal.connection_id??''):null,
+      claimant:str(a.claimant,'claimant',128),acquisitionId:a.acquisition_id,leaseMs:a.lease_ms,capacity:claimCapacity,preflight,admit:admitPolicyWorker});
+    const {free_lanes,queued}=store.laneState(principal.subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
+    return withAvailableChecks(nonterminalOutcome(claimed.request_id,{...claimed,free_lanes,queued_after_claim:queued}),true,worker,principal.subject);
+  }
   if(a&&typeof a==='object') {
     if(typeof a.request_id==='string'&&!store.mayAct(worker,a.request_id)) a={...a,request_id:absentId};
     if(typeof a.message_id==='string'&&!store.mayAct(worker,a.message_id)) a={...a,message_id:absentId};
@@ -697,7 +763,7 @@ async function dispatchTool(name,a,principal,notifyMeta) {
       const claims_accepted=!store.paused();
       const next=claims_accepted?store.nextQueued(free_lanes,null,worker):{};
       const claimsNote=claims_accepted?'':'Claims are paused (temporary): do not claim now; call list_pending again later and claim once claims_accepted is true.';
-      return {assignments,attention:store.attention(subject,worker),free_lanes,claims_accepted,...(claims_accepted?next:{next_action:claimsNote}),guidance};
+      return {assignments,policy_work:policyPage(worker),attention:store.attention(subject,worker),free_lanes,claims_accepted,...(claims_accepted?next:{next_action:claimsNote}),guidance};
     }
     case 'claim': {
       const requestId=id(a.request_id),claimant=str(a.claimant,'claimant',128),ctx=commandContext('claim',{claimant,acquisition_id:a.acquisition_id??null,lease_ms:a.lease_ms??null}),row=store.get(requestId),held=row.claim?.state==='active'?row.claim:null,retry=holdsLiveGrant(worker,requestId,claimant,subject,a.acquisition_id);
@@ -872,7 +938,9 @@ const adminServer=http.createServer(async(req,res)=>{
     dryRequested=url.pathname==='/submit-preview';
     log({kind:'admin_call',route:url.pathname,method:req.method});
     if(url.pathname==='/submit'&&(url.searchParams.get('dry_run')==='1'||body.dry_run===true)) throw new Error('dry run requires POST /submit-preview; /submit always submits');
+    if((url.pathname==='/submit'||url.pathname==='/submit-preview')&&body.routing!==undefined) return json(res,200,await submitPolicy(body,req,url.pathname==='/submit-preview'));
     if(url.pathname==='/submit'||url.pathname==='/submit-preview') {
+      if(typeof body.assignment?.request_id==='string'&&store.pullQueue.row(body.assignment.request_id))throw new Error('request_id reserved for policy work; retry with routing');
       // Set before any check below, so every refusal carries typed reasons, answers a dry run with a verdict and is logged.
       // Cohort labels can contain private values; logs need equality, not their contents.
       const labelDigest=value=>typeof value==='string'&&value.trim()?createHash('sha256').update(value.trim()).digest('hex'):null;
@@ -996,10 +1064,10 @@ const adminServer=http.createServer(async(req,res)=>{
       if(stored.scope_excluded?.length&&!result.duplicate) log({kind:'scope_excluded',request_id:payload.request_id,excluded:stored.scope_excluded});
       return json(res,200,{...result,execution:store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(payload.request_id).execution,...(stored.scope_excluded?.length?{scope_excluded:stored.scope_excluded,scope_paths:stored.scope_paths}:{}),...(readiness?{check_readiness:readiness}:{}),...(submissionWarnings.length?{submission_warnings:submissionWarnings}:{})});
     }
-    if(url.pathname==='/admission'&&req.method==='GET') { const row=store.db.prepare('SELECT cancelled_reason FROM assignments WHERE request_id=?').get(id(url.searchParams.get('id'))); return json(res,200,{exists:!!row,...(row?.cancelled_reason==='expired'?{cancelled_reason:'expired'}:{})}); }
+    if(url.pathname==='/admission'&&req.method==='GET') { const requestId=id(url.searchParams.get('id'));const row=store.db.prepare('SELECT cancelled_reason FROM assignments WHERE request_id=?').get(requestId)??store.pullQueue.row(requestId); return json(res,200,{exists:!!row,...(row?.cancelled_reason==='expired'?{cancelled_reason:'expired'}:{})}); }
     if(url.pathname==='/get') {
       const requestId=id(url.searchParams.get('id'));
-      if(!store.hasAssignment(requestId)) return json(res,200,{kind:'message',message:store.getMessage(requestId)});
+      if(!store.hasAssignment(requestId)&&!store.pullQueue.row(requestId)) return json(res,200,{kind:'message',message:store.getMessage(requestId)});
       adminOwner(req,requestId);
       store.assertProtocolAvailable(requestId);
       store.recordFetched(requestId);
@@ -1045,7 +1113,7 @@ const adminServer=http.createServer(async(req,res)=>{
       const states=body.items.map(item=>{
         const requestId=id(item?.id);
         try { store.owner(requestId,item.capability); } catch { return {request_id:requestId,error:'not_owned'}; }
-        const row=store.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(requestId);
+        const row=store.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(requestId)??(store.pullQueue.row(requestId)?store.get(requestId):null);
         const blockers=store.db.prepare('SELECT note FROM progress WHERE request_id=? ORDER BY id').all(requestId).map(p=>p.note).filter(note=>/^\s*(?:BLOCKED:|QUESTION:)/im.test(note));
         return {request_id:requestId,status:row.status,blocker_count:blockers.length,last_blocker:blockers.at(-1)??null,inbox:store.ownerInbox(requestId)};
       });

@@ -1427,13 +1427,13 @@ await check('migration identity is durable from a synthesized schema 34; abandon
   }
   const file=path.join(root,'identity-synthesized.db'),old=new Store(file);preWorkerFixture(old);
   assert.equal(old.db.prepare('PRAGMA user_version').get().user_version,34);old.db.close();
-  const next=new Store(file);assert.equal(next.db.prepare('PRAGMA user_version').get().user_version,65);
+  const next=new Store(file);assert.equal(next.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.equal(next.db.prepare('SELECT identity FROM schema_migrations').get().identity,'s1v2-worker-facts-20261022');next.db.close();
 });
 
 await historicalCheck('migration identity is durable from the pre-public base release',[BASE_COMMIT],async()=>{
   const Old=await baseStore(),file=path.join(root,'identity.db');new Old(file).db.close();
-  const next=new Store(file);assert.equal(next.db.prepare('PRAGMA user_version').get().user_version,65);
+  const next=new Store(file);assert.equal(next.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.equal(next.db.prepare('SELECT identity FROM schema_migrations').get().identity,'s1v2-worker-facts-20261022');next.db.close();
 });
 
@@ -1441,7 +1441,7 @@ await check('an identified review-build version 35 DB drops the obsolete subscri
   const file=path.join(root,'review-v35.db'),old=new Store(file);
   old.db.exec("ALTER TABLE subscriptions ADD COLUMN lane_key TEXT NOT NULL DEFAULT 'old-lane'; CREATE TRIGGER subscriptions_lane_key_immutable BEFORE UPDATE OF lane_key ON subscriptions BEGIN SELECT RAISE(ABORT,'immutable'); END;");old.db.close();
   const next=new Store(file);
-  assert.equal(next.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(next.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.equal(next.db.prepare("SELECT 1 FROM pragma_table_info('subscriptions') WHERE name='lane_key'").get(),undefined);next.db.close();
 });
 
@@ -1459,7 +1459,7 @@ await historicalCheck('migration marks unsupported base subjects unknown and den
   assert.equal(next.rollingUsage().claims_last_hour,0);assert.equal(next.rollingUsage().tool_calls_last_hour,0);next.db.close();
 });
 
-await historicalCheck('v0.2.0 live claim survives upgrade to schema 65',['v0.2.0'], async () => {
+await historicalCheck('v0.2.0 live claim survives upgrade to schema 66',['v0.2.0'], async () => {
   const OldStore = await baseStore('v0.2.0');
   const file = path.join(root, 'upgrade-020-live-claim.db');
   const now = Date.parse('2026-11-01T00:00:00Z');
@@ -1490,7 +1490,7 @@ await historicalCheck('v0.2.0 live claim survives upgrade to schema 65',['v0.2.0
     old.db.close(); old = null;
 
     current = new Store(file, options);
-    assert.equal(current.db.prepare('PRAGMA user_version').get().user_version,65);
+    assert.equal(current.db.prepare('PRAGMA user_version').get().user_version,66);
     const migrated = current.get(inFlight);
     assert.equal(migrated.status, 'claimed');
     assert.equal(migrated.claim.state, 'active');
@@ -1516,7 +1516,7 @@ await historicalCheck('v0.2.0 live claim survives upgrade to schema 65',['v0.2.0
     assert.deepEqual(snapshot(current.db), settled, 'second open changed upgrade/claim/report/progress state');
     current.db.close(); current = null;
     assert.throws(() => new OldStore(file, options),
-      /database schema version 65 is newer than supported version 49/);
+      /database schema version 66 is newer than supported version 49/);
     current = new Store(file, options);
     assert.deepEqual(snapshot(current.db), settled, 'old-version refusal changed upgraded state');
   } finally {

@@ -13,7 +13,7 @@ const payload=id=>({schema_version:1,request_id:id,brief:'late evidence',inputs:
 const refusal=fn=>{try{fn();}catch(e){return JSON.parse(e.message);}assert.fail('finish must refuse');};
 try {
   const s=new Store(path.join(home,'bridge.db'));
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66);
   const count=(table,id)=>s.db.prepare(`SELECT count(*) n FROM ${table} WHERE request_id=?`).get(id).n;
   s.submit(payload('req_a'),{mode:'none'},null,'owner');
   const c=s.claim('req_a','dot','sub',6);

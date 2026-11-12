@@ -57,7 +57,7 @@ try {
   legacy.exec('DROP INDEX assignments_pending_priority; ALTER TABLE assignments DROP COLUMN priority; PRAGMA user_version=18;');
   legacy.close();
   const migrated=new Store(copy);
-  assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.equal(migrated.db.prepare("SELECT priority FROM assignments WHERE request_id='req_legacy_shape'").get().priority,'normal','migration backfills existing assignments as normal');
   migrated.db.close();
   console.log('PASS priority ordering, yielding, default/custom background caps, status classes, and real-shaped v18 migration');
