@@ -49,9 +49,9 @@ Use `dalan try --public --route gozar` for a client with internet reach. Dalan f
 
 Then:
 
-1. **Add the connector.** Dalan prints your complete connector URL, a click path for your client and one prompt to paste. In your MCP client, add a custom connector (a remote MCP server) with that URL and start its sign-in. The URL is a secret: it is printed once on your terminal and kept in a private file in the trial home.
-2. **Approve in this terminal.** Dalan shows a pairing code. Compare it with the one on the sign-in page, then answer `y` in the terminal. Nothing is granted until you do.
-3. **Send the prompt.** In a chat with the connector enabled, paste the printed prompt. The client lists the pending jobs, claims the demo job and finishes it with a report. Success is the report appearing in your terminal, followed by the accept or reject question.
+1. **Add the connector.** Dalan prints your complete connector URL, the steps to add it and sign in. In your MCP client, add a custom connector (a remote MCP server) with that URL and start its sign-in. The URL is a secret: it is printed once on your terminal and kept in a private file in the trial home.
+2. **Approve in this terminal.** Dalan shows a pairing code. Compare it with the one on the sign-in page, then answer `y` in the terminal. Nothing is granted until you do. After approval, Dalan prints the demo prompt as your next step.
+3. **Send the prompt.** In a chat with the connector enabled, paste the prompt shown after approval. The client lists the pending jobs, claims the demo job and finishes it with a report. Success is the report appearing in your terminal, followed by the accept or reject question.
 
 Keep the terminal open. Ctrl-C stops the trial and removes the link. The trial grants no repository access. The output says "Temporary trial" and shows the time left: a trial link works for 3 hours at most, then the trial ends and removes it. If the relay gives it a new address, the trial stops and says so, because the sign-in is tied to the first address: start a fresh trial and replace the connector URL. The demo runs on your own ChatGPT or claude.ai account with its normal limits; Dalan runs no model.
 

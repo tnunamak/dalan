@@ -12,7 +12,7 @@ import { createLineMasker, safeDiagnostic } from './diagnostic.mjs';
 import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
-import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText } from './try-hosted-clients.mjs';
+import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText, hostedPrompt } from './try-hosted-clients.mjs';
 import { PUBLIC_READY_MS, createGate, gozarProvider, localhostRunProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
@@ -264,16 +264,17 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     const trialLeft = () => trialEndsAt === null ? '' : ` Temporary trial: ${timeLeft(trialEndsAt - clock.now())} left.`;
     if (trialEndsAt !== null) say(`Temporary trial: this link stops in ${timeLeft(trialMs)} or sooner if the relay changes the address. Replace it with \`dalan setup\` for daily use.`);
     say('');
-    say(handoffText({ client, url: mcpUrl, requestId, requestPhrase: phrase }));
+    say(handoffText({ client, url: mcpUrl }));
     say('');
     say(`Waiting for sign-in. Ctrl-C stops the trial and removes its link. This terminal shows the connection code. Type help here to see the ${spec.label} steps again. The URL is also in ${urlFile}.`);
 
+    const showPrompt = () => say(`Finish sign-in in its browser tab, then enable "${CONNECTOR_NAME}" in a ${spec.label} chat. Paste this into the chat:\n${hostedPrompt(requestId, phrase)}`);
     const seen = new Set();
     let approvedConnection = null, reminded = 0, retryNow = false, stage = 'signin';
     let remindAt = clock.now() + DIAGNOSE_AFTER_MS;
     const stageNote = () => ({
       signin: `No sign-in request yet. Add ${CONNECTOR_NAME} in ${spec.label} and start sign-in. Type help here to see the steps again.`,
-      approved: 'Approval succeeded, but the client has not claimed the job. Finish sign-in in its browser tab, enable the connector in the chat, and send the prompt above.',
+      approved: 'Approval succeeded, but the client has not claimed the job. Finish sign-in and send this prompt in a chat with the connector enabled.',
       claimed: 'The demo is claimed. Check the chat for a tool approval or a stopped response.',
     }[stage]);
     const stillCurrent = async attempt => (await pendingNow()).pending.some(p => p.code === attempt.code && !p.superseded);
@@ -284,7 +285,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     };
     // Help is read from the same input as the answers: a line that is not an answer is checked for it.
     let asking = false;
-    lines.on('line', line => { if (line.trim().toLowerCase() === 'help' && !asking) { say(`${spec.label}\n${spec.steps.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n(The connector URL is in ${urlFile}.)`); } });
+    lines.on('line', line => { if (line.trim().toLowerCase() === 'help' && !asking) { if (stage === 'approved') { showPrompt(); return; } say(`${spec.label}\n${spec.steps.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n(The connector URL is in ${urlFile}.)`); } });
     const askOnce = async question => { asking = true; try { return await ask(question); } finally { asking = false; } };
 
     while (!exited && !stopRequested() && !routeDied && !trialOver()) {
@@ -324,7 +325,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
           remindAt = Math.max(remindAt, clock.now() + DIAGNOSE_AFTER_MS);
           if (answer?.trim().toLowerCase() === 'y') {
             const result = await approve(attempt);
-            if (result) { approvedConnection = result.connection_id ?? (await dalan(['connect', 'list', '--json']).then(t => JSON.parse(t).connections.find(c => c.worker === HOSTED_WORKER && c.revoked_at === null)?.connection_id ?? null)); stage = 'approved'; say('Connection approved. Waiting for the client to claim the demo job…'); }
+            if (result) { approvedConnection = result.connection_id ?? (await dalan(['connect', 'list', '--json']).then(t => JSON.parse(t).connections.find(c => c.worker === HOSTED_WORKER && c.revoked_at === null)?.connection_id ?? null)); stage = 'approved'; say('Connection approved.'); showPrompt(); }
             else {
               say(`That attempt is no longer current or expired (attempts last ${PAIRING_MINUTES} minutes). Start the sign-in again in ${spec.label}; its new code appears here.`);
               retryNow = (await pendingNow()).pending.some(p => !p.superseded && !seen.has(p.code));
@@ -332,10 +333,10 @@ export async function runHosted({ options, env, out, input, signal, errorContext
             break;
           }
           if (stopRequested()) { say('\nNot approved.'); break; }
-          say(`Not approved. Approve later with:\n${commandLine(ownCommand('connect', 'approve', attempt.code, '--worker', HOSTED_WORKER, '--replace'))}`);
+          say(`Not approved. Start sign-in again in ${spec.label}; approve the new matching code here to get the demo prompt.`);
         }
       } else if (stage !== 'claimed') { stage = 'claimed'; say(`Hosted worker claimed ${requestId}.`); }
-      if (reminded < DIAGNOSE_LIMIT && !exited && !stopRequested() && clock.now() >= remindAt) { say(`\n${stageNote()}${trialLeft()}`); reminded++; remindAt = clock.now() + DIAGNOSE_EVERY_MS; }
+      if (reminded < DIAGNOSE_LIMIT && !exited && !stopRequested() && clock.now() >= remindAt) { say(`\n${stageNote()}${trialLeft()}`); if (stage === 'approved') showPrompt(); reminded++; remindAt = clock.now() + DIAGNOSE_EVERY_MS; }
       if (retryNow) { retryNow = false; continue; }
       await Promise.race([clock.sleep(POLL_MS), untilStopRequested()]);
     }
