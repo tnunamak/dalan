@@ -167,17 +167,34 @@ const POLICY_HOME_FILES = new Set([
   'service-migration.json', 'workers.json', 'workers-audit.jsonl', 'workers-audit-checkpoint.sqlite',
   'workers-audit-checkpoint.sqlite-wal', 'workers-audit-checkpoint.sqlite-shm', 'workers-repos.json',
 ]);
+const WORKSPACE_RUNTIME_DIRS = ['artifacts', 'caches', 'worktrees'];
 
 function installReceipt(home, configDir, o, workers) {
   return { schema_version: 1, home, origin: o.origin, port: o.port, target: o.target.value, enable_workspace: !!o.enableWorkspace, enable_t3: !!o.enableT3,
     unit: unitName(home), workers: [...workers].sort(), created_at: new Date().toISOString() };
 }
 
+function validateWorkspaceRuntime(home) {
+  const scratch = path.join(home, '.tmp');
+  const runtime = path.join(scratch, 'dalan');
+  for (const directory of [scratch, runtime]) assertRealDirectoryPath(directory, { owner: true });
+  const scratchEntries = fs.readdirSync(scratch);
+  if (scratchEntries.length !== 1 || scratchEntries[0] !== 'dalan') fail(`${scratch} contains data outside Dalan runtime scratch`);
+  if ((fs.lstatSync(runtime).mode & 0o777) !== 0o700) fail(`${runtime} must be private`);
+  const runtimeEntries = fs.readdirSync(runtime).sort();
+  if (JSON.stringify(runtimeEntries) !== JSON.stringify(WORKSPACE_RUNTIME_DIRS)) fail(`${runtime} does not contain the expected Dalan workspace directories`);
+  for (const name of runtimeEntries) {
+    const directory = path.join(runtime, name);
+    assertRealDirectoryPath(directory, { owner: true });
+    if ((fs.lstatSync(directory).mode & 0o777) !== 0o700) fail(`${directory} must be private`);
+  }
+}
+
 function checkHomeScope(home, configDir, o, workers) {
   if (!fs.existsSync(home)) return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
   const rootEntries = fs.readdirSync(home);
   if (!rootEntries.length) return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
-  const rootAllowed = ['.config', '.local', 'resource-url'];
+  const rootAllowed = ['.config', '.local', '.tmp', 'resource-url'];
   if (rootEntries.some(name => !rootAllowed.includes(name))) fail(`${home} contains unrelated data; use a fresh home or one created by dalan service migrate-workers`);
   if (!rootEntries.includes('.config')) fail(`${home} has no Dalan config directory; refusing to adopt it`);
   const configRoot = path.join(home, '.config');
@@ -186,7 +203,7 @@ function checkHomeScope(home, configDir, o, workers) {
   const configName = path.basename(configDir);
   if (configEntries.some(name => name !== configName)) fail(`${home} contains config outside the service home; refusing to adopt it`);
   if (!configEntries.length) {
-    if (rootEntries.includes('.local') || rootEntries.includes('resource-url')) fail(`${home} already contains bridge data; use a fresh home or one created by dalan service migrate-workers`);
+    if (rootEntries.includes('.local') || rootEntries.includes('.tmp') || rootEntries.includes('resource-url')) fail(`${home} already contains bridge data; use a fresh home or one created by dalan service migrate-workers`);
     return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
   }
   const configInfo = fs.lstatSync(configDir);
@@ -203,10 +220,11 @@ function checkHomeScope(home, configDir, o, workers) {
     for (const field of ['schema_version', 'home', 'origin', 'port', 'target', 'enable_workspace', 'enable_t3', 'unit', 'workers']) {
       if (JSON.stringify(existing[field]) !== JSON.stringify(wanted[field])) fail(`${receiptFile} belongs to a different service configuration (${field}); refusing to change it`);
     }
+    if (rootEntries.includes('.tmp')) validateWorkspaceRuntime(home);
     if (rootEntries.includes('.local')) assertRealDirectoryPath(defaultPath(home, '.local/share/dot-bridge'));
     return { receiptFile, hasReceipt };
   }
-  if (rootEntries.includes('.local') || rootEntries.includes('resource-url')) fail(`${home} already contains bridge data; use a fresh home or one created by dalan service migrate-workers`);
+  if (rootEntries.includes('.local') || rootEntries.includes('.tmp') || rootEntries.includes('resource-url')) fail(`${home} already contains bridge data; use a fresh home or one created by dalan service migrate-workers`);
   for (const name of entries) {
     if (POLICY_HOME_FILES.has(name) || hasReceipt && name === 'service-install.json') continue;
     fail(`${configDir}/${name} is outside a fresh or migrated policy-only home; refusing to adopt it`);

@@ -80,6 +80,14 @@ try {
   assert.ok(grantEvents.some(event => event.worker === 'muse' && event.after.repos.includes(grantedRepo)), 'the existing repository grant must have an owner audit event');
 
   const installState = privateState(home);
+  for (const directory of ['artifacts', 'caches', 'worktrees']) {
+    fs.mkdirSync(path.join(home, '.tmp/dalan', directory), { recursive: true, mode: 0o700 });
+  }
+  const worktree = path.join(home, '.tmp/dalan/worktrees', 'req_fixture');
+  const linkedDirectory = path.join(root, 'linked-repo-content');
+  fs.mkdirSync(worktree, { mode: 0o700 });
+  fs.mkdirSync(linkedDirectory, { mode: 0o700 });
+  fs.symlinkSync(linkedDirectory, path.join(worktree, 'repo-link'));
   const exactRetry = await installService({ home, origin: 'https://bridge.example.test', port: 8787,
     target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
     env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
@@ -87,6 +95,76 @@ try {
   });
   assert.equal(exactRetry.started, true);
   assert.deepEqual(privateState(home), installState, 'an exact --worker retry must preserve keys, policy, grants and receipt');
+  assert.equal(fs.lstatSync(path.join(worktree, 'repo-link')).isSymbolicLink(), true, 'repository symlinks inside a workspace are not treated as service-home aliases');
+
+  const runtimeRoot = path.join(home, '.tmp/dalan');
+  const runtimeInstallState = privateState(home);
+  fs.rmdirSync(path.join(runtimeRoot, 'artifacts'));
+  await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+  }), /does not contain the expected Dalan workspace directories/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'missing runtime container refusal preserves service state');
+  fs.mkdirSync(path.join(runtimeRoot, 'artifacts'), { mode: 0o700 });
+
+  const unrelatedScratch = path.join(home, '.tmp/other');
+  fs.mkdirSync(unrelatedScratch, { mode: 0o700 });
+  await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+  }), /contains data outside Dalan runtime scratch/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'unrelated scratch refusal preserves service state');
+  fs.rmSync(unrelatedScratch, { recursive: true });
+
+  const scratch = path.join(home, '.tmp');
+  const scratchBackup = path.join(root, 'scratch-backup');
+  fs.renameSync(scratch, scratchBackup);
+  fs.symlinkSync(scratchBackup, scratch);
+  await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+  }), /symlink/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'scratch symlink refusal preserves service state');
+  fs.rmSync(scratch);
+  fs.renameSync(scratchBackup, scratch);
+
+  const runtimeBackup = path.join(root, 'runtime-backup');
+  fs.renameSync(runtimeRoot, runtimeBackup);
+  fs.symlinkSync(runtimeBackup, runtimeRoot);
+  await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+  }), /symlink/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'runtime symlink refusal preserves service state');
+  fs.rmSync(runtimeRoot);
+  fs.renameSync(runtimeBackup, runtimeRoot);
+
+  fs.chmodSync(path.join(runtimeRoot, 'artifacts'), 0o755);
+  await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+  }), /must be private/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'non-private container refusal preserves service state');
+  fs.chmodSync(path.join(runtimeRoot, 'artifacts'), 0o700);
+
+  const unsafeContainer = path.join(runtimeRoot, 'caches');
+  const externalContainer = path.join(root, 'external-cache');
+  fs.renameSync(unsafeContainer, externalContainer);
+  fs.symlinkSync(externalContainer, unsafeContainer);
+  await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+  }), /symlink/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'container symlink refusal preserves service state');
+  fs.rmSync(unsafeContainer);
+  fs.renameSync(externalContainer, unsafeContainer);
+
+  const unreceiptedScratchHome = path.join(root, 'unreceipted-scratch');
+  fs.mkdirSync(path.join(unreceiptedScratchHome, '.config'), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(unreceiptedScratchHome, '.tmp'), { mode: 0o700 });
+  await assert.rejects(installService({ home: unreceiptedScratchHome, origin: 'https://bridge.example.test', port: 8787,
+    target: '127.0.0.1:8787', workers: ['dot'] }, { env, platform: 'linux', spawn }), /already contains bridge data/);
+  assert.equal(fs.existsSync(path.join(unreceiptedScratchHome, '.config/dot-bridge/as.json')), false, 'an empty config directory with scratch is not adopted without a receipt');
 
   const migratedHome = path.join(root, 'migrated');
   const migratedConfig = defaultPath(migratedHome, '.config/dot-bridge');
