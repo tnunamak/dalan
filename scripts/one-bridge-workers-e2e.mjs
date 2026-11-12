@@ -57,6 +57,7 @@ const serverEnv = {
   DALAN_CATALOG_PROFILE: 'stable',
   DALAN_ENABLE_T3_TOOLS: '1',
   DALAN_ENABLE_WORKSPACE: '1',
+  DALAN_WORKSPACE_ROOT: path.join(home, 'workspace'),
   DALAN_GOZAR_SERVICE: '1',
   NODE_ENV: 'test',
 };
@@ -242,11 +243,12 @@ async function main() {
     console.log('PASS each worker was refused all three foreign claims and claimed its own job');
 
     const duetClaim = claims.get('duet-default');
-    const workspaceRoot = path.join(home, '.local/share/dot-bridge/workspaces');
+    const worktrees = path.join(serverEnv.DALAN_WORKSPACE_ROOT, 'worktrees');
+    const worktreesBefore = fs.readdirSync(worktrees);
     const refusedWorkspace = await callTool(sessions.get('duet-default').access, 'list_files', { request_id: requestIds['duet-default'], claim_id: duetClaim.claim_id });
     assert.equal(refusedWorkspace.ok, false);
     assert.match(refusedWorkspace.error, /capability_not_enabled/);
-    assert.equal(fs.existsSync(workspaceRoot), false, 'default-denied Duet workspace call created workspace data');
+    assert.deepEqual(fs.readdirSync(worktrees), worktreesBefore, 'default-denied Duet workspace call created a worktree');
     console.log('PASS per-worker workspace default deny: Duet gets capability_not_enabled and creates no workspace');
 
     const token = sessions.get('dot').access;
