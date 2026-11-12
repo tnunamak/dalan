@@ -1,3 +1,4 @@
+import { updateWindowOpen, refuseDuringUpdate } from './service-update-gate.mjs';
 import {routingPolicy,PULL_PAGE_PREFIX} from './pull-queue.mjs';
 import {inspect} from 'node:util';
 import { loopbackRequestAllowed } from './loopback.mjs';
@@ -962,6 +963,8 @@ const verifyService=builtinMode&&readEnv('DALAN_GOZAR_SERVICE')==='1'?createServ
 const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)=>{
   const outcome=req.url===publicPath?beginMcpOutcome(req,res,log,toolNames,!!oauth):null;
   try {
+    // Updater window: no entry may acknowledge a write the rollback snapshot would erase. Clients retry after the commit.
+    if(updateWindowOpen()) return refuseDuringUpdate(res);
     if(loopback && !loopbackRequestAllowed(req, `http://127.0.0.1:${port}`)) { log({kind:'mcp_inbound',status:403,route:'loopback',ua:uaToken(req)}); res.writeHead(403); res.end(); return; }
     // Both authentication modes serve only the configured public Host, including discovery and verifier routes.
     if(as ? !as.hostOk(req) : oauth&&req.headers.host!==new URL(oauth.OAUTH_AUDIENCE).host) { log({kind:'mcp_inbound',status:421,route:'host',ua:uaToken(req)}); res.writeHead(421); res.end(); return; }
@@ -1003,6 +1006,7 @@ const adminServer=http.createServer(async(req,res)=>{
   let rejected=null, dryRequested=false;
   try {
     const raw=req.method==='POST'?await readBody(req):'',body=raw?JSON.parse(raw):{},url=new URL(req.url,'http://localhost');
+    if(updateWindowOpen()&&!(req.method==='GET'&&url.pathname==='/service-check')) return refuseDuringUpdate(res);
     if(url.pathname.startsWith('/protocol/service/')) {
       if(!protocolServices||req.method!=='POST')return json(res,404,{error:'not found'});
       return json(res,200,await protocolServices.invoke(url.pathname.slice('/protocol/service/'.length),req.headers['x-protocol-service-capability'],body));
@@ -1454,12 +1458,15 @@ function maintain() {
   } catch(error) { log({kind:'maintenance_error',reason:error.message}); }
 }
 const runDrain=createDrainRunner(drain,log);
-store.recoverSends();
 try { fs.unlinkSync(socket); } catch(e) { if(e.code!=='ENOENT') throw e; }
 const adminListening=new Promise(resolve=>adminServer.listen(socket,()=>{fs.chmodSync(socket,0o600);console.log(`admin socket ${socket}`);resolve();}));
 // Built-in mode sits behind a tunnel on this computer: only loopback may reach the listener.
 const bindHost=readEnv('DALAN_BIND_HOST')||(as||loopbackOnly||loopback?'127.0.0.1':'0.0.0.0');
 const publicListening=new Promise(resolve=>publicServer.listen(port,bindHost,()=>{console.log(`MCP listening on ${bindHost}:${publicServer.address().port}`);resolve();}));
+// Every background writer starts only when no update window is open, so a candidate restarted inside the window changes no state
+// the rollback snapshot would discard. Outside a window this runs at once, in the same order as before.
+function startBackground() {
+  store.recoverSends();
 // Cleanup removes worktrees and dependency caches; it starts only after both servers listen, and
 // cleanupExpired is async and single-flight, so neither startup nor the hourly tick blocks requests.
 if(workspace) {
@@ -1477,6 +1484,9 @@ const staleDays=(d=>Number.isFinite(d)&&d>0?d:7)(Number(readEnv('DALAN_DECISION_
 const sweepStale=()=>{try{const ids=store.sweepStaleDecisions(staleDays);if(ids.length)log({kind:'decisions_stale',count:ids.length,request_ids:ids.slice(0,20)});}catch(error){log({kind:'decisions_stale_error',reason:error.message});}};
 sweepStale(); setInterval(sweepStale,3600000).unref();
 setInterval(()=>checkAlerts(store,log).catch(e=>log({kind:'alert_error',reason:e.message})),60000).unref();
+}
+const startWhenWindowCloses=()=>{ if(updateWindowOpen()) setTimeout(startWhenWindowCloses,250).unref(); else startBackground(); };
+startWhenWindowCloses();
 
 }
 
