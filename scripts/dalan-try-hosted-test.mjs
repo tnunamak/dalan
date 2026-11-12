@@ -1931,7 +1931,7 @@ test('Gozar rotation keeps the first issuer, stops the trial, and prints a fresh
     assert.equal(firstOrigin, 'https://trial.lhr.life');
     globalThis.fetch = async (input, init) => {
       const requestUrl = new URL(input instanceof Request ? input.url : String(input));
-      if (requestUrl.origin !== firstOrigin) return realFetch(input, init);
+      assert.equal(requestUrl.origin, firstOrigin, 'the scripted client must never fetch another public origin');
       clientOrigins.push(requestUrl.origin);
       const expose = fake.calls().find(args => args[0] === 'expose');
       const gatePort = Number(gozarPort(expose));
