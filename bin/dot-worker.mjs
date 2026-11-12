@@ -3,7 +3,6 @@ import { defaultPath,workspaceRoot,rootWarnings } from '../src/paths.mjs';
 import { readEnv } from '../src/env.mjs';
 import http from 'node:http';
 import net from 'node:net';
-import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { prepareNodeModules } from '../src/prepared-node-modules.mjs';
 import fs from 'node:fs';
@@ -18,6 +17,7 @@ import { legacyFixLedgerPath } from '../src/legacy-names.mjs';
 import { buildInbox, formatInbox, parseWhen, decideWords } from '../src/inbox.mjs';
 import { decideDrained, drainedExitCodes, terminal } from '../src/drained.mjs';
 import { takeSlot, releaseSlot } from '../src/drained-slot.mjs';
+import { liveWaiter } from '../src/drained-owner.mjs';
 import { resolveHelp } from '../src/cli-help.mjs';
 import { readLines } from '../src/request-log.mjs';
 import { lintChecksFile, formatChecksReport } from '../src/check-lint.mjs';
@@ -208,15 +208,6 @@ function producerId() {
 }
 const drainedDir=defaultPath(home,'.local/state/dot-bridge/drained');
 function drainedPidfile(producer) { return path.join(drainedDir,createHash('sha256').update(producer).digest('hex').slice(0,32)+'.json'); }
-function liveWaiter(held) {
-  try {
-    if(!Number.isSafeInteger(held.pid)||held.pid<=0) return null;
-    const cmd=process.platform==='darwin'
-      ? execFileSync('/bin/ps',['-p',String(held.pid),'-o','command='],{stdio:['ignore','pipe','ignore'],timeout:1000})
-      : fs.readFileSync(`/proc/${held.pid}/cmdline`,'utf8');
-    return cmd.includes('wait')&&cmd.includes('--drained')?held:null;
-  } catch { return null; }
-}
 // Producer receipts. A parsed receipt never changes, so it is read once; one still being written is retried next time.
 function producerReceipts(producer,cache) {
   let names=[]; try { names=fs.readdirSync(receipts); } catch {}
@@ -309,7 +300,7 @@ async function waitDrained() {
   // One waiter per producer: a second one exits at once, so the hook and a forgetful agent cannot stack them.
   fs.mkdirSync(drainedDir,{recursive:true,mode:0o700});
   const file=drainedPidfile(producer), mine={pid:process.pid,token:randomBytes(8).toString('hex'),producer,started_at:new Date().toISOString()};
-  const other=takeSlot(file,mine,{isLive:entry=>liveWaiter(entry)!==null});
+  const other=takeSlot(file,mine,{isLive:liveWaiter});
   if(other) return {status:'already_running',producer,pid:other.pid,started_at:other.started_at};
   const release=()=>releaseSlot(file,mine);
   process.once('exit',release);

@@ -38,6 +38,10 @@ function missingDeclaredTestPath(dir,spec,origin) {
   return null;
 }
 const yieldLoop=()=>new Promise(resolve=>setImmediate(resolve));
+function pathExistsOrThrow(file) {
+  try { fs.lstatSync(file); return true; }
+  catch(error) { if(error.code==='ENOENT'||error.code==='ENOTDIR') return false; throw error; }
+}
 function spawnAsync(cmd,args,timeout=60000,env=process.env) { return new Promise(resolve=>{ let stderr='';const child=spawn(cmd,args,{stdio:['ignore','ignore','pipe'],timeout,env});child.stderr.on('data',b=>{if(stderr.length<300)stderr+=b;});child.on('error',error=>resolve({status:null,stderr:error.message}));child.on('close',status=>resolve({status,stderr})); }); }
 async function gitAsync(args) { const r=await spawnAsync('git',args,10000,gitEnv()); if(r.status!==0) throw new Error(`git failed: ${r.stderr.slice(0,300)}`); }
 // Go and uv write their module caches read-only, so make the tree writable before removing it.
@@ -294,7 +298,7 @@ export async function restoreOutsideWritable({dir,scratch,preTree,writable}) {
   const errors=[];
   // A path is removed or written only below real directories: a symlinked ancestor is itself a listed change and is handled on its own.
   const parentsOf=name=>{const bytes=nameBytes(name),out=[];for(let i=0;i<bytes.length;i++) if(bytes[i]===0x2f) out.push(bytes.subarray(0,i));return out;};
-  const realParents=name=>{for(const parent of parentsOf(name)){try{if(!fs.lstatSync(Buffer.concat([Buffer.from(dir+path.sep),parent])).isDirectory()) return false;}catch{return true;}}return true;};
+  const realParents=name=>{for(const parent of parentsOf(name)){try{if(!fs.lstatSync(Buffer.concat([Buffer.from(dir+path.sep),parent])).isDirectory()) return false;}catch{return false;}}return true;};
   for(const entry of outside.filter(e=>e.status==='A')) {
     if(!realParents(entry.path)) continue;
     try{fs.rmSync(absBytes(dir,entry.path),{recursive:true,force:true});}catch(error){errors.push(`${entry.path}: ${error.code||error.message}`);continue;}
@@ -585,7 +589,10 @@ export class Workspace {
   async sweepMirrors(pressure,minFree) {
     const db=this.store.db,inUse=new Set();
     for(const row of db.prepare("SELECT request_id,payload,target_worker FROM assignments WHERE status IN ('queued','claimed')").all()) { try{inUse.add(mirrorPath(payloadRepo(row.payload),{worker:row.target_worker||'dot'}));}catch{} }
-    for(const row of db.prepare('SELECT request_id,path FROM workspaces').all()) { const common=savedWorkspaceMirror(row.path,row.request_id);if(common) inUse.add(common); }
+    let unknownWorkspaceMirror=false;
+    for(const row of db.prepare('SELECT request_id,path FROM workspaces').all()) { const common=savedWorkspaceMirror(row.path,row.request_id);if(common) inUse.add(common);else unknownWorkspaceMirror=true; }
+    // A workspace whose .git pointer could not be read may still depend on any mirror.
+    if(unknownWorkspaceMirror) return 0;
     const found=[];
     const visit=async dir=>{
       if(path.basename(dir).includes('.evicting-')) { await removeCache(dir);return; }
@@ -666,7 +673,7 @@ export class Workspace {
         const cache=path.join(caches,row.request_id);if(fs.existsSync(cache)) { await removeCache(cache);if(!fs.existsSync(cache)) summary.caches_removed++; }
         if(!expired&&!row.fetched_at) { if(!pressure) continue; if(!(pressure=await this.freeBytes()<minFree)) continue; if(!(row=idle())) continue; }
         if(row.path!==path.join(worktrees,row.request_id)) throw Object.assign(new Error('workspace cleanup path mismatch'),{request_id:requestId,summary});
-        if(fs.existsSync(row.path)) await gitAsync(['-C',mirror,'worktree','remove','--force',row.path]);
+        if(pathExistsOrThrow(row.path)) await gitAsync(['-C',mirror,'worktree','remove','--force',row.path]);
         db.prepare('DELETE FROM workspaces WHERE request_id=?').run(row.request_id);fs.rmSync(this.ignoredWrittenFile(row.request_id),{force:true});summary.workspaces_removed++;
       } catch(error) { if(error.summary) throw error;failed({request_id:requestId},error); }
     }

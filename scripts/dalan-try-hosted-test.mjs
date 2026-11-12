@@ -569,7 +569,7 @@ test('the trial\'s own node: the certificate check ends on cancel, escalates pas
   await sleepMs(30);
   const leftover = path.dirname(b.events.cert.files[0]); fs.writeFileSync(path.join(leftover, 'key'), 'PRIVATE-KEY-BODY');
   const deferred = [];
-  const held = await sweepTrialNodes({ registry: b.registry, processCmd: () => ({ state: 'unknown' }), say: line => deferred.push(line), kill() {}, clock: { sleep: async () => {} } });
+  const held = await sweepTrialNodes({ registry: b.registry, processCmd: pid => pid === 5555 ? { state: 'unknown' } : { state: 'absent' }, say: line => deferred.push(line), kill() {}, clock: { sleep: async () => {} } });
   assert.deepEqual(held, []);
   assert.equal(b.events.certAlive, true);
   assert.equal(fs.existsSync(leftover), true, 'failed inspection cannot delete files under a live writer');
@@ -625,7 +625,7 @@ test('the trial\'s own node: outputs wait for a late exit, and are kept for the 
   assert.equal(fs.existsSync(kept), true, 'its folder stays');
   assert.deepEqual(fs.readdirSync(never.registry), ['dalan-trial-abc123.json'], 'and so does the record');
   const unknownLines = [];
-  const unknown = await sweepTrialNodes({ registry: never.registry, processCmd: () => ({ state: 'unknown' }), say: line => unknownLines.push(line), kill() {}, clock: { sleep: async () => {} } });
+  const unknown = await sweepTrialNodes({ registry: never.registry, processCmd: pid => pid === 5555 ? { state: 'unknown' } : { state: 'absent' }, say: line => unknownLines.push(line), kill() {}, clock: { sleep: async () => {} } });
   assert.deepEqual(unknown, []);
   assert.equal(never.events.certAlive, true);
   assert.equal(fs.existsSync(kept), true);
@@ -677,11 +677,12 @@ test('a real live writer survives failed ps and identity reads, then its confirm
   fs.mkdirSync(out, { recursive: true }); fs.writeFileSync(path.join(out, 'key'), 'private');
   const child = liveProcess('certificate-writer');
   const gone = new Promise(resolve => child.once('exit', resolve));
+  const owner = await deadPid();
   const file = path.join(registry, 'debt.json');
   try {
     await sleepMs(100);
     const identity = processCommand(child.pid); assert.equal(identity.state, 'present');
-    fs.writeFileSync(file, JSON.stringify({ dir, certOut: out, certPid: child.pid, certCmd: identity.command, certStart: identity.start }));
+    fs.writeFileSync(file, JSON.stringify({ dir, certOut: out, certPid: child.pid, certCmd: identity.command, certStart: identity.start, owner }));
     for (const fault of [
       { run: () => ({ status: null, error: Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }) }) },
       ...(process.platform === 'linux'
@@ -689,12 +690,12 @@ test('a real live writer survives failed ps and identity reads, then its confirm
         : [{ run: () => ({ status: 0, stdout: 'invalid start identity' }) }]),
     ]) {
       const lines = [];
-      assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => processCommand(pid, fault), say: line => lines.push(line), kill() { assert.fail('writer is not signalled'); } }), []);
+      assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : processCommand(pid, fault), say: line => lines.push(line), kill() { assert.fail('writer is not signalled'); } }), []);
       assert.equal(isAlive(child.pid), true); assert.equal(fs.existsSync(out), true); assert.equal(fs.existsSync(file), true);
       assert.match(lines.join('\n'), /certificate.*unknown/i);
     }
   } finally { child.kill(); await gone; }
-  assert.deepEqual(await sweepTrialNodes({ registry }), ['debt.json']);
+  assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : processCommand(pid) }), ['debt.json']);
   assert.equal(fs.existsSync(out), false); assert.equal(fs.existsSync(file), false);
   assert.deepEqual(await sweepTrialNodes({ registry }), [], 'cleanup is idempotent');
 });
@@ -755,7 +756,7 @@ test('failed certificate identity persistence keeps the durable unknown marker a
   assert.match(h.lines.join('\n'), /identity persistence failure/);
   await h.node.stop();
   const lines = [];
-  assert.deepEqual(await sweepTrialNodes({ registry: h.registry, processCmd: processCommand, say: line => lines.push(line), kill() {} }), []);
+  assert.deepEqual(await sweepTrialNodes({ registry: h.registry, processCmd: pid => pid === process.pid ? { state: 'absent' } : processCommand(pid), say: line => lines.push(line), kill() {} }), []);
   assert.equal(fs.existsSync(rec.certOut), true); assert.equal(fs.existsSync(file), true);
   assert.deepEqual(fs.readdirSync(h.registry), ['dalan-trial-abc123.json'], 'atomic-update scratch is removed');
   assert.match(lines.join('\n'), /certificate.*unknown/i);
@@ -778,10 +779,11 @@ test('certificate cleanup debt survives unknown inspection and releases only on 
     const registry = fs.mkdtempSync(path.join(tmp, 'registry-'));
     const dir = path.join(fs.mkdtempSync(path.join(tmp, 'debt-')), 'tsnode'), out = path.join(dir, 'tlscheck-owned');
     fs.mkdirSync(out, { recursive: true }); fs.writeFileSync(path.join(out, 'key'), 'private');
+    const owner = await deadPid();
     const file = path.join(registry, 'debt.json');
-    fs.writeFileSync(file, JSON.stringify({ dir, certOut: out, certPid: 5555, certCmd: 'tailscale cert', certStart: savedStart }));
+    fs.writeFileSync(file, JSON.stringify({ dir, certOut: out, certPid: 5555, certCmd: 'tailscale cert', certStart: savedStart, owner }));
     const lines = [];
-    const ended = await sweepTrialNodes({ registry, processCmd: () => inspection, say: line => lines.push(line), kill() { assert.fail('certificate PID must not be signalled'); } });
+    const ended = await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : inspection, say: line => lines.push(line), kill() { assert.fail('certificate PID must not be signalled'); } });
     assert.equal(fs.existsSync(out), !releases, label);
     assert.equal(fs.existsSync(file), !releases, label);
     assert.equal(ended.length, releases ? 1 : 0, label);
@@ -1451,7 +1453,7 @@ test('a real route reuses one home per client, so its address and sign-in surviv
   try {
     const homes = [];
     for (const [route, name] of [['tailscale', 'rh1'], ['tailscale', 'rh2'], [undefined, 'th1'], [undefined, 'th2']]) {
-      const run = await hostedRun(name, { noHome: true, route, providers: [unreadyTailscale('x'), fakeRoute().provider] });
+      const run = await hostedRun(name, { noHome: true, route, providers: [{ name: 'tailscale', probe: () => ({ ok: true }), start: async () => { throw new Error('test stops after home selection'); }, stop: async () => ({ removed: true }) }, fakeRoute().provider] });
       for (let waited = 0; !run.errorContext.home && waited < 5000; waited += 20) await sleepMs(20);
       if (!route) await run.close(); else await run.finished;
       assert.ok(run.errorContext.home, `the home is chosen before anything else happens: ${(await run.finished).error?.message}`);
@@ -1502,12 +1504,12 @@ test('a run that loses the home lock removes nothing of the winner', async () =>
 test('children of a trial that was killed are ended by the next trial, only when the process still matches', async () => {
   const registry = path.join(tmp, 'children');
   const live = new Map([[111, 'ssh -R x'], [222, 'ssh -R y'], [999, 'node bin/dalan.mjs try']]);
-  const processCmd = pid => live.get(pid) ?? null;
+  const processCmd = pid => live.has(pid) ? { state: 'present', command: live.get(pid), start: `start-${pid}` } : { state: 'absent' };
   const killed = [];
   const kill = (pid, signal) => { killed.push([pid, signal]); live.delete(pid); };
   registerChild({ registry, child: { pid: 111 }, processCmd, owner: 998 }); // owner 998 is gone
   registerChild({ registry, child: { pid: 222 }, processCmd, owner: 999 }); // owner 999 still runs
-  fs.writeFileSync(path.join(registry, '333.json'), JSON.stringify({ pid: 333, cmd: 'ssh -R z', owner: 998, ownerCmd: 'node old' })); // pid 333 now belongs to another process
+  fs.writeFileSync(path.join(registry, '333.json'), JSON.stringify({ pid: 333, cmd: 'ssh -R z', owner: 998, ownerStart: 'old-owner' })); // pid 333 now belongs to another process
   live.set(333, 'vim notes.txt');
   const ended = await sweepChildren({ registry, processCmd, kill, clock: { sleep: async () => {} } });
   assert.deepEqual(ended, [111]);
@@ -1773,4 +1775,116 @@ test('Gozar loopback Host normalization keeps the public host check and Origin h
     assert.equal(wrongHost, 421, 'an unrelated host is still rejected');
     assert.equal((await fetch(target, { headers: { origin: 'https://evil.example' } })).status, 403, 'Origin is preserved for Dalan to check');
   } finally { await gate.close(); await new Promise(resolve => upstream.close(resolve)); }
+});
+
+test('default Tailscale fallback starts successive ephemeral trials in fresh homes', async () => {
+  const oldHome = process.env.HOME;
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dfb-'));
+  process.env.HOME = fakeHome;
+  const homes = [];
+  try {
+    for (let i = 0; i < 2; i++) {
+      const fallback = fakeRoute('tailscale-node');
+      const busy = { name: 'tailscale', probe: () => ({ ok: false, busy: true, line: 'busy', fix: 'free 443' }) };
+      const run = await hostedRun(`fallback-${i}`, { noHome: true, argv: ['--route', 'tailscale'], providers: [busy, fallback.provider] });
+      try {
+        await run.until(/Checking public routes/);
+        homes.push(run.errorContext.home);
+        if (i) assert.notEqual(homes[0], homes[1], 'the next trial must not select the previous node identity');
+        await run.handoff();
+      } finally {
+        const done = await run.close();
+        assert.equal(done.error, undefined, done.error?.message);
+      }
+      assert.ok(fs.existsSync(path.join(homes[i], '.config/dalan/as.json')), 'old sign-in identity remains in history');
+    }
+    assert.notEqual(homes[0], homes[1], 'a new node must not reuse the old sign-in identity');
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test('node sweep protects owners without recorded identity and requires start identity to prove PID reuse', async () => {
+  for (const [label, owner, recordedStart, reclaim] of [
+    ['present without saved command', { state: 'present', command: 'trial', start: '10' }, null, false],
+    ['unknown without saved command', { state: 'unknown' }, null, false],
+    ['same start changed command', { state: 'present', command: 'new title', start: '10' }, '10', false],
+    ['different start', { state: 'present', command: 'trial', start: '11' }, '10', true],
+    ['confirmed absent', { state: 'absent' }, null, true],
+  ]) {
+    const registry = fs.mkdtempSync(path.join(tmp, 'owner-'));
+    const dir = path.join(registry, 'tsnode'), sock = path.join(dir, 'daemon.sock');
+    fs.mkdirSync(dir);
+    const file = path.join(registry, 'trial.json');
+    fs.writeFileSync(file, JSON.stringify({ owner: 12345, ownerCmd: null, ownerStart: recordedStart, pid: 23456, dir, sock }));
+    let daemonAlive = true;
+    const killed = [];
+    const ended = await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? owner : daemonAlive ? { state: 'present', command: `tailscaled --socket=${sock}`, start: '20' } : { state: 'absent' }, kill(pid) { killed.push(pid); daemonAlive = false; }, clock: { sleep: async () => {} } });
+    assert.equal(killed.length, reclaim ? 1 : 0, label);
+    assert.equal(ended.length, reclaim ? 1 : 0, label);
+    assert.equal(fs.existsSync(file), !reclaim, label);
+    assert.equal(fs.existsSync(dir), !reclaim, label);
+  }
+});
+
+test('node sweep retains unreadable records and directories of daemons whose exit is unknown', async () => {
+  const registry = fs.mkdtempSync(path.join(tmp, 'inspect-debt-'));
+  const broken = path.join(registry, 'broken.json'); fs.writeFileSync(broken, '{');
+  const dir = path.join(registry, 'tsnode'); fs.mkdirSync(dir);
+  const file = path.join(registry, 'trial.json');
+  fs.writeFileSync(file, JSON.stringify({ owner: 12345, pid: 23456, sock: path.join(dir, 'daemon.sock'), dir }));
+  assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? { state: 'absent' } : { state: 'unknown' }, kill() { assert.fail('unknown process must not be killed'); } }), []);
+  assert.ok(fs.existsSync(broken), 'an unparseable record is retained');
+  assert.ok(fs.existsSync(file), 'unknown daemon keeps recovery record');
+  assert.ok(fs.existsSync(dir), 'unknown daemon keeps its socket directory');
+});
+
+test('a daemon that survives stop keeps its directory and recovery record', async () => {
+  const h = nodeHarness({ killGraceMs: 5 });
+  const home = fs.mkdtempSync(path.join(tmp, 'daemon-debt-'));
+  await h.node.start({ gatePort: 1, home, say: h.say });
+  h.events.daemon.kill = () => false;
+  const stopped = await h.node.stop();
+  assert.equal(stopped.keepNode, true);
+  assert.equal(stopped.removed, false);
+  assert.ok(fs.existsSync(path.join(home, 'tsnode')));
+  assert.ok(fs.existsSync(path.join(h.registry, 'dalan-trial-abc123.json')));
+});
+
+test('Gozar controller inspection timeout cannot prove a route absent', async () => {
+  let exposed = false, timeout = false;
+  const calls = [];
+  const provider = gozarProvider({ which: () => 'gozar', run(binary, args, options, callback) {
+    calls.push(args[0]);
+    const empty = { phase: 'unknown', candidate: null, published: null, resources: [], limitations: [`Controller unavailable: ${timeout ? 'timeout' : 'ENOENT'}`] };
+    if (args[0] === 'expose') exposed = true;
+    callback(null, JSON.stringify({ snapshot: args[0] === 'expose' || (exposed && !timeout) ? { sessionId: 'own', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : empty }));
+  } });
+  provider.probe();
+  await provider.start({ gatePort: 12348 });
+  timeout = true;
+  assert.equal((await provider.stop()).removed, false, 'unavailable controller is unknown, not removed');
+  assert.equal(calls.includes('stop'), false, 'port-only stop cannot act without observed session ownership');
+  const next = gozarProvider({ which: () => 'gozar', run(binary, args, options, callback) {
+    assert.equal(args[0], 'status', 'startup must not expose on unknown prior route state');
+    callback(null, JSON.stringify({ snapshot: { phase: 'unknown', candidate: null, published: null, resources: [], limitations: ['Controller unavailable: timeout'] } }));
+  } });
+  next.probe();
+  await assert.rejects(next.start({ gatePort: 12349 }), /already has a Gozar route/);
+});
+
+test('node sweeps require a present socket identity before signalling and retain incomplete records', async () => {
+  for (const [label, overrides, inspectDaemon] of [
+    ['missing owner', { owner: null }, sock => ({ state: 'present', command: `tailscaled --socket=${sock}` })],
+    ['missing socket', { sock: null }, () => ({ state: 'present', command: 'tailscaled' })],
+    ['unknown with partial command', {}, sock => ({ state: 'unknown', command: `tailscaled --socket=${sock}` })],
+  ]) {
+    const registry = fs.mkdtempSync(path.join(tmp, 'incomplete-node-'));
+    const dir = path.join(registry, 'tsnode'); fs.mkdirSync(dir);
+    const sock = path.join(dir, 'daemon.sock'), file = path.join(registry, 'trial.json');
+    fs.writeFileSync(file, JSON.stringify({ owner: 12345, pid: 23456, sock, dir, ...overrides }));
+    assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? { state: 'absent' } : inspectDaemon(sock), kill() { assert.fail(`${label} must not authorize a signal`); } }), [], label);
+    assert.ok(fs.existsSync(file), label); assert.ok(fs.existsSync(dir), label);
+  }
 });

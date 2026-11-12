@@ -10,7 +10,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const entryName = owner => `${owner.pid}-${owner.token}.json`;
-const readEntry = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { return error.code === 'ENOENT' ? undefined : null; } };
+const readEntry = file => {
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
+  let entry;
+  try { entry = JSON.parse(raw); } catch { throw new Error(`invalid waiter entry: ${file}`); }
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Number.isSafeInteger(entry.pid) || entry.pid <= 0 || (entry.token !== undefined && typeof entry.token !== 'string')) {
+    throw new Error(`invalid waiter entry: ${file}`);
+  }
+  return entry;
+};
+
+const waiterIsLive = (entry, isLive, file) => {
+  const state = isLive(entry);
+  if (state === true) return true;
+  if (state === false) return false;
+  throw new Error(`could not inspect waiter: ${file}`);
+};
 
 // Returns null when `owner` now holds the slot, or the live holder's entry. Throws when the slot cannot be settled.
 export function takeSlot(slot, owner, { isLive, beforeRemoval } = {}) {
@@ -25,7 +42,7 @@ export function takeSlot(slot, owner, { isLive, beforeRemoval } = {}) {
       try { stat = fs.lstatSync(slot); } catch { continue; }
       if (stat.isFile()) { // a pidfile written by an earlier release
         const held = readEntry(slot);
-        if (held && isLive(held)) return held;
+        if (held && waiterIsLive(held, isLive, slot)) return held;
         beforeRemoval?.();
         fs.rmSync(slot, { force: true });
         continue;
@@ -36,7 +53,7 @@ export function takeSlot(slot, owner, { isLive, beforeRemoval } = {}) {
       for (const name of names) {
         const entry = readEntry(path.join(slot, name));
         if (entry === undefined) continue;
-        if (entry && isLive(entry)) return entry;
+        if (waiterIsLive(entry, isLive, path.join(slot, name))) return entry;
         stale.push(name);
       }
       if (!stale.length) continue; // empty: the next rename replaces it

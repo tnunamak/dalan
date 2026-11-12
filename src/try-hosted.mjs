@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { terminalSafe } from './terminal-safe.mjs';
+import { waitForChildExit } from './child-exit.mjs';
 import { createLineMasker, safeDiagnostic } from './diagnostic.mjs';
 import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
@@ -39,9 +40,11 @@ export function acquireHomeLock(home) {
       return () => { try { if (fs.readFileSync(file, 'utf8') === token) fs.rmSync(file, { force: true }); } catch { /* gone */ } };
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      const pid = Number.parseInt(fs.readFileSync(file, 'utf8'), 10);
-      if (!Number.isInteger(pid)) throw busy();
-      try { process.kill(pid, 0); throw busy(); } catch (probe) { if (probe.tryKind || probe.code === 'EPERM') throw busy(); }
+      const raw = fs.readFileSync(file, 'utf8').trim();
+      const match = /^([1-9]\d*)(?:\s+\S+)?$/.exec(raw);
+      const pid = match ? Number(match[1]) : NaN;
+      if (!Number.isSafeInteger(pid)) throw busy();
+      try { process.kill(pid, 0); throw busy(); } catch (probe) { if (probe.tryKind || probe.code !== 'ESRCH') throw busy(); }
       fs.rmSync(file, { force: true }); // its owner is gone
     }
   }
@@ -108,8 +111,9 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const realRoute = routeChoice === 'tailscale';
   const spec = CLIENTS[client];
   const realHome = fs.realpathSync(os.homedir());
-  // A real route keeps one home per client, so its address and its sign-in survive a restart; a trial gets a new home every run.
-  const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', realRoute ? `dalan-hosted-${client}` : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
+  // Only the host's usable Funnel has a stable identity; its ephemeral fallback needs a new home.
+  const stableHome = realRoute && providers.find(provider => provider.name === 'tailscale')?.probe().ok;
+  const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', stableHome ? `dalan-hosted-${client}` : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
   errorContext.home = home;
   const cliPath = errorContext.shellCli ?? shellQuote(path.join(repo, 'bin/dalan.mjs'));
   const cli = errorContext.cli ?? `node ${cliPath}`;
@@ -171,9 +175,9 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     server.once('close', forgetServer);
     const child = server;
     const sinks = [child.stdout, child.stderr].map(stream => { const persist = createLineMasker(text => fs.appendFileSync(logFile, text)); stream.setEncoding('utf8').on('data', chunk => persist(chunk)); return persist; });
-    stopped = new Promise(resolve => {
-      child.once('close', () => { for (const flush of sinks) flush('', true); exited = true; resolve(); });
-      child.once('error', error => { fs.appendFileSync(logFile, `spawn failed: ${safeDiagnostic(error.message, 1000)}\n`); exited = true; resolve(); });
+    stopped = waitForChildExit(child, {
+      onClose: () => { for (const flush of sinks) flush('', true); exited = true; },
+      onError: error => { fs.appendFileSync(logFile, `process error: ${safeDiagnostic(error.message, 1000)}\n`); },
     });
   };
   const stopServer = async () => {
@@ -214,7 +218,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     const origin = route.origin;
     say(`Public route ready (${route.provider.name}).`);
     if (storedOrigin && storedOrigin !== origin) {
-      const error = new Error(`this home was set up for ${storedOrigin}, but the new public address is ${origin}. A new address is a new sign-in identity. Start a fresh trial instead`);
+      const error = new Error(`this home was set up for ${storedOrigin}, but the new public address is ${origin}. A new address is a new sign-in identity. Start a fresh trial instead${route.provider.name === 'tailscale-node' ? ` with: ${cli} try --public --client ${client} --route ${routeChoice} --home ${shellQuote(path.join(realHome, '.local/share', `dalan-hosted-${randomBytes(3).toString('hex')}`))}` : ''}`);
       error.tryKind = 'identity';
       throw error;
     }

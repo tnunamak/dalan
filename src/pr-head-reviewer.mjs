@@ -586,9 +586,9 @@ export function acquireLock(dir) {
     try { fs.writeFileSync(file, String(process.pid), { flag: 'wx' }); return () => { try { fs.unlinkSync(file); } catch { /* gone */ } }; }
     catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      const pid = Number(fs.readFileSync(file, 'utf8'));
-      let alive = true; try { process.kill(pid, 0); } catch (err) { alive = err.code === 'EPERM'; }
-      if (alive) return null;
+      const raw = fs.readFileSync(file, 'utf8').trim();
+      if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(Number(raw))) return null;
+      try { process.kill(Number(raw), 0); return null; } catch (err) { if (err.code !== 'ESRCH') return null; }
       try { fs.unlinkSync(file); } catch { /* raced */ }
     }
   }

@@ -320,17 +320,15 @@ const checkerEnv = home => ({ PATH: checkerPath(), HOME: home, TMPDIR: home, LAN
 // no sound containment without a sandbox or cgroup, so the checker also runs only when the host-check policy allows
 // unsandboxed host execution, and it must be a trusted local data-only command, not a security boundary.
 function descendantPids(rootPid) {
-  try {
-    const rows = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(l => l.trim().split(/\s+/).map(Number));
-    const kids = new Map();
-    for (const [pid, ppid] of rows) { if (!kids.has(ppid)) kids.set(ppid, []); kids.get(ppid).push(pid); }
-    const found = [], queue = [rootPid];
-    while (queue.length) for (const pid of kids.get(queue.pop()) ?? []) { found.push(pid); queue.push(pid); }
-    return found;
-  } catch { return []; }
+  const rows = execFileSync('ps', ['-eo', 'pid=,ppid='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(l => l.trim().split(/\s+/).map(Number));
+  const kids = new Map();
+  for (const [pid, ppid] of rows) { if (!kids.has(ppid)) kids.set(ppid, []); kids.get(ppid).push(pid); }
+  const found = [], queue = [rootPid];
+  while (queue.length) for (const pid of kids.get(queue.pop()) ?? []) { found.push(pid); queue.push(pid); }
+  return found;
 }
 // Optional prose check of a build patch: pipes the added prose lines to an owner-configured linter command.
-export function runBuildProseCheck(repo, patch, env = process.env, { refusal = hostCheckRefusal, timeoutMs = 30000 } = {}) {
+export function runBuildProseCheck(repo, patch, env = process.env, { refusal = hostCheckRefusal, timeoutMs = 30000, descendants = descendantPids } = {}) {
   const ownersName = 'DALAN_ACP_PROSE_CHECK_OWNERS';
   const command = env.DALAN_ACP_PROSE_CHECK;
   const owners = configuredOwners(env[ownersName]);
@@ -345,12 +343,20 @@ export function runBuildProseCheck(repo, patch, env = process.env, { refusal = h
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'prose-check-'));
     const child = spawn(command, ['check', '--stdin', '--kind', 'doc', '--json'], { env: checkerEnv(home), stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     const killTree = () => {
-      const tracked = descendantPids(child.pid);
+      let tracked;
+      try { tracked = descendants(child.pid); } catch { tracked = null; }
       try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-      for (const pid of tracked) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+      for (const pid of tracked ?? []) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+      return tracked !== null;
     };
     let stdout = '', stderr = '', settled = false;
-    const finish = result => { if (settled) return; settled = true; clearTimeout(timer); killTree(); fs.rmSync(home, { recursive: true, force: true }); resolve(result); };
+    const finish = result => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      if (killTree()) fs.rmSync(home, { recursive: true, force: true });
+      else result = { ...result, status: 'ERROR', detail: `process inspection failed; temporary files retained at ${home}`, cleanupHome: home };
+      resolve(result);
+    };
     const timer = setTimeout(() => finish({ status: 'ERROR', detail: 'timed out' }), timeoutMs);
     child.stdout.setEncoding('utf8').on('data', chunk => { if (stdout.length < 256000) stdout += chunk; });
     child.stderr.setEncoding('utf8').on('data', chunk => { if (stderr.length < 4000) stderr += chunk; });
