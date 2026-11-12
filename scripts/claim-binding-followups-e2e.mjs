@@ -182,19 +182,20 @@ childProcess.execFile=fixtureExec;syncBuiltinESMExports();
 const baseWorkers=(over={})=>({default_execution:'worker',workers:{dot:{destination:declaration(),repos:[REPO],workspaceAllowed:true,...over},other:{}}});
 const noDestination=()=>({default_execution:'worker',workers:{dot:{repos:[REPO],workspaceAllowed:true},other:{}}});
 
-// ---- Finding 1: configuration errors reach a worker only as the generic error ----------------------------------
-
 const CANARY='PRIVATE_CONFIG_CANARY_7f3a';
 // Mirrors Store.destinationConfigurationError: the only text a caller may receive for any configuration failure.
 // A parse error gets 'invalid JSON configuration'; any other loader error gets 'configuration could not be loaded'.
 const fixedConfigError=(requestId,cause='configuration could not be loaded')=>JSON.stringify({error:'destination_configuration_invalid',request_id:requestId,
   message:'Current destination configuration is unavailable or invalid; restore it before a new admission. Cause: '+cause});
-for(const kind of ['invalid-json','invalid-shape','wrong-mode','deleted']) test('worker never sees raw workers.json errors on repository jobs: '+kind,{timeout:60000},async t=>{
+for(const kind of ['invalid-json','invalid-shape','wrong-mode','deleted']) test('invalid workers.json blocks new claims and workspace access without leaking config: '+kind,{timeout:60000},async t=>{
   const f=await fixture(t,{workers:baseWorkers()});
   const a=f.connect('A');
   await f.submit('req_cfg_live',{repo:true,implementation:true});await f.submit('req_cfg_queued',{repo:true});
   // A live grant on an implementation job, so `get` reaches repository-policy metadata preparation.
-  assert.ok((await f.rpc(a,'claim',f.claimArgs('req_cfg_live'))).claim_id);
+  const liveId='req_cfg_live',queuedId='req_cfg_queued';
+  const grant=await f.rpc(a,'claim',f.claimArgs(liveId));
+  assert.ok(grant.claim_id,JSON.stringify(grant));
+  const liveBefore=f.state(liveId);
   const bad={
     'invalid-json':()=>f.writeWorkers(`{"${CANARY}": not json`),
     'invalid-shape':()=>f.writeWorkers({[CANARY]:{unknown:true}}),
@@ -202,21 +203,43 @@ for(const kind of ['invalid-json','invalid-shape','wrong-mode','deleted']) test(
     'deleted':()=>fs.rmSync(f.workersFile),
   }[kind];
   bad();
-  const before=f.state('req_cfg_queued');
-  const attempts={
-    'fresh claim':await f.rpc(a,'claim',f.claimArgs('req_cfg_queued')),
-    'get of live grant':await f.rpc(a,'get',{request_id:'req_cfg_live'}),
-  };
+  const configError=id=>fixedConfigError(id,kind==='invalid-json'?'invalid JSON configuration':undefined);
+  const queuedBefore=f.state(queuedId);
+  const freshClaim=await f.rpc(a,'claim',f.claimArgs(queuedId));
+  assert.equal(freshClaim.error,configError(queuedId),'new claim reports only the generic config error');
   const leak=new RegExp(CANARY+'|workers\\.json|'+f.home.replaceAll('.','\\.')+'|Unexpected token|not valid JSON|mode 0600|worker profile disappeared|EACCES|ENOENT');
-  // Check every call site before failing, so one run names each site that leaks.
-  const problems=Object.entries(attempts).flatMap(([label,result])=>{
-    const text=result.error??JSON.stringify(result);
-    if(!result.error)return [label+' must be refused: '+text];
-    return [...(/destination_configuration_invalid/.test(text)?[]:[label+' lacks the generic configuration error: '+text]),
-      ...(leak.test(text)?[label+' leaked configuration detail: '+text]:[])];
-  });
-  assert.deepEqual(problems,[]);
-  assert.deepEqual(f.state('req_cfg_queued'),before,'refused claim changed state');
+  assert.doesNotMatch(freshClaim.error,leak,'fresh claim leaked configuration detail');
+
+  const liveGet=await f.rpc(a,'get',{request_id:liveId});
+  assert.equal(liveGet.error,undefined,JSON.stringify(liveGet));
+  assert.equal(liveGet.request_id,liveId);
+  assert.equal(liveGet.status,'claimed');
+  assert.equal(liveGet.assignment?.execution_scope,'implementation');
+  assert.equal(liveGet.claim?.state,'active');
+  assert.deepEqual(liveGet.available_checks,[]);
+  assert.equal(liveGet.available_checks_error,'destination_configuration_invalid');
+  const liveGetText=JSON.stringify(liveGet);
+  assert.doesNotMatch(liveGetText,leak,'live get leaked configuration detail');
+  assert.doesNotMatch(liveGetText,/\"(?:claim_id|acquisition_id)\"\s*:/,'live get exposed a grant capability field');
+  assert.equal(liveGetText.includes(grant.claim_id),false,'live get exposed the claim ID');
+  assert.deepEqual(f.state(liveId).claims,liveBefore.claims,'metadata failure changed the existing grant');
+  assert.deepEqual(f.state(liveId).status,liveBefore.status,'metadata failure changed the live assignment');
+
+  const workspaceEffects=()=>{
+    const snapshot=f.snapshot(liveId);
+    return {tables:Object.fromEntries(Object.entries(snapshot.tables).filter(([name])=>/workspace|check|artifact/i.test(name))),files:snapshot.files};
+  };
+  const effectsBefore=workspaceEffects();
+  for(const [tool,args] of [
+    ['list_files',{request_id:liveId,claim_id:grant.claim_id}],
+    ['read_file',{request_id:liveId,claim_id:grant.claim_id,path:'README.md'}],
+  ]) {
+    const refused=await f.rpc(a,tool,args);
+    assert.equal(refused.error,configError(liveId),tool+' must fail closed with the generic config error');
+    assert.doesNotMatch(refused.error,leak,tool+' leaked configuration detail');
+  }
+  assert.deepEqual(workspaceEffects(),effectsBefore,'workspace denial created or changed a workspace/check effect');
+  assert.deepEqual(f.state(queuedId),queuedBefore,'refused fresh claim changed queued state');
 });
 
 test('server log keeps the real configuration error that the worker never sees',{timeout:60000},async t=>{
@@ -266,7 +289,7 @@ test('server log bounds a cyclic configuration error with a huge attached string
   }
 });
 
-// ---- Finding 1 / legacy: no workers.json is a legacy profile, not a configuration error -------------------------
+// ---- Legacy profile: no workers.json is not a configuration error ----------------------------------------------
 
 test('legacy profile without workers.json keeps its own repository refusal through the real policy loader',{timeout:60000},async t=>{
   const f=await fixture(t,{workers:null});
@@ -299,7 +322,7 @@ test('legacy restart: a queued repository job gets the legacy refusal on claim, 
   assert.doesNotMatch(result.error,/destination_configuration_invalid/);
 });
 
-// ---- Finding 2: a worker with no destination block is fenced to its granting connection -------------------------
+// ---- A worker with no destination block is fenced to its granting connection ----------------------------------
 
 for(const native of [false,true]) test('replacement connection cannot recover a grant for a worker with no destination ('+(native?'native receipt':'duplicate')+')',{timeout:60000},async t=>{
   const f=await fixture(t,{workers:noDestination(),native});
@@ -324,7 +347,7 @@ for(const native of [false,true]) test('replacement connection cannot recover a 
   assert.equal(f.state(id+'_fresh').claims[0].connection_id,b.connection_id);
 });
 
-// ---- Finding 3: an exact retry by the granting connection is not a new admission --------------------------------
+// ---- An exact retry by the granting connection is not a new admission ------------------------------------------
 
 for(const native of [false,true]) test('same-connection retry survives allowlist and destination edits without writing a refusal ('+(native?'native receipt':'duplicate')+')',{timeout:90000},async t=>{
   const f=await fixture(t,{workers:baseWorkers(),native});
