@@ -380,6 +380,21 @@ try {
   await assert.rejects(installService({ home: retryHome, origin: 'https://changed.example.test', port: 8791,
     target: '127.0.0.1:8791', workers: ['dot'] }, { env, platform: 'linux' }), /belongs to a different service configuration/);
 
+  const legacyHome = path.join(root, 'legacy-unit');
+  const legacyInstall = () => installService({ home: legacyHome, origin: 'https://legacy.example.test', port: 8790,
+    target: '127.0.0.1:8790', workers: ['dot'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn: (command, args) => args.includes('service') && args.includes('add')
+      ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route: { ...route, origin: 'https://legacy.example.test', target: '127.0.0.1:8790', verification: { status: 'verified' } } }), stderr: '' }
+      : { status: 0, stdout: '', stderr: '' }, waitForSocket: async () => true,
+  });
+  const legacyResult = await legacyInstall();
+  const legacyFile = path.join(xdg, 'systemd/user', legacyResult.unit);
+  const fresh = fs.readFileSync(legacyFile, 'utf8');
+  assert.match(fresh, new RegExp(`^ExecStart=/usr/bin/node .*src/server\\.mjs\\nExecStartPre=/usr/bin/node \\S+/current/bin/dalan\\.mjs service recover --home ${legacyHome} --quiet\\n`, 'm'));
+  fs.writeFileSync(legacyFile, fresh.split('\n').filter(l => !l.startsWith('ExecStartPre=')).join('\n'), { mode: 0o600 });
+  await legacyInstall();
+  assert.equal(fs.readFileSync(legacyFile, 'utf8'), fresh, 'a unit from 0.6.x without ExecStartPre is still enrolled and gains recovery');
+
   for (const field of ['origin', 'target']) {
     const mismatchHome = path.join(root, `mismatch-${field}`);
     await assert.rejects(installService({ home: mismatchHome, origin: route.origin, port: 8787,
