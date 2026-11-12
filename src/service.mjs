@@ -167,7 +167,8 @@ const POLICY_HOME_FILES = new Set([
   'service-migration.json', 'workers.json', 'workers-audit.jsonl', 'workers-audit-checkpoint.sqlite',
   'workers-audit-checkpoint.sqlite-wal', 'workers-audit-checkpoint.sqlite-shm', 'workers-repos.json',
 ]);
-const WORKSPACE_RUNTIME_DIRS = ['artifacts', 'caches', 'worktrees'];
+const WORKSPACE_RUNTIME_DIRS = new Set(['artifacts', 'caches', 'host-receipts', 'mirrors', 'run', 'worktrees']);
+const WORKSPACE_RUNTIME_FILES = new Map([['github-askpass', 0o700]]);
 
 function installReceipt(home, configDir, o, workers) {
   return { schema_version: 1, home, origin: o.origin, port: o.port, target: o.target.value, enable_workspace: !!o.enableWorkspace, enable_t3: !!o.enableT3,
@@ -182,11 +183,19 @@ function validateWorkspaceRuntime(home) {
   if (scratchEntries.length !== 1 || scratchEntries[0] !== 'dalan') fail(`${scratch} contains data outside Dalan runtime scratch`);
   if ((fs.lstatSync(runtime).mode & 0o777) !== 0o700) fail(`${runtime} must be private`);
   const runtimeEntries = fs.readdirSync(runtime).sort();
-  if (JSON.stringify(runtimeEntries) !== JSON.stringify(WORKSPACE_RUNTIME_DIRS)) fail(`${runtime} does not contain the expected Dalan workspace directories`);
   for (const name of runtimeEntries) {
-    const directory = path.join(runtime, name);
-    assertRealDirectoryPath(directory, { owner: true });
-    if ((fs.lstatSync(directory).mode & 0o777) !== 0o700) fail(`${directory} must be private`);
+    const entry = path.join(runtime, name);
+    if (!WORKSPACE_RUNTIME_DIRS.has(name) && !WORKSPACE_RUNTIME_FILES.has(name)) fail(`${runtime} contains an unknown Dalan workspace entry`);
+    const info = fs.lstatSync(entry);
+    if (WORKSPACE_RUNTIME_FILES.has(name)) {
+      const owned = typeof process.getuid !== 'function' || info.uid === process.getuid();
+      if (!info.isFile() || info.isSymbolicLink() || !owned || (info.mode & 0o777) !== WORKSPACE_RUNTIME_FILES.get(name)) {
+        fail(`${entry} must be a private regular Dalan file`);
+      }
+      continue;
+    }
+    assertRealDirectoryPath(entry, { owner: true });
+    if ((info.mode & 0o777) !== 0o700) fail(`${entry} must be private`);
   }
 }
 

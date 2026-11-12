@@ -80,32 +80,46 @@ try {
   assert.ok(grantEvents.some(event => event.worker === 'muse' && event.after.repos.includes(grantedRepo)), 'the existing repository grant must have an owner audit event');
 
   const installState = privateState(home);
-  for (const directory of ['artifacts', 'caches', 'worktrees']) {
-    fs.mkdirSync(path.join(home, '.tmp/dalan', directory), { recursive: true, mode: 0o700 });
-  }
-  const worktree = path.join(home, '.tmp/dalan/worktrees', 'req_fixture');
-  const linkedDirectory = path.join(root, 'linked-repo-content');
-  fs.mkdirSync(worktree, { mode: 0o700 });
-  fs.mkdirSync(linkedDirectory, { mode: 0o700 });
-  fs.symlinkSync(linkedDirectory, path.join(worktree, 'repo-link'));
-  const exactRetry = await installService({ home, origin: 'https://bridge.example.test', port: 8787,
+  const retryServiceInstall = () => installService({ home, origin: 'https://bridge.example.test', port: 8787,
     target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
     env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn, waitForSocket: async () => true,
   });
+  const createRuntimeFixture = () => spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import path from 'node:path';
+    import { hostGitEnv } from ${JSON.stringify(new URL('../src/projects.mjs', import.meta.url).href)};
+    const hostEnv = hostGitEnv();
+    process.stdout.write(JSON.stringify({ runtime: path.dirname(hostEnv.GIT_ASKPASS), askpass: hostEnv.GIT_ASKPASS }));
+  `, root], { env: { ...env, HOME: home, XDG_CONFIG_HOME: path.join(home, '.config'), NODE_OPTIONS: '--disable-warning=ExperimentalWarning' }, encoding: 'utf8' });
+  const runtimeFixture = createRuntimeFixture();
+  assert.equal(runtimeFixture.status, 0, runtimeFixture.stderr);
+  const generatedRuntime = JSON.parse(runtimeFixture.stdout);
+  assert.equal(generatedRuntime.runtime, path.join(home, '.tmp/dalan'));
+  assert.equal(generatedRuntime.askpass, path.join(generatedRuntime.runtime, 'github-askpass'));
+  const sparseRetry = await retryServiceInstall();
+  assert.equal(sparseRetry.started, true, 'the hostGitEnv-created sparse runtime root is safe to preserve');
+  assert.deepEqual(privateState(home), installState, 'a sparse-runtime retry preserves keys, policy, grants and receipt');
+  fs.rmSync(generatedRuntime.askpass);
+  const emptyScratchRetry = await retryServiceInstall();
+  assert.equal(emptyScratchRetry.started, true, 'empty receipt-backed scratch remains safe to preserve');
+  assert.deepEqual(privateState(home), installState, 'an empty-scratch retry preserves keys, policy, grants and receipt');
+  assert.equal(createRuntimeFixture().status, 0, 'hostGitEnv restores its private askpass file for later runtime use');
+
+  const runtimeRoot = generatedRuntime.runtime;
+  for (const directory of ['artifacts', 'caches', 'host-receipts', 'mirrors', 'run', 'worktrees']) {
+    fs.mkdirSync(path.join(runtimeRoot, directory), { mode: 0o700 });
+  }
+  const worktree = path.join(runtimeRoot, 'worktrees/req_fixture');
+  const linkedDirectory = path.join(root, 'linked-repo-content');
+  fs.mkdirSync(worktree, { mode: 0o700 });
+  fs.mkdirSync(linkedDirectory, { mode: 0o700 });
+  fs.symlinkSync(linkedDirectory, path.join(worktree, 'repo-link'));
+  const exactRetry = await retryServiceInstall();
   assert.equal(exactRetry.started, true);
   assert.deepEqual(privateState(home), installState, 'an exact --worker retry must preserve keys, policy, grants and receipt');
   assert.equal(fs.lstatSync(path.join(worktree, 'repo-link')).isSymbolicLink(), true, 'repository symlinks inside a workspace are not treated as service-home aliases');
 
-  const runtimeRoot = path.join(home, '.tmp/dalan');
   const runtimeInstallState = privateState(home);
-  fs.rmdirSync(path.join(runtimeRoot, 'artifacts'));
-  await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
-  }), /does not contain the expected Dalan workspace directories/);
-  assert.deepEqual(privateState(home), runtimeInstallState, 'missing runtime container refusal preserves service state');
-  fs.mkdirSync(path.join(runtimeRoot, 'artifacts'), { mode: 0o700 });
 
   const unrelatedScratch = path.join(home, '.tmp/other');
   fs.mkdirSync(unrelatedScratch, { mode: 0o700 });
@@ -115,6 +129,12 @@ try {
   }), /contains data outside Dalan runtime scratch/);
   assert.deepEqual(privateState(home), runtimeInstallState, 'unrelated scratch refusal preserves service state');
   fs.rmSync(unrelatedScratch, { recursive: true });
+
+  const unknownRuntime = path.join(runtimeRoot, 'unrecognized');
+  fs.mkdirSync(unknownRuntime, { mode: 0o700 });
+  await assert.rejects(retryServiceInstall(), /contains an unknown Dalan workspace entry/);
+  assert.deepEqual(privateState(home), runtimeInstallState, 'unknown runtime entry refusal preserves service state');
+  fs.rmdirSync(unknownRuntime);
 
   const scratch = path.join(home, '.tmp');
   const scratchBackup = path.join(root, 'scratch-backup');
