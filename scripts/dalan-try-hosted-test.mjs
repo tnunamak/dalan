@@ -19,7 +19,7 @@ const { chooseMode } = tryHostedInternals;
 import { handoffText, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
 import { runSelfCheck } from '../src/try-selfcheck.mjs';
-import { sweepTrialNodes, localhostRunProvider, parseLocalhostRunOrigins, createGate, explainTailscale, authorizationServerMetadataUrl, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { sweepTrialNodes, gozarProvider, localhostRunProvider, parseLocalhostRunOrigins, createGate, explainTailscale, authorizationServerMetadataUrl, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
 import { acquireHomeLock } from '../src/try-hosted.mjs';
 import { registerChild, sweepChildren } from '../src/child-registry.mjs';
 import { writeRouteSetting } from '../src/route-setting.mjs';
@@ -1297,4 +1297,124 @@ test('children of a trial that was killed are ended by the next trial, only when
   assert.deepEqual(killed, [[111, 'SIGTERM']]);
   assert.ok(live.has(222) && live.has(333), 'a live owner and a reused PID are left alone');
   assert.deepEqual(fs.readdirSync(registry).sort(), ['222.json']);
+});
+
+// A real executable boundary: no Gozar, SSH or machine route state is used by these tests.
+function fakeGozar(name, mode = 'success') {
+  const dir = path.join(tmp, `fake-gozar-${name}`);
+  fs.mkdirSync(dir);
+  const binary = path.join(dir, 'gozar'), log = path.join(dir, 'calls.jsonl');
+  fs.writeFileSync(binary, `#!${process.execPath}
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+if (args[0] === 'stop') console.log(JSON.stringify({snapshot:{phase:'stopped',published:null,resources:[]},localCleanupFailures:[]}));
+else if (${JSON.stringify(mode)} === 'error') { console.log(JSON.stringify({error:'trial route unavailable'})); process.exitCode=1; }
+else if (${JSON.stringify(mode)} === 'candidate') console.log(JSON.stringify({snapshot:{phase:'starting',candidate:'https://trial.lhr.life',published:null}}));
+else { if (${JSON.stringify(mode)} === 'slow') await new Promise(r=>setTimeout(r,300)); console.log(JSON.stringify({snapshot:{phase:'published-ready',published:'https://trial.lhr.life'}})); }
+`, { mode: 0o700 });
+  return { binary, log, calls: () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [], env: { PATH: dir } };
+}
+
+test('Gozar uses PATH before GOZAR_BIN, reads published origin and stops the exact gate port', async () => {
+  const fake = fakeGozar('success');
+  const provider = gozarProvider({ env: { ...fake.env, GOZAR_BIN: '/missing' } });
+  assert.equal(provider.probe().ok, true);
+  const route = await startRoute({ route: 'gozar', providers: [provider], gatePort: 45678, home: tmp });
+  assert.equal(route.origin, 'https://trial.lhr.life');
+  assert.deepEqual(fake.calls()[0], ['expose', '--port', '45678', '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'localhost-run']);
+  assert.deepEqual(await route.stop(), { removed: true });
+  assert.deepEqual(fake.calls()[1], ['stop', '--port', '45678', '--json']);
+  await route.stop();
+  assert.equal(fake.calls().length, 2, 'stop is idempotent');
+});
+
+test('Gozar missing is actionable; GOZAR_BIN works when PATH has no gozar', async () => {
+  const missing = gozarProvider({ env: { PATH: '', GOZAR_BIN: '/missing' } });
+  assert.equal(missing.probe().ok, false);
+  await assert.rejects(startRoute({ route: 'gozar', providers: [missing], gatePort: 12345 }), /Install gozar on PATH or set GOZAR_BIN/);
+  const fake = fakeGozar('env');
+  const provider = gozarProvider({ env: { PATH: '', GOZAR_BIN: fake.binary } });
+  assert.equal(provider.probe().ok, true);
+  assert.equal((await provider.start({ gatePort: 12345 })).origin, 'https://trial.lhr.life');
+  assert.equal((await provider.stop()).removed, true);
+});
+
+test('Gozar error JSON and unpublished candidates fail and clean up without another route', async () => {
+  for (const mode of ['error', 'candidate']) {
+    const fake = fakeGozar(mode, mode), provider = gozarProvider({ env: fake.env });
+    const fallback = fakeRoute();
+    await assert.rejects(startRoute({ route: 'gozar', providers: [provider, fallback.provider], gatePort: 12346 }), mode === 'error' ? /trial route unavailable/ : /did not publish a ready HTTPS origin/);
+    assert.deepEqual(fake.calls().map(args => args[0]), ['expose', 'stop']);
+    assert.equal(fallback.record.started, 0);
+  }
+});
+
+test('Gozar stop reports cleanup debt instead of claiming removal', async () => {
+  const fake = fakeGozar('debt');
+  const provider = gozarProvider({ env: fake.env, run: (binary, args, options, callback) => callback(null, JSON.stringify(args[0] === 'stop' ? { snapshot: { phase: 'cleanup-pending', published: null }, localCleanupFailures: ['ssh still running'] } : { snapshot: { phase: 'published-ready', published: 'https://trial.lhr.life' } })) });
+  provider.probe();
+  await provider.start({ gatePort: 12347 });
+  assert.deepEqual(await provider.stop(), { removed: false, detail: 'Gozar route cleanup is unconfirmed', command: 'gozar stop --port 12347' });
+});
+
+const readyGozarFetch = async value => {
+  const url = new URL(value), origin = url.origin, secret = url.pathname.split('/').at(-2);
+  if (url.pathname.startsWith('/.well-known/oauth-protected-resource/')) return Response.json({ resource: `${origin}/${secret}/mcp`, authorization_servers: [origin] });
+  if (url.pathname.startsWith('/.well-known/oauth-authorization-server')) return Response.json({ issuer: origin, authorization_endpoint: `${origin}/authorize`, token_endpoint: `${origin}/token`, registration_endpoint: `${origin}/register` });
+  if (url.pathname.endsWith('/mcp')) return new Response('', { status: 401, headers: { 'www-authenticate': 'Bearer' } });
+  return new Response('', { status: 404 });
+};
+
+test('auto prefers installed Gozar over the saved route and Ctrl-C removes it', async () => {
+  const fake = fakeGozar('auto'), provider = gozarProvider({ env: fake.env });
+  const fallback = fakeRoute();
+  const run = await hostedRun('gozar-auto', { argv: ['--route', 'auto'], route: 'tailscale', providers: [provider, fallback.provider], fetchImpl: readyGozarFetch });
+  try {
+    await run.until(/Waiting for sign-in/);
+    assert.match(run.out, /Public route ready \(gozar\)/);
+    assert.equal(fallback.record.started, 0);
+  } finally { assert.equal((await run.close()).error, undefined); }
+  assert.deepEqual(fake.calls().map(args => args[0]), ['expose', 'stop']);
+  assert.match(run.out, /Public route removed\. Bridge stopped\./);
+});
+
+test('auto without installed Gozar keeps the default trial route', async () => {
+  const fallback = fakeRoute();
+  const run = await hostedRun('gozar-missing-auto', { providers: [gozarProvider({ env: { PATH: '' } }), fallback.provider] });
+  try { await run.handoff(); assert.equal(fallback.record.started, 1); }
+  finally { await run.close(); }
+});
+
+test('Ctrl-C during Gozar expose waits for startup and stops the partial route', async () => {
+  const fake = fakeGozar('sigint', 'slow');
+  const run = await hostedRun('gozar-sigint-home', { argv: ['--route', 'gozar'], providers: [gozarProvider({ env: fake.env })], fetchImpl: readyGozarFetch });
+  try {
+    for (let i = 0; fake.calls().length === 0; i++) { assert.ok(i < 200, 'expose started'); await sleepMs(25); }
+    await run.close(); // The same AbortSignal delivered by the CLI's Ctrl-C handler.
+    assert.deepEqual(fake.calls().map(args => args[0]), ['expose', 'stop']);
+    assert.equal(fake.calls()[0][2], fake.calls()[1][2]);
+    assert.doesNotMatch(run.out, /cleanup is unconfirmed|Waiting for sign-in/);
+  } finally { await run.close(); }
+});
+
+test('Gozar loopback Host normalization keeps the public host check and Origin header intact', async () => {
+  const upstream = http.createServer((req, res) => {
+    if (req.headers.host !== 'trial.lhr.life') { res.writeHead(421); res.end(); return; }
+    res.writeHead(req.headers.origin === 'https://evil.example' ? 403 : 200);
+    res.end();
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const gate = await createGate();
+  try {
+    gate.open(upstream.address().port, { gozarOrigin: 'https://trial.lhr.life' });
+    const target = `http://127.0.0.1:${gate.port}/mcp`;
+    assert.equal((await fetch(target)).status, 200, 'Gozar rewrites Host to the loopback target; restore the configured public host');
+    const wrongHost = await new Promise((resolve, reject) => {
+      const request = http.get(target, { headers: { host: 'evil.example' } }, response => { response.resume(); resolve(response.statusCode); });
+      request.on('error', reject);
+    });
+    assert.equal(wrongHost, 421, 'an unrelated host is still rejected');
+    assert.equal((await fetch(target, { headers: { origin: 'https://evil.example' } })).status, 403, 'Origin is preserved for Dalan to check');
+  } finally { await gate.close(); await new Promise(resolve => upstream.close(resolve)); }
 });

@@ -32,20 +32,23 @@ export function lineBuffer(onLine, max = 65_536) {
   return push;
 }
 const PROBE_TIMEOUT_MS = 10_000;
-export const PUBLIC_READY_MS = { tailscale: 120_000, 'tailscale-node': 120_000, 'localhost.run': 60_000 };
+export const PUBLIC_READY_MS = { tailscale: 120_000, 'tailscale-node': 120_000, 'localhost.run': 60_000, gozar: 60_000 };
 
 // ---- the gate ----------------------------------------------------------------------------------------------------------
 // The route forwards to this listener, never to the bridge. A tunnel reports its address only after it starts, and the
 // bridge needs that address at `init`, so the route must exist first. The gate answers 503 until the bridge is up, forwards to the
 // one bridge port after that, and answers 503 again once closed. Nothing else on the computer is ever reachable through the route.
 export async function createGate() {
-  let upstream = null;
+  let upstream = null, gozarHost = null;
   // A fresh connection per request: a kept-alive socket that the bridge closed in the meantime would fail the next request with a 502
   // that the bridge never sees.
   const agent = new http.Agent({ keepAlive: false });
   const server = http.createServer((req, res) => {
     if (!upstream) { res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '2' }); res.end('starting\n'); return; }
-    const forward = http.request({ agent, host: '127.0.0.1', port: upstream, method: req.method, path: req.url, headers: req.headers }, answer => {
+    // Gozar forwards with Host set to this loopback gate. Restore only that exact transport host to the
+    // configured public host; preserve other hosts and Origin for the bridge's identity checks.
+    const headers = gozarHost && req.headers.host === `127.0.0.1:${server.address().port}` ? { ...req.headers, host: gozarHost } : req.headers;
+    const forward = http.request({ agent, host: '127.0.0.1', port: upstream, method: req.method, path: req.url, headers }, answer => {
       res.writeHead(answer.statusCode, answer.headers);
       answer.pipe(res);
     });
@@ -57,7 +60,7 @@ export async function createGate() {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   return {
     port: server.address().port,
-    open(port) { upstream = port; },
+    open(port, { gozarOrigin } = {}) { upstream = port; gozarHost = gozarOrigin ? new URL(gozarOrigin).host : null; },
     shut() { upstream = null; },
     async close() { upstream = null; server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); },
   };
@@ -451,6 +454,54 @@ export function localhostRunProvider({ env = process.env, spawnChild = spawn, wh
   };
 }
 
+// ---- Gozar (transport only; Dalan still owns sign-in and identity) --------------------------------------------------------
+export function gozarProvider({ env = process.env, which = name => whichOnPath(name, env), run = execFile } = {}) {
+  let binary = null, port = null;
+  const command = args => new Promise((resolve, reject) => {
+    run(binary, args, { env, encoding: 'utf8', timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+      let reply;
+      try { reply = JSON.parse(stdout); } catch { reject(new Error('Gozar did not return valid JSON')); return; }
+      if (error || reply?.error) { reject(new Error(`Gozar: ${safeDiagnostic(reply?.error ?? 'command failed', 240)}`)); return; }
+      resolve(reply);
+    });
+  });
+  return {
+    name: 'gozar',
+    probe() {
+      binary = which('gozar');
+      if (!binary && env.GOZAR_BIN) {
+        try { fs.accessSync(env.GOZAR_BIN, fs.constants.X_OK); binary = env.GOZAR_BIN; } catch { /* unavailable */ }
+      }
+      return binary ? { ok: true } : { ok: false, line: 'Gozar is not installed', fix: 'Install gozar on PATH or set GOZAR_BIN to its executable path.' };
+    },
+    async start({ gatePort, signal }) {
+      signal?.throwIfAborted();
+      if (!binary) throw new Error('gozar: probe() must succeed before start()');
+      if (!Number.isInteger(gatePort) || gatePort < 1 || gatePort > 65535) throw new Error('the local gate port is not valid');
+      port = gatePort; // Keep the exact target even if expose fails, so startRoute can remove a partial route.
+      // Pin the trial adapter: auto recommendation can select a machine's existing Tailscale instead.
+      // Wait for expose to settle before cleanup, including on Ctrl-C: it launches a background controller.
+      const reply = await command(['expose', '--port', String(port), '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'localhost-run']);
+      signal?.throwIfAborted();
+      const origin = reply?.snapshot?.published;
+      let url; try { url = new URL(origin); } catch { /* rejected below */ }
+      if (reply?.snapshot?.phase !== 'published-ready' || !url || url.protocol !== 'https:' || url.origin !== origin) throw new Error('Gozar did not publish a ready HTTPS origin');
+      return { origin };
+    },
+    async stop() {
+      if (port === null) return { removed: true };
+      const cleanupCommand = `gozar stop --port ${port}`;
+      try {
+        const reply = await command(['stop', '--port', String(port), '--json']);
+        const snapshot = reply.snapshot;
+        if (!snapshot || snapshot.published || snapshot.resources?.some(resource => resource.cleanup !== 'removed') || reply.localCleanupFailures?.length || ['cleanup-pending', 'stopping'].includes(snapshot.phase)) throw new Error('Gozar route cleanup is unconfirmed');
+        port = null;
+        return { removed: true };
+      } catch (error) { return { removed: false, detail: error.message, command: cleanupCommand }; }
+    },
+  };
+}
+
 // ---- choosing a route --------------------------------------------------------------------------------------------------
 // `localhost.run` is the trial route (anonymous, automatic). `tailscale` is the real route: this computer's Tailscale on :443 when no
 // rule uses it, else a Tailscale node of the trial's own. An explicit route shows its own failure and never falls back to the other:
@@ -470,8 +521,8 @@ export async function startRoute({ route = 'localhost.run', providers, gatePort,
     }
   };
   signal?.throwIfAborted();
-  if (route === 'localhost.run') {
-    const provider = named('localhost.run'), probe = provider.probe();
+  if (route === 'localhost.run' || route === 'gozar') {
+    const provider = named(route), probe = provider.probe();
     if (!probe.ok) throw new Error(probe.fix);
     return attempt(provider);
   }
