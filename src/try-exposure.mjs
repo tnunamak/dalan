@@ -503,11 +503,11 @@ const bundledGozar = () => {
 };
 
 export function gozarProvider({ env = process.env, which = name => whichOnPath(name, env), resolveBundled = bundledGozar, run = execFile, pollMs = 3000, now = Date.now } = {}) {
-  let binary = null, bundled = null, port = null, sessionId = null;
+  let binary = null, bundled = null, commandCwd = null, port = null, sessionId = null;
   let endReason = null;
   let watching = false, timer = null, wakeWatcher = () => {}, watcher = Promise.resolve();
   const command = (args, { status = false } = {}) => new Promise((resolve, reject) => {
-    run(binary, [...(bundled ? [bundled] : []), ...args], { env, encoding: 'utf8', timeout: status ? 15_000 : 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+    run(binary, [...(bundled ? [bundled] : []), ...args], { cwd: commandCwd, env, encoding: 'utf8', timeout: status ? 15_000 : 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
       let reply;
       try { reply = JSON.parse(stdout); } catch { reject(new Error('Gozar did not return valid JSON')); return; }
       if (status && !validStatus(reply?.snapshot)) { reject(new Error('Gozar did not return valid status JSON')); return; }
@@ -525,7 +525,7 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
     const keys = ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'TMPDIR', 'GOZAR_HOME'];
     const assignments = keys.filter(key => env[key] !== undefined).map(key => `${key}=${quote(env[key])}`);
     const argv = [binary, ...(bundled ? [bundled] : []), 'stop', '--port', String(target)];
-    return `(unset ${keys.join(' ')}; ${[...assignments, ...argv.map(quote)].join(' ')})`;
+    return `(cd ${quote(commandCwd ?? process.cwd())} && unset ${keys.join(' ')} && ${[...assignments, ...argv.map(quote)].join(' ')})`;
   };
   const status = target => command(['status', '--port', String(target), '--json'], { status: true });
   const validResources = snapshot => snapshot.resources === undefined || (Array.isArray(snapshot.resources) &&
@@ -548,6 +548,7 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
   return {
     name: 'gozar',
     probe() {
+      commandCwd = process.cwd();
       bundled = resolveBundled();
       binary = bundled ? process.execPath : null;
       if (!binary && env.GOZAR_BIN) {

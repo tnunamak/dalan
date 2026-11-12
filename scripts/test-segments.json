@@ -39,6 +39,7 @@
   "timeout --kill-after=5s 360s nice -n 10 node --test scripts/dalan-try-hosted-test.mjs",
   "node --test scripts/trial-public-watch-test.mjs",
   "node scripts/mcp-sse-idle-test.mjs",
+  "node --test scripts/gozar-recovery-cwd-test.mjs",
   "node --test scripts/child-registry-inspection-test.mjs scripts/inspection-locks-test.mjs scripts/prose-inspection-cleanup-test.mjs",
   "node scripts/workspace-inspection-cleanup-test.mjs",
   "node --test scripts/dalan-setup-test.mjs",

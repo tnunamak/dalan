@@ -103,9 +103,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const say = line => out.write(`${terminalSafe(line)}\n`);
   const providers = deps.providers ?? defaultProviders({ env, say, client, hostedDeps: deps });
   // An explicit route wins. Auto uses a usable Tailscale route first, then the consented Gozar trial relay.
-  const saved = options.route === undefined || options.route === 'auto' ? readRouteSetting(env) : null;
+  const autoRoute = options.route === undefined || options.route === 'auto';
+  const saved = autoRoute ? readRouteSetting(env) : null;
   const tailscale = providers.find(provider => provider.name === 'tailscale');
-  const tailscaleProbe = tailscale?.probe();
+  // Explicit routes are probed by the selector once; a saved relay needs no Tailscale preflight.
+  const tailscaleProbe = autoRoute && saved !== 'gozar' && saved !== 'localhost.run' ? tailscale?.probe() : null;
   const automaticRoute = saved === 'gozar' || saved === 'localhost.run' ? 'gozar' :
     tailscaleProbe?.ok ? 'tailscale' : providers.some(provider => provider.name === 'gozar') ? 'gozar' : 'localhost.run';
   const routeChoice = options.route && options.route !== 'auto' ? options.route : automaticRoute;
@@ -115,7 +117,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   // Only the host's usable Funnel has a stable identity; its ephemeral fallback needs a new home.
   const routeMessages = [];
   let selectedProvider, selectionError;
-  try { selectedProvider = selectRouteProvider({ route: routeChoice, providers, say: line => routeMessages.push(line), signal }); }
+  try {
+    signal?.throwIfAborted();
+    selectedProvider = autoRoute && routeChoice === 'tailscale' ? tailscale :
+      selectRouteProvider({ route: routeChoice, providers, say: line => routeMessages.push(line), signal });
+  }
   catch (error) { selectionError = error; } // Report startup failures after the home and cleanup context are ready.
   const stableHome = selectedProvider?.name === 'tailscale';
   const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', stableHome ? `dalan-hosted-${client}` : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);

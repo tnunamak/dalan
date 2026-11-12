@@ -964,9 +964,9 @@ test('Ctrl-C during startup ends it at once: nothing waits for the login, the no
 });
 
 test('the printed restart command: the same home only where the address is stable; a new home otherwise', () => {
-  const base = { cli: 'dalan', home: '/h', shellQuote: x => x, client: 'claude', route: 'auto' };
+  const base = { cli: 'dalan', home: '/h', freshHome: '/fresh-trial', shellQuote: x => x, client: 'claude', route: 'auto' };
   assert.equal(tryHostedInternals.restartCommand({ ...base, provider: 'tailscale' }), 'dalan try --public --client claude --route auto --home /h');
-  for (const provider of ['localhost.run', 'tailscale-node']) assert.equal(tryHostedInternals.restartCommand({ ...base, provider }), 'dalan try --public --client claude --route auto', `${provider}: its next address is new, so the home would refuse it`);
+  for (const provider of ['localhost.run', 'tailscale-node']) assert.equal(tryHostedInternals.restartCommand({ ...base, provider }), 'dalan try --public --client claude --route auto --home /fresh-trial', `${provider}: its next address is new, so the home would refuse it`);
 });
 
 test('a route that fails to start names the real next steps, not a new home', async () => {
@@ -976,10 +976,11 @@ test('a route that fails to start names the real next steps, not a new home', as
   const error = await runTry({ argv: ['--public', '--route', 'tailscale', '--home', home], env: { PATH: process.env.PATH }, out: { write() {} }, input: new PassThrough(), errorContext: context, hosted: { interactive: true, providers: [failing] } }).then(() => null, e => e);
   assert.equal(error.tryKind, 'route_start');
   const text = tryInternals.formatTryError(error, context, { home: '/other', port: 1 });
-  assert.match(text, /tailscale funnel did not publish the rule\nA Tailscale route never falls back to a trial link on its own[^\n]*\nThe public route did not start, so the bridge was not started\./);
+  assert.match(text, /tailscale funnel did not publish the rule\nA Tailscale route never falls back to a trial relay on its own\. Fix Tailscale and run again, or choose the Gozar demo route\.\nThe public route did not start, so the bridge was not started\./);
   assert.doesNotMatch(text, /new home|Fix the problem above/);
   assert.match(text, /Try again with:\n\s+dalan try --public --client chatgpt --route tailscale --home /);
-  assert.match(text, /Or make a trial link \(localhost\.run\) instead:\n\s+dalan try --public --client chatgpt --route localhost\.run --home /);
+  const freshGozarHome = /Or make a temporary public demo link with Gozar:\n\s+dalan try --public --client chatgpt --route gozar --home '([^']+)'/.exec(text)?.[1];
+  assert.ok(freshGozarHome && freshGozarHome !== home, 'the alternative trial uses a fresh home');
   assert.match(text, /Or try on this computer only:\n\s+dalan try --local/);
 });
 
@@ -1008,7 +1009,11 @@ test('a route that dies stops the trial, with the route stopped and the restart 
     await run.handoff();
     run.route.die();
     const result = await run.finished;
-    assert.match(result.error?.message ?? '', /The public route stopped\. This URL is offline\./);
+    assert.match(result.error?.message ?? '', /The temporary demo link stopped responding\. The connector cannot use this URL; the trial is stopping\./);
+    const formatted = tryInternals.formatTryError(result.error, run.errorContext);
+    assert.match(formatted, /The old connector URL cannot be used\. Remove that connector, add the new URL from the fresh trial, then sign in and approve it again\./);
+    const restartHome = /Start fresh with:\n\s*.*try --public --client chatgpt --route localhost\.run --home '([^']+)'/.exec(formatted)?.[1];
+    assert.ok(restartHome && restartHome !== run.home && path.basename(restartHome).startsWith('dalan-hosted-'), 'the restart command selects a fresh home for the temporary address');
     assert.equal(run.route.stopped, 1);
   } finally { await run.close(); }
 });
@@ -1430,17 +1435,22 @@ test('uaToken names a known caller class and never echoes the caller\'s own text
   }
 });
 
-test('a saved Tailscale choice asks nothing, says it is not a trial, and never falls back to localhost.run when it fails', async () => {
+test('a saved Tailscale route falls back to Gozar with consent when Tailscale is unusable', async () => {
+  const fake = fakeGozar('saved-ts-fallback'), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
   const lhr = fakeRoute('localhost.run');
   const ts = unreadyTailscale('Tailscale is not connected; run: tailscale up');
-  const run = await hostedRun('saved-ts', { route: 'tailscale', providers: [lhr.provider, ts] });
-  const done = await run.finished;
-  assert.match(run.out, /^Using Tailscale, the address you saved with `dalan setup`\. This is not a trial link\.$/m);
-  assert.doesNotMatch(run.out, /Temporary demo link/);
-  assert.doesNotMatch(run.out, /Choose|\[Y\/n\]|\[y\/N\]/, 'no question is asked');
-  assert.match(run.out, /Tailscale is not connected/);
-  assert.equal(lhr.record.started, 0, 'localhost.run is never started for a real route');
-  assert.ok(done.error || /did not start/.test(run.out));
+  const run = await hostedRun('saved-ts', { route: 'tailscale', providers: [provider, lhr.provider, ts], fetchImpl: readyGozarFetch });
+  try {
+    await run.until(/Waiting for sign-in/);
+    assert.match(run.out, /This public demo uses tunnl\.gg/);
+    assert.match(run.out, /Continue\? \[y\/N\]/, 'the relay needs consent');
+    assert.match(run.out, /Public route ready \(gozar\)/);
+    assert.match(run.out, /Temporary demo link/);
+    assert.doesNotMatch(run.out, /Using Tailscale/);
+    assert.equal(fake.calls().filter(args => args[0] === 'expose').length, 1, 'consented Gozar is started');
+    assert.equal(lhr.record.started, 0, 'localhost.run is not selected');
+  } finally { assert.equal((await run.close()).error, undefined); }
+  assert.equal(fake.calls().filter(args => args[0] === 'stop').length, 1, 'Gozar is cleaned up');
 });
 
 test('without a saved choice, a trial prints its one temporary-link notice; ssh missing is one line with the fix', async () => {
@@ -1472,7 +1482,10 @@ test('a real route reuses one home per client, so its address and sign-in surviv
   try {
     const homes = [];
     for (const [route, name] of [['tailscale', 'rh1'], ['tailscale', 'rh2'], [undefined, 'th1'], [undefined, 'th2']]) {
-      const run = await hostedRun(name, { noHome: true, route, providers: [{ name: 'tailscale', probe: () => ({ ok: true }), start: async () => { throw new Error('test stops after home selection'); }, stop: async () => ({ removed: true }) }, fakeRoute().provider] });
+      const tailscale = route
+        ? { name: 'tailscale', probe: () => ({ ok: true }), start: async () => { throw new Error('test stops after home selection'); }, stop: async () => ({ removed: true }) }
+        : unreadyTailscale('Tailscale is not connected');
+      const run = await hostedRun(name, { noHome: true, route, providers: [tailscale, fakeRoute().provider] });
       for (let waited = 0; !run.errorContext.home && waited < 5000; waited += 20) await sleepMs(20);
       if (!route) await run.close(); else await run.finished;
       assert.ok(run.errorContext.home, `the home is chosen before anything else happens: ${(await run.finished).error?.message}`);
@@ -1570,7 +1583,7 @@ test('Gozar falls back to PATH after an unavailable GOZAR_BIN, reads published o
   assert.equal(provider.probe().ok, true);
   const route = await startRoute({ route: 'gozar', providers: [provider], gatePort: 45678, home: tmp });
   assert.equal(route.origin, 'https://trial.lhr.life');
-  assert.deepEqual(fake.calls()[1], ['expose', '--port', '45678', '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'localhost-run']);
+  assert.deepEqual(fake.calls()[1], ['expose', '--port', '45678', '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'tunnl-gg']);
   assert.deepEqual(await route.stop(), { removed: true });
   assert.deepEqual(fake.calls().at(-1), ['stop', '--port', '45678', '--json']);
   await route.stop();
@@ -1690,7 +1703,7 @@ test('Gozar route loss during approval revokes connections and closes bridge and
     for (let i = 0; (run.out.match(/Approve this connection\?/g) ?? []).length < 2; i++) { assert.ok(i < 200); await sleepMs(25); }
     fake.setSnapshot({ sessionId: 'own-session', phase: 'stopped', candidate: null, published: null, resources: [] });
     const result = await Promise.race([run.finished, sleepMs(5000).then(() => { throw new Error('hosted run stayed alive'); })]);
-    assert.match(result.error?.message ?? '', /The public route stopped/);
+    assert.match(result.error?.message ?? '', /The temporary demo link stopped responding\. The connector cannot use this URL; the trial is stopping\./);
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(path.join(run.home, '.config/dalan/as.sqlite'), { readOnly: true });
     try {
@@ -1814,12 +1827,13 @@ test('two public identity failures interrupt an unanswered approval and ignore l
 
 test('unsaved auto uses a usable Tailscale route before Gozar', async () => {
   const fake = fakeGozar('auto-unsaved'), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
-  let starts = 0;
-  const tailscale = { name: 'tailscale', probe: () => ({ ok: true }), async start() { starts++; throw new Error('selected usable Tailscale'); }, async stop() { return { removed: true }; } };
+  let probes = 0, starts = 0;
+  const tailscale = { name: 'tailscale', probe: () => { probes++; return { ok: true }; }, async start() { starts++; throw new Error('selected usable Tailscale'); }, async stop() { return { removed: true }; } };
   const run = await hostedRun('auto-unsaved-ts', { argv: ['--route', 'auto'], providers: [tailscale, provider], fetchImpl: readyGozarFetch });
   const done = await run.finished;
   assert.match(done.error?.message ?? '', /selected usable Tailscale/);
   assert.equal(starts, 1, 'the usable saved-network route is selected');
+  assert.equal(probes, 1, 'auto selection and startup use one Tailscale preflight result');
   assert.equal(fake.calls().filter(args => args[0] === 'expose').length, 0, 'Gozar does not expose a route');
   assert.doesNotMatch(run.out, /Continue\? \[y\/N\]/, 'Tailscale needs no Gozar consent');
 });
@@ -2045,10 +2059,11 @@ test('Gozar controller inspection timeout cannot prove a route absent', async ()
   let exposed = false, timeout = false;
   const calls = [];
   const provider = gozarProvider({ which: () => 'gozar', run(binary, args, options, callback) {
-    calls.push(args[0]);
+    const action = args.find(value => ['status', 'expose', 'stop'].includes(value));
+    calls.push(action);
     const empty = { phase: 'unknown', candidate: null, published: null, resources: [], limitations: [`Controller unavailable: ${timeout ? 'timeout' : 'ENOENT'}`] };
-    if (args[0] === 'expose') exposed = true;
-    callback(null, JSON.stringify({ snapshot: args[0] === 'expose' || (exposed && !timeout) ? { sessionId: 'own', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : empty }));
+    if (action === 'expose') exposed = true;
+    callback(null, JSON.stringify({ snapshot: action === 'expose' || (exposed && !timeout) ? { sessionId: 'own', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : empty }));
   } });
   provider.probe();
   await provider.start({ gatePort: 12348 });
@@ -2056,7 +2071,7 @@ test('Gozar controller inspection timeout cannot prove a route absent', async ()
   assert.equal((await provider.stop()).removed, false, 'unavailable controller is unknown, not removed');
   assert.equal(calls.includes('stop'), false, 'port-only stop cannot act without observed session ownership');
   const next = gozarProvider({ which: () => 'gozar', run(binary, args, options, callback) {
-    assert.equal(args[0], 'status', 'startup must not expose on unknown prior route state');
+    assert.ok(args.includes('status'), 'startup must not expose on unknown prior route state');
     callback(null, JSON.stringify({ snapshot: { phase: 'unknown', candidate: null, published: null, resources: [], limitations: ['Controller unavailable: timeout'] } }));
   } });
   next.probe();

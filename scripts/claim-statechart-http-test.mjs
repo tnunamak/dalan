@@ -8,8 +8,11 @@ import {spawn,execFileSync} from 'node:child_process';
 import {once} from 'node:events';
 import {DatabaseSync} from 'node:sqlite';
 import {randomUUID} from 'node:crypto';
-import {root,code,repo,AsStore,approve,declaration,assignment,cleanup,stateOf,assertRefusal,assertAuthorized,refusalCode} from './claim-statechart-fixture.mjs';
+import {root,code,repo,AsStore,approve,declaration,assignment,workers,cleanup,stateOf,assertRefusal,assertAuthorized,refusalCode} from './claim-statechart-fixture.mjs';
 after(cleanup);
+const fixtureRepo=path.join(root,'repository');fs.mkdirSync(fixtureRepo);
+const git=(...args)=>execFileSync('git',['-C',fixtureRepo,...args],{encoding:'utf8',env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null'}}).trim();
+git('init','-q');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid');fs.writeFileSync(path.join(fixtureRepo,'README.md'),'fixture\n');git('add','README.md');git('-c','commit.gpgsign=false','commit','-qm','fixture');const fixtureSha=git('rev-parse','HEAD');
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const IO_MS=5000,START_MS=20000,INIT_MS=30000;
 // Test-only self-check: DALAN_STATECHART_MUTATE=http500|bad-token|wrong-claim corrupts the one call whose refusal a test asserts.
@@ -49,9 +52,10 @@ async function fixture(t) {
     if(listener.listening)await deadline(new Promise((resolve,reject)=>listener.close(error=>error?reject(error):resolve())), 'port release');
   }
   const env={...process.env};for(const k of Object.keys(env))if(k.startsWith('DALAN_')||k.startsWith('DOT_BRIDGE_'))delete env[k];
-  Object.assign(env,{HOME:home,NODE_ENV:'test',DALAN_LOOPBACK:'1',DALAN_AUTH_MODE:'builtin',DALAN_PORT:String(port),DALAN_ENABLE_WORKSPACE:'1'});
+  Object.assign(env,{HOME:home,NODE_ENV:'test',DALAN_LOOPBACK:'1',DALAN_AUTH_MODE:'builtin',DALAN_PORT:String(port),DALAN_ENABLE_WORKSPACE:'1',DALAN_GITHUB_URL_EXAMPLE_FIXTURE:fixtureRepo});
   fs.mkdirSync(config,{recursive:true,mode:0o700});
   fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'worker',workers:{dot:{workspaceAllowed:true,destination:declaration},other:{}}}),{mode:0o600});
+  workers.updateWorkerRepoPolicy(path.join(config,'workers.json'),'dot','allow','example/fixture');
   execFileSync(process.execPath,['bin/dalan.mjs','as-init','--public-url',`http://127.0.0.1:${port}`],{cwd:code,env,stdio:'pipe',timeout:INIT_MS,killSignal:'SIGKILL'});
   child=spawn(process.execPath,['--import',path.join(repo,'scripts/claim-statechart-barrier.mjs'),'src/server.mjs'],{cwd:code,env,stdio:['ignore','pipe','pipe','ipc']});
   let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);
@@ -89,8 +93,8 @@ async function fixture(t) {
     return rpc(c,name,args,options);
   }
   const a=connect('A');
-  async function submit(id) {
-    const body={assignment:assignment(id),worker:'dot',owner_token:'owner',delivery:'none',execution:'worker'};
+  async function submit(id,overrides={}) {
+    const body={assignment:{...assignment(id),...overrides},worker:'dot',owner_token:'owner',delivery:'none',execution:'worker'};
     const preview=await admin('/submit-preview',body);assert.ok(preview.destination_disclosure,JSON.stringify(preview));
     const result=await admin('/submit',{...body,destination_revision:preview.destination_disclosure.revision});assert.ok(!result.error,JSON.stringify(result));
   }
@@ -104,7 +108,7 @@ async function fixture(t) {
     const s=state(id);assert.equal(s.assignment.status,'claimed');assert.equal(s.claims.length,1);assert.equal(s.claims[0].claim_id,got.claim_id);assert.equal(s.claims[0].state,'active');
     return got;
   };
-  const queued=async id=>{await submit(id);const s=state(id);assert.equal(s.assignment.status,'queued');assert.deepEqual(s.claims,[]);assert.deepEqual(s.reports,[]);};
+  const queued=async(id,overrides={})=>{await submit(id,overrides);const s=state(id);assert.equal(s.assignment.status,'queued');assert.deepEqual(s.claims,[]);assert.deepEqual(s.reports,[]);};
   return {a,auth,child,connect,submit,rpc,ok,refuse,claim,queued,state,mutated,live:()=>auth.liveConnectionIds('dot')};
 }
 
@@ -149,7 +153,8 @@ test('GrantAdmitted/http: live B cannot recover A claim with same run identifier
   assert.equal(after.claims[0].claim_id,a.claim_id);assert.deepEqual(after.reports,[]);
 });
 for(const revoke of [false,true]) test(revoke?'RevokedCannotCommit/http: revoke while finish waits in makeRoom':'RevokedCannotCommit/http control: live finish through makeRoom',async t=>{
-  const f=await fixture(t);const id='req_http_revoke_finish';await f.queued(id);
+  // Declared output paths make this a workspace finish; plain text finishes deliberately skip makeRoom.
+  const f=await fixture(t);const id='req_http_revoke_finish';await f.queued(id,{inputs:[{github_repo:'example/fixture',base_sha:fixtureSha}],scope_paths:['README.md'],output_paths:['report.txt']});
   const a=await f.claim(f.a,id);
   const gate=once(f.child,'message',{signal:AbortSignal.timeout(IO_MS)});
   const finishing=f.mutated(f.a,'finish',{request_id:id,claim_id:a.claim_id,outcome:'completed',summary:'summary',result:'result'});

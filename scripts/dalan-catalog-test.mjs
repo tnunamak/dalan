@@ -11,10 +11,12 @@ const root=path.resolve(new URL('..',import.meta.url).pathname);
 // The parent fixture holds the tools that must survive an upgrade. The earlier notification alias is not among them: it was removed,
 // and `notify_owner` is the only notification tool.
 // Catalog v2 added annotations and the `list_tools`, `call_tool_read` and `call_tool_write` registry tools; list_files gained paging earlier.
-// The upgrade check compares the surviving tools after undoing those announced additions.
+// The upgrade check allows only the explicitly announced descriptor changes below.
 const parentTools=JSON.parse(fs.readFileSync(new URL('./fixtures/catalog.pre-dalan.schemas.json',import.meta.url))).map(tool=>tool.name!=='list_files'?tool:{...tool,description:"List files in this assignment's checked-out repository workspace. Read-only; scoped to the assignment. When truncated is true, pass next_cursor as cursor to get the next page.",inputSchema:{...tool.inputSchema,properties:{...tool.inputSchema.properties,cursor:{type:'string',maxLength:1024}}}});
-// Announced in this release: finish no longer requires summary, and finish summary and progress note accept long text that the server cuts.
+// Announced changes: optional/long finish summary, long progress note, and a 90-second modern T3 wait bound.
+const announcedWait=tool=>({...tool,description:'Wait at most 90 seconds for a T3 turn; returns partial state on timeout.',inputSchema:{...tool.inputSchema,properties:{...tool.inputSchema.properties,timeoutMs:{...tool.inputSchema.properties.timeoutMs,maximum:90000}}}});
 const announced={
+ t3_thread_wait:announcedWait,
  finish:tool=>({...tool,description:tool.description+' summary is optional: when absent it is the first line of result, and one over 4096 bytes is cut.',inputSchema:{...tool.inputSchema,required:tool.inputSchema.required.filter(name=>name!=='summary'),properties:{...tool.inputSchema.properties,summary:{...tool.inputSchema.properties.summary,maxLength:262144}}}}),
  progress:tool=>({...tool,description:tool.description+' A note over 4096 bytes is cut.',inputSchema:{...tool.inputSchema,properties:{...tool.inputSchema.properties,note:{...tool.inputSchema.properties.note,maxLength:262144}}}}),
 };
@@ -25,7 +27,7 @@ for(const [index,tool] of parentTools.entries())if(announced[tool.name])parentTo
 const frozen=schemas(parentTools);
 
 // This is an explicit opt-in upgrade: no claim is made that an unchanged install keeps T3 enabled.
-test('explicit T3 opt-in retains every parent tool/schema except the removed alias and adds notify_owner; default refuses reverse control',{timeout:45000},async()=>{
+test('explicit T3 opt-in allows only announced schema changes; default refuses reverse control',{timeout:45000},async()=>{
  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-catalog-')),running=new Set(),notices=[];
  const ntfy=http.createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;notices.push(body);res.end('ok');});
  await new Promise(resolve=>ntfy.listen(0,'127.0.0.1',resolve));
@@ -52,7 +54,7 @@ test('explicit T3 opt-in retains every parent tool/schema except the removed ali
    let beforeTools=profile==='stable'?parentTools:null;
    let before=profile==='stable'?frozen:profile==='legacy-v46'?schemas(legacy):null;
    if(process.env.DALAN_TEST_UPGRADE_FROM) {
-    const old=await start(process.env.DALAN_TEST_UPGRADE_FROM,home,profile);beforeTools=(await old.tools()).filter(tool=>parentTools.some(kept=>kept.name===tool.name));before=schemas(beforeTools);await old.stop();
+    const old=await start(process.env.DALAN_TEST_UPGRADE_FROM,home,profile);beforeTools=(await old.tools()).filter(tool=>parentTools.some(kept=>kept.name===tool.name));if(profile!=='legacy-v46')beforeTools=beforeTools.map(tool=>tool.name==='t3_thread_wait'?announcedWait(tool):tool);before=schemas(beforeTools);await old.stop();
    }
    const off=await start(root,home,profile),offTools=await off.tools();
    assert.match(off.stderr,/startup WARNING: worker "dot".*DALAN_ENABLE_T3_TOOLS=1/,profile+' silently removed reverse control');
