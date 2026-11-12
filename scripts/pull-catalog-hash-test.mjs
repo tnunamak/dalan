@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {DotBridgeAdapter} from './conformance/adapter-dot-bridge.mjs';
+import {fetchForPublicHost} from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('dot-bridge.example.test');
 
 // These hashes are taken from origin/main before policy pull was added. Hash the
 // serialized advertised tools, including field order, descriptions and annotations.
