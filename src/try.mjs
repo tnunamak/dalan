@@ -20,6 +20,7 @@ import { PAIRING_MINUTES, untrusted } from './as-files.mjs';
 import { beginPairing, DEMO_REDIRECT, workJob, workRepositoryJob } from './demo-worker.mjs';
 import { writeWorkerInstructions } from './worker-instructions.mjs';
 import { SOCKET_PATH_LIMIT } from './admin-socket.mjs';
+import { waitForChildExit } from './child-exit.mjs';
 
 
 const repo = path.resolve(import.meta.dirname, '..');
@@ -161,12 +162,21 @@ const portFree = port => new Promise(resolve => {
 });
 
 // Whether a bridge answers on this admin socket: then the trial bridge for that home is already running.
-const socketAnswers = file => new Promise(resolve => {
-  const probe = net.connect(file);
-  const done = value => { probe.destroy(); resolve(value); };
-  probe.setTimeout(1000, () => done(false));
-  probe.once('connect', () => done(true));
-  probe.once('error', () => done(false));
+const socketAnswers = (file, connect = net.connect) => new Promise((resolve, reject) => {
+  const probe = connect(file);
+  let settled = false;
+  const finish = (settle, value) => {
+    if (settled) return;
+    settled = true;
+    probe.destroy();
+    settle(value);
+  };
+  probe.setTimeout(1000, () => finish(reject, Object.assign(new Error('admin socket inspection timed out'), { code: 'ETIMEDOUT' })));
+  probe.once('connect', () => finish(resolve, true));
+  probe.once('error', error => {
+    if (error.code === 'ENOENT' || error.code === 'ECONNREFUSED') finish(resolve, false);
+    else finish(reject, error);
+  });
 });
 
 // A free port is a hint: another process can take it before the server binds, so the caller retries on a bind failure.
@@ -376,9 +386,9 @@ export async function runTry({ argv = [], env = process.env, out = process.stdou
       stream.setEncoding('utf8').on('data', chunk => persist(chunk));
       return persist;
     });
-    stopped = new Promise(resolve => {
-      child.once('close', () => { for (const flush of sinks) flush('', true); exited = true; resolve(); });
-      child.once('error', error => { fs.appendFileSync(logFile, `spawn failed: ${safeDiagnostic(error.message, 1000)}\n`); exited = true; resolve(); });
+    stopped = waitForChildExit(child, {
+      onClose: () => { for (const flush of sinks) flush('', true); exited = true; },
+      onError: error => { fs.appendFileSync(logFile, `process error: ${safeDiagnostic(error.message, 1000)}\n`); },
     });
   };
   const stop = async () => {

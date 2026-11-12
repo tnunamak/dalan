@@ -13,6 +13,8 @@ import {
 } from '../scripts/lib/expose-tailscale.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 import { safeDiagnostic } from './diagnostic.mjs';
+import { processCommand } from './process-inspection.mjs';
+export { processCommand } from './process-inspection.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // Cancellation: every wait in route startup ends when the caller's signal aborts, and an abort is never turned into a fallback.
@@ -169,39 +171,6 @@ function recoverStaleFunnel(home, tailscale, recordName = 'trial') {
 // trial is gone.
 const SOCKET_PATH_LIMIT = 100; // a unix socket path must fit sun_path (104 on macOS, 108 on Linux)
 const nodeCli = (sock, env) => args => spawnSync('tailscale', [`--socket=${sock}`, ...args], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
-// Inspection failure is not evidence of exit. Read Linux start ticks on both sides of ps so command and identity belong
-// to the same process. macOS supplies its start timestamp and command in one ps snapshot, with a fixed locale and timezone.
-export const processCommand = (pid, { platform = process.platform, run = spawnSync, readFile = fs.readFileSync, probe = pid => process.kill(pid, 0) } = {}) => {
-  const unknown = { state: 'unknown' }, absent = { state: 'absent' };
-  if (!Number.isInteger(pid) || pid <= 0) return unknown;
-  const startTicks = () => {
-    const stat = readFile(`/proc/${pid}/stat`, 'utf8');
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
-    if (!/^\d+$/.test(fields[19] ?? '')) throw new Error('invalid process start time');
-    return fields[19];
-  };
-  try {
-    const before = platform === 'linux' ? startTicks() : null;
-    if (!['linux', 'darwin'].includes(platform)) return unknown;
-    const out = run('ps', ['-p', String(pid), '-o', platform === 'darwin' ? 'lstart=,command=' : 'command='], { encoding: 'utf8', timeout: 5000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } });
-    if (out.error || out.status !== 0 || !out.stdout?.trim()) {
-      // Even ps exit 1 can be an inspection failure; only ESRCH confirms absence.
-      try { probe(pid); } catch (error) { if (error.code === 'ESRCH') return absent; }
-      return unknown;
-    }
-    if (platform === 'linux') {
-      const after = startTicks();
-      return before === after ? { state: 'present', command: out.stdout.trim(), start: before } : unknown;
-    }
-    const match = /^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/.exec(out.stdout.trim());
-    return match ? { state: 'present', command: match[2], start: match[1].replace(/\s+/g, ' ') } : unknown;
-  } catch (error) {
-    if (['ENOENT', 'ESRCH'].includes(error.code)) {
-      try { probe(pid); } catch (probeError) { if (probeError.code === 'ESRCH') return absent; }
-    }
-    return unknown;
-  }
-};
 const defaultRegistry = env => path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'dalan', 'trial-nodes');
 // A key, a login link or a node key never reaches the daemon log.
 export const maskNodeText = text => String(text).replace(/tskey-[A-Za-z0-9_-]+/g, '[key]').replace(/https:\/\/login\.tailscale\.com\/\S+/g, '[login link]').replace(/(nodekey|authkey)\S*/gi, '[secret]');
@@ -221,19 +190,30 @@ export const redactTailnetNames = (text, names = [], { strict = false } = {}) =>
 // Ends the daemons of trials that no longer run. A record is stale when its trial process is gone (or its PID now runs something
 // else); the daemon is ended only if its command line still names the socket this trial started it with.
 export async function sweepTrialNodes({ registry, processCmd = processCommand, kill = (pid, sig) => process.kill(pid, sig), clock = { sleep }, say = () => {} }) {
-  let names = []; try { names = fs.readdirSync(registry).filter(n => n.endsWith('.json')); } catch { return []; }
-  const ended = [];
+  let names = []; try { names = fs.readdirSync(registry).filter(n => n.endsWith('.json')); } catch (error) { if (error.code === 'ENOENT') return { ended: [], retained: [] }; throw error; }
+  const ended = [], retained = [];
   for (const name of names) {
     const file = path.join(registry, name);
-    let rec; try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fs.rmSync(file, { force: true }); continue; }
-    if (Number.isInteger(rec.owner) && rec.owner !== process.pid && rec.ownerCmd) {
+    let rec; try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { retained.push({ home: null, sock: null }); continue; }
+    // Keep the ownership boundary even when a record cannot be safely reclaimed.
+    retained.push({ home: rec?.home ?? (typeof rec?.dir === 'string' ? path.dirname(rec.dir) : null), sock: rec?.sock ?? null });
+    if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue;
+    if (Number.isInteger(rec.pid) && (!Number.isInteger(rec.owner) || typeof rec.sock !== 'string' || !rec.sock)) continue;
+    if (Number.isInteger(rec.owner)) {
       const owner = processCmd(rec.owner);
-      if (owner.state === 'unknown' || (owner.state === 'present' && owner.command === rec.ownerCmd)) continue; // its trial may still run
+      const reused = owner.state === 'present' && rec.ownerStart && owner.start && owner.start !== rec.ownerStart;
+      if (owner.state !== 'absent' && !reused) continue; // a missing command is not evidence that its trial ended
     }
-    if (Number.isInteger(rec.pid) && rec.sock && processCmd(rec.pid).command?.includes(rec.sock)) {
+    const daemonMatches = () => { const daemon = processCmd(rec.pid); return daemon.state === 'present' && daemon.command?.includes(rec.sock); };
+    if (Number.isInteger(rec.pid) && rec.sock && daemonMatches()) {
       try { kill(rec.pid, 'SIGTERM'); } catch { /* gone */ }
-      for (let i = 0; i < 20 && processCmd(rec.pid).command?.includes(rec.sock); i++) await clock.sleep(100);
-      if (processCmd(rec.pid).command?.includes(rec.sock)) { try { kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } }
+      for (let i = 0; i < 20 && daemonMatches(); i++) await clock.sleep(100);
+      if (daemonMatches()) { try { kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } }
+    }
+    // A failed check or signal must keep the daemon's files and recovery record.
+    if (Number.isInteger(rec.pid)) {
+      const daemon = processCmd(rec.pid);
+      if (daemon.state === 'unknown' || (daemon.state === 'present' && daemon.command?.includes(rec.sock))) continue;
     }
     // Missing identities (including older records) cannot prove PID reuse. Unknown inspection keeps all files and the debt.
     if (rec.certOut) {
@@ -248,8 +228,9 @@ export async function sweepTrialNodes({ registry, processCmd = processCommand, k
     if (rec.dir && path.basename(rec.dir) === 'tsnode') fs.rmSync(rec.dir, { recursive: true, force: true });
     fs.rmSync(file, { force: true });
     ended.push(rec.hostname ?? name);
+    retained.pop();
   }
-  return ended;
+  return { ended, retained };
 }
 
 export function tailscaleNodeProvider({
@@ -268,8 +249,11 @@ export function tailscaleNodeProvider({
     recover: ({ say } = {}) => sweepTrialNodes({ registry, processCmd, clock, say }),
     async start({ gatePort, home, say = () => {}, signal }) {
       signal?.throwIfAborted();
-      await sweepTrialNodes({ registry, processCmd, clock, say });
+      const { retained } = await sweepTrialNodes({ registry, processCmd, clock, say });
       const dir = path.join(home, 'tsnode'), sock = path.join(dir, 'tailscaled.sock'), hostname = `dalan-trial-${newId()}`;
+      if (retained.some(debt => debt.home === home || debt.sock === sock || (!debt.home && !debt.sock))) {
+        throw Object.assign(new Error(`Cannot confirm that the earlier Tailscale node in ${home} has stopped; its files are retained.`), { tryKind: 'node_retained' });
+      }
       if (Buffer.byteLength(sock) > SOCKET_PATH_LIMIT) throw new Error('the trial home path is too long for a Tailscale socket; choose a shorter --home');
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       // tailscaled keeps its TLS certificates under its var root (--statedir). --state=mem: gives it none, so without this directory
@@ -279,7 +263,8 @@ export function tailscaleNodeProvider({
       fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
       fs.mkdirSync(registry, { recursive: true, mode: 0o700 });
       const recordFile = path.join(registry, `${hostname}.json`);
-      const writeRecord = pid => fs.writeFileSync(recordFile, JSON.stringify({ dir, sock, hostname, pid, home, owner: process.pid, ownerCmd: processCmd(process.pid).command ?? null, created_at: new Date().toISOString() }), { mode: 0o600 });
+      const owner = processCmd(process.pid);
+      const writeRecord = pid => fs.writeFileSync(recordFile, JSON.stringify({ dir, sock, hostname, pid, home, owner: process.pid, ownerCmd: owner.command ?? null, ownerStart: owner.start ?? null, created_at: new Date().toISOString() }), { mode: 0o600 });
       writeRecord(null); // ownership is recorded before the first process exists
       const run = runCli(sock, childEnv);
       const logFile = path.join(dir, 'tailscaled.log');
@@ -399,7 +384,17 @@ export function tailscaleNodeProvider({
       if (inner) result = await inner.stop();
       let loggedOut = true;
       if (node.signedIn) { try { loggedOut = run(['logout']).status === 0; } catch { loggedOut = false; } }
-      if (daemon.exitCode === null && daemon.signalCode == null) { const gone = new Promise(resolve => daemon.once('exit', resolve)); daemon.kill('SIGTERM'); await Promise.race([gone, clock.sleep(5000)]); if (daemon.exitCode === null && daemon.signalCode == null) daemon.kill('SIGKILL'); }
+      const daemonGone = () => daemon.exitCode !== null || daemon.signalCode != null || !Number.isInteger(daemon.pid);
+      if (!daemonGone()) {
+        const gone = new Promise(resolve => daemon.once('exit', resolve));
+        try { daemon.kill('SIGTERM'); } catch { /* only exit confirms cleanup */ }
+        await Promise.race([gone, clock.sleep(5000)]);
+        if (!daemonGone()) {
+          try { daemon.kill('SIGKILL'); } catch { /* keep recovery debt */ }
+          await Promise.race([gone, clock.sleep(killGraceMs)]);
+        }
+      }
+      const daemonConfirmed = daemonGone();
       // A certificate child that diagnose could not stop still holds its files: wait once more for its exit. Without a confirmed
       // exit, everything else goes, the child's directory stays, and the record stays so the next sweep removes it.
       const pendingCert = node.certChild;
@@ -409,13 +404,14 @@ export function tailscaleNodeProvider({
         await Promise.race([pendingCert.exited, clock.sleep(killGraceMs)]);
         certConfirmed = exitedNow;
       }
-      if (certConfirmed) { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(recordFile, { force: true }); }
-      else {
+      if (daemonConfirmed && certConfirmed) { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(recordFile, { force: true }); }
+      else if (daemonConfirmed) {
         for (const entry of fs.readdirSync(dir)) if (path.join(dir, entry) !== pendingCert.out) fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
       }
       node = null;
       // keepNode tells the caller not to delete the node's directory: a certificate child still holds files there.
-      const keep = certConfirmed ? {} : { keepNode: true };
+      const keep = daemonConfirmed && certConfirmed ? {} : { keepNode: true };
+      if (!daemonConfirmed) return { removed: false, ...keep, detail: `the trial's Tailscale daemon did not exit; its files and recovery record are retained` };
       if (!result.removed) return { ...result, ...keep };
       // Logout removes the node at once. If it failed, the node is still registered until Tailscale drops the ephemeral machine.
       return loggedOut ? { removed: true, ...keep } : { ...keep, removed: false, detail: `the trial's Tailscale node ${hostname} could not be logged out. It is ephemeral, so Tailscale removes it on its own once offline; to remove it now, delete ${hostname} in the Tailscale admin console` };
@@ -528,7 +524,7 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
     snapshot.published === null && snapshot.candidate === null &&
     ['unknown', 'stopped', 'stopping', 'cleanup-pending'].includes(snapshot.phase);
   const removed = snapshot => withdrawn(snapshot) && (snapshot.resources ?? []).every(resource => resource.cleanup === 'removed') &&
-    (snapshot.phase === 'stopped' || (snapshot.phase === 'unknown' && Array.isArray(snapshot.limitations) && snapshot.limitations.some(line => typeof line === 'string' && /^Controller unavailable:/.test(line))));
+    (snapshot.phase === 'stopped' || (snapshot.phase === 'unknown' && Array.isArray(snapshot.limitations) && snapshot.limitations.some(line => typeof line === 'string' && /^Controller unavailable:.*\b(?:ENOENT|ECONNREFUSED)\b/.test(line))));
   const stopWatcher = async () => {
     watching = false;
     clearTimeout(timer);
@@ -606,25 +602,13 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
 // `localhost.run` is the trial route (anonymous, automatic). `tailscale` is the real route: this computer's Tailscale on :443 when no
 // rule uses it, else a Tailscale node of the trial's own. An explicit route shows its own failure and never falls back to the other:
 // a real route never becomes a trial link without the owner choosing it. A rule that already holds 443 is never changed.
-export async function startRoute({ route = 'localhost.run', providers, gatePort, home, say, signal }) {
+export function selectRouteProvider({ route = 'localhost.run', providers, say = () => {}, signal }) {
   const named = name => providers.find(p => p.name === name);
-  // A start that fails is cleaned up before anything else happens, so a failed route never leaves a rule, node or process behind.
-  const attempt = async provider => {
-    signal?.throwIfAborted();
-    try {
-      const started = await provider.start({ gatePort, home, say, signal });
-      return { provider, origin: started.origin, exited: started.exited, stop: () => provider.stop() };
-    } catch (error) {
-      const cleaned = await provider.stop().catch(e => ({ removed: false, detail: e.message }));
-      if (!cleaned.removed) throw Object.assign(new Error(`${provider.name} failed (${error.message}) and could not be removed: ${cleaned.detail}${cleaned.command ? `\nRemove it with:\n  ${cleaned.command}` : ''}`), { cleanupFailed: true });
-      throw error;
-    }
-  };
   signal?.throwIfAborted();
   if (route === 'localhost.run' || route === 'gozar') {
     const provider = named(route), probe = provider.probe();
     if (!probe.ok) throw new Error(probe.fix);
-    return attempt(provider);
+    return provider;
   }
   if (route !== 'tailscale') throw new Error(`unknown route ${route}`);
   const host = named('tailscale').probe();
@@ -636,7 +620,23 @@ export async function startRoute({ route = 'localhost.run', providers, gatePort,
     else { say(host.line); why = `${host.fix} (${node.fix})`; }
   } else say(host.line);
   if (!choice) throw new Error(why);
-  return attempt(choice);
+  return choice;
+}
+
+export async function startRoute({ route = 'localhost.run', providers, selectedProvider, gatePort, home, say, signal }) {
+  // Clean a failed start before returning, and carry any retained files/debt to the caller's final cleanup.
+  const attempt = async provider => {
+    signal?.throwIfAborted();
+    try {
+      const started = await provider.start({ gatePort, home, say, signal });
+      return { provider, origin: started.origin, exited: started.exited, stop: () => provider.stop() };
+    } catch (error) {
+      const cleaned = await provider.stop().catch(e => ({ removed: false, keepNode: true, detail: e.message }));
+      if (!cleaned.removed) throw Object.assign(new Error(`${provider.name} failed (${error.message}) and could not be removed: ${cleaned.detail}${cleaned.command ? `\nRemove it with:\n  ${cleaned.command}` : ''}`), { cleanupFailed: true, routeCleanup: cleaned });
+      throw Object.assign(error, { routeCleanup: cleaned });
+    }
+  };
+  return attempt(selectedProvider ?? selectRouteProvider({ route, providers, say, signal }));
 }
 
 // A trial constraint, not an OAuth rule: RFC 8414 lets an authorization server live on another origin. A trial's bridge serves its own
