@@ -68,8 +68,10 @@ a destination revision. The owner can use `get`, `wait`, `inbox` and `cancel` wi
 the submitted request ID before or after acquisition. Reports and decisions use
 that same request ID and the same saved owner capability.
 
-## Worker flow without a connector refresh (for workers connected over MCP —
-`list_pending` and `claim` here are MCP tools, not `dalan` commands)
+## Worker flow without a connector refresh
+
+Workers connected over MCP use these tools; `list_pending` and `claim` are MCP
+tools, not `dalan` commands.
 
 1. Call `list_pending`. Its existing `assignments` list is unchanged. The new
    `policy_work.items` field contains up to 50 eligible work orders, with priority,
