@@ -131,6 +131,19 @@ try {
     assert.equal(r.outcome, 'connector_refresh_required'); assert.ok(!f.events.includes('stop'));
   }
   {
+    const original = [{ name: 'ping', inputSchema: { type: 'object', properties: {} } }];
+    const changed = [{ name: 'ping', inputSchema: { type: 'object', properties: { request_id: { type: 'string' } }, required: ['request_id'] } }];
+    const f = fixture({
+      probeService: async () => ({ version: '0.6.0', catalogs: { codex: original, muse: original } }),
+      probeCandidate: async () => ({ version: '0.7.0', catalogs: { codex: original, muse: changed } }),
+    });
+    // A worker added after install is absent from the receipt but still must be checked.
+    fs.writeFileSync(path.join(f.home, '.config/dot-bridge/workers.json'), JSON.stringify({ workers: { codex: { repos: [] }, muse: { repos: [] } } }));
+    const result = await updateService({ home: f.home }, f.seams);
+    assert.equal(result.outcome, 'connector_refresh_required');
+    assert(!f.events.includes('stop'), 'a schema change confined to the last configured worker must not switch');
+  }
+  {
     const changed = { codex: [{ name: 'new-tool' }] };
     const f = fixture({ probeService: async home => ({ version: JSON.parse(fs.readFileSync(path.join(fs.realpathSync(path.join(home, 'current')), 'package.json'), 'utf8')).version, catalogs: fs.realpathSync(path.join(home, 'current')).includes('0.7.0') ? changed : { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } }), probeCandidate: async () => ({ version: '0.7.0', catalogs: changed }) });
     const r = await updateService({ home: f.home, yes: true }, f.seams);
