@@ -463,7 +463,7 @@ export async function serviceMain(argv, seams = {}) {
     (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Linux systemd only.');
     return null;
   }
-  if (action !== 'install') fail('use dalan service install or dalan service migrate-workers');
+  if (action !== 'install') fail('use dalan service install, update, auto-update, status or migrate-workers');
   const o = parseOptions(args, seams.env ?? process.env);
   if (o.help) return serviceMain(['help'], seams);
   const result = await installService(o, seams);
