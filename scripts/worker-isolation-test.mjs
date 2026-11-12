@@ -808,8 +808,8 @@ try {
   await check('enabled tools/list stays identical across workers with different T3 authority', async () => {
     const catalog = async bearer => (await server.rpc(bearer, 'tools/list')).body.result.tools;
     const dot = await catalog(T.dot), lark = await catalog(T.lark), grok = await catalog(T.grok);
-    assert.deepEqual(lark, dot, 'worker capability must not change the advertised catalog');
-    assert.deepEqual(grok, dot, 'worker capability must not change the advertised catalog');
+    assert.equal(JSON.stringify(lark), JSON.stringify(dot), 'worker capability must not change the advertised catalog bytes');
+    assert.equal(JSON.stringify(grok), JSON.stringify(dot), 'worker capability must not change the advertised catalog bytes');
     const names = dot.map(t => t.name);
     for (const name of t3Names) assert.ok(names.includes(name), `stable catalog lost ${name}`);
     for (const name of ['list_pending', 'claim', 'get', 'finish', 'artifact_chunk']) assert.ok(names.includes(name));
@@ -821,7 +821,7 @@ try {
     assert.notEqual(disabled.port, null, `disabled server did not start: ${disabled.stderr}`);
     const catalog = async bearer => (await disabled.rpc(bearer, 'tools/list')).body.result.tools;
     const dot = await catalog(T.dot), lark = await catalog(T.lark);
-    assert.deepEqual(lark, dot, 'global feature switch must not create per-worker catalogs');
+    assert.equal(JSON.stringify(lark), JSON.stringify(dot), 'global feature switch must not create per-worker catalogs');
     assert.equal(dot.filter(tool => tool.name.startsWith('t3_')).length, 0, 'disabled global switch retained T3 tools');
     for (const bearer of [T.dot, T.lark]) {
       const denied = await disabled.tool(bearer, 't3_thread_list', { status: 'all' });
