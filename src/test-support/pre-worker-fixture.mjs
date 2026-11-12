@@ -1,4 +1,5 @@
 const post54Tables = [
+  'policy_work_orders',
   'submit_supersedes',
   'destination_blocks', 'destination_approvals',
   'question_answer_wakes', 'job_questions',
@@ -43,6 +44,8 @@ export function dropEmptyPost54FixtureState(db,{requireEmptyLeaseDeadlines=false
     // Validate the complete downgrade before the first DROP or ALTER.
     const {existing, hasLeaseDeadline, hasDestinationRevision} = validateEmptyPost54State(db);
     for (const table of existing) db.exec(`DROP TABLE "${table}"`);
+    if (existing.includes('policy_work_orders') && db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='bridge_state'").get())
+      db.prepare("DELETE FROM bridge_state WHERE key='pull_cursor_key'").run();
     if (hasLeaseDeadline) db.exec('ALTER TABLE claims DROP COLUMN lease_deadline_at');
     if (hasMonotonicDeadline) { db.exec('ALTER TABLE claims DROP COLUMN lease_deadline_monotonic_ms'); db.exec('ALTER TABLE claims DROP COLUMN lease_boot_id'); }
     if (hasDestinationRevision) db.exec('ALTER TABLE claims DROP COLUMN destination_revision');

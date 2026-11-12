@@ -1,3 +1,4 @@
+import {PullQueue,migratePullQueue,PULL_PAGE_PREFIX} from './pull-queue.mjs';
 import { defaultPath } from './paths.mjs';
 import { readEnv } from './env.mjs';
 import { validateOwnerNote } from './submission-policy.mjs';
@@ -49,7 +50,7 @@ function waiterOwnerGone(attemptId) {
   return !!(owner.boot&&owner.start&&current.boot&&current.start&&(owner.boot!==current.boot||owner.start!==current.start));
 }
 
-const SUPPORTED_SCHEMA_VERSION = 65;
+const SUPPORTED_SCHEMA_VERSION = 66;
 const monotonicMs=()=>Number(process.hrtime.bigint())/1e6;
 function systemBootId() {
   if(process.platform!=='linux') return null;
@@ -330,6 +331,7 @@ export class Store {
         CREATE TABLE IF NOT EXISTS bridge_state (key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS notifications_due ON notifications(state,next_at);`);
       this.migrate();
+      this.pullQueue=new PullQueue(this);
       this.initializeLeaseClock();
       this.initializeSubscriptionStorage();
     } catch(error) { this.db.close(); throw error; } finally { storage?.release(); }
@@ -921,6 +923,7 @@ export class Store {
         if(this.db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='skipped_by_dot_at'").get()) this.db.exec('ALTER TABLE assignments RENAME COLUMN skipped_by_dot_at TO skipped_at;');
         this.db.exec('PRAGMA user_version=65;');
       }
+      if(version<66) { migratePullQueue(this.db); this.db.exec('PRAGMA user_version=66;'); }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
       this.legacyFixNames=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assignments' AND instr(sql,?)>0").get(`'${legacyFixLoopName}'`);
@@ -1091,7 +1094,7 @@ export class Store {
       expired_lower_bounds:evidence.expired_lower_bounds,window_days:days,factor:QUEUE_WINDOW.factor,floor_ms:QUEUE_WINDOW.minMs,cap_ms:QUEUE_WINDOW.maxMs,worker,kind};
   }
   owner(id, token) {
-    const row = this.db.prepare('SELECT owner_hash FROM assignments WHERE request_id=?').get(id);
+    const row = this.db.prepare('SELECT owner_hash FROM assignments WHERE request_id=?').get(id)??this.pullQueue.ownerRow(id);
     if (!row) throw new Error('assignment not found');
     if (!row.owner_hash) throw new Error('legacy request requires operator adoption');
     const got = Buffer.from(hash(token || ''), 'hex'), expected = Buffer.from(row.owner_hash, 'hex');
@@ -1242,7 +1245,10 @@ export class Store {
     return {request_id:payload.request_id,status:old.status,duplicate:true,...(approval?{destination_approval:approval}:{})};
   }
   // identity: the assignment as the submitter sent it, when the stored payload differs (scope narrowing); a retry then still matches.
-  submit(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, preflight=null, priority='normal', meta=null, identity=payload, maxQueued=null, targetWorker=undefined, execution=null, defaultExecution='host', requiredCapabilities=null, defaultValidUntil=null, commandKey=null, supersedes=null, destinationRevision=null) { return this.transaction(() => {
+  submit(...args) { return this.transaction(()=>this.submitInTransaction(...args)); }
+  submitInTransaction(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, preflight=null, priority='normal', meta=null, identity=payload, maxQueued=null, targetWorker=undefined, execution=null, defaultExecution='host', requiredCapabilities=null, defaultValidUntil=null, commandKey=null, supersedes=null, destinationRevision=null, inheritedOwnerHash=null) {
+    if(!this.db.isTransaction) throw new Error('transaction_required');
+    if(payload.request_id.startsWith(PULL_PAGE_PREFIX)||!inheritedOwnerHash&&this.pullQueue.row(payload.request_id)) throw new Error('request_id reserved for policy work');
     const protocol=!this.hasAssignment(payload.request_id)&&Object.hasOwn(payload,'protocol')?validateProtocol(payload.protocol):null;
     if(protocol)identity={...identity,protocol};
     if(targetWorker==='pool') throw new Error('worker \"pool\" is not supported');
@@ -1252,7 +1258,7 @@ export class Store {
     if(!['normal','background'].includes(priority)) throw new Error('invalid priority');
     const retry=this.checkRetry(payload,delivery,environmentId,ownerToken,review,priority,meta,identity,targetWorker,execution,requiredCapabilities,commandKey,supersedes,destinationRevision);
     if(retry) return retry;
-    const id=payload.request_id, body=JSON.stringify(payload),payloadHash=hash(JSON.stringify(canonical(identity))),ownerHash=hash(ownerToken);
+    const id=payload.request_id, body=JSON.stringify(payload),payloadHash=hash(JSON.stringify(canonical(identity))),ownerHash=inheritedOwnerHash??hash(ownerToken);
     // checkRetry validated this target in the same transaction; only counts containing it gain room.
     const supersededId=supersedes?.target_id??null;
     if(destinationRevision!==null&&(typeof destinationRevision!=='string'||!/^sha256:[a-f0-9]{64}$/.test(destinationRevision)))throw new Error('invalid destination_revision');
@@ -1318,7 +1324,7 @@ export class Store {
       this.db.prepare('INSERT INTO owner_submit_commands(request_id,key_digest,intent_digest,receipt,owner_hash) VALUES(?,?,?,?,?)').run(id,hash(commandKey),intent,JSON.stringify(receipt),ownerHash);
     }
     return receipt;
-  }); }
+  }
   // Fills objective columns of rows that have none, only with tuples verifyObjective proves against the stored payload.
   // Idempotent: a row that already carries any objective column is never rewritten.
   backfillObjectives(tuples, {dryRun=false}={}) { return this.transaction(() => {
@@ -1827,7 +1833,7 @@ export class Store {
   }
   failureFields(id) {
     const a=this.db.prepare('SELECT status,cancelled_reason FROM assignments WHERE request_id=?').get(id);
-    if(!a) return {failure_type:'unknown',failure_type_source:'unknown'};
+    if(!a) {const policy=this.pullQueue.inbox(id);return policy?{failure_type:policy.failure_type,failure_type_source:policy.failure_type_source}:{failure_type:'unknown',failure_type_source:'unknown'};}
     const report=this.db.prepare('SELECT outcome,summary,result FROM reports WHERE request_id=?').get(id);
     const failedReport=!!report&&report.outcome!=='completed';
     const checkFailedObserved=!!this.db.prepare("SELECT 1 FROM lifecycle_events WHERE request_id=? AND type='check_failed' LIMIT 1").get(id);
@@ -2024,7 +2030,7 @@ export class Store {
     this.db.prepare("UPDATE notifications SET state='suppressed',last_error='subscription revoked' WHERE subscription_id=? AND state IN ('pending','failed')").run(id);
   }); }
   get(id) {
-    const a=this.db.prepare('SELECT * FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
+    const a=this.db.prepare('SELECT * FROM assignments WHERE request_id=?').get(id); if(!a) { const work=this.pullQueue.row(id);if(work)return this.pullQueue.project(work);throw new Error('assignment not found'); }
     this.assertProtocolAvailable(id);
     const claimRow=this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id);
     const claim=claimRow&&(({acquisition_id,tool_calls,last_tool,last_tool_at,last_tool_error,first_workspace_tool_at,destination_revision,...rest})=>({...rest,...(destination_revision?{destination_revision}:{}),lease_expires_at:this.leaseExpiresAt(claimRow),activity:Store.toolActivity(claimRow)}))(claimRow);
@@ -2040,7 +2046,7 @@ export class Store {
     const supersedes=this.db.prepare('SELECT target_id AS request_id,created_at FROM submit_supersedes WHERE request_id=?').get(id)??null;
     const superseded_by=this.db.prepare('SELECT request_id,created_at FROM submit_supersedes WHERE target_id=?').get(id)??null;
     const authorityRevoked=!!a.cancelled_at||this.isProtocolJob(id)&&a.status==='finished';
-    return {...this.destinationFields(id),request_id:id,supersedes,superseded_by,target_worker:a.target_worker,assignment:JSON.parse(a.payload),delivery_mode:a.delivery,t3_muted:this.deliveryMuted(id),thread_id:a.thread_id||null,environment_id:a.environment_id||null,status:a.status,execution:a.execution,required_capabilities:a.required_capabilities?JSON.parse(a.required_capabilities):[],review:!!a.review,created_at:a.created_at,valid_until:a.valid_until??null,valid_until_source:a.valid_until_source??null,expiry_requeues:a.expiry_requeues??0,...this.failureFields(id),cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancellation_requested:!!a.cancelled_at,authority_revoked:authorityRevoked,...this.sandboxStop(id,authorityRevoked),claim,progress,lifecycle_events:this.db.prepare("SELECT type,at,actor,reason FROM lifecycle_events WHERE request_id=? ORDER BY id").all(id),report:report??null,late_evidence,delivery,watch,owner_notes:this.ownerNotes(id),worker_break_notices:this.breakNotices(id),claim_denied:this.claimDenial(id),skipped_by_worker:a.skipped_at?{at:a.skipped_at,listed_count:a.listed_count,passed_over:a.passed_over}:null,pr_preflights:this.db.prepare("SELECT phase,evidence FROM pr_preflights WHERE request_id=? ORDER BY CASE phase WHEN 'submit' THEN 0 ELSE 1 END").all(id).map(row=>({phase:row.phase,...JSON.parse(row.evidence)}))};
+    return {...this.destinationFields(id),...(this.pullQueue.row(id)?{work_order_id:this.pullQueue.row(id).work_order_id,child_request_id:id}:{}),request_id:id,supersedes,superseded_by,target_worker:a.target_worker,assignment:JSON.parse(a.payload),delivery_mode:a.delivery,t3_muted:this.deliveryMuted(id),thread_id:a.thread_id||null,environment_id:a.environment_id||null,status:a.status,execution:a.execution,required_capabilities:a.required_capabilities?JSON.parse(a.required_capabilities):[],review:!!a.review,created_at:a.created_at,valid_until:a.valid_until??null,valid_until_source:a.valid_until_source??null,expiry_requeues:a.expiry_requeues??0,...this.failureFields(id),cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancellation_requested:!!a.cancelled_at,authority_revoked:authorityRevoked,...this.sandboxStop(id,authorityRevoked),claim,progress,lifecycle_events:this.db.prepare("SELECT type,at,actor,reason FROM lifecycle_events WHERE request_id=? ORDER BY id").all(id),report:report??null,late_evidence,delivery,watch,owner_notes:this.ownerNotes(id),worker_break_notices:this.breakNotices(id),claim_denied:this.claimDenial(id),skipped_by_worker:a.skipped_at?{at:a.skipped_at,listed_count:a.listed_count,passed_over:a.passed_over}:null,pr_preflights:this.db.prepare("SELECT phase,evidence FROM pr_preflights WHERE request_id=? ORDER BY CASE phase WHEN 'submit' THEN 0 ELSE 1 END").all(id).map(row=>({phase:row.phase,...JSON.parse(row.evidence)}))};
   }
   recordPrPreflight(id,phase,assignment,evidence,replace=false) {
     assertPreflight(assignment,evidence,this.nowMs());
@@ -2648,6 +2654,7 @@ export class Store {
     return {receipt_id:receipt,request_id:id,duplicate:false,late:false,...Store.resultAuthority(false),...this.nextQueued(this.freeLanes(claim.subject,claim.worker),id,worker)};
   }
   cancel(id,reason=null,ctx=null,ownerToken=null) {
+    const workCancelled=this.pullQueue.cancel(id,reason);if(workCancelled)return workCancelled;
     return this.isProtocolJob(id)?cancelProtocolJob(this,id,reason,ownerToken,ctx):this.transaction(()=>this.cancelInTransaction(id,reason));
   }
   cancelInTransaction(id,reason=null) {
@@ -2667,6 +2674,8 @@ export class Store {
   // Returns the resulting state either way: cancelled:true when this call cancelled it, false when it was already claimed,
   // finished or cancelled (the status then says which). A claimed row keeps running; nothing is revoked.
   cancelIfQueued(id) { return this.transaction(() => {
+    const pendingWork=this.pullQueue.row(id);
+    if(pendingWork&&!pendingWork.child_request_id) {const status=this.pullQueue.project(pendingWork).status;if(status!=='queued')return {request_id:id,status,cancelled:false};return {...this.pullQueue.cancel(id),cancelled:true};}
     this.assertProtocolAvailable(id);
     if(this.isProtocolJob(id)) throw new Error('protocol jobs require keyed /cancel with command_key and expected_revision');
     const a=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
@@ -2726,6 +2735,7 @@ export class Store {
       this.db.prepare("UPDATE watches SET state='suppressed',updated_at=? WHERE request_id=? AND state IN ('armed','fired')").run(at,row.request_id);
       cancelled.push(row.request_id);
     }
+    cancelled.push(...this.pullQueue.sweepExpired(Math.max(0,limit-rows.length)));
     cancelled.requeued=requeued;
     return cancelled;
   }); }
@@ -2842,6 +2852,7 @@ export class Store {
   }); }
   // The owner received a finished report (wait delivery or admin get). Only the first receipt per request counts.
   consumeOnce(id,via) {
+    this.pullQueue.consume(id);
     this.db.prepare("UPDATE assignments SET owner_read_at=? WHERE request_id=? AND status='cancelled' AND owner_read_at IS NULL").run(this.stamp(),id);
     if(this.db.prepare("SELECT status FROM assignments WHERE request_id=?").get(id)?.status!=='finished') return false;
     if(this.db.prepare("SELECT 1 FROM lifecycle_events WHERE request_id=? AND type='consumed' LIMIT 1").get(id)) return false;
@@ -2850,6 +2861,7 @@ export class Store {
   }
   // Read-only view of one request for the owner's inbox: what the owner has and has not seen. Writes nothing.
   ownerInbox(id) {
+    const policyInbox=this.pullQueue.inbox(id);if(policyInbox)return policyInbox;
     const a=this.db.prepare('SELECT status,payload,target_worker,created_at,cancelled_at,cancelled_reason,owner_read_at FROM assignments WHERE request_id=?').get(id);
     const one=(sql,...p)=>this.db.prepare(sql).get(...p);
     const report=one('SELECT outcome,created_at FROM reports WHERE request_id=?',id);
@@ -2872,7 +2884,7 @@ export class Store {
   }
   // Owner action for `dalan inbox --mark-read`: the same read marker as get, without fetching the result. True when it was unread.
   markInboxRead(id,via) { return this.transaction(() => {
-    const status=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id).status, v=this.ownerInbox(id);
+    const status=this.get(id).status, v=this.ownerInbox(id);
     const unread=status==='finished'?!v.consumed:status==='cancelled'?!v.read:false;
     this.consumeOnce(id,via); return unread;
   }); }

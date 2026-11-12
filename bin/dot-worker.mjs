@@ -62,7 +62,7 @@ const FIRST_JOB_URL=docsUrl('docs/manual-setup.md','submit-finish-and-read-the-r
 const cli=json?'dalan':cliCommand(process.argv[1]);
 // Every option a command reads. An option it does not know is refused, so a typo is not ignored in silence.
 const SUBMIT_FLAGS=['--stdin','--json','--review','--wait','--dry-run','--queue-anyway','--refuse-defer','--allow-scope-prune','--fix-scope','--background','--allow-main','--exclude-sensitive'];
-const SUBMIT_VALUES=['--file','--brief','--worker','--thread','--deliver','--timeout','--execution','--require-capability','--objective-key','--revision','--task-kind','--source','--sensitive-scope-override','--defer-if-queued','--producer-thread'];
+const SUBMIT_VALUES=['--eligible','--policy','--file','--brief','--worker','--thread','--deliver','--timeout','--execution','--require-capability','--objective-key','--revision','--task-kind','--source','--sensitive-scope-override','--defer-if-queued','--producer-thread'];
 const SUBMIT_OPTIONS=[...SUBMIT_FLAGS,...SUBMIT_VALUES];
 function refuseUnknownOptions(name,{flags=[],values=[]}) {
   for(let i=0;i<args.length;i++) {
@@ -129,12 +129,12 @@ function acpReceipt(id) {
   if(secret.length<32) return null;
   return {request_id:id,token:createHmac('sha256',secret).update(id).digest('hex'),acp:true};
 }
-function writeReceipt(id, token, body, delivery, review=false, background=false, meta=null, producer=null) {
+function writeReceipt(id, token, body, delivery, review=false, background=false, meta=null, producer=null, routing=null, destinationRevisions=null) {
   fs.mkdirSync(receipts,{recursive:true,mode:0o700});
   const file=receiptPath(id);
   try {
     const fd=fs.openSync(file,'wx',0o600);
-    try { fs.writeSync(fd,JSON.stringify({request_id:id,token,body,delivery,...(delivery.startsWith('t3:')?{thread:delivery.slice(3)}:{}),...(review?{review:true}:{}),...(background?{background:true}:{}),...(meta?{meta}:{}),...(producer?{producer}:{})})+'\n'); fs.fsyncSync(fd); }
+    try { fs.writeSync(fd,JSON.stringify({request_id:id,token,body,delivery,...(delivery.startsWith('t3:')?{thread:delivery.slice(3)}:{}),...(review?{review:true}:{}),...(background?{background:true}:{}),...(meta?{meta}:{}),...(producer?{producer}:{}),...(routing?{routing,destination_revisions:destinationRevisions??{}}:{})})+'\n'); fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
   } catch(e) { if(e.code!=='EEXIST') throw e; }
   const dir=fs.openSync(receipts,'r'); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
@@ -421,6 +421,19 @@ async function main() {
       if(!Array.isArray(body.inputs)&&!args.includes('--dry-run')) throw jobFix('the job has no inputs array: inputs must be an array', 'add "inputs": [] when the job has no repository input');
       const id=body.request_id, review=args.includes('--review'), background=args.includes('--background'), worker=option('--worker');
       if(args.includes('--worker')&&(!worker||worker.startsWith('--'))) throw new Error('--worker requires a name');
+      if(args.includes('--eligible')&&args.includes('--policy'))throw new Error('use either --eligible or --policy');
+      let routing=null,destinationRevisions={};
+      if(args.includes('--eligible')) {
+        const list=option('--eligible');if(!list||list.startsWith('--'))throw new Error('--eligible requires a comma-separated worker list');
+        routing={version:1,allowed_workers:list.split(','),fan_out:1,...(body.valid_until?{deadline_at:body.valid_until}:{})};
+      }
+      if(args.includes('--policy')) {
+        const file=option('--policy');if(!file||file.startsWith('--'))throw new Error('--policy requires a JSON file');
+        const value=JSON.parse(fs.readFileSync(file,'utf8'));
+        if(value?.routing&&Object.keys(value).some(key=>!['routing','destination_revisions'].includes(key)))throw new Error('unsupported policy file field');
+        routing=value.routing??value;destinationRevisions=value.destination_revisions??{};
+      }
+      if(routing&&worker)throw new Error('--worker cannot be combined with --eligible or --policy');
       // Execution capability (none|worker|host) and required backend capabilities travel beside the assignment, like --worker.
       const execution=option('--execution'), requireCaps=option('--require-capability');
       if(args.includes('--execution')) parseExecution(execution);
@@ -438,25 +451,29 @@ async function main() {
       // workers.json, so a stale CLI profile cannot authorize an assignment.
       if(!dryRun&&!fs.existsSync(receiptPath(id))) {
         const policy=loadOwnerWorkers(readEnv('DALAN_WORKERS_FILE')||defaultPath(home,'.config/dot-bridge/workers.json'));
-        const target=submitTarget(policy,worker??undefined)??'dot',inputs=body.inputs;
-        if(Array.isArray(inputs)&&inputs.some(input=>input?.github_repo!==undefined)) {
-          const repoName=inputs[0]?.github_repo;
-          if(inputs.length!==1) throw new Error('one repository input per job; submit separate jobs for multiple repositories');
-          if(typeof repoName!=='string'||!policy.allowsRepo(target,repoName)) throw new Error(`repository ${typeof repoName==='string'?repoName:'(invalid repository)'} is not allowed for worker "${target}"; update it with dalan worker allow ${target} OWNER/REPO, or choose another worker`);
+        const targets=routing?.allowed_workers??[submitTarget(policy,worker??undefined)??'dot'],inputs=body.inputs;
+        for(const target of targets) {
+          if(routing&&!policy.workers.has(target))throw new Error('unknown eligible worker '+target);
+          if(Array.isArray(inputs)&&inputs.some(input=>input?.github_repo!==undefined)) {
+            const repoName=inputs[0]?.github_repo;
+            if(inputs.length!==1) throw new Error('one repository input per job; submit separate jobs for multiple repositories');
+            if(typeof repoName!=='string'||!policy.allowsRepo(target,repoName)) throw new Error(`repository ${typeof repoName==='string'?repoName:'(invalid repository)'} is not allowed for worker "${target}"; update it with dalan worker allow ${target} OWNER/REPO, or choose another worker`);
+          }
         }
       }
       const token=randomBytes(32).toString('hex');
-      const write=()=>writeReceipt(id,token,JSON.stringify(body),delivery,review,background,{...given,source:given.source??'agent'},producerId());
+      const write=()=>writeReceipt(id,token,JSON.stringify(body),delivery,review,background,{...given,source:given.source??'agent'},producerId(),routing,destinationRevisions);
       let saved;
       if(dryRun) {
         try { saved=receipt(id); }
-        catch(error) { if(error.code!=='ENOENT') throw error; saved={request_id:id,token,delivery,body:input}; }
+        catch(error) { if(error.code!=='ENOENT') throw error; saved={request_id:id,token,delivery,body:input,...(routing?{routing,destination_revisions:destinationRevisions}:{})}; }
       } else saved=write();
+      if(!routing&&saved.routing) {routing=saved.routing;destinationRevisions=saved.destination_revisions??{};}
       let fresh=!dryRun&&saved.token===token;
       // Receipts written by earlier releases may carry the old spelling of a source; compare the normalized form.
       const savedMeta=()=>{ try { return normalizeMeta(saved.meta); } catch { return {}; } };
       const conflicts=()=>{ const savedDelivery=saved.delivery ?? (saved.thread ? `t3:${saved.thread}` : null);
-        return JSON.stringify(canonical(JSON.parse(saved.body)))!==JSON.stringify(canonical(body))||savedDelivery!==delivery||!!saved.review!==review||!!saved.background!==background||metaFields.some(k=>savedMeta()[k]!=null&&given[k]!==null&&savedMeta()[k]!==given[k]); };
+        return JSON.stringify(canonical(saved.routing??null))!==JSON.stringify(canonical(routing))||JSON.stringify(canonical(saved.destination_revisions??{}))!==JSON.stringify(canonical(destinationRevisions))||JSON.stringify(canonical(JSON.parse(saved.body)))!==JSON.stringify(canonical(body))||savedDelivery!==delivery||!!saved.review!==review||!!saved.background!==background||metaFields.some(k=>savedMeta()[k]!=null&&given[k]!==null&&savedMeta()[k]!==given[k]); };
       const conflict=()=>Object.assign(new Error('request_id conflict with local receipt'),{local_code:'receipt_conflict'});
       // A refused submit stores no assignment, so its receipt guards nothing. Replace it instead of refusing a corrected retry.
       if(dryRun&&conflicts()) throw conflict();
@@ -468,7 +485,7 @@ async function main() {
       }
       // A retry inherits what the receipt recorded for any flag it omits, so replaying a drainer request by hand stays one request.
       const meta=Object.fromEntries(metaFields.map(k=>[k,given[k]??savedMeta()[k]??(k==='source'?'agent':null)]));
-      const send=()=>request(dryRun?'/submit-preview':'/submit', 'POST', { ...(worker?{worker}:{}), delivery, assignment: body, owner_token:saved.token, review, ...(background?{background:true}:{}), meta, ...(args.includes('--sensitive-scope-override')?{sensitive_scope_override:option('--sensitive-scope-override')}:{}), ...(args.includes('--allow-main')?{allow_main:true}:{}), ...(args.includes('--exclude-sensitive')?{exclude_sensitive:true}:{}), ...(execution?{execution}:{}), ...(requiredCapabilities?{required_capabilities:requiredCapabilities}:{}), ...(dryRun?{dry_run:true}:{...(refuseDefer?{refuse_defer:true}:{}),...(queueAnyway?{queue_anyway:true}:{})}), ...(args.includes('--defer-if-queued')?{defer_queued:Number(option('--defer-if-queued'))}:{}) },args.includes('--allow-main')?{'x-operator-key':operator()}:{});
+      const send=()=>request(dryRun?'/submit-preview':'/submit', 'POST', { ...(worker?{worker}:{}), ...(routing?{routing,destination_revisions:destinationRevisions}:{}), delivery, assignment: body, owner_token:saved.token, review, ...(background?{background:true}:{}), meta, ...(args.includes('--sensitive-scope-override')?{sensitive_scope_override:option('--sensitive-scope-override')}:{}), ...(args.includes('--allow-main')?{allow_main:true}:{}), ...(args.includes('--exclude-sensitive')?{exclude_sensitive:true}:{}), ...(execution?{execution}:{}), ...(requiredCapabilities?{required_capabilities:requiredCapabilities}:{}), ...(dryRun?{dry_run:true}:{...(refuseDefer?{refuse_defer:true}:{}),...(queueAnyway?{queue_anyway:true}:{})}), ...(args.includes('--defer-if-queued')?{defer_queued:Number(option('--defer-if-queued'))}:{}) },args.includes('--allow-main')?{'x-operator-key':operator()}:{});
       try {
         try { result=await send(); }
         catch(error) {

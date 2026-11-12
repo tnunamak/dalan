@@ -64,7 +64,7 @@ try {
   raw.exec('ALTER TABLE claims DROP COLUMN lease_ms; PRAGMA user_version=52;');
   raw.close();
   store=open(file,1800);
-  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.equal(store.db.prepare('SELECT lease_ms FROM claims WHERE request_id=?').get('req_persist').lease_ms,1800,'schema-52 grant did not inherit prior configured lease');
 
   // A blocked regrant keeps the expired old claim and its epoch intact.

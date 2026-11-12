@@ -79,6 +79,6 @@ process.stdout.write(JSON.stringify(observation));
   // An expired preparation is cancelled as expired (by the sweep or by this claim) and the claim answers assignment_expired, never a generic preflight failure.
   {const result=await rpc('claim',{request_id:expires.request_id,claimant:'pr-test'});assert.match(result.error||'',/^assignment_expired: /,JSON.stringify(result));assert.equal(countRows('claims',expires.request_id),0,'expired claim created claim');const row=await get(expires.request_id);assert.equal(row.body.status,'cancelled');assert.equal(row.body.cancelled_reason,'expired');}
   assert.equal(calls(),beforeExpiredClaim,'expired task fetched PR');
-  const db=new DatabaseSync(path.join(home,'.local/share/dalan/bridge.db'));assert.equal(db.prepare('PRAGMA user_version').get().user_version,65);db.close();
+  const db=new DatabaseSync(path.join(home,'.local/share/dalan/bridge.db'));assert.equal(db.prepare('PRAGMA user_version').get().user_version,66);db.close();
   console.log('pr-preflight-e2e: PASS');
 } finally {if(service&&service.exitCode===null){service.kill('SIGTERM');await new Promise(resolve=>service.once('exit',resolve));}fs.rmSync(home,{recursive:true,force:true});}

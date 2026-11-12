@@ -34,11 +34,11 @@ try {
     s.db.exec('DROP INDEX assignments_objective'); for(const c of ['objective_key','revision','task_kind','source']) s.db.exec(`ALTER TABLE assignments DROP COLUMN ${c}`);
     s.db.exec('PRAGMA user_version=21'); s.db.close();
     s=open('migrate');
-    assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65);
+    assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66);
     assert.deepEqual(Object.fromEntries(Object.entries(row(s,'req_old_1')).filter(([k])=>k!=='payload_hash')),{objective_key:null,revision:null,task_kind:null,source:null});
     s.progress('req_old_1',claim.claim_id,'still mine','subject_a');
     assert.equal(s.claims()[0].claim_id,claim.claim_id);
-    s.db.close(); s=open('migrate'); assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,65,'reopen re-ran the migration'); s.db.close();
+    s.db.close(); s=open('migrate'); assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,66,'reopen re-ran the migration'); s.db.close();
   }
   pass('v22 migration adds nullable objective columns; existing rows stay null and existing claim_ids stay valid');
 

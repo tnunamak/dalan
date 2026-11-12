@@ -38,7 +38,7 @@ function migrateExistingCopy() {
   chmodSync(`${copy}.secrets`,0o700);
   chmodSync(`${copy}.secrets/storage.key`,0o600);
   const migrated=new Store(copy);
-  assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,65,'migration version');
+  assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,66,'migration version');
   assert.equal(migrated.get(oldId).delivery_mode,'t3:mcp:12345678-1234-1234-1234-123456789abc','legacy delivery');
   migrated.db.close();
 }

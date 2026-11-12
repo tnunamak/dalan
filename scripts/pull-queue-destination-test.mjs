@@ -1,0 +1,73 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import {Store} from '../src/store.mjs';
+import {parseWorkers} from '../src/workers.mjs';
+import {routingPolicy} from '../src/pull-queue.mjs';
+const dir=fs.mkdtempSync(path.join(os.homedir(),'.tmp','pull-dest-'));
+const declaration={provider:'Fixture provider',operator:'Fixture owner',data_categories:['assignment'],retention:'one day',training:'none',terms:'v1'};
+let connections={alpha:['conn-alpha'],beta:['conn-beta']},provider='Fixture provider';
+const profile=()=>parseWorkers({workers:{alpha:{destination:{...declaration,provider}},beta:{destination:declaration}},default_execution:'worker'},{builtin:true,builtinConnectionIds:worker=>connections[worker]});
+let current=profile(),now=Date.now();
+const store=new Store(path.join(dir,'store.db'),{workers:current,destinationProfile:()=>current,connectionIsLive:id=>Object.values(connections).flat().includes(id),now:()=>now});
+const admit=(worker,payload,execution,revision)=>{const snap=store.destinationSnapshot(worker,execution,payload);if(snap.revision!==revision||!snap.policy.allowed||!connections[worker].length)throw new Error('destination changed');};
+const payload={schema_version:1,request_id:'req_policy_destination',brief:'Read supplied text.',inputs:[],execution_scope:'read-only',expected_output:'Report'};
+const routing=routingPolicy({version:1,allowed_workers:['alpha','beta'],deadline_at:new Date(now+3600000).toISOString()},payload);
+const opts={delivery:{mode:'none'},environmentId:'',execution:'worker',review:false,priority:'normal',meta:null};
+try {
+  const approvals=Object.fromEntries(routing.allowed_workers.map(worker=>[worker,store.destinationSnapshot(worker,'worker',payload).revision]));
+  store.pullQueue.submit(payload,payload,opts,routing,approvals,'owner');
+  assert.equal(store.pullQueue.list('alpha',admit).items.length,1);
+  provider='Changed provider';current=profile();
+  assert.equal(store.pullQueue.list('alpha',admit).items.length,0);
+  assert.throws(()=>store.pullQueue.get(payload.request_id,'alpha',admit),/not found/);
+  const acquire=(extra={})=>store.pullQueue.acquire(payload.request_id,{worker:'alpha',subject:'subject',connectionId:'conn-alpha',claimant:'run',acquisitionId:'first-acquisition',capacity:10,preflight:null,leaseMs:1000,admit,...extra});
+  assert.throws(()=>acquire(),/destination changed/);assert.equal(store.hasAssignment(payload.request_id),false);
+  provider=declaration.provider;current=profile();
+  assert.throws(()=>acquire({connectionId:'unapproved-connection'}),/connection_not_live/);assert.equal(store.hasAssignment(payload.request_id),false);
+  connections.alpha=['conn-alpha','conn-new'];current=profile();assert.equal(store.pullQueue.list('alpha',admit).items.length,0);
+  assert.throws(()=>acquire(),/destination changed/);assert.equal(store.hasAssignment(payload.request_id),false);
+  connections.alpha=['conn-alpha'];current=profile();const grant=acquire();
+  assert.equal(store.get(payload.request_id).valid_until,routing.deadline_at);
+  assert.equal(store.destinationApproval(payload.request_id).revision,approvals.alpha);
+  assert.equal(store.get(payload.request_id).claim.connection_id,'conn-alpha');
+  // A lost reply is still recoverable after an owner edits destination metadata,
+  // as on ordinary claims. Changing the approved connection set is different.
+  provider='Changed after grant';current=profile();
+  assert.equal(acquire().claim_id,grant.claim_id);
+  connections.alpha=['conn-alpha','conn-new'];current=profile();
+  assert.throws(()=>acquire(),/approved connection set changed/);
+  connections.alpha=['conn-alpha'];provider=declaration.provider;current=profile();
+  // An acquired slot stays bound to the same child. Ordinary abandonment and
+  // regrant produce a fresh epoch for that worker, never a second child.
+  store.abandon(payload.request_id,{actor:'operator',reason:'worker stopped'});
+  now+=1001;
+  const renewed=store.claim(payload.request_id,'new-run','subject',10,null,'alpha','second-acquisition',store.limits.leaseMs,null,'conn-alpha');
+  assert.equal(renewed.epoch,2);assert.notEqual(renewed.claim_id,grant.claim_id);
+  assert.equal(store.pullQueue.row(payload.request_id).child_request_id,payload.request_id);
+  assert.throws(()=>store.claim(payload.request_id,'rival','subject',10,null,'beta','rival',store.limits.leaseMs,null,'conn-beta'),/not found|invalid claim/);
+  store.cancel(payload.request_id,'owner stopped');assert.equal(store.get(payload.request_id).status,'cancelled');
+  assert.throws(()=>acquire(),/finished or cancelled/);
+  const bounded=routingPolicy({...routing,deadline_at:new Date(now+7200000).toISOString()},{...payload,valid_until:new Date(now+1000).toISOString()});assert.equal(Date.parse(bounded.deadline_at),now+1000);
+  assert.throws(()=>routingPolicy({...routing,fan_out:2},payload),/fan_out/);
+  assert.throws(()=>routingPolicy({...routing,worker_class:'any'},payload),/supported fields/);
+  assert.throws(()=>routingPolicy(routing,{...payload,execution_scope:'implementation'}),/read-only/);
+  const expiring={...payload,request_id:'req_policy_deadline'},deadline=new Date(now+1000).toISOString();
+  store.pullQueue.submit(expiring,expiring,opts,{...routing,deadline_at:deadline},approvals,'owner');
+  now+=1001;
+  assert.equal(store.get(expiring.request_id).status,'cancelled');
+  assert.ok(!store.pullQueue.list('alpha',admit).items.some(item=>item.request_id===expiring.request_id));
+  assert.throws(()=>store.pullQueue.get(expiring.request_id,'alpha',admit),/not found/);
+  assert.throws(()=>store.pullQueue.acquire(expiring.request_id,{worker:'alpha',subject:'subject',connectionId:'conn-alpha',claimant:'run',acquisitionId:'expired',capacity:10,preflight:null,admit}),/deadline expired/);
+  assert.equal(store.hasAssignment(expiring.request_id),false);
+  assert.ok(store.sweepExpired().includes(expiring.request_id));
+  assert.equal(store.pullQueue.row(expiring.request_id).cancelled_reason,'expired');
+  assert.equal(store.sweepExpired().includes(expiring.request_id),false);
+  const queued={...payload,request_id:'req_policy_pending_owner'};store.pullQueue.submit(queued,queued,opts,routing,approvals,'owner');
+  assert.equal(store.ownerInbox(queued.request_id).brief,queued.brief);assert.equal(store.markInboxRead(queued.request_id,'test'),false);
+  assert.equal(store.cancelIfQueued(queued.request_id).cancelled,true);assert.equal(store.cancelIfQueued(queued.request_id).cancelled,false);
+  assert.equal(store.markInboxRead(queued.request_id,'test'),true);assert.equal(store.ownerInbox(queued.request_id).read,true);
+  assert.equal(store.markInboxRead(queued.request_id,'test'),false);
+  console.log('PASS built-in candidate approval/provider/connection drift, ordinary child regrant, deadline bound and pending owner lifecycle');
+} finally {store.db.close();fs.rmSync(dir,{recursive:true,force:true});}

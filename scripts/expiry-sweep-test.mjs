@@ -161,13 +161,13 @@ try {
     preWorkerFixture(s);
     s.db.exec('DROP INDEX assignments_expiry; ALTER TABLE assignments DROP COLUMN valid_until; ALTER TABLE assignments DROP COLUMN cancelled_reason; PRAGMA user_version=26;');s.db.close();
     s=new Store(file,{now:()=>now,limits});
-    assert(s.db.prepare('PRAGMA user_version').get().user_version===65,'migration 27 version');
+    assert(s.db.prepare('PRAGMA user_version').get().user_version===66,'migration 27 version');
     const v=id=>s.db.prepare('SELECT valid_until FROM assignments WHERE request_id=?').get(id).valid_until;
     assert(v('mg_q')===iso(now+MIN)&&v('mg_c')===iso(now+HOUR)&&v('mg_f')===null,'backfill: '+JSON.stringify([v('mg_q'),v('mg_c'),v('mg_f')]));
     assert(s.claims().length===1&&s.claims()[0].claim_id===c.claim_id,'claim lost in migration 27');
     s.progress('mg_c',c.claim_id,'still valid','local-principal');
     assert(s.get('mg_q').status==='queued','migration cancelled something');
-    s.db.close();s=new Store(file,{now:()=>now,limits});assert(s.db.prepare('PRAGMA user_version').get().user_version===65,'reopen');s.db.close();
+    s.db.close();s=new Store(file,{now:()=>now,limits});assert(s.db.prepare('PRAGMA user_version').get().user_version===66,'reopen');s.db.close();
     log('migration 27 on a v26 database: columns and index added, open rows backfilled, claims stay valid, nothing cancelled');
   }
 

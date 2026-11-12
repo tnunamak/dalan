@@ -209,7 +209,7 @@ await test('pause suspicion requires queued work for the whole delay',()=>fixtur
 
 await test('schema49 episode rows survive additive migration without invented publication',()=>fixture(async h=>{
   const db=h.store.db;
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version,66);
   h.store.setBreak('legacy fixture break');h.store.clearBreak();
   // The helper also restores the original break table name, as at that version.
   dropEmptyPost54FixtureState(db);
@@ -221,7 +221,7 @@ await test('schema49 episode rows survive additive migration without invented pu
   db.prepare('INSERT INTO alert_episodes(condition,active,started_at,last_change_at) VALUES(?,1,?,?)').run('skipped_by_worker',h.store.stamp(),h.store.stamp());
   const before=db.prepare('SELECT * FROM dot_breaks').get();
   h.reopen();
-  assert.equal(h.store.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(h.store.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.equal(h.store.db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
   const after=h.store.db.prepare('SELECT * FROM worker_breaks').get();
   assert.deepEqual({...after,alert_first_observed_at:undefined,attention_published_at:undefined},
@@ -236,7 +236,7 @@ await test('historical migration fixtures retain columns already present on repl
   // Test-owned legacy fixtures rewind selected schema sections, retaining unrelated columns.
   dropEmptyPost54FixtureState(h.store.db);
   h.store.db.exec('PRAGMA user_version=49;');h.reopen();
-  assert.equal(h.store.db.prepare('PRAGMA user_version').get().user_version,65);
+  assert.equal(h.store.db.prepare('PRAGMA user_version').get().user_version,66);
   assert.deepEqual(h.row(),row,'replayed migration must preserve existing success evidence');
   await h.tick();assert.equal(h.count('attention','skipped_by_worker:'),1);
 }));

@@ -362,7 +362,7 @@ try {
     preWorkerFixture(s);
     s.db.exec('ALTER TABLE notifications DROP COLUMN covers; PRAGMA user_version=22;');s.db.close();
     s=new Store(file,{now:()=>now,limits});
-    assert(s.db.prepare('PRAGMA user_version').get().user_version===65,'migration version');
+    assert(s.db.prepare('PRAGMA user_version').get().user_version===66,'migration version');
     assert(s.db.prepare("SELECT count(*) n FROM notifications WHERE covers IS NOT NULL").get().n===0,'old rows got covers');
     assert(s.claims().length===1&&s.claims()[0].claim_id===c.claim_id&&s.claims()[0].epoch===1,'claim lost in migration');
     s.progress('m1',c.claim_id,'still valid','local-principal');
@@ -381,7 +381,7 @@ try {
     s.db.exec(`DROP INDEX notifications_request_state;DROP INDEX notifications_wake_gate;DROP INDEX notifications_wake_time;DROP INDEX notifications_wake_latest;
       ALTER TABLE notifications DROP COLUMN wake_kind;PRAGMA user_version=23;`);s.db.close();
     s=new Store(file,{now:()=>now,limits});
-    assert(s.db.prepare('PRAGMA user_version').get().user_version===65,'migration 24 version');
+    assert(s.db.prepare('PRAGMA user_version').get().user_version===66,'migration 24 version');
     const kinds=s.db.prepare("SELECT kind,request_id,wake_kind FROM notifications ORDER BY rowid").all().map(r=>`${r.kind}:${r.request_id}:${r.wake_kind}`).join(',');
     assert(kinds==='event:n1:submit,event:n2:submit,event:n1:owner_note,event:null:message','wake_kind backfill: '+kinds);
     const indexes=s.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'notifications_%' ORDER BY name").all().map(r=>r.name).join(',');

@@ -404,7 +404,7 @@ try {
     // The rewound fixture carries the break table under its original name.
     s.db.exec('DROP TABLE break_notices; DROP TABLE dot_breaks; DROP TABLE worker_calls; PRAGMA user_version=24;');s.db.close();
     s=new Store(file,{now:()=>now,limits});
-    assert(s.db.prepare('PRAGMA user_version').get().user_version===65,'migration 25+26+27 version');
+    assert(s.db.prepare('PRAGMA user_version').get().user_version===66,'migration 25+26+27 version');
     assert(s.claims().length===1&&s.claims()[0].claim_id===c.claim_id&&s.claims()[0].epoch===1,'claim lost in migration 25');
     s.progress('m1',c.claim_id,'still valid','local-principal');
     call(s);s.setBreak('after migration');
@@ -424,7 +424,7 @@ try {
       CREATE INDEX worker_calls_minute ON worker_calls(minute); PRAGMA user_version=25;`);
     s.db.prepare('INSERT INTO worker_calls VALUES(?,?,?)').run('dot',Math.floor((T-30*MIN)/60000),7);s.db.close();
     s=new Store(file,{now:()=>now,limits});
-    assert(s.db.prepare('PRAGMA user_version').get().user_version===65,'migration 26 version');
+    assert(s.db.prepare('PRAGMA user_version').get().user_version===66,'migration 26 version');
     const rows=s.db.prepare('SELECT subject,tool,count,bytes FROM worker_calls').all().map(r=>({...r}));
     assert(JSON.stringify(rows)==='[{"subject":"dot","tool":"unrecorded","count":7,"bytes":null}]','migrated rows: '+JSON.stringify(rows));
     assert(s.db.prepare("SELECT 1 FROM sqlite_master WHERE name='worker_calls_minute'").get(),'minute index lost');
