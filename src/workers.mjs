@@ -182,6 +182,16 @@ export function loadOwnerWorkers(file=readEnv('DALAN_WORKERS_FILE')||defaultPath
     return parseOwnerWorkers(JSON.parse(fs.readFileSync(file,'utf8')));
   } catch(error) { if(error.code==='ENOENT') return legacyRepoProfile(file);throw error; }
 }
+// Read-only effective policy for export/migration. Never reconcile or checkpoint the source.
+export function loadEffectiveOwnerWorkers(file) {
+  const profile=loadOwnerWorkers(file);
+  const current=new Map([...profile.workers.keys()].map(name=>[name,profile.repoPolicy(name).repos]));
+  const {applied,unaudited}=evaluateGrants(file,current,false,null);
+  return {...profile,deniedRepoGrants:unaudited,
+    repoPolicy(worker) {return profile.workers.has(worker)?{mode:'exact',repos:[...(applied.get(worker)??[])]}:null;},
+    allowsRepo(worker,repo) {return (applied.get(worker)??[]).some(pattern=>repoMatches(pattern,repo));},
+  };
+}
 function parseOwnerWorkers(value) {
   const entries=Object.values(value?.workers??{});
   // Built-in profiles permit both absent and empty connection arrays. Only persisted records imply external OAuth.

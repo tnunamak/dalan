@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
-import { createServiceVerifier } from '../src/service-verifier.mjs';
+import { randomBytes } from 'node:crypto';
+import { createServiceVerifier } from '@tnunamak/gozar';
 
-const nonce = 'a'.repeat(64);
+const nonce = randomBytes(32).toString('hex');
 const verifier = createServiceVerifier();
 function request(overrides = {}, handler = verifier) {
   const req = { method: 'GET', url: '/.well-known/gozar/service?nonce=' + nonce,
     rawHeaders: ['Host', 'Service.Example:443'], socket: { localPort: 8040 }, ...overrides };
+  // Node supplies headers.host from the same received Host represented in rawHeaders.
+  req.headers ??= { host: req.rawHeaders?.find((value, index) => index % 2 === 1 && req.rawHeaders[index - 1]?.toLowerCase() === 'host') };
   const headers = {};
   let status, body, writes = 0;
   const handled = handler(req, {
@@ -32,7 +35,7 @@ assert.deepEqual(request({ rawHeaders: ['hOsT', 'service.example'] }).body, firs
 assert.notEqual(request({ socket: { localPort: 8041 } }).body.proof, first.body.proof);
 assert.notEqual(request({ rawHeaders: ['Host', 'other.example'] }).body.proof, first.body.proof);
 assert.notEqual(request({ rawHeaders: ['Host', 'service.example:8443'] }).body.proof, first.body.proof);
-assert.notEqual(request({ url: '/.well-known/gozar/service?nonce=' + 'b'.repeat(64) }).body.proof, first.body.proof);
+assert.notEqual(request({ url: '/.well-known/gozar/service?nonce=' + randomBytes(32).toString('hex') }).body.proof, first.body.proof);
 const fresh = request({}, createServiceVerifier()).body;
 assert.notEqual(fresh.instanceId, first.body.instanceId);
 assert.notEqual(fresh.proof, first.body.proof);
@@ -41,6 +44,11 @@ for (const [host, authority] of [
   ['localhost:1', 'localhost:1'], ['a-b.example:00443', 'a-b.example'],
   ['Service.Example.:443', 'service.example.'],
 ]) assert.equal(request({ rawHeaders: ['Host', host] }).body.authority, authority);
+// The shared verifier canonicalizes URL-compatible numeric IPv4 spellings; Dalan's
+// public Host gate runs first and still requires its exact configured authority.
+for (const host of ['0x7f000001']) {
+  assert.equal(request({ rawHeaders: ['Host', host] }).body.authority, '127.0.0.1');
+}
 function refuses(overrides) {
   const result = request(overrides);
   assert.equal(result.handled, false, JSON.stringify(overrides));
@@ -50,7 +58,7 @@ for (const host of [null, 12, '', 'a b', 'a\tb', 'a\nb', 'a/b', 'a\\b', 'a@b',
   'a?b', 'a#b', 'a%b', 'a,b', '-a.test', 'a-.test', 'a..test',
   'a'.repeat(64) + '.test', Array(5).fill('a'.repeat(63)).join('.'),
   '[not-v6]', '[127.0.0.1]', '[::1', '::1', 'a:0', 'a:65536', 'a:-1', 'a:x',
-  'a:', '999.1.1.1', '127.1', '2130706433', '0x7f000001', '0177.0.0.1']) {
+  'a:', '999.1.1.1', '127.1', '2130706433', '0177.0.0.1']) {
   refuses({ rawHeaders: ['Host', host] });
 }
 for (const rawHeaders of [undefined, [], ['Host'], ['Host', 'a', 'HOST', 'a'],
@@ -60,7 +68,7 @@ refuses({ socket: undefined });
 refuses({ rawHeaders: [], headers: { host: 'service.example', 'x-forwarded-host': 'service.example' } });
 refuses({ socket: {}, rawHeaders: ['Host', 'service.example', 'X-Forwarded-Port', '8040'] });
 assert.deepEqual(request({ rawHeaders: ['Host', 'service.example', 'X-Forwarded-Host', 'evil.example',
-  'X-Forwarded-Port', '9999', 'Forwarded', 'host=evil.example:9999'], headers: { host: 'evil.example' } }).body, first.body);
+  'X-Forwarded-Port', '9999', 'Forwarded', 'host=evil.example:9999'], headers: { host: 'service.example' } }).body, first.body);
 for (const method of ['POST', 'HEAD', 'get', undefined]) refuses({ method });
 for (const url of [undefined, '/', '/.well-known/gozar/service', '/.well-known/gozar/service/',
   '/.well-known/gozar/service?nonce=' + 'A'.repeat(64),

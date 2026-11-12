@@ -2,11 +2,11 @@
 import './require-host-sandbox.mjs';
 // run_check executes repository code. It must not widen what the job may change or see. The budgeted host backend runs the check in a
 // private copy and exports nothing back, so a check's writes never reach the job's worktree:
-//   T1 implementation job: a check that writes or edits files outside scope_paths changes nothing in the worktree or the patch; the
+//   implementation job: a check that writes or edits files outside scope_paths changes nothing in the worktree or the patch; the
 //      scope guard still refuses workspace_result and finish with scope_violation for a stray out-of-scope change made directly.
-//   T2 read-only job with output_paths: the restore applied to a dirtied worktree keeps only the output files.
-//   T3 sensitive committed files (the submission-policy deny rules) read as empty inside the check, in the install and the check phase.
-//   T4 the npm cache is private to each check run: nothing a check writes there reaches the host's shared cache.
+//   read-only job with output_paths: the restore applied to a dirtied worktree keeps only the output files.
+//   sensitive committed files (the submission-policy deny rules) read as empty inside the check, in the install and the check phase.
+//   the npm cache is private to each check run: nothing a check writes there reaches the host's shared cache.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,7 +24,7 @@ const workspaceModule = await import('../src/workspace.mjs');
 const { Workspace, treeDigest, writableScope, restoreOutsideWritable } = workspaceModule;
 const run = (cmd, args, cwd) => { const x = spawnSync(cmd, args, { cwd, encoding: 'utf8' }); if (x.status !== 0) throw new Error(x.stderr || x.stdout); return x.stdout.trim(); };
 const NODE = '/runtime/node', NODE_HOST = process.execPath;
-const want = id => !process.env.ONLY || process.env.ONLY === id; // ONLY=T3 runs one block
+const want = id => !process.env.ONLY || process.env.ONLY === id; // ONLY=sensitive runs one block
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const WRITER = `const fs=require('fs');
@@ -98,8 +98,8 @@ const read = (a, file) => fs.readFileSync(path.join(a.dir, file), 'utf8');
 const exists = (a, file) => fs.existsSync(path.join(a.dir, file)) || (() => { try { fs.lstatSync(path.join(a.dir, file)); return true; } catch { return false; } })();
 
 try {
-  // T1. Implementation job, scope_paths src + test.
-  if (want('T1')) {
+  // Implementation job, scope_paths src + test.
+  if (want('implementation')) {
     // A job with a narrow scope cannot run a host check at all: the executor exposes the whole checkout, so the check is refused
     // before any sandbox starts. The scope guard on result and finish is what protects the patch.
     const narrow = open({ scope_paths: ['src', 'test'] });
@@ -148,8 +148,8 @@ try {
     ws.result(narrow.id, narrow.claim, 'subject');
   }
 
-  // T1b. Repo-wide scope: the check's package.json rewrite stays in its private copy too.
-  if (want('T1b')) {
+  // Repo-wide scope: the check's package.json rewrite stays in its private copy too.
+  if (want('repo-wide')) {
     const a = open({ scope_paths: ['.'] });
     const c = await check(a, 'write');
     assert.equal(c.evidence.exit_code, 0, c.text);
@@ -158,17 +158,17 @@ try {
     assert.deepEqual(patchFiles(ws.result(a.id, a.claim, 'subject').diff_preview), []);
   }
 
-  // T1c. A review's diff against base is the PR's files: the scope guard does not apply (finish is never blocked by diff state).
-  if (want('T1c')) {
+  // A review's diff against base is the PR's files: the scope guard does not apply (finish is never blocked by diff state).
+  if (want('review')) {
     const a = open({ scope_paths: ['src'] }, true);
     fs.writeFileSync(path.join(a.dir, 'package.json'), '{"pr":true}\n');
     assert(patchFiles(ws.result(a.id, a.claim, 'subject').diff_preview).includes('package.json'));
     ws.snapshot(a.id, a.claim, 'subject');
   }
 
-  // T2. Read-only job with output_paths: run_check stays closed to it (docs/usage.md), and the writable set it would be held to is the
+  // Read-only job with output_paths: run_check stays closed to it (docs/usage.md), and the writable set it would be held to is the
   // output files alone. The restore the check path uses is applied here to a worktree the writer script dirtied on the host.
-  if (want('T2')) {
+  if (want('read-only')) {
     const a = open({ execution_scope: 'read-only', scope_paths: ['src', 'test'], output_paths: ['notes/out.md'] });
     await assert.rejects(() => ws.check(a.id, a.claim, 'subject', 'write'), /read_only_assignment/);
     const writable = writableScope(store.get(a.id).assignment);
@@ -188,9 +188,9 @@ try {
     assert.deepEqual(patchFiles(ws.result(a.id, a.claim, 'subject').diff_preview), ['notes/out.md'], 'only the output file reaches the patch');
   }
 
-  // T5 (GAP-1). Tracked files under node_modules, target, .venv-style and __pycache__ names are still tracked files: a check that edits or
+  // Tracked files under node_modules, target, .venv-style and __pycache__ names are still tracked files: a check that edits or
   // deletes them outside scope_paths is restored, and a stray change to one refuses with scope_violation. Only untracked output is exempt.
-  if (want('T5')) {
+  if (want('tracked-generated')) {
     const a = open({ scope_paths: ['.'], inputs: [{ github_repo: 'example-owner/fixture', base_sha: base2 }] });
     const names = ['target/t.txt', 'target/gone.txt', 'vendor/node_modules/pkg/index.js', 'tools/__pycache__/x.py'];
     const c = await check(a, 'gen');
@@ -214,8 +214,8 @@ try {
     ws.result(n.id, n.claim, 'subject');
   }
 
-  // T6 (GAP-3). File names are bytes. A non-UTF-8 name, untracked or tracked, is restored; one that cannot be restored refuses.
-  if (want('T6')) {
+  // File names are bytes. A non-UTF-8 name, untracked or tracked, is restored; one that cannot be restored refuses.
+  if (want('non-utf8')) {
     const a = open({ scope_paths: ['.'], inputs: [{ github_repo: 'example-owner/fixture', base_sha: base2 }] });
     const c = await check(a, 'raw');
     assert.equal(c.evidence.exit_code, 0, c.text);
@@ -239,8 +239,8 @@ try {
     assert.throws(() => ws.result(n.id, n.claim, 'subject'), e => /stuck/.test(JSON.parse(e.message).message) && /cancel and resubmit/.test(JSON.parse(e.message).message));
   }
 
-  // T3. Sensitive committed files read as empty, in both phases; other files and code files read normally.
-  if (want('T3')) {
+  // Sensitive committed files read as empty, in both phases; other files and code files read normally.
+  if (want('sensitive')) {
     const a = open({ scope_paths: ['.'] });
     const probe = `const fs=require('fs');const len=f=>fs.readFileSync(f).length;let w='ok';try{fs.writeFileSync('.env','changed')}catch(e){w=e.code}`;
     setOwnerChecks({ default: {
@@ -257,8 +257,8 @@ try {
     assert.match(c.evidence.observed, /3 sensitive path\(s\) were masked/);
   }
 
-  // T4. The cache is private to one check run: the install phase can fill it for the check phase, and nothing reaches the host's shared cache.
-  if (want('T4')) {
+  // The cache is private to one check run: the install phase can fill it for the check phase, and nothing reaches the host's shared cache.
+  if (want('private-cache')) {
     const a = open({ scope_paths: ['.'] });
     setOwnerChecks({ default: {
       install_argv: [NODE, '-e', 'const fs=require("fs");fs.mkdirSync("/cache/npm/_cacache",{recursive:true});fs.writeFileSync("/cache/npm/_cacache/marker","ok")'],

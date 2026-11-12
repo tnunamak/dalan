@@ -45,7 +45,8 @@ import { acquireAsOwner, loadAsConfig, loadKeys } from './as-files.mjs';
 import { createSignal } from './signal.mjs';
 import { adminSocketPathError } from './admin-socket.mjs';
 import { createToolRegistry, createT3PostHandler, RegistryError } from './tool-registry.mjs';
-import { createServiceVerifier } from './service-verifier.mjs';
+import { createServiceVerifier } from '@tnunamak/gozar';
+import { acceptsMcpEventStream, beginMcpEventStream } from './mcp-sse.mjs';
 
 export async function main({protocolServiceAdapters,loopbackOnly=false}={}) {
 if(typeof loopbackOnly!=='boolean')throw new Error('loopbackOnly must be boolean');
@@ -232,7 +233,7 @@ function withAvailableChecks(response,workerSurface=false,worker='dot',subject=n
   const checks=store.db.prepare("SELECT j.id check_run_id,j.check_id,CASE WHEN j.status='completed' THEN COALESCE(r.diff_sha256,j.diff_sha256) ELSE j.diff_sha256 END diff_sha256,j.status,j.error,j.output_preview,r.exit_code,r.timed_out,r.output_artifact_id,r.output_sha256,r.duration_ms,r.evidence FROM check_jobs j LEFT JOIN check_runs r ON r.id=j.id WHERE j.request_id=? ORDER BY j.started_at").all(response.request_id).map(withEvidence);
   const blocker=workerSurface?null:queuedRepositoryBlocker(response);
   const enriched={...response,artifacts,checks,...(blocker?{queue_blocker:blocker}:{}),...(checks.some(c=>c.evidence)?{not_identified:NOT_IDENTIFIED}:{})};
-  if(!workspaceEnabled||workerSurface&&!(workspaceAllowed??workerWorkspaceAllowed(worker,response.request_id))||response.assignment?.execution_scope!=='implementation') return enriched;
+  if(!workspaceEnabled||response.assignment?.execution_scope!=='implementation'||workerSurface&&!(workspaceAllowed??workerWorkspaceAllowed(worker,response.request_id))) return enriched;
   const target=store.db.prepare('SELECT target_worker FROM assignments WHERE request_id=?').get(response.request_id)?.target_worker??worker;
   if(!mayPrepareCheckMetadata(response,target,subject)) return {...enriched,available_checks:[],available_checks_error:'repository_policy_denied'};
   const execution=response.execution??store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(response.request_id).execution;
@@ -283,8 +284,10 @@ function publicWorkerGet(response) {
 function crashAt(point, requestId) { return readEnv('DALAN_CRASH_AT')===point && (!readEnv('DALAN_CRASH_REQUEST_ID') || readEnv('DALAN_CRASH_REQUEST_ID')===requestId); }
 const T3_READ_TOOLS_OFF={off:true,message:'T3 thread tools are off; the needed context is inlined in your assignment.'};
 // The final boundary for every HTTP response: error text and error data pass the redactor whatever path built them.
-function json(res, status, value) { if (value && typeof value === 'object' && !Array.isArray(value)) for (const key of ['error', 'reason', 'check_metadata_error']) if (value[key] !== undefined) value = { ...value, [key]: redactOutput(value[key]) };
-  const body = JSON.stringify(value), bytes = Buffer.byteLength(body); recordMcpResponse(res,value,bytes); res.writeHead(status, { 'content-type': 'application/json', 'content-length': bytes }); res.end(body); }
+function json(res, status, value, eventStream = null) { if (value && typeof value === 'object' && !Array.isArray(value)) for (const key of ['error', 'reason', 'check_metadata_error']) if (value[key] !== undefined) value = { ...value, [key]: redactOutput(value[key]) };
+  const body = JSON.stringify(value), bytes = Buffer.byteLength(body);
+  if(eventStream) { eventStream.finish(body,streamBytes=>recordMcpResponse(res,value,streamBytes)); return; }
+  recordMcpResponse(res,value,bytes); res.writeHead(status, { 'content-type': 'application/json', 'content-length': bytes }); res.end(body); }
 async function readBody(req, outcome) {
   const chunks = []; let size = 0;
   for await (const chunk of req) {
@@ -313,6 +316,7 @@ const short={type:'string',maxLength:512};
 const hashField={type:'string',maxLength:128},keyField={type:'string',minLength:1,maxLength:128};
 const message={type:'string',maxLength:262144};
 const bool={type:'boolean'};
+const maxT3WaitMs=catalogProfile==='legacy-v46'?120000:90000;
 const optionsArray={type:'array',items:string,maxItems:16};
 const tools = [
   { name:'list_pending',description:'List up to 50 queued assignment IDs and titles.',inputSchema:schema({}) },
@@ -333,7 +337,7 @@ const tools = [
   { name:'t3_thread_read',description:'Read a bounded T3 thread transcript.',inputSchema:schema({threadId,detail:{type:'string',enum:['answers','messages','full']},turns:{type:'integer',minimum:1,maximum:100},firstTurn:bool,maxChars:{type:'integer',minimum:1,maximum:20000}},['threadId']) },
   { name:'t3_thread_create',description:'Create a T3 thread in any project or directory and start its first turn.',inputSchema:schema({projectId:threadId,cwd:short,prompt:message,workspaceMode:short,projectPolicy:short,provider:short,model:short,thinkingEffort:short,permission:short,interactionMode:short,environmentMode:short,speedMode:short,open:short,options:optionsArray},['prompt']) },
   { name:'t3_thread_send',description:'Send to any T3 thread, including settled threads when wakeSettled is true.',inputSchema:schema({threadId,message,mode:{type:'string',enum:['refuse','queue','steer','restart']},wakeSettled:bool,provider:short,model:short,thinkingEffort:short,permission:short,interactionMode:short,speedMode:short,options:optionsArray},['threadId','message']) },
-  { name:'t3_thread_wait',description:'Wait at most 120 seconds for a T3 turn; returns partial state on timeout.',inputSchema:schema({threadId,timeoutMs:{type:'integer',minimum:1,maximum:120000},detail:{type:'string',enum:['answers','messages','full']},maxChars:{type:'integer',minimum:1,maximum:20000}},['threadId']) },
+  { name:'t3_thread_wait',description:catalogProfile==='legacy-v46'?'Wait at most 120 seconds for a T3 turn; returns partial state on timeout.':'Wait at most 90 seconds for a T3 turn; returns partial state on timeout.',inputSchema:schema({threadId,timeoutMs:{type:'integer',minimum:1,maximum:maxT3WaitMs},detail:{type:'string',enum:['answers','messages','full']},maxChars:{type:'integer',minimum:1,maximum:20000}},['threadId']) },
   { name:'t3_thread_set',description:'Change a T3 thread provider, model, effort, permission, or mode.',inputSchema:schema({threadId,provider:short,model:short,thinkingEffort:short,permission:short,interactionMode:short,speedMode:short,options:optionsArray},['threadId']) },
   { name:'notify_owner',description:'Send a short notification to the owner through the configured ntfy alert path.',inputSchema:schema({text:{type:'string',maxLength:1000}},['text']) },
   { name:'list_tools',description:'Call this first to learn which tools you can use. Returns registry_version and each available tool with its description, input schema, class (read or write) and schema_hash.',inputSchema:schema({}) },
@@ -679,7 +683,6 @@ async function tool(name,a,principal,notifyMeta) {
   }
 }
 async function dispatchTool(name,a,principal,notifyMeta) {
-  const workerWorkspaceEnabled=workspaceEnabled&&workerWorkspaceAllowed(principal.worker,a?.request_id);
   const t3Audit=(t3Tools.has(name)||notifyTools.has(name))?await loadT3Audit():null;
   if(t3Audit) t3Audit.admitT3Audit(store.db,principal.worker,principal.subject);
   store.recordWorkerCall(principal.subject,toolNames.has(name)?name:'unknown',principal.worker);
@@ -707,7 +710,8 @@ async function dispatchTool(name,a,principal,notifyMeta) {
         log({kind:'t3_read_tool_blocked',tool:name,subject:principal.subject,call_id:audit.call_id});
         return T3_READ_TOOLS_OFF;
       }
-      const result=notifyTools.has(name) ? await notifyLedger.send(principal.worker,str(a.text,'text',1000),notificationKey,idempotencyKey=>publishAlert('Dalan message',a.text,log,{requirePublisher:true,idempotencyKey})) : await (await import('./t3-control.mjs')).runT3Tool(name,a);
+      const t3Arguments=name==='t3_thread_wait'?{...a,timeoutMs:Math.min(a.timeoutMs??90_000,90_000)}:a;
+      const result=notifyTools.has(name) ? await notifyLedger.send(principal.worker,str(a.text,'text',1000),notificationKey,idempotencyKey=>publishAlert('Dalan message',a.text,log,{requirePublisher:true,idempotencyKey})) : await (await import('./t3-control.mjs')).runT3Tool(name,t3Arguments);
       t3Audit.appendT3Audit(store.db,audit,principal.subject,'success',result);
       if(result && typeof result==='object' && Object.hasOwn(result,'_audit_ids')) { const {_audit_ids,...publicResult}=result; return publicResult; }
       return result;
@@ -726,10 +730,12 @@ async function dispatchTool(name,a,principal,notifyMeta) {
     if(name==='get')return a.request_id.startsWith(PULL_PAGE_PREFIX)?{policy_work:policyPage(worker,a.request_id)}:store.pullQueue.get(a.request_id,worker,admitPolicyWorker);
     const offered=policyRow.child_request_id?null:store.pullQueue.get(a.request_id,worker,admitPolicyWorker);
     const preflight=offered?await preflightPR(offered.assignment):null;
+    const workspaceAllowed=workspaceEnabled&&offered?.assignment?.execution_scope==='implementation'
+      ?workerWorkspaceAllowed(worker,a.request_id):false;
     const claimed=store.pullQueue.acquire(a.request_id,{worker,subject:principal.subject,connectionId:principal.builtin?(principal.connection_id??''):null,
       claimant:str(a.claimant,'claimant',128),acquisitionId:a.acquisition_id,leaseMs:a.lease_ms,capacity:claimCapacity,preflight,admit:admitPolicyWorker});
     const {free_lanes,queued}=store.laneState(principal.subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
-    return withAvailableChecks(nonterminalOutcome(claimed.request_id,{...claimed,free_lanes,queued_after_claim:queued}),true,worker,principal.subject);
+    return withAvailableChecks(nonterminalOutcome(claimed.request_id,{...claimed,free_lanes,queued_after_claim:queued}),true,worker,principal.subject,workspaceAllowed);
   }
   if(a&&typeof a==='object') {
     if(typeof a.request_id==='string'&&!store.mayAct(worker,a.request_id)) a={...a,request_id:absentId};
@@ -739,7 +745,7 @@ async function dispatchTool(name,a,principal,notifyMeta) {
   a=repaired.args;
   validate(name,a);
   if(oauth) needScope(principal,scopeFor(name));
-  if(disabled.has(name)&&!workerWorkspaceEnabled) throw new Error('capability_not_enabled');
+  if(disabled.has(name)&&!(workspaceEnabled&&workerWorkspaceAllowed(worker,a?.request_id))) throw new Error('capability_not_enabled');
   if(a.request_id===absentId&&disabled.has(name)) throw new Error('assignment not found');
   const subject=principal.subject,connectionId=principal.builtin?(principal.connection_id??''):null;
   const strictJob=typeof a.request_id==='string'&&store.isProtocolJob(a.request_id);
@@ -780,13 +786,21 @@ async function dispatchTool(name,a,principal,notifyMeta) {
     case 'claim': {
       const requestId=id(a.request_id),claimant=str(a.claimant,'claimant',128),ctx=commandContext('claim',{claimant,acquisition_id:a.acquisition_id??null,lease_ms:a.lease_ms??null}),row=store.get(requestId),held=row.claim?.state==='active'?row.claim:null,retry=holdsLiveGrant(worker,requestId,claimant,subject,a.acquisition_id);
       if(!retry)assertRepoAllowed(worker,row.assignment);
+      const needsWorkspace=workspaceEnabled&&(row.assignment.execution_scope==='implementation'||row.assignment.output_paths?.length);
+      let workspaceAllowed=false;
       store.refuseExpired(requestId);
       // Retry a successful claim without a new remote dependency, and skip it for a live rival claim that the Store will refuse.
       // A fresh claim, a claim after abandon and an expired-lease takeover are each a new admission. The Store
       // still validates claimant, subject, lease, cancellation and capacity atomically.
       const admission=!store.paused()&&(row.status==='queued'||row.status==='claimed'&&held&&!(held.claimant===claimant&&held.subject===subject)&&store.leaseExpired(held));
       const preflight=admission?await preflightPR(row.assignment):null;
-      if(!retry)assertRepoAllowed(worker,row.assignment);
+      if(!retry) {
+        assertRepoAllowed(worker,row.assignment);
+        // Resolve an optional workspace grant after remote preflight but before claim acquisition. A broken
+        // profile cannot leave a live claim behind when response enrichment fails, and an exact retry does
+        // not depend on the current profile because it adds no workspace authority.
+        if(needsWorkspace) workspaceAllowed=workerWorkspaceAllowed(worker,requestId);
+      }
       const prior=store.db.prepare('SELECT * FROM claims WHERE request_id=?').get(requestId);
       if(prior&&store.leaseExpired(prior)&&(!strictJob||store.protocolRevision(requestId)===ctx.revision)) await workspace?.quiesce(requestId);
       // Store revalidates after the await: a concurrent claimant may have won.
@@ -797,13 +811,13 @@ async function dispatchTool(name,a,principal,notifyMeta) {
       const claimed=store.claim(requestId,claimant,subject,claimCapacity,preflight,worker,a.acquisition_id,a.lease_ms,ctx,principal.builtin?(principal.connection_id??''):null);
       const grant=store.db.prepare('SELECT * FROM claims WHERE request_id=?').get(requestId);
       const {free_lanes,queued}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
-      return withAvailableChecks({...claimed,lease_expires_at:claimed.lease_expires_at??store.leaseExpiresAt(grant),queued_after_claim:queued,free_lanes,...store.nextQueued(free_lanes,requestId,worker),guidance:`${claimed.guidance} ${claimMoreGuidance}`},true,worker,subject,workerWorkspaceEnabled);
+      return withAvailableChecks({...claimed,lease_expires_at:claimed.lease_expires_at??store.leaseExpiresAt(grant),queued_after_claim:queued,free_lanes,...store.nextQueued(free_lanes,requestId,worker),guidance:`${claimed.guidance} ${claimMoreGuidance}`},true,worker,subject,workspaceAllowed);
     }
     case 'renew_claim': {
       if(!strictJob) throw new Error('renew_claim requires a protocol job');
       return store.renewClaim(id(a.request_id),id(a.claim_id,'claim_id'),a.lease_ms,commandContext('renew',{leaseMs:a.lease_ms}),subject,worker,connectionId);
     }
-    case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject,workerWorkspaceEnabled)),guidance:store.guidanceFor(worker)}; }
+    case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject)),guidance:store.guidanceFor(worker)}; }
     case 'ack_message': {const message=store.ackMessage(id(a.message_id,'message_id'),worker);log({kind:'message_acknowledged',message_id:message.message_id});return {kind:'message',message};}
     case 'progress': {
       const requestId=id(a.request_id),note=str(a.note,'note',4096),receipt=store.progress(requestId,id(a.claim_id,'claim_id'),note,subject,a.blocker===true,worker,null,commandContext('progress',{note,blocker:a.blocker===true}),connectionId);
@@ -825,8 +839,10 @@ async function dispatchTool(name,a,principal,notifyMeta) {
         let captureEvidence=null;
         if(!existing) {
           store.assertQuestionsResolved(requestId,claimId,a.outcome);
-          if(a.artifact_ids?.length) { if(!workerWorkspaceEnabled) throw new Error('capability_not_enabled'); store.assertSealedArtifacts(requestId,claimId,a.artifact_ids); }
           const request=store.get(requestId);
+          const needsWorkspace=workspaceEnabled&&(a.artifact_ids?.length||request.assignment.execution_scope==='implementation'||request.assignment.output_paths?.length);
+          const workerWorkspaceEnabled=needsWorkspace&&workerWorkspaceAllowed(worker,requestId);
+          if(a.artifact_ids?.length) { if(!workerWorkspaceEnabled) throw new Error('capability_not_enabled'); store.assertSealedArtifacts(requestId,claimId,a.artifact_ids); }
           if(workerWorkspaceEnabled) await workspace.makeRoom(requestId);
           // Recheck after the last await. The evidence capture below runs inside the finish transaction, after finishOnce's own
           // connection check, so a patch artifact is never committed for a holder that lost the connection.
@@ -933,8 +949,9 @@ const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)
     log({kind:'mcp_inbound',call_id:outcome.state.call_id,rpc_method:outcome.state.rpc_method,tool:outcome.state.tool,ua:uaToken(req)});
     if(!Object.hasOwn(rpc,'id')) { res.writeHead(202); res.end(); return; }
     outcome.state.phase='dispatch';
-    try { json(res,200,{jsonrpc:'2.0',id:rpc.id,result:{resultType:'complete',...await dispatch(rpc,principal)}}); }
-    catch(e) { json(res,200,rpcError(rpc.id,e.code||-32602,publicErrorText(e,'request'),e.data)); }
+    const eventStream=readEnv('DALAN_TRIAL_SSE')==='1'&&req.method==='POST'&&acceptsMcpEventStream(req.headers.accept)?beginMcpEventStream(res):null;
+    try { json(res,200,{jsonrpc:'2.0',id:rpc.id,result:{resultType:'complete',...await dispatch(rpc,principal)}},eventStream); }
+    catch(e) { json(res,200,rpcError(rpc.id,e.code||-32602,publicErrorText(e,'request'),e.data),eventStream); }
     // Response-byte accounting for the throttle and the break ledger; the response is already written, so a failure only logs.
     if(outcome.state.tool) try { store.recordResponseBytes(principal.subject,outcome.state.tool,outcome.state.response_bytes,principal.worker); } catch(e) { log({kind:'response_bytes_error',call_id:outcome.state.call_id,reason:e.message}); }
   } catch(e) { const errorType=e.message==='body too large'?'body_too_large':req.aborted?'request_aborted':'request_error';if(outcome)outcome.state.error_type=errorType;log({kind:'inbound_error',call_id:outcome?.state.call_id,error_type:errorType}); if(!res.headersSent&&!res.destroyed) json(res,400,rpcError(null,-32700,publicErrorText(e,'request'))); }

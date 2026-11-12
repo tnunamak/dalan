@@ -623,7 +623,7 @@
  },
  {
   "name": "t3_thread_wait",
-  "description": "Wait at most 120 seconds for a T3 turn; returns partial state on timeout.",
+  "description": "Wait at most 90 seconds for a T3 turn; returns partial state on timeout.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -634,7 +634,7 @@
     "timeoutMs": {
      "type": "integer",
      "minimum": 1,
-     "maximum": 120000
+     "maximum": 90000
     },
     "detail": {
      "type": "string",

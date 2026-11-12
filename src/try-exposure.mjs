@@ -1,6 +1,5 @@
-// The public route for `dalan try --public`: a loopback gate the route forwards to, a ready Tailscale Funnel for a real route,
-// or, for a trial, an anonymous localhost.run tunnel over `ssh`. Every process, file and rule here is
-// owned by one trial and removed by `stop()`. Every outside effect goes through a seam in `deps` so tests need no real route.
+// The public route for `dalan try --public`: a loopback gate forwarded by Tailscale or a temporary relay. Cleanup attempts to
+// remove resources owned by the trial and reports when removal is unconfirmed. Outside effects use injected seams in tests.
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash, randomBytes } from 'node:crypto';
@@ -73,8 +72,7 @@ export async function createGate() {
 const tailscaleRunner = (env = process.env) => args => spawnSync('tailscale', args, { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
 
 // A foreground Funnel (no --bg) is listed by `serve|funnel status --json` under Foreground.<session>.{TCP,Web,AllowFunnel}, not in
-// the top-level maps that the shared preflight and rule matching read (verified live on Tailscale 1.104.5). Merging the sessions
-// into the top-level view makes those routines see foreground rules, ours and other people's, exactly like background ones.
+// the top-level maps read by the shared preflight and rule matching. Merge foreground sessions into the view used for rule matching.
 export function mergeForeground(status) {
   const sessions = Object.values(status?.Foreground ?? {});
   if (!sessions.length) return status;
@@ -99,16 +97,14 @@ export function explainTailscale(error) {
   if (/Funnel is not allowed/.test(text)) return first('Funnel is not allowed for this tailnet.', `A tailnet administrator can enable Funnel at ${ADMIN_ACL_URL}, then retry.`);
   if (/no free Funnel port/.test(text)) return first('All permitted Funnel ports are occupied. Existing routes are unchanged.', 'Free one Funnel port (tailscale funnel status), then retry.');
   const port = /--funnel-port (\d+) is (?:already used|not allowed)/.exec(text)?.[1];
-  if (port) return { ...first(`Tailscale port ${port} is not free for Funnel on this computer; its rules are unchanged.`, `Free Funnel port ${port} (tailscale funnel status shows what uses it), or make a trial link with --route localhost.run.`), busy: /already used/.test(text) };
+  if (port) return { ...first(`Tailscale port ${port} is not free for Funnel on this computer; its rules are unchanged.`, `Free Funnel port ${port} (tailscale funnel status shows what uses it), or make a public demo link with --route gozar.`), busy: /already used/.test(text) };
   if (/macOS: the Tailscale/.test(text)) return first('The Tailscale app on this Mac cannot serve Funnel here', text.split('\n')[0]);
   const line = safeDiagnostic(text.split('\n')[0], 160);
   return first(`Tailscale Funnel is not usable (${line}).`, line);
 }
 
-// WHY 443 ONLY: a trial always publishes on public port 443, for every client. On 2026-11-10 claude.ai could not reach a Funnel on
-// 8443 ("Couldn't reach this address") but did reach 443, so a Funnel on any other port is not a working route. When this
-// computer's Tailscale already has a rule on 443 (it is never changed), the trial uses its own Tailscale node instead
-// (`tailscaleNodeProvider`), and localhost.run is the trial route.
+// Hosted trials use HTTPS port 443 for client compatibility. If this computer already uses 443, its existing rule is unchanged;
+// an explicitly selected Tailscale route can use an isolated temporary node. Automatic trial relay selection uses Gozar.
 export const TRIAL_PORT = 443;
 export function tailscaleProvider({ port: wantedPort = TRIAL_PORT, name = 'tailscale', record: recordName = 'trial', tailscale: rawTailscale = tailscaleRunner(), env = process.env, platform = process.platform, spawnChild = spawn, clock = { sleep }, which = name => whichOnPath(name, env) } = {}) {
   const tailscale = seeForeground(rawTailscale);
@@ -420,10 +416,9 @@ export function tailscaleNodeProvider({
   };
 }
 
-// ---- localhost.run (the trial route) -------------------------------------------------------------------------------------
-// An anonymous SSH reverse tunnel: `ssh -R 80:127.0.0.1:<gate> nokey@localhost.run`. No account, no download (ssh ships with macOS and
-// Linux). The relay ends TLS, so it can see the traffic, and its free address changes within hours. Both facts are told to the owner
-// before the URL is shown. A changed address cannot keep the OAuth identity, so the trial stops instead of restarting.
+// ---- localhost.run (explicit legacy route) -------------------------------------------------------------------------------
+// An explicit legacy option. The relay ends TLS and can see traffic. A changed address cannot keep the OAuth identity, so the trial
+// stops instead of restarting.
 export const LHR_ORIGIN = /^https:\/\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.lhr\.life$/;
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 // Every origin the relay names on one line of its session output. Banner links (admin.localhost.run, docs) are not tunnels: only
@@ -509,6 +504,7 @@ const bundledGozar = () => {
 
 export function gozarProvider({ env = process.env, which = name => whichOnPath(name, env), resolveBundled = bundledGozar, run = execFile, pollMs = 3000, now = Date.now } = {}) {
   let binary = null, bundled = null, port = null, sessionId = null;
+  let endReason = null;
   let watching = false, timer = null, wakeWatcher = () => {}, watcher = Promise.resolve();
   const command = (args, { status = false } = {}) => new Promise((resolve, reject) => {
     run(binary, [...(bundled ? [bundled] : []), ...args], { env, encoding: 'utf8', timeout: status ? 15_000 : 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
@@ -522,6 +518,15 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
       resolve(reply);
     });
   });
+  // Recovery may be pasted into another shell: retain the selected executable and
+  // directory lookup context, without printing unrelated environment secrets.
+  const recoveryCommand = target => {
+    const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
+    const keys = ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'TMPDIR', 'GOZAR_HOME'];
+    const assignments = keys.filter(key => env[key] !== undefined).map(key => `${key}=${quote(env[key])}`);
+    const argv = [binary, ...(bundled ? [bundled] : []), 'stop', '--port', String(target)];
+    return `(unset ${keys.join(' ')}; ${[...assignments, ...argv.map(quote)].join(' ')})`;
+  };
   const status = target => command(['status', '--port', String(target), '--json'], { status: true });
   const validResources = snapshot => snapshot.resources === undefined || (Array.isArray(snapshot.resources) &&
     snapshot.resources.every(resource => resource && typeof resource === 'object' && !Array.isArray(resource) && typeof resource.cleanup === 'string' && resource.cleanup.length > 0));
@@ -557,14 +562,14 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
       if (!Number.isInteger(gatePort) || gatePort < 1 || gatePort > 65535) throw new Error('the local gate port is not valid');
       // Expose silently reuses an existing controller. Refuse it before acquiring any cleanup responsibility.
       const before = await status(gatePort);
-      if (!removed(before.snapshot)) throw new Error(`port ${gatePort} already has a Gozar route; stop it first: gozar stop --port ${gatePort}`);
+      if (!removed(before.snapshot)) throw new Error(`port ${gatePort} already has a Gozar route; stop it first: ${recoveryCommand(gatePort)}`);
       signal?.throwIfAborted();
       port = gatePort;
       // Pin the trial adapter; never let auto recommendation select the machine's Tailscale.
       // Let expose settle before cleanup: it starts a background controller even if the caller cancels.
       let reply;
       const lifetimeArgs = lifetimeEndsAt === undefined ? [] : ['--lifetime-ms', String(Math.max(1, Math.floor(lifetimeEndsAt - now())))];
-      try { reply = await command(['expose', ...lifetimeArgs, '--port', String(port), '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'localhost-run']); }
+      try { reply = await command(['expose', ...lifetimeArgs, '--port', String(port), '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'tunnl-gg']); }
       catch (error) { sessionId = error.gozarReply?.snapshot?.sessionId ?? null; throw error; }
       sessionId = reply?.snapshot?.sessionId ?? null;
       signal?.throwIfAborted();
@@ -582,17 +587,18 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
           try {
             const current = (await status(ownedPort)).snapshot;
             if (current?.sessionId === ownedSession && current.phase === 'published-ready' && current.published === origin) continue;
+            endReason = current?.sessionId === ownedSession && current.phase === 'published-ready' && current.published && current.published !== origin ? 'rotated' : 'lost';
           } catch { /* Unobservable readiness cannot keep the trial alive. */ }
           if (watching) ended();
           break;
         }
       })();
-      return { origin, exited };
+      return { origin, exited, endedBecause: () => endReason };
     },
     async stop() {
       await stopWatcher();
       if (port === null) return { removed: true };
-      const cleanupCommand = `gozar stop --port ${port}`;
+      const cleanupCommand = recoveryCommand(port);
       try {
         const current = (await status(port)).snapshot;
         if (removed(current) || (sessionId && current?.sessionId && current.sessionId !== sessionId)) {
@@ -611,10 +617,9 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
 }
 
 // ---- choosing a route --------------------------------------------------------------------------------------------------
-// `localhost.run` is the trial route (anonymous, automatic). `tailscale` is the real route: this computer's Tailscale on :443 when no
-// rule uses it, else a Tailscale node of the trial's own. An explicit route shows its own failure and never falls back to the other:
-// a real route never becomes a trial link without the owner choosing it. A rule that already holds 443 is never changed.
-export function selectRouteProvider({ route = 'localhost.run', providers, say = () => {}, signal }) {
+// `tailscale` uses the computer's HTTPS route, or an isolated node when that route is busy. `gozar` is the temporary demo relay.
+// An explicit route shows its own failure and never falls back to the other. Existing Tailscale rules are never changed.
+export function selectRouteProvider({ route = 'gozar', providers, say = () => {}, signal }) {
   const named = name => providers.find(p => p.name === name);
   signal?.throwIfAborted();
   if (route === 'localhost.run' || route === 'gozar') {
@@ -635,7 +640,7 @@ export function selectRouteProvider({ route = 'localhost.run', providers, say = 
   return choice;
 }
 
-export async function startRoute({ route = 'localhost.run', providers, selectedProvider, gatePort, home, say, signal, lifetimeEndsAt }) {
+export async function startRoute({ route = 'gozar', providers, selectedProvider, gatePort, home, say, signal, lifetimeEndsAt }) {
   // Clean a failed start before returning, and carry any retained files/debt to the caller's final cleanup.
   const attempt = async provider => {
     signal?.throwIfAborted();
@@ -688,21 +693,179 @@ export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clo
       if (typeof as[key] !== 'string' || !onOrigin(origin, as[key])) return `the authorization server's ${key} is missing or is not an address on this origin (${TRIAL_ORIGIN_RULE})`;
     }
     const challenge = await fetchImpl(resource, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}', signal: within(10_000) });
-    if (challenge.status !== 401 || !/^Bearer/i.test(challenge.headers.get('www-authenticate') ?? '')) return `an unauthenticated MCP request returned HTTP ${challenge.status}, not an OAuth challenge`;
+    const isChallenge = challenge.status === 401 && /^Bearer/i.test(challenge.headers.get('www-authenticate') ?? '');
+    void challenge.body?.cancel().catch(() => {});
+    if (!isChallenge) return `an unauthenticated MCP request returned HTTP ${challenge.status}, not an OAuth challenge`;
     for (const owner of ['/admin', '/connect/pending', '/connect/list']) {
       const res = await fetchImpl(`${origin}${owner}`, { redirect: 'manual', signal: within(10_000) });
-      if (res.status === 200) return `${owner} answers on the public address`;
+      const status = res.status;
+      void res.body?.cancel().catch(() => {});
+      if (status === 200) return `${owner} answers on the public address`;
     }
-    return null;
+    return {
+      resource: doc.resource,
+      authorizationServers: doc.authorization_servers,
+      issuer,
+      authorizationServer: as,
+    };
   };
   const end = clock.now() + timeoutMs;
   let last = 'no answer yet', nextSay = clock.now() + 15_000;
   for (;;) {
     signal?.throwIfAborted();
-    try { last = await check(); if (last === null) return { ready: true }; }
+    try { last = await check(); if (last && typeof last === 'object') return { ready: true, identity: last }; }
     catch (error) { if (signal?.aborted) throw error; last = safeDiagnostic(error.cause?.code ?? error.message, 120); }
     if (clock.now() >= end) return { ready: false, last };
     if (clock.now() >= nextSay) { say(`Still waiting for the public address to answer (${last})…`); nextSay += 15_000; }
     await raceAbort(clock.sleep(2000), signal);
   }
+}
+
+const identityMatches = (actual, expected) => actual.resource === expected.resource &&
+  JSON.stringify(actual.authorizationServers) === JSON.stringify(expected.authorizationServers) &&
+  actual.issuer === expected.issuer &&
+  ['issuer', 'authorization_endpoint', 'token_endpoint', 'registration_endpoint'].every(key => actual.authorizationServer[key] === expected.authorizationServer[key]);
+
+async function readIdentityJson(response, signal, label, maxBytes = 65_536) {
+  if (response.status >= 300 && response.status < 400) return { kind: 'identity_changed', detail: `${label} redirected` };
+  if (response.status !== 200) return { kind: 'unresponsive', detail: `${label} returned HTTP ${response.status}` };
+  if (!response.body) return { kind: 'unresponsive', detail: `${label} returned no body` };
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      if (signal.aborted) throw signal.reason ?? new Error('identity check timed out');
+      const { done, value } = await raceSignal(reader.read(), signal, () => reader.cancel().catch(() => {}));
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        void reader.cancel().catch(() => {});
+        return { kind: 'identity_changed', detail: `${label} returned an oversized identity document` };
+      }
+      chunks.push(Buffer.from(value));
+    }
+    let value;
+    try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch { return { kind: 'identity_changed', detail: `${label} returned invalid JSON` }; }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { kind: 'identity_changed', detail: `${label} returned invalid JSON` };
+    return { value };
+  } finally { try { reader.releaseLock(); } catch { /* A timed-out stream may still be cancelling. */ } }
+}
+
+function raceSignal(promise, signal, onAbort = () => {}) {
+  if (signal.aborted) {
+    const failed = Promise.reject(signal.reason ?? new Error('identity check timed out'));
+    onAbort();
+    return failed;
+  }
+  let listener;
+  const aborted = new Promise((_, reject) => {
+    listener = () => { reject(signal.reason ?? new Error('identity check timed out')); onAbort(); };
+    signal.addEventListener('abort', listener, { once: true });
+  });
+  return Promise.race([promise, aborted]).finally(() => signal.removeEventListener('abort', listener));
+}
+
+// One bounded identity check: one deadline covers TLS, all response bodies and every endpoint.
+export async function checkPublicIdentity({ origin, secret, fetchImpl = fetch, signal, timeoutMs = 5000 }) {
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const checkSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const request = (url, init = {}) => raceSignal(fetchImpl(url, { ...init, redirect: 'manual', signal: checkSignal }), checkSignal);
+  const resource = `${origin}/${secret}/mcp`;
+  try {
+    const meta = await request(`${origin}/.well-known/oauth-protected-resource/${secret}/mcp`);
+    const docResult = await readIdentityJson(meta, checkSignal, 'protected-resource metadata');
+    if (docResult.kind) return docResult;
+    const doc = docResult.value;
+    if (doc.resource !== resource || !Array.isArray(doc.authorization_servers) || !doc.authorization_servers.length ||
+        doc.authorization_servers.some(value => typeof value !== 'string' || !onOrigin(origin, value))) {
+      return { kind: 'identity_changed', detail: 'protected-resource identity changed' };
+    }
+    const issuer = doc.authorization_servers[0];
+    let asUrl;
+    try { asUrl = authorizationServerMetadataUrl(issuer); }
+    catch { return { kind: 'identity_changed', detail: 'authorization-server identity changed' }; }
+    const asResponse = await request(asUrl);
+    const asResult = await readIdentityJson(asResponse, checkSignal, 'authorization-server metadata');
+    if (asResult.kind) return asResult;
+    const as = asResult.value;
+    if (as.issuer !== issuer || !['authorization_endpoint', 'token_endpoint', 'registration_endpoint'].every(key =>
+      typeof as[key] === 'string' && onOrigin(origin, as[key]))) {
+      return { kind: 'identity_changed', detail: 'authorization-server identity changed' };
+    }
+    const challenge = await request(resource, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: '{"jsonrpc":"2.0","id":1,"method":"ping"}',
+    });
+    try {
+      if (challenge.status >= 300 && challenge.status < 400) return { kind: 'identity_changed', detail: 'MCP endpoint redirected' };
+      if (challenge.status !== 401 || !/^Bearer/i.test(challenge.headers.get('www-authenticate') ?? '')) {
+        return { kind: 'unresponsive', detail: `MCP identity probe returned HTTP ${challenge.status}` };
+      }
+    } finally { void challenge.body?.cancel().catch(() => {}); }
+    const actual = { resource: doc.resource, authorizationServers: doc.authorization_servers, issuer, authorizationServer: as };
+    return { kind: 'ready', identity: actual };
+  } catch (error) {
+    if (signal?.aborted) return { kind: 'stopped' };
+    return { kind: 'unresponsive', detail: safeDiagnostic(error?.cause?.code ?? error?.message ?? 'probe failed', 160) };
+  }
+}
+
+const sleepOrAbort = (ms, signal) => new Promise(resolve => {
+  if (signal.aborted) { resolve(); return; }
+  const timer = setTimeout(done, ms);
+  function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
+  signal.addEventListener('abort', done, { once: true });
+});
+
+// The URL is also the OAuth identity. A replacement or two consecutive failed public checks ends this trial.
+export async function watchPublicIdentity({ origin, secret, identity, fetchImpl = fetch, intervalMs = 10_000, retryMs = 5000, timeoutMs = 5000, onStatus = () => {} }) {
+  const controller = new AbortController();
+  let resolveReady, resolveLost;
+  const ready = new Promise(resolve => { resolveReady = resolve; });
+  const lost = new Promise(resolve => { resolveLost = resolve; });
+  let stopped = false, failure = null;
+  const check = async () => checkPublicIdentity({ origin, secret, fetchImpl, signal: controller.signal, timeoutMs });
+  const run = (async () => {
+    const initial = await check();
+    if (initial.kind === 'identity_changed' || (initial.kind === 'ready' && !identityMatches(initial.identity, identity))) {
+      resolveLost({ origin, reason: 'identity_changed', detail: initial.detail });
+      resolveReady(false);
+      return;
+    }
+    if (initial.kind !== 'ready') {
+      failure = initial;
+      try { onStatus('retrying', initial.detail); } catch { /* A status message cannot keep a dead route alive. */ }
+    }
+    resolveReady(true);
+    for (;;) {
+      await sleepOrAbort(failure ? retryMs : intervalMs, controller.signal);
+      if (stopped) return;
+      const result = await check();
+      if (result.kind === 'stopped' || stopped) return;
+      if (result.kind === 'identity_changed' || (result.kind === 'ready' && !identityMatches(result.identity, identity))) {
+        resolveLost({ origin, reason: 'identity_changed', detail: result.detail });
+        return;
+      }
+      if (result.kind === 'ready') {
+        failure = null;
+        try { onStatus('ready'); } catch { /* A status message cannot keep a dead route alive. */ }
+        continue;
+      }
+      if (!failure) {
+        failure = result;
+        try { onStatus('retrying', result.detail); } catch { /* A status message cannot keep a dead route alive. */ }
+        continue;
+      }
+      resolveLost({ origin, reason: 'unresponsive', detail: result.detail ?? failure.detail });
+      return;
+    }
+  })();
+  return {
+    ready,
+    lost,
+    async stop() { stopped = true; controller.abort(); await run; },
+  };
 }

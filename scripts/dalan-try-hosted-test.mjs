@@ -2,7 +2,7 @@
 // A fake route (a relay on its own port, so the public address is not the bridge's bind address) and a scripted hosted client
 // stand in for the outside. The bridge, its OAuth server, its MCP tools and the CLI are the real ones.
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -18,8 +18,9 @@ import * as tryHostedInternals from '../src/try-hosted.mjs';
 const { chooseMode } = tryHostedInternals;
 import { handoffText, hostedPrompt, CLIENTS } from '../src/try-hosted-clients.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
+import { mcpResponseText } from '../src/mcp-sse.mjs';
 import { runSelfCheck } from '../src/try-selfcheck.mjs';
-import { sweepTrialNodes, gozarProvider, localhostRunProvider, parseLocalhostRunOrigins, createGate, explainTailscale, authorizationServerMetadataUrl, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from '../src/try-exposure.mjs';
+import { sweepTrialNodes, gozarProvider, localhostRunProvider, parseLocalhostRunOrigins, createGate, explainTailscale, authorizationServerMetadataUrl, processCommand, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady, watchPublicIdentity } from '../src/try-exposure.mjs';
 import { acquireHomeLock } from '../src/try-hosted.mjs';
 import { registerChild, sweepChildren } from '../src/child-registry.mjs';
 import { writeRouteSetting } from '../src/route-setting.mjs';
@@ -62,16 +63,20 @@ function fakeRoute(name = 'localhost.run') {
 const unreadyTailscale = reason => ({ name: 'tailscale', probe: () => ({ ok: false, line: reason, fix: reason }), start: async () => { throw new Error('must not start'); }, stop: async () => ({ removed: true }) });
 
 // ---- a hosted run ------------------------------------------------------------------------------------------------------
-async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: savedRoute, trialMs, noHome } = {}) {
+async function hostedRun(name, { argv = [], providers, clock, fetchImpl, route: savedRoute, trialMs, noHome, consentAnswer = 'y\n', watchPublicIdentity: watchIdentity } = {}) {
   const home = path.join(tmp, name);
   const port = await reservedPort();
   const route = fakeRoute();
   if (savedRoute) writeRouteSetting(savedRoute, { XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`) });
   const run = { out: '', input: new PassThrough(), controller: new AbortController(), home, route: route.record, errorContext: { started: false, shellCli: `'${path.join(repo, 'bin/dalan.mjs')}'` } };
+  const out = { write: text => {
+    run.out += text;
+    if (consentAnswer !== null && /Continue\? \[y\/N\]/.test(text)) setImmediate(() => run.input.write(consentAnswer));
+  } };
   run.finished = runTry({
     argv: ['--public', '--client', 'chatgpt', ...(noHome ? [] : ['--home', home]), '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), XDG_CACHE_HOME: path.join(tmp, `cache-${name}`), ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
-    out: { write: text => { run.out += text; } }, input: run.input, signal: run.controller.signal, errorContext: run.errorContext, clock,
-    hosted: { interactive: true, providers: providers ?? [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, ...(trialMs ? { trialMs } : {}) },
+    out, input: run.input, signal: run.controller.signal, errorContext: run.errorContext, clock,
+    hosted: { interactive: true, providers: providers ?? [route.provider], serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, ...(watchIdentity ? { watchPublicIdentity: watchIdentity } : {}), ...(trialMs ? { trialMs } : {}) },
   }).then(() => ({}), error => ({ error }));
   run.until = async (pattern, ms = 60_000) => {
     for (let waited = 0; !pattern.test(run.out); waited += 50) {
@@ -109,9 +114,9 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
     const origin = new URL(url).origin;
     assert.notEqual(Number(new URL(origin).port), run.errorContext.bindPort, 'the public origin is not the bridge bind address');
     assert.match(run.out, /Public HTTPS, OAuth discovery and the authorization server's metadata verified\./);
-    assert.match(run.out, /^Trial link via localhost\.run, a third-party relay that can see this traffic; the address changes within hours\. For daily use: dalan setup$/m, 'one trial disclaimer before the URL');
-    assert.ok(run.out.indexOf('Trial link via localhost.run') < run.out.indexOf('Paste this URL'));
-    assert.equal(run.out.match(/Trial link via/g).length, 1);
+    assert.match(run.out, /^Temporary demo link\. It can change or stop without warning\. For a lasting address, use dalan setup\.$/m, 'one temporary-link notice before the URL');
+    assert.ok(run.out.indexOf('Temporary demo link.') < run.out.indexOf('Paste this URL'));
+    assert.equal(run.out.match(/Temporary demo link/g).length, 1);
     // The scripted client signs in through the public origin, the owner approves, the client works the job.
     const pairing = await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
     await run.until(/Connection waiting for your approval/);
@@ -142,11 +147,14 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
     const challenge = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
     assert.equal(challenge.status, 401);
     for (const owner of ['/admin', '/connect/pending', '/connect/approve']) assert.notEqual((await fetch(`${origin}${owner}`)).status, 200, owner);
-    // The transport is JSON, never SSE: Quick Tunnel does not carry SSE.
+    // Hosted trials keep an accepted MCP stream alive with heartbeats until its reply arrives.
     const call = await openSession(url, token);
     await assert.doesNotReject(call('list_pending', {}));
     const raw = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/list' }) });
-    assert.match(raw.headers.get('content-type'), /^application\/json/);
+    assert.match(raw.headers.get('content-type'), /^text\/event-stream/);
+    const reply = JSON.parse(mcpResponseText(await raw.text()));
+    assert.equal(reply.id, 9, 'the event-stream response matches this request');
+    assert.ok(reply.result?.tools?.some(tool => tool.name === 'list_pending'), 'the response contains the Dalan tools list');
     assert.equal((await fetch(url, { headers: { authorization: `Bearer ${token}` } })).status, 405, 'the optional GET stream is refused');
   } finally {
     const result = await run.close();
@@ -155,8 +163,9 @@ test('Enter, Enter: the hosted ChatGPT path from a bare `try`, end to end with a
   assert.match(run.out, /Public route removed\. Bridge stopped\./);
   assert.match(run.out, new RegExp(`Trial history kept at ${run.home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.equal(run.route.stopped, 1, 'the route was stopped exactly once');
-  assert.match(run.out, /To run it again: .*try --public --client chatgpt --route localhost.run\n/, 'the restart command keeps every selection');
-  assert.doesNotMatch(run.out.split('To run it again:')[1], /--home/, 'a new address needs a new home, so the restart command names none');
+  assert.match(run.out, /To run it again: .*try --public --client chatgpt --route localhost\.run --home '([^']+)'\n/, 'the restart command keeps the route and selects a fresh home');
+  const restartHome = /To run it again: .*--home '([^']+)'/.exec(run.out)?.[1];
+  assert.ok(restartHome && restartHome !== run.home, 'a temporary address uses a fresh home on restart');
   // After a normal stop no credential is left in the trial home.
   assert.equal(fs.existsSync(path.join(run.home, 'resource-url')), false, 'the connector URL file is removed');
   assert.deepEqual(filesHolding(run.home, secretPath), [], 'the secret path is in no file after the stop');
@@ -334,7 +343,8 @@ test('the self-check walks a live trial as a real client: every step passes, and
 });
 
 test('the self-check stops at the first failing step, skips the rest and says FAIL', async () => {
-  const url = 'https://demo.example/' + 'a'.repeat(64) + '/mcp';
+  const secret = randomBytes(32).toString('hex');
+  const url = `https://demo.example/${secret}/mcp`;
   const lines = [];
   const fetchImpl = async (u, init = {}) => {
     if (init.method === 'POST' && String(u) === url) return new Response('', { status: 401, headers: { 'www-authenticate': 'Bearer resource_metadata="https://demo.example/.well-known/oauth-protected-resource/x/mcp"' } });
@@ -344,7 +354,7 @@ test('the self-check stops at the first failing step, skips the rest and says FA
   assert.equal(result.ok, false);
   assert.match(lines.join('\n'), /PASS challenge[^\n]*\nFAIL discovery[^\n]*no authorization server\nSKIP metadata[^\n]*\nSKIP registration/);
   assert.equal(lines.at(-1), 'RESULT FAIL');
-  assert.ok(!lines.join('\n').includes('a'.repeat(64)), 'the secret path is not printed');
+  assert.ok(!lines.join('\n').includes(secret), 'the secret path is not printed');
 });
 
 async function liveSelfCheck(wrapFetch) {
@@ -384,24 +394,26 @@ test('the self-check registers as an explicit public client and accepts only the
 
 test('the self-check refuses a malformed URL with a fixed message, and a failing request never echoes the URL or secret', async () => {
   const lines = [];
-  const bad = await runSelfCheck({ url: 'https://exa mple.test/SECRETSECRETSECRET/mcp', say: l => lines.push(l) });
+  const malformedSecret = randomBytes(32).toString('hex');
+  const bad = await runSelfCheck({ url: `https://exa mple.test/${malformedSecret}/mcp`, say: l => lines.push(l) });
   assert.equal(bad.ok, false);
   assert.deepEqual(lines, ['FAIL input: the trial URL is not a valid web address', 'RESULT FAIL']);
-  assert.equal(JSON.stringify(bad).includes('SECRETSECRETSECRET'), false);
+  assert.equal(JSON.stringify(bad).includes(malformedSecret), false);
   const text = [];
-  const url = 'https://demo.example/' + 'b'.repeat(64) + '/mcp';
-  const leaky = await runSelfCheck({ url, fetchImpl: async () => { throw new Error(`connect failed for ${url} with ${'b'.repeat(64)}`); }, say: l => text.push(l) });
+  const secret = randomBytes(32).toString('hex');
+  const url = `https://demo.example/${secret}/mcp`;
+  const leaky = await runSelfCheck({ url, fetchImpl: async () => { throw new Error(`connect failed for ${url} with ${secret}`); }, say: l => text.push(l) });
   assert.equal(leaky.ok, false);
-  assert.ok(!JSON.stringify(leaky).includes('b'.repeat(64)) && !text.join().includes('b'.repeat(64)), 'neither the lines nor the returned detail carry the secret');
+  assert.ok(!JSON.stringify(leaky).includes(secret) && !text.join().includes(secret), 'neither the lines nor the returned detail carry the secret');
   // A server that never finishes answering ends at the request deadline, not at the approval wait.
   const started = Date.now();
   const hung = await runSelfCheck({ url, requestMs: 100, fetchImpl: (u, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason))), say() {} });
   assert.equal(hung.ok, false);
   assert.ok(Date.now() - started < 3000, 'bounded');
   // The CLI prints a fixed line for a malformed credential and never the credential.
-  const cli = spawnSync(process.execPath, [path.join(repo, 'scripts/dalan-try-selfcheck.mjs'), '--client', 'claude'], { env: { PATH: process.env.PATH, DALAN_TRY_URL: 'https://exa mple.test/CLISECRETCLISECRET/mcp' }, encoding: 'utf8' });
+  const cli = spawnSync(process.execPath, [path.join(repo, 'scripts/dalan-try-selfcheck.mjs'), '--client', 'claude'], { env: { PATH: process.env.PATH, DALAN_TRY_URL: `https://exa mple.test/${malformedSecret}/mcp` }, encoding: 'utf8' });
   assert.equal(cli.status, 1);
-  assert.doesNotMatch(cli.stdout + cli.stderr, /CLISECRET/);
+  assert.ok(!(cli.stdout + cli.stderr).includes(malformedSecret));
 });
 
 // ---- route choice and the trial's own Tailscale node -----------------------------------------------------------------------
@@ -436,7 +448,10 @@ test('route choice: trial links are localhost.run, a real route is only Tailscal
   assert.equal(refused.record.started, 0);
 });
 
-function nodeHarness({ certInspection, killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
+function nodeHarness({ certInspection, killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks } = {}) {
+  const loginUrl = `https://login.tailscale.com/a/${randomBytes(16).toString('hex')}`;
+  const keyMaterial = randomBytes(32).toString('hex');
+  loginChunks ??= [`\nTo authenticate, visit:\n\n\t${loginUrl}\n`];
   const fake = fakeTailscale(host);
   const events = { spawned: [], daemon: null, envs: [], keyDuringUp: null };
   registry ??= fs.mkdtempSync(path.join(tmp, 'registry-'));
@@ -462,7 +477,7 @@ function nodeHarness({ certInspection, killGraceMs = 2000, certWaitMs = 60_000, 
       };
       setImmediate(() => {
         if (certBehaviour === 'error-live') child.emit('error', new Error('process-control failure'));
-        if (certBehaviour === 'ok') { for (const f of events.cert.files) fs.writeFileSync(f, '-----BEGIN PRIVATE KEY-----\nPRIVATE-KEY-BODY\n-----END PRIVATE KEY-----\n'); child.exitCode = 0; child.emit('exit', 0); }
+        if (certBehaviour === 'ok') { for (const f of events.cert.files) fs.writeFileSync(f, `-----BEGIN PRIVATE KEY-----\n${keyMaterial}\n-----END PRIVATE KEY-----\n`); child.exitCode = 0; child.emit('exit', 0); }
         if (certBehaviour === 'error-named') { child.stderr.write('500 Internal Server Error: no cert for box.tail1234.ts.net (owner@example.com)\n'); child.exitCode = 1; child.emit('exit', 1); }
         if (certBehaviour === 'error') { child.stderr.write('500 Internal Server Error: no TailscaleVarRoot\n'); child.exitCode = 1; child.emit('exit', 1); }
       });
@@ -484,7 +499,7 @@ function nodeHarness({ certInspection, killGraceMs = 2000, certWaitMs = 60_000, 
   };
   const lines = [];
   const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200, certWaitMs, killGraceMs, processCmd: pid => pid === 5555 ? (certInspection ? certInspection(events) : events.certAlive ? { state: 'present', command: 'tailscale cert', start: '100' } : { state: 'absent' }) : processCommand(pid) });
-  return { node, fake, events, lines, registry, say: l => lines.push(l) };
+  return { node, fake, events, lines, registry, loginUrl, keyMaterial, say: l => lines.push(l) };
 }
 const liveProcess = marker => spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)', '--', marker], { stdio: 'ignore' });
 const deadPid = () => new Promise(resolve => { const c = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' }); c.once('exit', () => resolve(c.pid)); });
@@ -502,7 +517,7 @@ test('the trial\'s own node: ephemeral userspace tailscaled, a one-time login li
   assert.deepEqual(daemon, ['tailscaled', '--tun=userspace-networking', '--state=mem:', `--statedir=${home}/tsnode/state`, `--socket=${home}/tsnode/tailscaled.sock`, '--port=0'], 'in-memory node state, a private directory for certificates');
   assert.equal(fs.statSync(path.join(home, 'tsnode', 'state')).mode & 0o777, 0o700, 'the certificate directory is private');
   assert.ok(h.events.spawned.some(a => a[0] === 'tailscale' && a.includes('up') && a.includes('--hostname=dalan-trial-abc123')), 'its own hostname');
-  assert.deepEqual(h.lines.filter(l => /login/.test(l)), ['This temporary Tailscale node needs a one-time sign-in. Open: https://login.tailscale.com/a/abc123'], 'one login line');
+  assert.deepEqual(h.lines.filter(l => /login/.test(l)), [`This temporary Tailscale node needs a one-time sign-in. Open: ${h.loginUrl}`], 'one login line');
   const funnel = h.events.spawned.find(a => a.includes('funnel'));
   assert.deepEqual(funnel, ['tailscale', `--socket=${home}/tsnode/tailscaled.sock`, 'funnel', '--https=443', 'http://127.0.0.1:6161']);
   assert.deepEqual(fs.readdirSync(h.registry), ['dalan-trial-abc123.json'], 'the node is listed in the registry that any later trial reads');
@@ -516,7 +531,8 @@ test('the trial\'s own node: ephemeral userspace tailscaled, a one-time login li
 
 test('the trial\'s own node: a failed TLS certificate check prints one sanitized line, leaves no key material, and keeps the daemon log', async () => {
   for (const [behaviour, expected] of [['ok', /^TLS certificate: ok$/], ['error', /^TLS certificate: error \(500 Internal Server Error: no TailscaleVarRoot\)$/], ['hang', /^TLS certificate: error \(no answer in 1 s\)$/]]) {
-    const h = nodeHarness({ certBehaviour: behaviour, certWaitMs: 1000, daemonOutput: ['2026/11/11 cert: tskey-auth-SECRETKEYVALUE failed\n', 'serve: TLS handshake error\n'] });
+    const fakeKey = `tskey-auth-${randomBytes(20).toString('hex')}`;
+    const h = nodeHarness({ certBehaviour: behaviour, certWaitMs: 1000, daemonOutput: [`cert: ${fakeKey} failed\n`, 'serve: TLS handshake error\n'] });
     const home = fs.mkdtempSync(path.join(tmp, 'node-'));
     await h.node.start({ gatePort: 6161, home, say: h.say });
     await sleepMs(30);
@@ -528,9 +544,9 @@ test('the trial\'s own node: a failed TLS certificate check prints one sanitized
     const outDir = path.dirname(cert.files[0]);
     assert.notEqual(outDir, path.join(home, 'tsnode'), 'a private temporary directory of its own');
     assert.equal(fs.existsSync(outDir), false, 'the outputs are deleted');
-    assert.ok(!lines.join('\n').includes('PRIVATE-KEY-BODY'), 'key material is never printed');
+    assert.ok(!lines.join('\n').includes(h.keyMaterial), 'key material is never printed');
     const kept = fs.readFileSync(path.join(home, 'tailscaled.log'), 'utf8');
-    assert.match(kept, /TLS handshake error/); assert.ok(!kept.includes('SECRETKEYVALUE'), 'the kept log is masked');
+    assert.match(kept, /TLS handshake error/); assert.ok(!kept.includes(fakeKey), 'the kept log is masked');
     assert.equal(fs.statSync(path.join(home, 'tailscaled.log')).mode & 0o777, 0o600);
     await h.node.stop();
     assert.equal(fs.existsSync(path.join(home, 'tsnode')), false);
@@ -553,7 +569,7 @@ test('the trial\'s own node: the certificate check ends on cancel, escalates pas
   const outDir = path.dirname(a.events.cert.files[0]);
   assert.equal(path.dirname(outDir), path.join(homeA, 'tsnode'), 'inside the registered node directory');
   assert.equal(fs.statSync(outDir).mode & 0o777, 0o700);
-  fs.writeFileSync(path.join(outDir, 'key'), 'PRIVATE-KEY-BODY');
+  fs.writeFileSync(path.join(outDir, 'key'), a.keyMaterial);
   controller.abort();
   await pending;
   assert.ok(Date.now() - began < 5000, 'cancel does not wait for the 60 s limit');
@@ -567,7 +583,7 @@ test('the trial\'s own node: the certificate check ends on cancel, escalates pas
   await b.node.start({ gatePort: 6161, home: homeB, say: b.say });
   const pendingB = b.node.diagnose({ home: homeB, say() {} });
   await sleepMs(30);
-  const leftover = path.dirname(b.events.cert.files[0]); fs.writeFileSync(path.join(leftover, 'key'), 'PRIVATE-KEY-BODY');
+  const leftover = path.dirname(b.events.cert.files[0]); fs.writeFileSync(path.join(leftover, 'key'), b.keyMaterial);
   const deferred = [];
   const held = (await sweepTrialNodes({ registry: b.registry, processCmd: pid => pid === 5555 ? { state: 'unknown' } : { state: 'absent' }, say: line => deferred.push(line), kill() {}, clock: { sleep: async () => {} } })).ended;
   assert.deepEqual(held, []);
@@ -853,25 +869,28 @@ test('the trial\'s own node: an unfinished login is a clean failure; a long home
 });
 
 test('the trial\'s own node: the auth key is in no argument or environment, only in a file that is gone once login ends; the daemon log is masked', async () => {
-  const h = nodeHarness({ upBehaviour: 'ok', env: { DALAN_TS_AUTHKEY: 'tskey-auth-SECRETSECRET' }, daemonOutput: ['boot with tskey-auth-SECRETSECRET\nvisit https://login.tailscale.com/a/LOGINTOKEN ok\n'] });
+  const fakeKey = `tskey-auth-${randomBytes(20).toString('hex')}`;
+  const loginUrl = `https://login.tailscale.com/a/${randomBytes(16).toString('hex')}`;
+  const h = nodeHarness({ upBehaviour: 'ok', env: { DALAN_TS_AUTHKEY: fakeKey }, daemonOutput: [`boot with ${fakeKey}\nvisit ${loginUrl} ok\n`] });
   const home = fs.mkdtempSync(path.join(tmp, 'node-'));
   await h.node.start({ gatePort: 1, home, say: h.say });
-  assert.equal(h.events.keyDuringUp, 'tskey-auth-SECRETSECRET', 'tailscale up reads the key from a file');
+  assert.equal(h.events.keyDuringUp, fakeKey, 'tailscale up reads the key from a file');
   assert.equal(fs.existsSync(path.join(home, 'tsnode', 'authkey')), false, 'the key file is deleted as soon as login ends, not at the end of the run');
-  assert.ok(!JSON.stringify(h.events.spawned).includes('SECRETSECRET'), 'never in an argument');
+  assert.ok(!JSON.stringify(h.events.spawned).includes(fakeKey), 'never in an argument');
   assert.ok(h.events.envs.every(e => e && !('DALAN_TS_AUTHKEY' in e)), 'never in a child environment');
   const log = fs.readFileSync(path.join(home, 'tsnode', 'tailscaled.log'), 'utf8');
   assert.match(log, /boot with \[key\]/);
-  assert.ok(!log.includes('SECRETSECRET') && !log.includes('LOGINTOKEN'), 'the daemon log holds no key or login token');
+  assert.ok(!log.includes(fakeKey) && !log.includes(loginUrl), 'the daemon log holds no key or login token');
   await h.node.stop();
-  assert.deepEqual(filesHolding(home, 'SECRETSECRET'), []);
-  assert.deepEqual(filesHolding(h.registry, 'SECRETSECRET'), []);
+  assert.deepEqual(filesHolding(home, fakeKey), []);
+  assert.deepEqual(filesHolding(h.registry, fakeKey), []);
 });
 
 test('the trial\'s own node: a login URL split across output chunks is announced whole, once', async () => {
-  const h = nodeHarness({ loginChunks: ['To authenticate, visit:\n\n\thttps://login.tail', 'scale.com/a/ab', 'c123\n'] });
+  const loginUrl = `https://login.tailscale.com/a/${randomBytes(16).toString('hex')}`;
+  const h = nodeHarness({ loginChunks: [`To authenticate, visit:\n\n\t${loginUrl.slice(0, 20)}`, loginUrl.slice(20, 35), `${loginUrl.slice(35)}\n`] });
   await h.node.start({ gatePort: 1, home: fs.mkdtempSync(path.join(tmp, 'node-')), say: h.say });
-  assert.deepEqual(h.lines.filter(l => /Open:/.test(l)), ['This temporary Tailscale node needs a one-time sign-in. Open: https://login.tailscale.com/a/abc123']);
+  assert.deepEqual(h.lines.filter(l => /Open:/.test(l)), [`This temporary Tailscale node needs a one-time sign-in. Open: ${loginUrl}`]);
   await h.node.stop();
 });
 
@@ -1082,7 +1101,7 @@ test('the mode question: an input that ends chooses the local path, never a publ
 const capMap = { https: [], funnel: [], 'https://tailscale.com/cap/funnel-ports?ports=443,8443,10000': [] };
 const readyStatus = { BackendState: 'Running', Self: { DNSName: 'box.tail1234.ts.net.', CapMap: capMap }, CurrentTailnet: { MagicDNSEnabled: true } };
 // Mirrors real Tailscale 1.104.5: a foreground `tailscale funnel` (no --bg) is listed only under Foreground.<session>, never in the
-// top-level TCP/Web/AllowFunnel maps (checked live; a fake that put it at the top level hid the first live failure).
+// top-level TCP/Web/AllowFunnel maps.
 const foregroundView = (state) => {
   const sessions = Object.entries(state.foreground);
   if (!sessions.length) return {};
@@ -1301,7 +1320,7 @@ test('the gate answers 503 until the bridge port is set, forwards to that one po
 });
 
 test('public readiness: wrong resource, wrong issuer, an unauthenticated 200 or an exposed owner route is not ready', async () => {
-  const origin = 'https://demo.trycloudflare.com', secret = 'a'.repeat(64);
+  const origin = 'https://demo.example', secret = randomBytes(32).toString('hex');
   const issuer = `${origin}/${secret}/oauth`;
   const good = {
     meta: { resource: `${origin}/${secret}/mcp`, authorization_servers: [issuer] },
@@ -1417,30 +1436,30 @@ test('a saved Tailscale choice asks nothing, says it is not a trial, and never f
   const run = await hostedRun('saved-ts', { route: 'tailscale', providers: [lhr.provider, ts] });
   const done = await run.finished;
   assert.match(run.out, /^Using Tailscale, the address you saved with `dalan setup`\. This is not a trial link\.$/m);
-  assert.doesNotMatch(run.out, /Trial link via/);
+  assert.doesNotMatch(run.out, /Temporary demo link/);
   assert.doesNotMatch(run.out, /Choose|\[Y\/n\]|\[y\/N\]/, 'no question is asked');
   assert.match(run.out, /Tailscale is not connected/);
   assert.equal(lhr.record.started, 0, 'localhost.run is never started for a real route');
   assert.ok(done.error || /did not start/.test(run.out));
 });
 
-test('with no saved choice a trial prints its one disclaimer; ssh missing is one line with the fix', async () => {
+test('without a saved choice, a trial prints its one temporary-link notice; ssh missing is one line with the fix', async () => {
   const missing = localhostRunProvider({ env: {}, which: () => null, spawnChild: () => { throw new Error('must not spawn'); } });
   const run = await hostedRun('no-ssh', { providers: [missing] });
   const done = await run.finished;
-  assert.equal(run.out.match(/Trial link via localhost\.run/g).length, 1, 'the disclaimer is printed once');
+  assert.equal(run.out.match(/Temporary demo link/g).length, 1, 'the notice is printed once');
   assert.match(`${run.out}${done.error?.message ?? ''}`, /ssh is not installed\. Install OpenSSH/);
   assert.doesNotMatch(run.out, /Cloudflare/i);
 });
 
-test('a trial says it is a temporary trial with the time left, and ends itself when the time is up; a real route has no timer', async () => {
+test('a trial states its local shutdown limit and attempts route cleanup when the limit expires; a real route has no timer', async () => {
   const run = await hostedRun('trial-time', { trialMs: 3 * 60_000, clock: virtualClock() });
   const done = await run.finished;
-  assert.match(run.out, /^Temporary trial: this link stops in 3 min or sooner if the relay changes the address\./m);
-  assert.ok(run.out.indexOf('Temporary trial:') < run.out.indexOf('Connector name:'));
-  assert.match(done.error?.message ?? '', /The temporary trial ended after 3 min; its link is removed\. Start a fresh trial/);
-  assert.match(run.out, /Temporary trial: \d+ (h \d+ )?min left\./, 'reminders show the time left');
-  assert.equal(run.route.stopped, 1, 'the link is removed');
+  assert.match(run.out, /^This trial has a local shutdown limit of 3 min; the temporary link can stop earlier or without warning\./m);
+  assert.ok(run.out.indexOf('local shutdown limit') < run.out.indexOf('Connector name:'));
+  assert.match(done.error?.message ?? '', /The temporary trial reached its 3 min shutdown limit\. Route cleanup will be attempted\./);
+  assert.match(run.out, /Local shutdown limit: \d+ (h \d+ )?min\./, 'reminders show the local shutdown limit');
+  assert.equal(run.route.stopped, 1, 'cleanup stops the route exactly once');
   const real = await hostedRun('real-no-timer', { route: 'tailscale', providers: [unreadyTailscale('x')] });
   await real.finished;
   assert.doesNotMatch(real.out, /Temporary trial/);
@@ -1466,12 +1485,12 @@ test('a real route reuses one home per client, so its address and sign-in surviv
   } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; fs.rmSync(fakeHome, { recursive: true, force: true }); }
 });
 
-test('the three-hour limit also ends an unanswered approval question, and the link is removed', async () => {
+test('the shutdown limit also ends an unanswered approval question and attempts cleanup', async () => {
   const run = await hostedRun('expire-prompt', { trialMs: 6000 });
   await approveAs(run, { answer: null });
   await run.until(/Approve this connection\? \[y\/N\] /);
   const done = await run.finished;
-  assert.match(done.error?.message ?? '', /The temporary trial ended after/);
+  assert.match(done.error?.message ?? '', /The temporary trial reached its .* shutdown limit\. Route cleanup will be attempted/);
   assert.equal(run.route.stopped, 1);
 });
 
@@ -1532,6 +1551,7 @@ const snapshot = () => fs.existsSync(state) ? JSON.parse(fs.readFileSync(state))
 const save = value => fs.writeFileSync(state,JSON.stringify(value));
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
 if (args[0] === 'status') { console.log(JSON.stringify({snapshot:snapshot()})); if(snapshot().phase==='unknown' || fs.existsSync(${JSON.stringify(failedStatus)}))process.exitCode=1; }
+else if (args[0] === 'stop' && ${JSON.stringify(mode)} === 'cleanup-debt' && !fs.existsSync(state + '.debt')) { fs.writeFileSync(state + '.debt', ''); save({sessionId:'own-session',phase:'cleanup-pending',candidate:null,published:null,resources:[{cleanup:'pending'}]}); console.log(JSON.stringify({snapshot:snapshot(),localCleanupFailures:['fixture pending']})); }
 else if (args[0] === 'stop') { save({sessionId:'own-session',phase:'stopped',candidate:null,published:null,resources:[]}); console.log(JSON.stringify({snapshot:snapshot(),localCleanupFailures:[]})); }
 else {
   if (${JSON.stringify(mode)} === 'slow') await new Promise(r=>setTimeout(r,300));
@@ -1562,7 +1582,7 @@ test('Gozar refuses a preexisting session without exposing or stopping it', asyn
     const fake = fakeGozar(`existing-${phase}`);
     fake.setSnapshot({ sessionId: 'someone-else', phase, candidate: null, published: phase === 'published-ready' ? 'https://other.lhr.life' : null });
     const provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
-    await assert.rejects(startRoute({ route: 'gozar', providers: [provider], gatePort: 45679 }), /port 45679 already has a Gozar route; stop it first: gozar stop --port 45679/);
+    await assert.rejects(startRoute({ route: 'gozar', providers: [provider], gatePort: 45679 }), /port 45679 already has a Gozar route; stop it first:/);
     assert.deepEqual(fake.calls().map(args => args[0]), ['status']);
   }
 });
@@ -1714,7 +1734,11 @@ test('Gozar stop reports cleanup debt instead of claiming removal', async () => 
   } });
   provider.probe();
   await provider.start({ gatePort: 12347 });
-  assert.deepEqual(await provider.stop(), { removed: false, detail: 'Gozar route cleanup is unconfirmed', command: 'gozar stop --port 12347' });
+  const result = await provider.stop();
+  assert.equal(result.removed, false);
+  assert.equal(result.detail, 'Gozar route cleanup is unconfirmed');
+  assert.ok(result.command.includes(fake.binary));
+  assert.match(result.command, /'stop' '--port' '12347'/);
 });
 
 const readyGozarFetch = async value => {
@@ -1725,24 +1749,107 @@ const readyGozarFetch = async value => {
   return new Response('', { status: 404 });
 };
 
-test('auto prefers installed Gozar over the saved route and Ctrl-C removes it', async () => {
-  const fake = fakeGozar('auto'), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
-  const fallback = fakeRoute();
-  const run = await hostedRun('gozar-auto', { argv: ['--route', 'auto'], route: 'tailscale', providers: [provider, fallback.provider], fetchImpl: readyGozarFetch });
+test('Gozar consent explains the relay and waits for yes before exposing it', async () => {
+  const fake = fakeGozar('consent-before-yes'), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
+  const run = await hostedRun('gozar-consent-yes', { argv: ['--route', 'gozar'], providers: [provider], fetchImpl: readyGozarFetch, consentAnswer: null });
   try {
+    await run.until(/Continue\? \[y\/N\]/);
+    assert.match(run.out, /tunnl\.gg.*third-party relay.*inspect forwarded traffic/);
+    assert.match(run.out, /https:\/\/tunnl\.gg\/terms/);
+    assert.match(run.out, /https:\/\/tunnl\.gg\/privacy/);
+    assert.equal(fake.calls().some(args => args[0] === 'expose'), false, 'the provider has not exposed a route before consent');
+    run.input.write('y\n');
     await run.until(/Waiting for sign-in/);
-    assert.match(run.out, /Public route ready \(gozar\)/);
-    assert.equal(fallback.record.started, 0);
+    assert.equal(fake.calls().filter(args => args[0] === 'expose').length, 1, 'yes permits route exposure');
   } finally { assert.equal((await run.close()).error, undefined); }
-  assert.deepEqual(fake.calls().filter(args => args[0] !== 'status').map(args => args[0]), ['expose', 'stop']);
-  assert.match(run.out, /Public route removed\. Bridge stopped\./);
+  assert.equal(fake.calls().filter(args => args[0] === 'stop').length, 1);
 });
 
-test('auto without installed Gozar keeps the default trial route', async () => {
-  const fallback = fakeRoute();
-  const run = await hostedRun('gozar-missing-auto', { providers: [gozarProvider({ resolveBundled: () => null, env: { PATH: '' } }), fallback.provider] });
-  try { await run.handoff(); assert.equal(fallback.record.started, 1); }
-  finally { await run.close(); }
+test('Gozar denial or input EOF never exposes a route', async () => {
+  for (const [name, answer] of [['deny', 'n\n'], ['eof', null]]) {
+    const fake = fakeGozar(`consent-${name}`), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
+    const run = await hostedRun(`gozar-consent-${name}`, { argv: ['--route', 'gozar'], providers: [provider], fetchImpl: readyGozarFetch, consentAnswer: null });
+    await run.until(/Continue\? \[y\/N\]/);
+    assert.equal(fake.calls().some(args => args[0] === 'expose'), false, `${name}: no expose before an affirmative answer`);
+    if (answer) run.input.write(answer); else run.input.end();
+    const done = await run.finished;
+    assert.match(done.error?.message ?? '', /No public route was started because relay consent was not given/);
+    assert.equal(fake.calls().some(args => args[0] === 'expose'), false, `${name}: no route is exposed`);
+    assert.equal(fake.calls().some(args => args[0] === 'stop'), false, `${name}: no route cleanup is needed`);
+  }
+});
+
+test('two public identity failures interrupt an unanswered approval and ignore late yes', async () => {
+  const route = fakeRoute('gozar');
+  let failIdentity = false, failedChecks = 0;
+  const fetchImpl = async (...args) => {
+    if (failIdentity) { failedChecks++; return new Response('', { status: 502 }); }
+    return readyGozarFetch(...args);
+  };
+  const run = await hostedRun('gozar-identity-loss-during-approval', {
+    argv: ['--route', 'gozar'], providers: [route.provider], fetchImpl,
+    watchPublicIdentity: options => watchPublicIdentity({ ...options, intervalMs: 10, retryMs: 10, timeoutMs: 500 }),
+  });
+  try {
+    const { url } = await run.handoff();
+    const pairing = await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
+    await run.until(/Approve this connection\? \[y\/N\] /);
+    failIdentity = true;
+    const done = await Promise.race([run.finished, sleepMs(5000).then(() => { throw new Error('identity loss did not interrupt the approval question'); })]);
+    assert.match(done.error?.message ?? '', /temporary demo link stopped responding/);
+    assert.equal(failedChecks, 2, 'two consecutive 502 identity checks mark the route lost');
+    assert.equal(route.record.stopped, 1, 'the lost route is cleaned up once');
+    assert.doesNotMatch(run.out, /Connection approved\.|Paste this into the chat:|claim only req_|bridge first report/);
+    const outputAtLoss = run.out;
+    run.input.write('y\n');
+    await sleepMs(30);
+    assert.equal(run.out, outputAtLoss, 'late yes creates no approval or demo prompt');
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(path.join(run.home, '.config/dalan/as.sqlite'), { readOnly: true });
+    try { assert.equal(db.prepare('SELECT count(*) AS active FROM connections WHERE revoked_at IS NULL').get().active, 0, 'late yes creates no active connection'); }
+    finally { db.close(); }
+    assert.ok(pairing.code, 'a matching approval question was presented before route loss');
+  } finally { await run.close(); }
+});
+
+test('unsaved auto uses a usable Tailscale route before Gozar', async () => {
+  const fake = fakeGozar('auto-unsaved'), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
+  let starts = 0;
+  const tailscale = { name: 'tailscale', probe: () => ({ ok: true }), async start() { starts++; throw new Error('selected usable Tailscale'); }, async stop() { return { removed: true }; } };
+  const run = await hostedRun('auto-unsaved-ts', { argv: ['--route', 'auto'], providers: [tailscale, provider], fetchImpl: readyGozarFetch });
+  const done = await run.finished;
+  assert.match(done.error?.message ?? '', /selected usable Tailscale/);
+  assert.equal(starts, 1, 'the usable saved-network route is selected');
+  assert.equal(fake.calls().filter(args => args[0] === 'expose').length, 0, 'Gozar does not expose a route');
+  assert.doesNotMatch(run.out, /Continue\? \[y\/N\]/, 'Tailscale needs no Gozar consent');
+});
+
+test('saved Gozar and legacy localhost.run choices select Gozar even when Tailscale is usable', async () => {
+  for (const [saved, name] of [['gozar', 'saved-gozar'], ['localhost.run', 'saved-legacy-trial']]) {
+    const fake = fakeGozar(name), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
+    let tailscaleStarts = 0;
+    const tailscale = { name: 'tailscale', probe: () => ({ ok: true }), async start() { tailscaleStarts++; throw new Error('Tailscale must not start'); }, async stop() { return { removed: true }; } };
+    const fallback = fakeRoute('localhost.run');
+    const run = await hostedRun(name, { argv: ['--route', 'auto'], route: saved, providers: [tailscale, provider, fallback.provider], fetchImpl: readyGozarFetch });
+    try {
+      await run.until(/Waiting for sign-in/);
+      assert.match(run.out, /Public route ready \(gozar\)/);
+      assert.equal(tailscaleStarts, 0);
+      assert.equal(fallback.record.started, 0);
+    } finally { assert.equal((await run.close()).error, undefined); }
+    assert.equal(fake.calls().filter(args => args[0] === 'expose').length, 1, `${saved} starts Gozar`);
+    assert.equal(fake.calls().filter(args => args[0] === 'stop').length, 1, `${saved} cleans up Gozar`);
+  }
+});
+
+test('auto does not fall back when Gozar is unavailable', async () => {
+  const missing = gozarProvider({ resolveBundled: () => null, env: { PATH: '' } });
+  const fallback = fakeRoute('localhost.run');
+  const run = await hostedRun('gozar-missing-auto', { providers: [missing, fallback.provider] });
+  const done = await run.finished;
+  assert.match(done.error?.message ?? '', /Install gozar on PATH or set GOZAR_BIN/);
+  assert.equal(fallback.record.started, 0, 'an unavailable selected relay does not silently switch routes');
+  assert.doesNotMatch(run.out, /Continue\? \[y\/N\]/, 'consent is not requested when Gozar cannot start');
 });
 
 test('Ctrl-C during Gozar expose waits for startup and stops the partial route', async () => {
@@ -1824,6 +1931,39 @@ test('public with no route uses Gozar and forwards a bounded trial deadline', as
     const lifetime = Number(args[args.indexOf('--lifetime-ms') + 1]);
     assert.ok(lifetime > 0 && lifetime <= 3 * 60 * 60 * 1000);
   } finally { await run.close(); }
+});
+
+
+test('Gozar recovery commands execute the selected bundled CLI with its config identity, not PATH', async () => {
+  for (const mode of ['bundled', 'override', 'path']) {
+  const bundled = fakeGozar(`recovery ${mode} bundle ' quoted`, 'cleanup-debt'), trap = fakeGozar(`recovery-${mode}-trap`);
+  const home = path.join(tmp, `recovery ${mode} home ' quoted`);
+  fs.mkdirSync(home);
+  // The fixture refuses a different config identity, including a copied command in another shell.
+  fs.appendFileSync(bundled.binary, `\nif (process.env.HOME !== ${JSON.stringify(home)} || process.env.XDG_CONFIG_HOME !== ${JSON.stringify(home)}) process.exitCode = 77;\n`);
+  const env = { PATH: trap.env.PATH, HOME: home, XDG_CONFIG_HOME: home, ...(mode === 'override' ? { GOZAR_BIN: bundled.binary } : {}) };
+  const provider = gozarProvider({ resolveBundled: () => mode === 'bundled' ? bundled.binary : null, which: () => bundled.binary, env });
+  assert.equal(provider.probe().ok, true);
+  await provider.start({ gatePort: 45687 });
+  const cleanup = await provider.stop();
+  assert.equal(cleanup.removed, false);
+  const recovered = spawnSync('/bin/sh', ['-c', cleanup.command], {
+    env: { PATH: trap.env.PATH, HOME: '/wrong-home', XDG_CONFIG_HOME: '/wrong-config' },
+    encoding: 'utf8',
+  });
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.deepEqual(trap.calls(), [], 'the PATH trap must never execute');
+  assert.deepEqual(bundled.calls().at(-1), ['stop', '--port', '45687']);
+  bundled.setSnapshot({ sessionId: 'other', phase: 'published-ready', candidate: null, published: 'https://other.lhr.life' });
+  await assert.rejects(provider.start({ gatePort: 45687 }), error => {
+    const command = error.message.split('stop it first: ')[1];
+    assert.ok(command);
+    const result = spawnSync('/bin/sh', ['-c', command], { env: { PATH: trap.env.PATH, HOME: '/wrong' }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return true;
+  });
+  assert.deepEqual(trap.calls(), []);
+  }
 });
 
 test('default Tailscale fallback starts successive ephemeral trials in fresh homes', async () => {

@@ -4,7 +4,7 @@
 
 `try` runs ordinary `dalan` commands in a private trial home. Use this page to run each piece yourself: to keep the bridge in the foreground, to choose your own worker name, or to set up a client that `try` does not cover. You need the npm package, two shells and a compatible HTTP MCP worker client with OAuth. This page explicitly installs the CLI globally before using bare `dalan` commands; `npx` alone does not put it on your persistent PATH.
 
-For a hosted first result instead, use `npx -y @tnunamak/dalan try` ([hosted trial](../README.md#quickstart)). The public default and `--route auto` use bundled `@tnunamak/gozar ^0.1.0`, with no extra install. Dalan still owns OAuth approval and checks the public origin. The underlying localhost.run relay terminates TLS and can see the secret connector URL and traffic; keep private work out of the demo. Its temporary address can change, the trial lasts at most 3 hours, and it can end sooner. A stable Tailscale route must be selected explicitly with `--route tailscale`; the loopback recipe below creates no public route.
+For a hosted first result instead, use `npx -y @tnunamak/dalan try` ([hosted trial](../README.md#quickstart)). In `auto` mode, a saved temporary-relay choice selects bundled Gozar. Otherwise Dalan uses a usable Tailscale route, then Gozar if Tailscale is unavailable. When Gozar is selected, Dalan names tunnl.gg, links its terms and privacy notice, and asks for consent before exposure. Gozar then creates an installation-owned key for the `tunnl-gg` relay; Dalan does not pass your SSH keys. The relay terminates TLS and can see the connector URL and traffic. Keep private work out of the demo. A temporary demo link can change or stop without warning; the three-hour trial limit is not an availability promise. Use `--route tailscale` to require Tailscale without a relay fallback. The loopback recipe below creates no public route.
 
 <a id="owner-and-requester-setup"></a>
 
@@ -36,7 +36,7 @@ For a hosted first result instead, use `npx -y @tnunamak/dalan try` ([hosted tri
    HOME="$DALAN_HOME" DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin DALAN_PORT=8799 node "$(npm root -g)/@tnunamak/dalan/src/server.mjs"
    ```
 
-   **Check:** `init` reports a new worker profile for `local`, and the server prints `MCP listening on 127.0.0.1:8799` and keeps running. Leave this terminal open: closing it stops the bridge. If you plan a repository job, add `DALAN_ENABLE_WORKSPACE=1` to the server command now to save a restart. If the port is taken, choose a free port and replace `8799` in the exported `DALAN_PORT`, the init public URL, and the server command. Use that same port in the worker's MCP URL.
+   **Check:** `init` reports a new worker profile for `local`, and the server prints `MCP listening on 127.0.0.1:8799` and keeps running. Leave this terminal open: closing it stops the bridge. If you plan a repository job, add `--enable-workspace` to the `init` command before creating the home, and add `DALAN_ENABLE_WORKSPACE=1` to the server command. Both the worker grant and the host flag are required; exact repository access is granted separately. If the port is taken, choose a free port and replace `8799` in the exported `DALAN_PORT`, the init public URL, and the server command. Use that same port in the worker's MCP URL.
 
 4. In a second shell, export the same `DALAN_HOME`, then check the bridge.
 

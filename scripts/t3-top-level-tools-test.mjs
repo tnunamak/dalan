@@ -67,6 +67,14 @@ try {
   if (updating) { fs.writeFileSync(goldenPath, text); console.log('t3-on tools golden updated'); }
   else assert.equal(text, golden, 'T3-on tools list changed: this needs a deliberate catalog release');
 
+  // Both an omitted wait and the advertised maximum reach the CLI as bounded read-only polls.
+  for (const args of [{threadId:'thread_x'}, {threadId:'thread_x',timeoutMs:90000}]) {
+    const waited = await on.rpc('tools/call', {name:'t3_thread_wait',arguments:args});
+    assert.equal(waited.isError,false,waited.content[0].text);
+    const call = on.invocations().filter(item => item.args.includes('wait')).at(-1);
+    assert.equal(call.args[call.args.indexOf('--timeout')+1],'90');
+  }
+
   // A direct call reaches the stub transport.
   const sent = await on.rpc('tools/call', { name: 't3_thread_send', arguments: { threadId: 'thread_x', message: 'hello from a worker' } });
   assert.equal(sent.isError, false, sent.content[0].text);

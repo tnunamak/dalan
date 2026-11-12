@@ -67,6 +67,10 @@ function formatTryError(error, context, alternate = null) {
   const cli = context.cli ?? `node ${context.shellCli}`;
   const flags = context.tryFlags ?? ''; // a public trial restarts as a public trial
   const newHome = label => alternate && commandBlock(label, `${cli} try${flags} --home ${shellQuote(alternate.home)}${alternate.port ? ` --port ${alternate.port}` : ''}`);
+  if (error?.tryKind === 'route_lost') {
+    const command = context.freshTrialCommand ?? `${cli} try${flags}`;
+    return `${cause}\nThe old connector URL cannot be used. Remove that connector, add the new URL from the fresh trial, then sign in and approve it again. Start fresh with:\n${commandBlock('', command).trimStart()}`;
+  }
   const recover = (head, withNewHome) => [`${cause}${head}`, commandBlock('Read the log with:', `cat ${context.shellLog}`),
     commandBlock('Retry this home with:', `${cli} try${flags} --home ${context.shellHome}`), withNewHome ? newHome('To try again in a new home instead, run:') : null].filter(Boolean).join('\n');
   if (error?.tryKind === 'startup') return recover(`\nThe bridge did not start. Full log: ${context.logFile}`, true);
@@ -77,7 +81,8 @@ function formatTryError(error, context, alternate = null) {
   if (error?.tryKind === 'already_running') return cause;
   if (error?.tryKind === 'route_start') {
     // The route, not the home, failed: the same home retries cleanly, and the other route or a local trial are the real alternatives.
-    const otherRoute = /--route tailscale\b/.test(flags) ? commandBlock('Or make a trial link (localhost.run) instead:', `${cli} try${flags.replace('--route tailscale', '--route localhost.run')} --home ${context.shellHome}`) : null;
+    const freshRelayHome = shellQuote(path.join(os.homedir(), '.local/share', `dalan-hosted-${randomUUID()}`));
+    const otherRoute = /--route tailscale\b/.test(flags) ? commandBlock('Or make a temporary public demo link with Gozar:', `${cli} try${flags.replace('--route tailscale', '--route gozar')} --home ${freshRelayHome}`) : null;
     return [`${cause}\nThe public route did not start, so the bridge was not started.`, commandBlock('Try again with:', `${cli} try${flags} --home ${context.shellHome}`), otherRoute,
       commandBlock('Or try on this computer only:', `${cli} try --local`)].filter(Boolean).join('\n');
   }

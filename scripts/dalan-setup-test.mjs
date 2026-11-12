@@ -35,19 +35,22 @@ test('Tailscale found: exactly one question, Enter saves it, and later runs read
   assert.equal(fs.statSync(routeSettingPath(s.env)).mode & 0o777, 0o600);
 });
 
-test('Tailscale found, answer n: keeps trial links and says so', async () => {
+test('Tailscale found, answer n: saves Gozar and describes its temporary demo link', async () => {
   const s = session(() => found, ['n']);
-  await s.run();
-  assert.equal(readRouteSetting(s.env), 'localhost.run');
-  assert.match(s.out, /keeps making trial links/);
+  const result = await s.run();
+  assert.equal(result.route, 'gozar');
+  assert.equal(readRouteSetting(s.env), 'gozar');
+  assert.match(s.out, /uses Gozar for a temporary demo link/);
+  assert.match(s.out, /can change or stop without warning/);
 });
 
-test('Tailscale not found: one short choice list; 2 keeps trial links, anything else saves nothing', async () => {
+test('Tailscale not found: one short choice list; 2 saves Gozar, anything else saves nothing', async () => {
   const two = session(() => absent, ['2']);
-  await two.run();
+  const result = await two.run();
   assert.match(two.out, /For daily use, pick one:\n  1\. Tailscale \(recommended\): install it from https:\/\/tailscale\.com\/download/);
-  assert.match(two.out, /2\. Keep using trial links/);
-  assert.equal(readRouteSetting(two.env), 'localhost.run');
+  assert.match(two.out, /2\. Use Gozar for a temporary demo link: it can change or stop without warning\./);
+  assert.equal(result.route, 'gozar');
+  assert.equal(readRouteSetting(two.env), 'gozar');
   const one = session(() => absent, ['1']);
   await one.run();
   assert.equal(readRouteSetting(one.env), null);
@@ -80,4 +83,8 @@ test('the saved route: unknown values are ignored and refused, and a corrupt fil
   assert.equal(readRouteSetting(env), null);
   fs.writeFileSync(routeSettingPath(env), '{"route":"cloudflare"}');
   assert.equal(readRouteSetting(env), null);
+  writeRouteSetting('localhost.run', env);
+  assert.equal(readRouteSetting(env), 'localhost.run', 'old saved trial choices remain readable');
+  writeRouteSetting('gozar', env);
+  assert.equal(readRouteSetting(env), 'gozar');
 });

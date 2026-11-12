@@ -1,6 +1,6 @@
 // `dalan try`: the one-command first job. These tests run the real CLI, a real bridge process and the real OAuth flow.
 // The "own worker" is a second stand-in client that uses the same demo-worker module. Nothing here touches the real HOME.
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn, spawnSync } from 'node:child_process';
@@ -121,7 +121,6 @@ async function liveTry(name, { clock, beforeCommand } = {}) {
 }
 
 const attempt = extra => ({ code: 'ABCD-1234', client_id: 'cid', client_name: 'app', redirect_uri: 'http://127.0.0.1/cb', scopes: ['a', 'b'], ...extra });
-const MCP = 'http://127.0.0.1:8799/s/mcp';
 
 test('option parsing is strict', () => {
   assert.deepEqual(parseTryArgs([]), { home: null, port: null, callbacks: [] });
@@ -201,13 +200,16 @@ test('pending output is read as data, and a changed shape stops the command inst
 });
 
 test('the resource line is always shown; a missing resource is said plainly and a foreign one blocks approval', () => {
+  const pathSecret = randomBytes(32).toString('hex');
+  const foreignSecret = randomBytes(32).toString('hex');
+  const MCP = `http://127.0.0.1:8799/${pathSecret}/mcp`;
   const missing = describeAttempt(parsePending({ window: null, pending: [attempt()] }).pending[0], MCP);
   assert.match(missing.text, /^resource    \(not reported: /m);
   assert.deepEqual([missing.blocked, missing.resourceReported], [false, false]);
   const same = describeAttempt(attempt({ resource: MCP }), MCP);
-  assert.match(same.text, /^resource    "http:\/\/127\.0\.0\.1:8799\/s\/mcp"$/m);
+  assert.ok(same.text.split('\n').includes(`resource    "${MCP}"`));
   assert.deepEqual([same.blocked, same.resourceReported], [false, true]);
-  const foreign = describeAttempt(attempt({ resource: 'http://127.0.0.1:8799/other/mcp' }), MCP);
+  const foreign = describeAttempt(attempt({ resource: `http://127.0.0.1:8799/${foreignSecret}/mcp` }), MCP);
   assert.match(foreign.text, /NOT this bridge's MCP URL/);
   assert.equal(foreign.blocked, true);
   assert.doesNotMatch(describeAttempt(attempt({ client_name: 'evil\u001b[31m\nname' }), MCP).text, /\u001b|name\n/, 'vendor strings stay terminal-safe');
@@ -215,6 +217,7 @@ test('the resource line is always shown; a missing resource is said plainly and 
 
 // A bridge stub that answers discovery and refuses registration with the given status and description.
 async function refusingRegistration(status, description) {
+  const pathSecret = randomBytes(32).toString('hex');
   const server = http.createServer((req, res) => {
     req.resume();
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -225,7 +228,7 @@ async function refusingRegistration(status, description) {
     res.end(JSON.stringify({ error: 'temporarily_unavailable', error_description: description }));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  return { server, url: `http://127.0.0.1:${server.address().port}/s/mcp` };
+  return { server, url: `http://127.0.0.1:${server.address().port}/${pathSecret}/mcp` };
 }
 
 test('a registration limit (HTTP 429) shows the server text and the lowest-risk next step, not callback advice', async () => {
@@ -246,6 +249,9 @@ test('a registration limit (HTTP 429) shows the server text and the lowest-risk 
 });
 
 test('the demo worker opens a real MCP session before it calls a tool', async () => {
+  const pathSecret = randomBytes(32).toString('hex');
+  const token = randomBytes(32).toString('hex');
+  const sessionId = randomUUID();
   const seen = [];
   const server = http.createServer((req, res) => {
     let body = '';
@@ -254,7 +260,7 @@ test('the demo worker opens a real MCP session before it calls a tool', async ()
       const message = JSON.parse(body);
       seen.push({ method: message.method, version: req.headers['mcp-protocol-version'], session: req.headers['mcp-session-id'], auth: req.headers.authorization });
       if (message.method === 'initialize') {
-        res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'sess-1' });
+        res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': sessionId });
         return res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 's', version: '1' } } }));
       }
       if (!message.id) { res.writeHead(202); return res.end(); }
@@ -264,18 +270,18 @@ test('the demo worker opens a real MCP session before it calls a tool', async ()
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
-    const call = await openSession(`http://127.0.0.1:${server.address().port}/s/mcp`, 'tok');
+    const call = await openSession(`http://127.0.0.1:${server.address().port}/${pathSecret}/mcp`, token);
     assert.deepEqual(await call('list_pending', {}), { ok: true });
     assert.deepEqual(seen.map(s => s.method), ['initialize', 'notifications/initialized', 'tools/call']);
-    assert.deepEqual(seen.slice(1).map(s => [s.version, s.session]), [['2025-06-18', 'sess-1'], ['2025-06-18', 'sess-1']], 'later calls carry the negotiated version and session');
-    assert.ok(seen.every(s => s.auth === 'Bearer tok'));
+    assert.deepEqual(seen.slice(1).map(s => [s.version, s.session]), [['2025-06-18', sessionId], ['2025-06-18', sessionId]], 'later calls carry the negotiated version and session');
+    assert.ok(seen.every(s => s.auth === `Bearer ${token}`));
   } finally {
     server.close();
   }
   const noVersion = http.createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} })); }); });
   await new Promise(resolve => noVersion.listen(0, '127.0.0.1', resolve));
   try {
-    await assert.rejects(openSession(`http://127.0.0.1:${noVersion.address().port}/s/mcp`, 'tok'), /initialize returned no protocol version/);
+    await assert.rejects(openSession(`http://127.0.0.1:${noVersion.address().port}/${pathSecret}/mcp`, token), /initialize returned no protocol version/);
   } finally {
     noVersion.close();
   }

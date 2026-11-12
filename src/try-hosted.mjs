@@ -14,7 +14,7 @@ import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
 import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText, hostedPrompt } from './try-hosted-clients.mjs';
-import { PUBLIC_READY_MS, createGate, gozarProvider, localhostRunProvider, selectRouteProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
+import { PUBLIC_READY_MS, createGate, gozarProvider, localhostRunProvider, selectRouteProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady, watchPublicIdentity } from './try-exposure.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 
@@ -52,8 +52,8 @@ export function acquireHomeLock(home) {
 }
 
 // Said once, before any public address exists. A trial link is told apart from a real address in every line that names it.
-export const TRIAL_NOTICE = 'Trial link via localhost.run, a third-party relay that can see this traffic; the address changes within hours. For daily use: dalan setup';
-// A trial link lasts at most this long: localhost.run rotates free addresses within hours, so the trial ends itself first, on its own terms.
+export const TRIAL_NOTICE = 'Temporary demo link. It can change or stop without warning. For a lasting address, use dalan setup.';
+// A trial's maximum local lifetime is a shutdown limit, not a promise that a public route will stay available.
 export const TRIAL_MS = 3 * 60 * 60 * 1000;
 export const timeLeft = ms => { const minutes = Math.max(0, Math.ceil(ms / 60_000)); return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min` : `${minutes} min`; };
 export const REAL_NOTICE = fromSetup => `Using Tailscale${fromSetup ? ', the address you saved with `dalan setup`' : ''}. This is not a trial link.`;
@@ -93,20 +93,21 @@ export function defaultProviders({ env, say, client, hostedDeps = {} }) {
   return [gozarProvider({ env, ...hostedDeps.gozar }), localhostRunProvider({ env, ...hostedDeps.localhostRun }), tailscaleProvider({ env, ...hostedDeps.tailscale }), tailscaleNodeProvider({ env, ...hostedDeps.tailscaleNode })];
 }
 
-// The restart command for a trial, with every selection, on one line. Only the computer's own Tailscale keeps its address between
-// runs, so only that route may reuse the home: any other address is new, and a home refuses a new address. Those restarts get a
-// new home.
+// The restart command keeps a stable Tailscale home and gives each temporary route a new home.
 const STABLE_ORIGIN_ROUTES = new Set(['tailscale']);
-export const restartCommand = ({ cli, home, shellQuote, client, route, provider }) => `${cli} try --public --client ${client} --route ${route}${STABLE_ORIGIN_ROUTES.has(provider) ? ` --home ${shellQuote(home)}` : ''}`;
+export const restartCommand = ({ cli, home, freshHome, shellQuote, client, route, provider }) => `${cli} try --public --client ${client} --route ${route} --home ${shellQuote(STABLE_ORIGIN_ROUTES.has(provider) ? home : freshHome)}`;
 
 export async function runHosted({ options, env, out, input, signal, errorContext, clock = { now: Date.now, sleep }, deps = {}, helpers }) {
   const { prepareHome, portFree, socketAnswers, choosePort, shellQuote, commandLine, parsePending, describeAttempt, MARKER, DIAGNOSE_AFTER_MS, DIAGNOSE_EVERY_MS, DIAGNOSE_LIMIT, POLL_MS, repo } = helpers;
   const client = options.client ?? 'chatgpt';
   const say = line => out.write(`${terminalSafe(line)}\n`);
   const providers = deps.providers ?? defaultProviders({ env, say, client, hostedDeps: deps });
-  // An explicit route wins; auto prefers bundled Gozar, otherwise preserves the saved/default route.
+  // An explicit route wins. Auto uses a usable Tailscale route first, then the consented Gozar trial relay.
   const saved = options.route === undefined || options.route === 'auto' ? readRouteSetting(env) : null;
-  const automaticRoute = providers.find(provider => provider.name === 'gozar')?.probe().ok ? 'gozar' : saved === 'tailscale' ? 'tailscale' : 'localhost.run';
+  const tailscale = providers.find(provider => provider.name === 'tailscale');
+  const tailscaleProbe = tailscale?.probe();
+  const automaticRoute = saved === 'gozar' || saved === 'localhost.run' ? 'gozar' :
+    tailscaleProbe?.ok ? 'tailscale' : providers.some(provider => provider.name === 'gozar') ? 'gozar' : 'localhost.run';
   const routeChoice = options.route && options.route !== 'auto' ? options.route : automaticRoute;
   const realRoute = routeChoice === 'tailscale';
   const spec = CLIENTS[client];
@@ -126,7 +127,9 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const logFile = path.join(home, 'server.log');
   errorContext.shellHome = shellQuote(home); errorContext.logFile = logFile; errorContext.shellLog = shellQuote(logFile);
   errorContext.tryFlags = ` --public --client ${client} --route ${routeChoice}`;
-  const retry = () => commandLine(restartCommand({ cli, home, shellQuote, client, route: routeChoice, provider: route?.provider.name }));
+  const freshRestartHome = path.join(realHome, '.local/share', `dalan-hosted-${randomBytes(3).toString('hex')}`);
+  const retry = () => commandLine(restartCommand({ cli, home, freshHome: freshRestartHome, shellQuote, client, route: routeChoice, provider: selectedProvider?.name ?? (realRoute ? 'tailscale' : null) }));
+  errorContext.freshTrialCommand = retry().trim();
 
   // A bridge or ssh that an earlier trial left behind (its process was killed without cleanup) is ended first; only a recorded, matching process is touched.
   const registry = childRegistry(env);
@@ -143,9 +146,16 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   let inputEnded = false;
   lines.once('close', () => { inputEnded = true; });
   const stopRequested = () => signal?.aborted || inputEnded;
-  let exited = true, stopped = Promise.resolve(), server = null, routeDied = false;
+  let exited = true, stopped = Promise.resolve(), server = null, routeDied = false, routeLossReason = null;
   const stopPromise = new Promise(resolve => { if (signal?.aborted) resolve(); signal?.addEventListener('abort', resolve, { once: true }); lines.once('close', resolve); });
-  let routeGone = new Promise(() => {});
+  let resolveRouteGone;
+  let routeGone = new Promise(resolve => { resolveRouteGone = resolve; });
+  const markRouteLost = reason => {
+    if (routeDied) return;
+    routeDied = true;
+    routeLossReason = reason;
+    resolveRouteGone();
+  };
   // The trial's lifetime is a real timer, not a check in the polling loop, so it also ends an unanswered question or a wait after a result.
   const trialMs = realRoute ? null : (deps.trialMs ?? TRIAL_MS);
   let expired = false, expireTimer = null;
@@ -163,7 +173,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
 
   const baseEnv = {
     ...Object.fromEntries(['PATH', 'TMPDIR', 'LANG', 'NODE_OPTIONS'].filter(k => env[k] !== undefined).map(k => [k, env[k]])),
-    HOME: home, DALAN_AUTH_MODE: 'builtin', ...(deps.serverEnv ?? {}),
+    HOME: home, DALAN_AUTH_MODE: 'builtin', DALAN_TRIAL_SSE: '1', ...(deps.serverEnv ?? {}),
   };
   let bindPort = null;
   // `abortable: false` is for cleanup: Ctrl-C must not cancel the revocation.
@@ -200,6 +210,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   };
 
   let gate = null, route = null, routeStopped = null, cleaned = true, keepRecoveredNode = false;
+  let identityWatcher = null;
   let trialEndsAt = null;
   let releaseHome;
   try { releaseHome = acquireHomeLock(home); } catch (error) { lines.close(); throw error; }
@@ -215,6 +226,20 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       if (ended?.length) say(`Ended ${ended.join(', ')} left by an earlier trial.`);
     }
     signal?.throwIfAborted();
+    if (selectedProvider?.name === 'gozar') {
+      say('This public demo uses tunnl.gg, a third-party relay that can inspect forwarded traffic. Gozar creates an installation-specific relay key after your consent; Dalan does not pass your SSH keys. Terms: https://tunnl.gg/terms. Privacy: https://tunnl.gg/privacy. Continue? [y/N]');
+      const consent = await new Promise(resolve => {
+        if (inputEnded || signal?.aborted) { resolve(false); return; }
+        const finish = answer => {
+          lines.off('line', onLine); lines.off('close', onClose); signal?.removeEventListener('abort', onClose);
+          resolve(['y', 'yes'].includes(String(answer ?? '').trim().toLowerCase()));
+        };
+        const onLine = answer => finish(answer);
+        const onClose = () => finish(null);
+        lines.once('line', onLine); lines.once('close', onClose); signal?.addEventListener('abort', onClose, { once: true });
+      });
+      if (!consent) throw Object.assign(new Error('No public route was started because relay consent was not given.'), { tryKind: 'consent' });
+    }
     trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
     try {
       for (const message of routeMessages) say(message);
@@ -230,11 +255,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       if (error && typeof error === 'object' && !signal?.aborted) {
         error.tryKind ??= 'route_start';
         // A real route never turns into a trial link without the owner choosing it.
-        if (realRoute && error instanceof Error) error.message += '\nA Tailscale route never falls back to a trial link on its own. Fix Tailscale and run again, or make a trial link with: dalan try --public --route localhost.run';
+        if (realRoute && error instanceof Error) error.message += '\nA Tailscale route never falls back to a trial relay on its own. Fix Tailscale and run again, or choose the Gozar demo route.';
       }
       throw error;
     }
-    routeGone = route.exited ? route.exited.then(() => { routeDied = true; }) : routeGone;
+    if (route.exited) route.exited.then(() => markRouteLost(route.provider.endedBecause?.() ?? 'provider_lost'));
     const origin = route.origin;
     say(`Public route ready (${route.provider.name}).`);
     if (storedOrigin && storedOrigin !== origin) {
@@ -269,6 +294,17 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     if (!ready.ready) { if (!signal?.aborted) await route.provider.diagnose?.({ home, say, signal }).catch(() => {}); const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
     say("Public HTTPS, OAuth discovery and the authorization server's metadata verified.");
 
+    if (!realRoute) {
+      identityWatcher = await (deps.watchPublicIdentity ?? watchPublicIdentity)({
+        origin, secret, identity: ready.identity, fetchImpl: deps.fetchImpl ?? fetch,
+        onStatus: status => { if (status === 'retrying') say('The temporary public link is not responding; checking again.'); },
+      });
+      identityWatcher.lost.then(loss => markRouteLost(loss.reason));
+      const watcherReady = await identityWatcher.ready;
+      if (!watcherReady) markRouteLost('identity_changed');
+      if (routeDied) throw Object.assign(new Error('The temporary demo link changed or stopped responding during startup; the trial is stopping.'), { tryKind: 'route_lost' });
+    }
+
     // The default callback list already holds both clients' published callbacks; the approval below accepts only the selected client's.
     await dalan(['connect', 'start', '--worker', HOSTED_WORKER]);
     const requestId = `req_${randomUUID()}`;
@@ -284,12 +320,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       const expiry = new Promise(resolve => { expireTimer = setTimeout(() => { expired = true; resolve(); }, Math.max(0, trialEndsAt - clock.now())); expireTimer.unref?.(); });
       routeGone = Promise.race([routeGone, expiry]);
     }
-    const trialLeft = () => trialEndsAt === null ? '' : ` Temporary trial: ${timeLeft(trialEndsAt - clock.now())} left.`;
-    if (trialEndsAt !== null) say(`Temporary trial: this link stops in ${timeLeft(trialEndsAt - clock.now())} or sooner if the relay changes the address. Replace it with \`dalan setup\` for daily use.`);
+    const trialLeft = () => trialEndsAt === null ? '' : ` Local shutdown limit: ${timeLeft(trialEndsAt - clock.now())}. The temporary link can stop earlier.`;
+    if (trialEndsAt !== null) say(`This trial has a local shutdown limit of ${timeLeft(trialEndsAt - clock.now())}; the temporary link can stop earlier or without warning. Use \`dalan setup\` for a lasting address.`);
     say('');
     say(handoffText({ client, url: mcpUrl }));
     say('');
-    say(`Waiting for sign-in. Ctrl-C stops the trial and removes its link. This terminal shows the connection code. Type help here to see the ${spec.label} steps again. The URL is also in ${urlFile}.`);
+    say(`Waiting for sign-in. Ctrl-C stops the trial and attempts to remove its public route. This terminal shows the connection code. Type help here to see the ${spec.label} steps again. The URL is also in ${urlFile}.`);
 
     const showPrompt = () => say(`Finish sign-in in its browser tab, then enable "${CONNECTOR_NAME}" in a ${spec.label} chat. Paste this into the chat:\n${hostedPrompt(requestId, phrase)}`);
     const seen = new Set();
@@ -302,9 +338,9 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     }[stage]);
     const stillCurrent = async attempt => (await pendingNow()).pending.some(p => p.code === attempt.code && !p.superseded);
     const approve = async attempt => {
-      if (!await stillCurrent(attempt)) return false;
+      if (routeDied || !await stillCurrent(attempt) || routeDied) return false;
       try { return JSON.parse(await dalan(['connect', 'approve', attempt.code, '--worker', HOSTED_WORKER, '--replace', '--json'])).result ?? true; }
-      catch (error) { if (exited || await stillCurrent(attempt)) throw error; return false; }
+      catch (error) { if (routeDied) return false; if (exited || await stillCurrent(attempt)) throw error; return false; }
     };
     // Help is read from the same input as the answers: a line that is not an answer is checked for it.
     let asking = false;
@@ -346,8 +382,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
           say('Check that the code matches the Dalan sign-in page you opened.');
           const answer = await askOnce('Approve this connection? [y/N] ');
           remindAt = Math.max(remindAt, clock.now() + DIAGNOSE_AFTER_MS);
-          if (answer?.trim().toLowerCase() === 'y') {
+          if (answer?.trim().toLowerCase() === 'y' && !routeDied) {
             const result = await approve(attempt);
+            if (routeDied) {
+              break;
+            }
             if (result) { approvedConnection = result.connection_id ?? (await dalan(['connect', 'list', '--json']).then(t => JSON.parse(t).connections.find(c => c.worker === HOSTED_WORKER && c.revoked_at === null)?.connection_id ?? null)); stage = 'approved'; say('Connection approved.'); showPrompt(); }
             else {
               say(`That attempt is no longer current or expired (attempts last ${PAIRING_MINUTES} minutes). Start the sign-in again in ${spec.label}; its new code appears here.`);
@@ -363,8 +402,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       if (retryNow) { retryNow = false; continue; }
       await Promise.race([clock.sleep(POLL_MS), untilStopRequested()]);
     }
-    if (routeDied && !stopRequested()) { const rotated = route?.provider.endedBecause?.() === 'rotated'; const error = new Error(rotated ? 'The temporary public address changed. This trial has stopped to protect its sign-in identity. Start a fresh trial and replace the connector URL.' : 'The public route stopped. This URL is offline.'); error.tryKind = 'route'; throw error; }
-    if (trialOver() && !stopRequested()) { const error = new Error(`The temporary trial ended after ${timeLeft(trialMs)}; its link is removed. Start a fresh trial for a new link, or run dalan setup for a stable address.`); error.tryKind = 'route'; throw error; }
+    if (routeDied && !stopRequested()) {
+      const changed = routeLossReason === 'rotated' || routeLossReason === 'identity_changed';
+      const error = new Error(`The temporary demo link ${changed ? 'changed its address' : 'stopped responding'}. The connector cannot use this URL; the trial is stopping. Its saved reports stay in the trial Home.`);
+      error.tryKind = 'route_lost'; throw error;
+    }
+    if (trialOver() && !stopRequested()) { const error = new Error(`The temporary trial reached its ${timeLeft(trialMs)} shutdown limit. Route cleanup will be attempted. Start a fresh trial for a new link, or run dalan setup for a lasting address.`); error.tryKind = 'route'; throw error; }
     if (exited && !stopRequested()) { const error = new Error('the bridge stopped unexpectedly'); error.tryKind = 'unexpected'; throw error; }
   } catch (error) {
     if (signal?.aborted) { /* a normal stop */ }
@@ -372,6 +415,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   } finally {
     lines.close();
     clearTimeout(expireTimer);
+    await identityWatcher?.stop();
     // Close forwarding first, then end the connection while the bridge can still answer, then remove the route and stop the bridge.
     gate?.shut();
     if (errorContext.started && !exited) await dalan(['connect', 'revoke', HOSTED_WORKER], { abortable: false }).catch(() => {});
@@ -384,7 +428,8 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     cleaned = routeStopped ? routeStopped.removed : true;
     if (!cleaned) { process.exitCode = 1; out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n${routeStopped.command ? `Remove it with:\n${commandLine(routeStopped.command)}\n` : ''}`); }
   }
-  if (cleaned) say('Public route removed. Bridge stopped.');
+  if (route && cleaned) say('Public route removed. Bridge stopped.');
+  else if (!route) say('No public route was started. Bridge stopped.');
   say(`Trial history kept at ${home}`);
   say(`To run it again: ${retry().trim()}`);
 }

@@ -6,6 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { safeDiagnostic } from './diagnostic.mjs';
 import { CLIENTS } from './try-hosted-clients.mjs';
 import { authorizationServerMetadataUrl, onOrigin, TRIAL_ORIGIN_RULE } from './try-exposure.mjs';
+import { mcpResponseText } from './mcp-sse.mjs';
 
 const MCP_PROTOCOL = '2025-11-25';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -138,8 +139,7 @@ export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, 
     const text = await res.text();
     if (res.status !== expect) throw new Error(`HTTP ${res.status}`);
     if (expect === 202) return null;
-    const data = text.startsWith('event:') || text.startsWith('data:') ? text.split('\n').find(l => l.startsWith('data:'))?.slice(5) : text;
-    try { return { res, message: JSON.parse(data) }; } catch { throw new Error('the reply is not JSON'); }
+    try { return { res, message: JSON.parse(mcpResponseText(text) ?? 'null') }; } catch { throw new Error('the reply is not JSON'); }
   };
   await step('mcp auth: a bearer token that was not issued here is refused', async () => {
     const res = await get(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${randomBytes(24).toString('base64url')}` }, body: '{"jsonrpc":"2.0","id":9,"method":"ping"}' });

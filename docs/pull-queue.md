@@ -85,31 +85,35 @@ tools, not `dalan` commands.
    `claim` with that ID, a claimant and a fresh `acquisition_id`. Respect the
    existing free-lane and pause limits. A race has one winner.
 4. Use the returned `request_id` and `claim_id` with the existing progress,
-   workspace and finish tools. The receipt includes a distinct `work_order_id`
-   and `child_request_id`; the child reserves the original submitted request ID.
+   workspace and finish tools. The receipt includes a distinct `work_order_id`. Once acquired, `child_request_id`
+   equals the original submitted `request_id`; the child keeps that reserved ID.
    A lost-reply retry must use the original claimant, lease and acquisition ID.
 5. Read the owner's decision separately. Completion does not accept the result.
 
 The eligible backlog is independent of available lanes. An unauthorized worker
 sees neither work-order titles nor a global backlog count. Repository revocation,
-destination drift or connection-set drift removes an offer from that worker and
-refuses a new acquisition. A committed live acquisition retry follows the existing
-grant fences; changing policy does not silently replace its holder.
+destination drift or connection-set drift removes an unacquired order from that
+worker's claimable set and refuses a new acquisition. Once a child exists, it
+follows ordinary assignment listing rules, including a visible `blocked:true` entry
+when destination policy blocks it. A committed live acquisition retry follows the
+existing grant fences; changing policy does not silently replace its holder.
 
 Acquisition commits the child, claim and parent winner in one SQLite transaction.
 A crash before commit leaves the work order available with no child or claim.
 A crash after commit can lose the reply; retrying the same acquisition returns
 the saved child and claim, subject to the ordinary live-grant checks.
 
-The deadline prevents a new acquisition and becomes the child's `valid_until`.
-As with ordinary assignments, that field limits queue admission; it does not
-stop an already active claim. Cancel the submitted request ID to revoke an
+At its deadline, an unacquired work order is cancelled and no child is created.
+After acquisition, the deadline becomes the child's `valid_until`; ordinary expiry
+rules cancel a queued child, while an active claim is untouched. The deadline does
+not stop an already active claim. Cancel the submitted request ID to revoke an
 active child's authority. Cancellation does not prove external compute stopped.
 The child's report and owner decision remain linked by the submitted request ID
 and `work_order_id`; a finished report is not an accepted result.
 
-Version 1 discovers unacquired work through polling `list_pending`. It adds no
-availability event for an unacquired work order. Existing events for materialized
+Version 1 discovers unacquired work through polling `list_pending`. An unacquired
+work order is not a queued assignment for the protocol's re-wake rule, so it adds
+no availability event. Existing events for materialized
 children remain hints. Lease expiry and abandonment use the ordinary child
 recovery path with a fresh acquisition ID, once prior work has verifiably stopped.
 There is no second result slot or cross-worker retry.

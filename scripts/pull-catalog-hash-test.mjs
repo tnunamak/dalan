@@ -4,15 +4,15 @@ import {DotBridgeAdapter} from './conformance/adapter-dot-bridge.mjs';
 import {fetchForPublicHost} from '../src/test-support/public-host-fetch.mjs';
 const fetch=fetchForPublicHost('dot-bridge.example.test');
 
-// These hashes are taken from origin/main before policy pull was added. Hash the
-// serialized advertised tools, including field order, descriptions and annotations.
+// Pin the serialized advertised tools, including field order, descriptions and annotations.
+// Modern T3 catalogs use the 90-second wait bound; non-T3 and frozen legacy hashes stay unchanged.
 const hashes={
   'stable/t3-0':'6bcc72c368bba25f527267e870c3c1efba46e39cfb5a1b4cda54ab260252ce86',
-  'stable/t3-1':'d084b52048d283365f364852b470f9e1195b021f9f503dc9d6e0ccb85fe1330f',
+  'stable/t3-1':'460b0f36d8d9554a9f933e2629b996d8a051514848ef8a9b370674ba936e244e',
   'questions-v1/t3-0':'21739919c2ab320873720b679bfa47d436a69a09e3f2147c9988a7d7e408fc95',
-  'questions-v1/t3-1':'0e46e50aa97061c4b2d95d31a0e5e6b4e7827e40a6fc1015fc0e7e921d99a8f6',
+  'questions-v1/t3-1':'70bad354761cdfb7350d20dbffd442201479867712db50b528bf93e5988f9d82',
   'protocol-v0/t3-0':'1669578b4538a82f57ffc3fdca66d543ba02073cf127f1d1d78d6b82a9e48965',
-  'protocol-v0/t3-1':'13e7303bf6344fb673770a1e535b97e1f7d220f35b72b6a039317db906f9f57c',
+  'protocol-v0/t3-1':'269e99d914f88aec6e9b8422505b4c461d0fcee56008f5fdd92bdfab01ccb5a3',
   'legacy-v46/t3-0':'0cbbaf9ab90346d0e06fb1413f62f8e834cd6d61010a48b52d3c6e2b2d8d3cbc',
   'legacy-v46/t3-1':'0cbbaf9ab90346d0e06fb1413f62f8e834cd6d61010a48b52d3c6e2b2d8d3cbc',
 };

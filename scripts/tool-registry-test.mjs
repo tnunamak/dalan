@@ -1,6 +1,7 @@
 // The tool registry: default-deny policy, argument validation, rate limit, audit, and a tools/list that never moves.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -119,7 +120,7 @@ test('owner list uses registration hashes without weakening caller hashes or gra
   assert.equal(registry.list()[0].schema_hash, registration.schema_hash);
 });
 test('handler failure is reported as handler_failed and results are redacted and capped', async () => {
-  const secret = 'ghp_' + 'a'.repeat(36);
+  const secret = 'ghp_' + randomBytes(18).toString('hex');
   const { registry } = fixture({ handlers: {
     boom: { run: async () => { throw new Error('secret detail'); } },
     leak: { run: async () => ({ text: `token ${secret}` }) },
@@ -348,9 +349,10 @@ function fakeT3Post() {
   const dir = fs.mkdtempSync(path.join(scratch, 'fakebin-'));
   const log = path.join(dir, 'calls.log'), stdinFile = path.join(dir, 'stdin.txt'), exitFile = path.join(dir, 'exit');
   fs.writeFileSync(exitFile, '0');
-  fs.writeFileSync(path.join(dir, 't3-post'), `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a" >> '${log}'; done\nprintf '@@END@@\\n' >> '${log}'\ncat > '${stdinFile}'\ncode=$(cat '${exitFile}')\n[ "$code" = 0 ] || echo "boom token=abcdefghijklmnopqrstuvwxyz0123456789" >&2\nexit "$code"\n`, { mode: 0o755 });
+  const errorToken = randomBytes(18).toString('hex');
+  fs.writeFileSync(path.join(dir, 't3-post'), `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a" >> '${log}'; done\nprintf '@@END@@\\n' >> '${log}'\ncat > '${stdinFile}'\ncode=$(cat '${exitFile}')\n[ "$code" = 0 ] || echo "boom token=${errorToken}" >&2\nexit "$code"\n`, { mode: 0o755 });
   return {
-    dir, setExit: n => fs.writeFileSync(exitFile, String(n)),
+    dir, errorToken, setExit: n => fs.writeFileSync(exitFile, String(n)),
     argv: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '').split('@@END@@\n').filter(Boolean).map(c => c.split('\n').filter(Boolean)),
     stdin: () => fs.readFileSync(stdinFile, 'utf8'),
   };
@@ -402,7 +404,7 @@ test('default delivery spawns t3-post: argv, stdin message, exit 3 keeps queue, 
     time += 11 * 60_000;
     let err; try { await send({ kind: 'question', text: 'x' }); } catch (e) { err = e; }
     assert.equal(err.code, 'handler_failed');
-    assert(!/abcdefghijklmnopqrstuvwxyz0123456789/.test(String(err.message)));
+    assert(!String(err.message).includes(fake.errorToken));
     assert.equal(store.db.prepare('SELECT count(*) n FROM tool_outbox WHERE sent_at IS NULL').get().n, 1);
   });
 });
@@ -727,7 +729,7 @@ test('registered tools use the real validator: nested objects, patterns, depth; 
 });
 
 test('results are redacted and capped at 32 KiB with truncated:true', async () => {
-  const secret = 'ghp_' + 'b'.repeat(36);
+  const secret = 'ghp_' + randomBytes(18).toString('hex');
   const { registry } = fixture({ handlers: { big: { run: async () => ({ text: `${secret} ${'z'.repeat(200000)}` }) }, medium: { run: async () => ({ text: 'q'.repeat(20000) }) } } });
   for (const kind of ['big', 'medium']) { registry.register(spec({ name: kind, handler: { kind } })); registry.grant(kind, 'dot'); }
   const big = (await dispatch(registry, { tool: 'big', args: { text: 'x' } })).result;

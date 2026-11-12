@@ -3,22 +3,62 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { randomBytes } from 'node:crypto';
 import { migrateWorkers } from '../src/service-migrate-workers.mjs';
-import { loadWorkers, loadOwnerWorkers, inspectGrantAudit } from '../src/workers.mjs';
+import { loadWorkers, loadOwnerWorkers, inspectGrantAudit, updateWorkerRepoPolicy } from '../src/workers.mjs';
 
 fs.mkdirSync(path.join(os.homedir(), '.tmp'), { recursive: true });
 const root = fs.mkdtempSync(path.join(os.homedir(), '.tmp/dalan-service-migrate-'));
 const save = (file, value) => fs.writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
 try {
+  // Migration may copy only grants backed by source audit evidence, without writing there.
+  const snapshot = directory => fs.readdirSync(directory, {withFileTypes: true}).sort((a,b) => a.name.localeCompare(b.name)).flatMap(entry => {
+    const file = path.join(directory, entry.name), stat = fs.statSync(file);
+    return [{file, mtimeMs: stat.mtimeMs, mode: stat.mode, ...(entry.isFile() ? {bytes: fs.readFileSync(file).toString('base64')} : {})},
+      ...(entry.isDirectory() ? snapshot(file) : [])];
+  });
+  for (const mode of ['valid', 'unaudited', 'corrupt-tail', 'truncated', 'corrupt-checkpoint']) {
+    const sourceDir = path.join(root, 'evidence-' + mode);
+    fs.mkdirSync(sourceDir, {mode: 0o700});
+    const source = path.join(sourceDir, 'workers.json');
+    save(source, {workers: {evidence: {repos: []}}});
+    if (mode !== 'unaudited') updateWorkerRepoPolicy(source, 'evidence', 'allow', 'acme/a');
+    save(source, {workers: {evidence: {repos: ['acme/a', 'acme/b']}}});
+    const audit = path.join(sourceDir, 'workers-audit.jsonl');
+    if (mode === 'corrupt-tail') fs.appendFileSync(audit, '{"torn":');
+    if (mode === 'truncated') fs.writeFileSync(audit, '');
+    if (mode === 'corrupt-checkpoint') fs.writeFileSync(path.join(sourceDir, 'workers-audit-checkpoint.sqlite'), 'not sqlite');
+    const before = snapshot(sourceDir), originalExec = DatabaseSync.prototype.exec;
+    let sourceExclusive = 0;
+    DatabaseSync.prototype.exec = function(sql) {
+      if (/BEGIN\s+EXCLUSIVE/i.test(sql)) {
+        const databases = this.prepare('PRAGMA database_list').all();
+        if (databases.some(row => row.file && path.dirname(path.resolve(row.file)) === sourceDir)) sourceExclusive++;
+      }
+      return originalExec.call(this, sql);
+    };
+    let migrated;
+    try { migrated = migrateWorkers({home: path.join(root, 'evidence-new-' + mode), sources: [source]}); }
+    finally { DatabaseSync.prototype.exec = originalExec; }
+    assert.ok(migrated.denied_repositories.some(item => item.worker === 'evidence' && item.repos.includes('acme/b')), mode + ': denied additions are reported');
+    assert.equal(sourceExclusive, 0, mode + ': source never takes an exclusive writer lock');
+    assert.deepEqual(snapshot(sourceDir), before, mode + ': source bytes, mtimes and sidecars unchanged');
+    const effective = loadWorkers(migrated.workers_file, {builtin: true, auditGrants: true});
+    assert.equal(effective.allowsRepo('evidence', 'acme/b'), false, mode + ': raw B must not become an audited destination grant');
+    assert.equal(effective.allowsRepo('evidence', 'acme/a'), mode !== 'unaudited' && mode !== 'truncated', mode + ': retain only surviving audited A');
+  }
   const a = path.join(root, 'a.json'), b = path.join(root, 'b.json');
   save(a, { workers: { alpha: { connections: [{ issuer: 'https://old.test', subject: 'old-subject', client_id: 'old-client' }], capabilities: ['t3'], repos: ['acme/alpha'], destination: { provider: 'Example', operator: 'Example operator' } } }, default_execution: 'host' });
   save(b, { workers: { beta: { repos: ['acme/beta'], guidance: 'resume' }, 'gamma': { repos: [] }, 'delta': { repos: [] } } });
+  updateWorkerRepoPolicy(a, 'alpha', 'allow', 'acme/alpha');
+  updateWorkerRepoPolicy(b, 'beta', 'allow', 'acme/beta');
   const originals = [fs.readFileSync(a), fs.readFileSync(b)];
+  const hidden = Object.fromEntries(['password','callbackPath','query','fragment','secret','connection'].map(name => [name, randomBytes(20).toString('hex')]));
   const sourceDb = path.join(root, 'source.sqlite');
   const db = new DatabaseSync(sourceDb);
   db.exec("CREATE TABLE subscriptions(worker TEXT,url TEXT,state TEXT,secret TEXT,connection TEXT,expires_at TEXT DEFAULT '2099-01-01T00:00:00.000Z'); CREATE TABLE destination_approvals(snapshot TEXT);");
-  db.prepare('INSERT INTO subscriptions(worker,url,state,secret,connection) VALUES(?,?,?,?,?)').run('alpha', 'https://user:callback-password@callback.test/private-token?key=query-token#fragment-token', 'active', 'ENCRYPTED_SECRET', 'ENCRYPTED_CONNECTION');
-  db.prepare('INSERT INTO subscriptions(worker,url,state,secret,connection) VALUES(?,?,?,?,?)').run('beta', 'https://callback.test/another-private-token', 'active', 'ENCRYPTED_SECRET', 'ENCRYPTED_CONNECTION');
+  db.prepare('INSERT INTO subscriptions(worker,url,state,secret,connection) VALUES(?,?,?,?,?)').run('alpha', `https://user:${hidden.password}@callback.test/${hidden.callbackPath}?key=${hidden.query}#${hidden.fragment}`, 'active', hidden.secret, hidden.connection);
+  db.prepare('INSERT INTO subscriptions(worker,url,state,secret,connection) VALUES(?,?,?,?,?)').run('beta', `https://callback.test/${hidden.callbackPath}`, 'active', hidden.secret, hidden.connection);
   db.prepare('INSERT INTO subscriptions(worker,url,state,secret,connection) VALUES(?,?,?,?,?)').run('alpha', 'https://expired.test/private', 'revoked', 'ENCRYPTED_SECRET', 'ENCRYPTED_CONNECTION');
   db.prepare('INSERT INTO subscriptions(worker,url,state,expires_at) VALUES(?,?,?,?)').run('alpha', 'https://expired-active.test/private', 'active', '2000-01-01T00:00:00.000Z');
   db.prepare('INSERT INTO destination_approvals VALUES(?)').run(JSON.stringify({ worker: 'alpha', connections_digest: 'OLD_CONNECTION_DIGEST', declaration: { provider: 'Example' } }));
@@ -42,7 +82,8 @@ try {
   assert.equal(profile.workers.get('alpha').destination.provider, 'Example');
   assert.deepEqual(fs.readFileSync(sourceDb), dbBefore);
   const manifestText = fs.readFileSync(result.migration_manifest, 'utf8');
-  assert.doesNotMatch(manifestText, /callback-password|private-token|query-token|fragment-token|ENCRYPTED_|OLD_CONNECTION_DIGEST|expired.test|expired-active.test/);
+  for (const value of Object.values(hidden)) assert.ok(!manifestText.includes(value), 'private subscription fields omitted');
+  assert.doesNotMatch(manifestText, /OLD_CONNECTION_DIGEST|expired.test|expired-active.test/);
   const manifest = JSON.parse(manifestText);
   assert.equal(manifest.authoritative, false);
   assert.deepEqual(manifest.subscriptions.map(s => [s.worker, s.callback_origin, s.count]), [['alpha', 'https://callback.test', 1], ['beta', 'https://callback.test', 1]]);

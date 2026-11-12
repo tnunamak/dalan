@@ -3,6 +3,7 @@
 // claim that any particular client works.
 import { createHash, randomBytes } from 'node:crypto';
 import { parseJsonBody, safeDiagnostic } from './diagnostic.mjs';
+import { mcpResponseText } from './mcp-sse.mjs';
 
 // A loopback pattern without a port admits any port, so this URI matches the 'http://127.0.0.1/callback' pattern.
 export const DEMO_REDIRECT = 'http://127.0.0.1:43111/callback';
@@ -102,8 +103,7 @@ export async function openSession(mcpUrl, token, { signal } = {}) {
     return { res, text };
   };
   const parse = text => {
-    const data = text.startsWith('event:') || text.startsWith('data:') ? text.split('\n').find(l => l.startsWith('data:'))?.slice(5) : text;
-    return parseJsonBody(data ?? 'null', 'MCP response');
+    return parseJsonBody(mcpResponseText(text) ?? 'null', 'MCP response');
   };
 
   const init = await post({ jsonrpc: '2.0', id: ++nextId, method: 'initialize', params: { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo: { name: 'dalan-demo', version: '1' } } });

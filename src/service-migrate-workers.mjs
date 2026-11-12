@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { loadOwnerWorkers, parseWorkers, updateWorkerRepoPolicy, workerRepoMigrationFile } from './workers.mjs';
+import { loadEffectiveOwnerWorkers, parseWorkers, updateWorkerRepoPolicy, workerRepoMigrationFile } from './workers.mjs';
 
 function reenrollmentIntent(files, workers) {
   const subscriptions = [], destinationApprovals = [];
@@ -44,10 +44,12 @@ export function migrateWorkers({ home, sources, sourceDbs = [], workspaceWorkers
   home = path.resolve(home);
   const workers = {};
   const grants = new Map();
+  const deniedRepositories = [];
   for (const source of sources) {
     const file = path.resolve(source);
     if (!fs.existsSync(file) && !fs.existsSync(workerRepoMigrationFile(file))) throw new Error(`no worker policy at ${file}`);
-    const profile = loadOwnerWorkers(file);
+    const profile = loadEffectiveOwnerWorkers(file);
+    deniedRepositories.push(...profile.deniedRepoGrants.map(item => ({ source: file, ...item })));
     for (const [name, worker] of profile.workers) {
       if (Object.hasOwn(workers, name)) throw new Error(`duplicate worker ${name} in sources`);
       workers[name] = {
@@ -89,7 +91,7 @@ export function migrateWorkers({ home, sources, sourceDbs = [], workspaceWorkers
   }
   return { home, workers_file: workersFile, migration_manifest: manifestFile,
     workers: [...grants].map(([worker, repos]) => ({ worker, repos, workspaceAllowed: workers[worker].workspaceAllowed })),
-    default_execution: 'none', reenrollment_required: true };
+    default_execution: 'none', reenrollment_required: true, denied_repositories: deniedRepositories };
 }
 
 export function migrationMain(args = process.argv.slice(4)) {
@@ -106,6 +108,6 @@ export function migrationMain(args = process.argv.slice(4)) {
     else workspaceWorkers.push(args[i]);
   }
   const result = migrateWorkers({ home, sources, sourceDbs, workspaceWorkers });
-  process.stdout.write(json ? JSON.stringify(result) + '\n' : `Created ${result.workers.length} workers in ${result.home}; execution defaults to none. Re-enrol connectors, subscriptions and destination approvals using ${result.migration_manifest}. No sign-ins or jobs were copied.\n`);
+  process.stdout.write(json ? JSON.stringify(result) + '\n' : `Created ${result.workers.length} workers in ${result.home}; execution defaults to none. Re-enrol connectors, subscriptions and destination approvals using ${result.migration_manifest}. No sign-ins or jobs were copied.${result.denied_repositories.length ? ` Denied unaudited additions: ${result.denied_repositories.map(item => `${item.worker}: ${item.repos.join(', ')}`).join('; ')}.` : ''}\n`);
   return result;
 }

@@ -1,6 +1,6 @@
-// `dalan setup`: move from a trial link to a real, stable address. It detects what it can and asks as little as possible:
-// Tailscale found and ready for Funnel -> one yes/no question; not found -> one short choice. The answer is saved, so
-// `dalan try --public` asks nothing afterwards.
+// `dalan setup`: choose the saved public route. It detects what Tailscale can do and asks as little as possible:
+// Tailscale ready for Funnel -> one yes/no question; not found -> one short choice. `dalan try --public` asks for relay consent
+// before it exposes the temporary demo link.
 import readline from 'node:readline';
 import { INSTALL_URL, defaultTailscale, preflight, whichOnPath } from '../scripts/lib/expose-tailscale.mjs';
 import { readRouteSetting, writeRouteSetting } from './route-setting.mjs';
@@ -38,20 +38,20 @@ export async function runSetup({ env = process.env, out = process.stdout, input 
         say(SWITCH_NOTE);
         return { route: 'tailscale', changed: saved !== 'tailscale' };
       }
-      writeRouteSetting('localhost.run', env);
-      say('Saved. `dalan try --public` keeps making trial links (localhost.run). Run `dalan setup` again to switch.');
-      return { route: 'localhost.run', changed: saved !== 'localhost.run' };
+      writeRouteSetting('gozar', env);
+      say('Saved. `dalan try --public` uses Gozar for a temporary demo link. It can change or stop without warning. Run `dalan setup` again to switch.');
+      return { route: 'gozar', changed: saved !== 'gozar' };
     }
     say(found.reason);
     say('For daily use, pick one:');
     say(`  1. Tailscale (recommended): install it from ${INSTALL_URL}, run \`tailscale up\`, then run \`dalan setup\` again.`);
-    say('  2. Keep using trial links (localhost.run): no setup, but the address changes within hours.');
+    say('  2. Use Gozar for a temporary demo link: it can change or stop without warning.');
     if (!interactive) return { route: saved, changed: false };
     const answer = ((await ask('Choose [1]: ')) ?? '').trim();
     if (answer === '2') {
-      writeRouteSetting('localhost.run', env);
-      say('Saved. `dalan try --public` keeps making trial links.');
-      return { route: 'localhost.run', changed: saved !== 'localhost.run' };
+      writeRouteSetting('gozar', env);
+      say('Saved. `dalan try --public` uses Gozar for a temporary demo link. It can change or stop without warning.');
+      return { route: 'gozar', changed: saved !== 'gozar' };
     }
     say('Nothing saved. Install Tailscale, then run `dalan setup` again.');
     return { route: saved, changed: false };
