@@ -64,11 +64,15 @@ try {
   fs.writeFileSync(path.join(config, 'workers.json'), JSON.stringify({ workers: { codex: { repos: [] } } }), { mode: 0o600 });
   const candidate = path.join(tmp, 'candidate'); fs.mkdirSync(path.join(candidate, 'src'), { recursive: true });
   fs.writeFileSync(path.join(candidate, 'package.json'), JSON.stringify({ name: '@tnunamak/dalan', version: '0.6.0' }));
-  const scratchBase = path.join(os.homedir(), '.tmp'); fs.mkdirSync(scratchBase, { recursive: true, mode: 0o700 });
-  const beforeScratch = new Set(fs.readdirSync(scratchBase).filter(name => name.startsWith('dalan-candidate-')));
-  await assert.rejects(probeCandidate(home, { enable_workspace: false, enable_t3: false }, candidate, { spawn: () => { throw new Error('spawn failed'); } }), /spawn failed/);
-  await assert.rejects(probeCandidate(home, { node: path.join(tmp, 'missing-node'), enable_workspace: false, enable_t3: false }, candidate), /could not start/);
-  assert.deepEqual(new Set(fs.readdirSync(scratchBase).filter(name => name.startsWith('dalan-candidate-'))), beforeScratch);
+  const failedScratch = [];
+  await assert.rejects(probeCandidate(home, { enable_workspace: false, enable_t3: false }, candidate, { spawn: (_command, _args, options) => {
+    failedScratch.push(options.env.HOME); throw new Error('spawn failed');
+  } }), /spawn failed/);
+  await assert.rejects(probeCandidate(home, { node: path.join(tmp, 'missing-node'), enable_workspace: false, enable_t3: false }, candidate, { spawn: (command, args, options) => {
+    failedScratch.push(options.env.HOME); return spawn(command, args, options);
+  } }), /could not start/);
+  assert.equal(failedScratch.length, 2);
+  assert(failedScratch.every(directory => !fs.existsSync(directory)), 'failed probes remove their own scratch without depending on other concurrent probes');
 
   const socketDir = path.join(home, '.local', 'share', 'dot-bridge'); fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
   const socketPath = path.join(socketDir, 'admin.sock');
