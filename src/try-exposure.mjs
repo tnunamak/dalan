@@ -563,7 +563,7 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
       if (!Number.isInteger(gatePort) || gatePort < 1 || gatePort > 65535) throw new Error('the local gate port is not valid');
       // Expose silently reuses an existing controller. Refuse it before acquiring any cleanup responsibility.
       const before = await status(gatePort);
-      if (!removed(before.snapshot)) throw new Error(`port ${gatePort} already has a Gozar route; stop it first: ${recoveryCommand(gatePort)}`);
+      if (!removed(before.snapshot)) throw new Error(`port ${gatePort} already has a Gozar route; Dalan cannot confirm ownership and is leaving it untouched. Choose a different --port and --home for another trial.`);
       signal?.throwIfAborted();
       port = gatePort;
       // Pin the trial adapter; never let auto recommendation select the machine's Tailscale.
@@ -599,20 +599,46 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
     async stop() {
       await stopWatcher();
       if (port === null) return { removed: true };
-      const cleanupCommand = recoveryCommand(port);
+      let current;
       try {
-        const current = (await status(port)).snapshot;
-        if (removed(current) || (sessionId && current?.sessionId && current.sessionId !== sessionId)) {
-          port = null; sessionId = null;
-          return { removed: true };
+        current = (await status(port)).snapshot;
+      } catch (error) {
+        return { removed: false, detail: `Gozar session ownership could not be confirmed (${error.message}); leaving the route untouched. Choose a different --port and --home for another trial.` };
+      }
+      if (sessionId && current?.sessionId && current.sessionId !== sessionId) {
+        return { removed: false, detail: 'Gozar now reports a different session for this port; cleanup of this trial could not be confirmed. The replacement was left untouched. Choose a different --port and --home for another trial.' };
+      }
+      if (removed(current)) {
+        const noController = current.phase === 'unknown' && Array.isArray(current.limitations) && current.limitations.some(line => typeof line === 'string' && /^Controller unavailable:.*\b(?:ENOENT|ECONNREFUSED)\b/.test(line));
+        if (!noController && (!sessionId || current.sessionId !== sessionId)) {
+          return { removed: false, detail: 'Gozar reports no active route, but cleanup of this trial could not be confirmed because its session identity is missing. Choose a different --port and --home for another trial.' };
         }
-        // Without the expose receipt, or after controller identity is lost, port-only stop is unsafe.
-        if (!sessionId || current?.sessionId !== sessionId) throw new Error('Gozar session ownership could not be confirmed; leaving the route untouched');
-        const reply = await command(['stop', '--port', String(port), '--json']);
-        if (!removed(reply.snapshot) || reply.localCleanupFailures?.length) throw new Error('Gozar route cleanup is unconfirmed');
         port = null; sessionId = null;
         return { removed: true };
-      } catch (error) { return { removed: false, detail: error.message, command: cleanupCommand }; }
+      }
+      // This avoids stopping a session already known to be unowned; Gozar can still race a replacement after this check.
+      if (!sessionId || current?.phase === 'unknown' || current?.sessionId !== sessionId) {
+        return { removed: false, detail: 'Gozar session ownership could not be confirmed; leaving the route untouched. Choose a different --port and --home for another trial.' };
+      }
+      const cleanupCommand = recoveryCommand(port);
+      let reply;
+      try {
+        reply = await command(['stop', '--port', String(port), '--json']);
+      } catch (error) {
+        return { removed: false, detail: `Gozar route cleanup is unconfirmed (${error.message}); its current owner could not be confirmed. Choose a different --port and --home for another trial.` };
+      }
+      const stopped = reply?.snapshot;
+      if (!validStatus(stopped) || stopped.sessionId !== sessionId || stopped.phase === 'unknown') {
+        return { removed: false, detail: 'Gozar route cleanup is unconfirmed; its current owner could not be confirmed. Choose a different --port and --home for another trial.' };
+      }
+      if (removed(stopped) && !reply.localCleanupFailures?.length) {
+        port = null; sessionId = null;
+        return { removed: true };
+      }
+      if (stopped.phase === 'cleanup-pending' && stopped.published === null && stopped.candidate === null) {
+        return { removed: false, detail: 'Gozar reports cleanup pending for this session. Its recovery command stops by port and can race a route replacement; inspect the route before you run it.', command: cleanupCommand };
+      }
+      return { removed: false, detail: 'Gozar route cleanup is unconfirmed; its current owner could not be confirmed. Choose a different --port and --home for another trial.' };
     },
   };
 }
@@ -647,7 +673,7 @@ export async function startRoute({ route = 'gozar', providers, selectedProvider,
     signal?.throwIfAborted();
     try {
       const started = await provider.start({ gatePort, home, say, signal, lifetimeEndsAt });
-      return { provider, origin: started.origin, exited: started.exited, stop: () => provider.stop() };
+      return { provider, origin: started.origin, exited: started.exited, endedBecause: started.endedBecause, stop: () => provider.stop() };
     } catch (error) {
       const cleaned = await provider.stop().catch(e => ({ removed: false, keepNode: true, detail: e.message }));
       if (!cleaned.removed) throw Object.assign(new Error(`${provider.name} failed (${error.message}) and could not be removed: ${cleaned.detail}${cleaned.command ? `\nRemove it with:\n  ${cleaned.command}` : ''}`), { cleanupFailed: true, routeCleanup: cleaned });

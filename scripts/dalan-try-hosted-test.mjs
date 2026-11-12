@@ -1595,22 +1595,33 @@ test('Gozar refuses a preexisting session without exposing or stopping it', asyn
     const fake = fakeGozar(`existing-${phase}`);
     fake.setSnapshot({ sessionId: 'someone-else', phase, candidate: null, published: phase === 'published-ready' ? 'https://other.lhr.life' : null });
     const provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
-    await assert.rejects(startRoute({ route: 'gozar', providers: [provider], gatePort: 45679 }), /port 45679 already has a Gozar route; stop it first:/);
+    await assert.rejects(startRoute({ route: 'gozar', providers: [provider], gatePort: 45679 }), error => {
+      assert.match(error.message, /port 45679 already has a Gozar route/i);
+      assert.match(error.message, /leaving it untouched/i);
+      assert.match(error.message, /choose a different --port/i);
+      assert.doesNotMatch(error.message, /stop it first|stop --port/);
+      return true;
+    });
     assert.deepEqual(fake.calls().map(args => args[0]), ['status']);
   }
 });
 
 test('Gozar watcher detects route loss and replacement; cleanup leaves replacements alone', async () => {
-  for (const change of ['stopped', 'replacement', 'origin', 'unavailable']) {
+  for (const change of ['stopped', 'replacement', 'replacement-stopped', 'origin', 'unavailable']) {
     const fake = fakeGozar(`watch-${change}`);
     const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, pollMs: 10 });
     provider.probe();
     const route = await provider.start({ gatePort: 45680 });
     try {
       assert.ok(route.exited instanceof Promise);
-      fake.setSnapshot({ stopped: { sessionId: 'own-session', phase: 'stopped', candidate: null, published: null, resources: [] }, replacement: { sessionId: 'replacement', phase: 'published-ready', candidate: null, published: route.origin }, origin: { sessionId: 'own-session', phase: 'published-ready', candidate: null, published: 'https://changed.lhr.life' }, unavailable: { phase: 'unknown', candidate: null, published: null, limitations: ['Controller unavailable: ENOENT'] } }[change]);
+      fake.setSnapshot({ stopped: { sessionId: 'own-session', phase: 'stopped', candidate: null, published: null, resources: [] }, replacement: { sessionId: 'replacement', phase: 'published-ready', candidate: null, published: route.origin }, 'replacement-stopped': { sessionId: 'replacement', phase: 'stopped', candidate: null, published: null, resources: [] }, origin: { sessionId: 'own-session', phase: 'published-ready', candidate: null, published: 'https://changed.lhr.life' }, unavailable: { phase: 'unknown', candidate: null, published: null, limitations: ['Controller unavailable: ENOENT'] } }[change]);
       await Promise.race([route.exited, sleepMs(2000).then(() => { throw new Error('route loss was not observed'); })]);
-      assert.deepEqual(await provider.stop(), { removed: true });
+      const cleanup = await provider.stop();
+      if (change === 'replacement' || change === 'replacement-stopped') {
+        assert.equal(cleanup.removed, false, 'a different current session does not prove the old session was cleaned up');
+        assert.match(cleanup.detail, /cleanup of this trial could not be confirmed/i);
+      } else assert.deepEqual(cleanup, { removed: true });
+      assert.equal(cleanup.command, undefined, `${change}: do not suggest a stop command after ownership has moved or ended`);
       const count = fake.calls().length;
       await sleepMs(50);
       assert.equal(fake.calls().length, count, 'cleanup stops the watcher');
@@ -1625,7 +1636,23 @@ test('Gozar cleanup checks ownership again even before the next watcher poll', a
   provider.probe();
   await provider.start({ gatePort: 45681 });
   fake.setSnapshot({ sessionId: 'replacement', phase: 'published-ready', candidate: null, published: 'https://other.lhr.life' });
-  assert.deepEqual(await provider.stop(), { removed: true });
+  const cleanup = await provider.stop();
+  assert.equal(cleanup.removed, false, 'a foreign replacement leaves unresolved cleanup debt for the old session');
+  assert.equal(cleanup.command, undefined);
+  assert.match(cleanup.detail, /replacement was left untouched/i);
+  assert.ok(!fake.calls().some(args => args[0] === 'stop'));
+});
+
+test('Gozar stopped status without a session identity does not prove prior cleanup', async () => {
+  const fake = fakeGozar('cleanup-stopped-unowned');
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
+  provider.probe();
+  await provider.start({ gatePort: 45689 });
+  fake.setSnapshot({ phase: 'stopped', candidate: null, published: null, resources: [] });
+  const cleanup = await provider.stop();
+  assert.equal(cleanup.removed, false);
+  assert.match(cleanup.detail, /session identity is missing/i);
+  assert.equal(cleanup.command, undefined);
   assert.ok(!fake.calls().some(args => args[0] === 'stop'));
 });
 
@@ -1657,7 +1684,9 @@ test('Gozar malformed cleanup status leaves the route untouched and reports unco
       { sessionId: 'own-session', phase: 'unknown', candidate: null, published: null, resources: [null] },
     ]) {
       fake.setSnapshot(snapshot);
-      assert.equal((await provider.stop()).removed, false);
+      const cleanup = await provider.stop();
+      assert.equal(cleanup.removed, false);
+      assert.equal(cleanup.command, undefined, 'malformed status cannot authorize a port-only stop command');
       assert.ok(!fake.calls().some(args => args[0] === 'stop'));
     }
   } finally {
@@ -1674,7 +1703,9 @@ test('Gozar exit-1 ready status withdraws readiness and cannot authorize cleanup
   try {
     fake.failStatus();
     await Promise.race([route.exited, sleepMs(2000).then(() => { throw new Error('failed status kept readiness'); })]);
-    assert.equal((await provider.stop()).removed, false);
+    const cleanup = await provider.stop();
+    assert.equal(cleanup.removed, false);
+    assert.equal(cleanup.command, undefined, 'failed status cannot authorize a port-only stop command');
     assert.ok(!fake.calls().some(args => args[0] === 'stop'));
   } finally { fake.clearStatusFailure(); assert.deepEqual(await provider.stop(), { removed: true }); }
 });
@@ -1743,15 +1774,45 @@ test('Gozar stop reports cleanup debt instead of claiming removal', async () => 
   let exposed = false;
   const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, run: (binary, args, options, callback) => {
     if (args[0] === 'expose') exposed = true;
-    callback(null, JSON.stringify(args[0] === 'stop' ? { snapshot: { sessionId: 'own', phase: 'cleanup-pending', published: null }, localCleanupFailures: ['ssh still running'] } : { snapshot: exposed ? { sessionId: 'own', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : { phase: 'unknown', candidate: null, published: null, limitations: ['Controller unavailable: ENOENT'] } }));
+    callback(null, JSON.stringify(args[0] === 'stop' ? { snapshot: { sessionId: 'own', phase: 'cleanup-pending', candidate: null, published: null, resources: [{ cleanup: 'pending' }] }, localCleanupFailures: ['ssh still running'] } : { snapshot: exposed ? { sessionId: 'own', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : { phase: 'unknown', candidate: null, published: null, limitations: ['Controller unavailable: ENOENT'] } }));
   } });
   provider.probe();
   await provider.start({ gatePort: 12347 });
   const result = await provider.stop();
   assert.equal(result.removed, false);
-  assert.equal(result.detail, 'Gozar route cleanup is unconfirmed');
+  assert.match(result.detail, /Gozar reports cleanup pending for this session/);
+  assert.match(result.detail, /can race a route replacement/);
   assert.ok(result.command.includes(fake.binary));
   assert.match(result.command, /'stop' '--port' '12347'/);
+});
+
+test('Gozar stop failures and replies without this session never offer a recovery command', async () => {
+  for (const outcome of [
+    { name: 'transport failure', error: Object.assign(new Error('controller unavailable'), { code: 'EIO' }), stdout: JSON.stringify({ snapshot: { sessionId: 'own-session', phase: 'cleanup-pending', candidate: null, published: null, resources: [{ cleanup: 'pending' }] } }) },
+    { name: 'invalid JSON', error: null, stdout: '{' },
+    { name: 'unknown ownership', error: null, stdout: JSON.stringify({ snapshot: { sessionId: 'own-session', phase: 'unknown', candidate: null, published: null, resources: [], limitations: ['Controller unavailable: timeout'] } }) },
+    { name: 'stopped replacement', error: null, stdout: JSON.stringify({ snapshot: { sessionId: 'replacement', phase: 'stopped', candidate: null, published: null, resources: [] } }) },
+  ]) {
+    let exposed = false;
+    const calls = [];
+    const provider = gozarProvider({ resolveBundled: () => null, which: () => 'fake-gozar', run: (_binary, args, _options, callback) => {
+      calls.push(args[0]);
+      if (args[0] === 'status') {
+        const snapshot = exposed ? { sessionId: 'own-session', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : { phase: 'unknown', candidate: null, published: null, limitations: ['Controller unavailable: ENOENT'] };
+        callback(null, JSON.stringify({ snapshot }));
+      } else if (args[0] === 'expose') {
+        exposed = true;
+        callback(null, JSON.stringify({ snapshot: { sessionId: 'own-session', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } }));
+      } else callback(outcome.error, outcome.stdout);
+    } });
+    provider.probe();
+    await provider.start({ gatePort: 12348 });
+    const cleanup = await provider.stop();
+    assert.equal(cleanup.removed, false, outcome.name);
+    assert.equal(cleanup.command, undefined, `${outcome.name}: no command without a valid current cleanup-pending reply for this session`);
+    assert.match(cleanup.detail, /cleanup is unconfirmed|owner could not be confirmed/i, outcome.name);
+    assert.deepEqual(calls, ['status', 'expose', 'status', 'stop'], outcome.name);
+  }
 });
 
 const readyGozarFetch = async value => {
@@ -1761,6 +1822,22 @@ const readyGozarFetch = async value => {
   if (url.pathname.endsWith('/mcp')) return new Response('', { status: 401, headers: { 'www-authenticate': 'Bearer' } });
   return new Response('', { status: 404 });
 };
+
+test('localhost.run disclosure precedes route exposure', async () => {
+  const fake = fakeRoute(), start = fake.provider.start;
+  fake.provider.start = async options => {
+    options.say('Fixture begins localhost.run exposure.');
+    return start(options);
+  };
+  const run = await hostedRun('lr-notice', { argv: ['--route', 'localhost.run'], providers: [fake.provider] });
+  try {
+    await run.until(/Waiting for sign-in/);
+    const notice = run.out.indexOf('localhost.run is a third-party relay that can inspect forwarded traffic.');
+    assert.ok(notice >= 0, 'the explicit relay needs its traffic-inspection disclosure');
+    assert.ok(notice < run.out.indexOf('Fixture begins localhost.run exposure.'), 'disclosure must precede provider startup');
+    assert.equal(fake.record.started, 1);
+  } finally { assert.equal((await run.close()).error, undefined); }
+});
 
 test('Gozar consent explains the relay and waits for yes before exposing it', async () => {
   const fake = fakeGozar('consent-before-yes'), provider = gozarProvider({ resolveBundled: () => null, env: fake.env });
@@ -1823,6 +1900,100 @@ test('two public identity failures interrupt an unanswered approval and ignore l
     finally { db.close(); }
     assert.ok(pairing.code, 'a matching approval question was presented before route loss');
   } finally { await run.close(); }
+});
+
+test('Gozar rotation keeps the first issuer, stops the trial, and prints a fresh-home command', async () => {
+  const fake = fakeGozar('hosted-rotation');
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, pollMs: 10 });
+  let providerEndReason = null;
+  const startProvider = provider.start.bind(provider);
+  provider.start = async options => {
+    const started = await startProvider(options);
+    started.exited.then(() => { providerEndReason = started.endedBecause(); });
+    return started;
+  };
+  const verificationOrigins = new Set();
+  const run = await hostedRun('gozar-hosted-rotation', {
+    argv: ['--route', 'gozar'],
+    providers: [provider],
+    fetchImpl: async value => {
+      verificationOrigins.add(new URL(value).origin);
+      return readyGozarFetch(value);
+    },
+  });
+  const realFetch = globalThis.fetch;
+  const clientOrigins = [];
+  try {
+    await run.until(/Waiting for sign-in/);
+    const url = run.out.match(/https:\/\/trial\.lhr\.life\/[0-9a-f]{64}\/mcp/)?.[0];
+    assert.ok(url, 'the first Gozar connector URL is printed');
+    const firstOrigin = new URL(url).origin;
+    assert.equal(firstOrigin, 'https://trial.lhr.life');
+    globalThis.fetch = async (input, init) => {
+      const requestUrl = new URL(input instanceof Request ? input.url : String(input));
+      if (requestUrl.origin !== firstOrigin) return realFetch(input, init);
+      clientOrigins.push(requestUrl.origin);
+      const expose = fake.calls().find(args => args[0] === 'expose');
+      const gatePort = Number(gozarPort(expose));
+      const localUrl = `http://127.0.0.1:${gatePort}${requestUrl.pathname}${requestUrl.search}`;
+      const response = await realFetch(localUrl, init);
+      if (requestUrl.pathname.startsWith('/.well-known/oauth-protected-resource/')) {
+        const metadata = await response.clone().json();
+        for (const issuer of metadata.authorization_servers ?? []) verificationOrigins.add(issuer);
+      }
+      return response;
+    };
+    const pairing = await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
+    await run.until(/Approve this connection\? \[y\/N\] /);
+    assert.ok(pairing.code);
+    assert.equal(run.errorContext.started, true);
+
+    fake.setSnapshot({ sessionId: 'own-session', phase: 'published-ready', candidate: null, published: 'https://changed.lhr.life' });
+    const done = await Promise.race([run.finished, sleepMs(5000).then(() => { throw new Error('Gozar rotation did not stop the hosted trial'); })]);
+    assert.equal(providerEndReason, 'rotated', 'the Gozar provider identifies an address rotation');
+    assert.equal(done.error?.tryKind, 'route_lost');
+    assert.match(done.error?.message ?? '', /temporary demo link changed its address/);
+    const observedIssuers = [...verificationOrigins];
+    assert.ok(observedIssuers.includes(firstOrigin), 'the public-origin readiness check uses the first origin');
+    assert.ok(observedIssuers.every(issuer => new URL(issuer).origin === firstOrigin), 'the issuer and identity checks remain tied to the first origin');
+    assert.ok(clientOrigins.length > 0 && clientOrigins.every(origin => origin === firstOrigin), 'the client only used the first connector origin');
+    assert.doesNotMatch(run.out, /https:\/\/changed\.lhr\.life/, 'the replacement address is never offered to the client');
+
+    const formatted = tryInternals.formatTryError(done.error, run.errorContext);
+    assert.match(formatted, /The old connector URL cannot be used/);
+    const freshHome = /Start fresh with:\n\s*.*try --public --client chatgpt --route gozar --home '([^']+)'/.exec(formatted)?.[1];
+    assert.ok(freshHome && freshHome !== run.home && path.basename(freshHome).startsWith('dalan-hosted-'), 'recovery uses the generated fresh-home command');
+    assert.equal(fake.calls().filter(args => args[0] === 'stop').length, 1, 'cleanup stops the still-owned session');
+
+    const outputAtLoss = run.out;
+    run.input.write('y\n');
+    await sleepMs(30);
+    assert.equal(run.out, outputAtLoss, 'a late approval cannot continue the rotated trial');
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(path.join(run.home, '.config/dalan/as.sqlite'), { readOnly: true });
+    try { assert.equal(db.prepare('SELECT count(*) AS active FROM connections WHERE revoked_at IS NULL').get().active, 0); }
+    finally { db.close(); }
+  } finally {
+    globalThis.fetch = realFetch;
+    await run.close();
+  }
+});
+
+test('Gozar replacement reports unconfirmed cleanup without a stop command', async () => {
+  const originalExit = process.exitCode;
+  const fake = fakeGozar('hosted-replacement');
+  const provider = gozarProvider({ resolveBundled: () => null, env: fake.env, pollMs: 10 });
+  const run = await hostedRun('gozar-hosted-replacement', { argv: ['--route', 'gozar'], providers: [provider], fetchImpl: readyGozarFetch });
+  try {
+    await run.until(/Waiting for sign-in/);
+    fake.setSnapshot({ sessionId: 'replacement', phase: 'published-ready', candidate: null, published: 'https://other.lhr.life' });
+    const done = await Promise.race([run.finished, sleepMs(5000).then(() => { throw new Error('Gozar replacement did not stop the hosted trial'); })]);
+    assert.equal(done.error?.tryKind, 'route_lost');
+    assert.match(run.out, /public-route cleanup is unconfirmed: Gozar now reports a different session for this port/);
+    assert.match(run.out, /The replacement was left untouched\./);
+    assert.doesNotMatch(run.out, /Remove it with:|stop(?:\.mjs)? ['"].*--port/);
+    assert.equal(fake.calls().filter(args => args[0] === 'stop').length, 0, 'the foreign replacement is never stopped');
+  } finally { await run.close(); process.exitCode = originalExit; }
 });
 
 test('unsaved auto uses a usable Tailscale route before Gozar', async () => {
@@ -1969,13 +2140,14 @@ test('Gozar recovery commands execute the selected bundled CLI with its config i
   assert.deepEqual(trap.calls(), [], 'the PATH trap must never execute');
   assert.deepEqual(bundled.calls().at(-1), ['stop', '--port', '45687']);
   bundled.setSnapshot({ sessionId: 'other', phase: 'published-ready', candidate: null, published: 'https://other.lhr.life' });
+  const foreignCallStart = bundled.calls().length;
   await assert.rejects(provider.start({ gatePort: 45687 }), error => {
-    const command = error.message.split('stop it first: ')[1];
-    assert.ok(command);
-    const result = spawnSync('/bin/sh', ['-c', command], { env: { PATH: trap.env.PATH, HOME: '/wrong' }, encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr);
+    assert.match(error.message, /leaving it untouched/i);
+    assert.match(error.message, /choose a different --port/i);
+    assert.doesNotMatch(error.message, /stop it first|stop --port/);
     return true;
   });
+  assert.deepEqual(bundled.calls().slice(foreignCallStart).map(args => args[0]), ['status'], 'a foreign route is inspected but never stopped');
   assert.deepEqual(trap.calls(), []);
   }
 });
@@ -2061,21 +2233,29 @@ test('Gozar controller inspection timeout cannot prove a route absent', async ()
   const provider = gozarProvider({ which: () => 'gozar', run(binary, args, options, callback) {
     const action = args.find(value => ['status', 'expose', 'stop'].includes(value));
     calls.push(action);
-    const empty = { phase: 'unknown', candidate: null, published: null, resources: [], limitations: [`Controller unavailable: ${timeout ? 'timeout' : 'ENOENT'}`] };
+    const empty = { ...(exposed ? { sessionId: 'own' } : {}), phase: 'unknown', candidate: null, published: null, resources: [], limitations: [`Controller unavailable: ${timeout ? 'timeout' : 'ENOENT'}`] };
     if (action === 'expose') exposed = true;
     callback(null, JSON.stringify({ snapshot: action === 'expose' || (exposed && !timeout) ? { sessionId: 'own', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : empty }));
   } });
   provider.probe();
   await provider.start({ gatePort: 12348 });
   timeout = true;
-  assert.equal((await provider.stop()).removed, false, 'unavailable controller is unknown, not removed');
+  const cleanup = await provider.stop();
+  assert.equal(cleanup.removed, false, 'unavailable controller is unknown, not removed');
+  assert.match(cleanup.detail, /ownership could not be confirmed/i);
+  assert.equal(cleanup.command, undefined, 'unknown ownership has no port-only recovery command');
   assert.equal(calls.includes('stop'), false, 'port-only stop cannot act without observed session ownership');
   const next = gozarProvider({ which: () => 'gozar', run(binary, args, options, callback) {
     assert.ok(args.includes('status'), 'startup must not expose on unknown prior route state');
     callback(null, JSON.stringify({ snapshot: { phase: 'unknown', candidate: null, published: null, resources: [], limitations: ['Controller unavailable: timeout'] } }));
   } });
   next.probe();
-  await assert.rejects(next.start({ gatePort: 12349 }), /already has a Gozar route/);
+  await assert.rejects(next.start({ gatePort: 12349 }), error => {
+    assert.match(error.message, /already has a Gozar route/i);
+    assert.match(error.message, /leaving it untouched/i);
+    assert.doesNotMatch(error.message, /stop it first|stop --port/);
+    return true;
+  });
 });
 
 test('node sweeps require a present socket identity before signalling and retain incomplete records', async () => {

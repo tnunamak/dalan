@@ -35,7 +35,9 @@ The hosted demo is a text job, not a repository review. It grants no repository 
 
 ### Stop a trial
 
-Ctrl-C stops the trial. It also cancels a route that is still starting. Dalan closes its forwarding gate and attempts to remove its route. If it cannot confirm cleanup, it reports that and prints a recovery command.
+Ctrl-C stops the trial. It also cancels a route that is still starting. Dalan closes its forwarding gate and attempts to remove its route. If it cannot confirm cleanup, it reports that. When Gozar cannot confirm route ownership, Dalan leaves the route alone and gives no stop command; use a different port and home for another trial.
+
+If Gozar returns a cleanup-pending status for this trial, Dalan provides a recovery command that stops by port. Gozar does not bind that command to a session ID, so the route can change before the command runs. Inspect the current route before using it.
 
 On stop, Dalan removes the connector URL file. It also removes the bridge's secret file for temporary routes. It keeps the bridge configuration when a Tailscale route reuses the same home.
 
@@ -68,7 +70,7 @@ If the public address does not answer, the trial prints `TLS certificate: ok` or
 
 `--route gozar` explicitly selects the Gozar relay. Dalan still asks for consent before it exposes the route.
 
-`--route localhost.run` remains available as an explicit option. It uses OpenSSH and a temporary third-party relay. The address can change or stop without warning. Dalan attempts to close the route and reports cleanup it cannot confirm.
+`--route localhost.run` remains available as an explicit option. It uses OpenSSH and a temporary third-party relay. The relay terminates TLS and can inspect the connector URL and forwarded traffic. Dalan prints this notice before it starts the route. The address can change or stop without warning. Dalan attempts to close the route and reports cleanup it cannot confirm.
 
 In `auto` mode, a saved Gozar choice or an older saved localhost.run choice selects Gozar. Otherwise, auto uses a usable Tailscale route and selects Gozar when Tailscale is unavailable.
 

@@ -121,6 +121,9 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     signal?.throwIfAborted();
     selectedProvider = autoRoute && routeChoice === 'tailscale' ? tailscale :
       selectRouteProvider({ route: routeChoice, providers, say: line => routeMessages.push(line), signal });
+    if (selectedProvider?.name === 'localhost.run') {
+      routeMessages.push('localhost.run is a third-party relay that can inspect forwarded traffic.');
+    }
   }
   catch (error) { selectionError = error; } // Report startup failures after the home and cleanup context are ready.
   const stableHome = selectedProvider?.name === 'tailscale';
@@ -265,7 +268,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       }
       throw error;
     }
-    if (route.exited) route.exited.then(() => markRouteLost(route.provider.endedBecause?.() ?? 'provider_lost'));
+    if (route.exited) route.exited.then(() => markRouteLost(route.endedBecause?.() ?? route.provider.endedBecause?.() ?? 'provider_lost'));
     const origin = route.origin;
     say(`Public route ready (${route.provider.name}).`);
     if (storedOrigin && storedOrigin !== origin) {
