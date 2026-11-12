@@ -14,8 +14,8 @@ Fresh homes use Dalan directories; existing installations retain their populated
 
 ## Versions and upgrades
 
-**Versions (0.5.2).** Package releases and SQLite schema numbers are
-separate: this package is 0.5.2 and `Store` supports schema 65. The recorded
+**Versions (0.6.0).** Package releases and SQLite schema numbers are
+separate: this package is 0.6.0 and `Store` supports schema 66. The recorded
 0.2.0/0.3.0 release history is manual version bumps, changelog sections and tags;
 it does not establish a general compatibility promise. The 0.3.0 changelog puts
 operator actions first.
@@ -37,7 +37,7 @@ Even additive catalog changes need deliberate catalog review and coordinated
 connector Refresh + worker reboot when the advertised profile changes; see
 `scripts/catalog-golden-test.mjs` and the profile-specific protocol guidance.
 
-**Current schema behavior.** Startup refuses `user_version > 65` before schema bootstrap, making no schema or row change; SQLite may create, recover or clean up the `-wal` and `-shm` files. `Store.migrate()` advances supported historical layouts to schema 65; version 65 needs no version upgrade. Versions 35 and later must carry `s1v2-worker-facts-20261022` in `schema_migrations`; abandoned worker-isolation layouts are refused. Valid layout, keys and private permissions are also required: a version number alone is not compatibility proof. Migrations never run down; never edit `user_version` to force an old build to open newer state.
+**Current schema behavior.** Startup refuses `user_version > 66` before schema bootstrap, making no schema or row change; SQLite may create, recover or clean up the `-wal` and `-shm` files. `Store.migrate()` advances supported historical layouts to schema 66; version 66 needs no version upgrade. Versions 35 and later must carry `s1v2-worker-facts-20261022` in `schema_migrations`; abandoned worker-isolation layouts are refused. Valid layout, keys and private permissions are also required: a version number alone is not compatibility proof. Migrations never run down; never edit `user_version` to force an old build to open newer state.
 
 **Release checklist (followed for 0.3.0).** Update `package.json` and the lockfile to the
 same version; add a CHANGELOG section with operator actions first (backup,
@@ -202,7 +202,7 @@ Optional self-check timers are deployment-specific, so review their endpoint, is
 
 ## Upgrade and rollback
 
-The package version is `0.5.2`; the bridge database schema is version 65. Stop the service and every other writer before making a backup or replacing files; keep them stopped until the complete backup set is captured. Keep each backup set consistent: include `<home>/.local/share/dalan/bridge.db`, `delivery-acks.db`, `notify-sent.db`, `<config>/dalan/as.sqlite` when built-in authorization is used, the private `<config>/dalan` files, owner receipts in `<home>/.local/share/dalan/receipts`, and artifact ownership entries in `<home>/.local/share/dalan/artifact-index`. Preserve file permissions. Do not copy either `bridge.db.secrets/owner.sqlite` or `as-owner.sqlite` lock database; recreate them locally after restoring with the service stopped, as described above. If external OAuth is used, its issuer database is managed separately and is not part of this bridge backup.
+The package version is `0.6.0`; the bridge database schema is version 66. Stop the service and every other writer before making a backup or replacing files; keep them stopped until the complete backup set is captured. Keep each backup set consistent: include `<home>/.local/share/dalan/bridge.db`, `delivery-acks.db`, `notify-sent.db`, `<config>/dalan/as.sqlite` when built-in authorization is used, the private `<config>/dalan` files, owner receipts in `<home>/.local/share/dalan/receipts`, and artifact ownership entries in `<home>/.local/share/dalan/artifact-index`. Preserve file permissions. Do not copy either `bridge.db.secrets/owner.sqlite` or `as-owner.sqlite` lock database; recreate them locally after restoring with the service stopped, as described above. If external OAuth is used, its issuer database is managed separately and is not part of this bridge backup.
 
 Take each existing application database (`bridge.db`, `delivery-acks.db`, `notify-sent.db`, and `as.sqlite` when built-in authorization is used) with SQLite's `.backup` command into a fresh destination in a new backup directory. Run `umask 077` and create the directory with mode 0700 first, so every copy is private. For each existing source file, set `source` and `destination` to its full source and fresh backup paths, then run `[ ! -e "$destination" ] && sqlite3 -bail "$source" ".backup '$destination'" || exit 1` (use destination paths without single quotes). This refuses an existing destination, so it cannot overwrite an earlier backup such as the rollback set. Stop immediately on any error and discard the incomplete set; do not accept a partial set. Copy the matching keys and other non-database state listed here with their private permissions. Use `.backup` for every application database. If it fails, stop and fix the error; do not fall back to copying only the database file, because a stopped writer can leave committed rows in a `-wal` file or a hot `-journal` that SQLite needs for recovery. Use the installation's resolved roots, including legacy roots and configured paths. Never delete a `-wal` or `-journal` file from a live database just because the service stopped. When you restore a `.backup` snapshot, first move the current database and its `-wal`, `-shm` and `-journal` files aside together, with every process stopped; the snapshot is restored without the old database's sidecar files. The rollback recipe below does this for `bridge.db` (it removes `-wal` and `-shm`); when you restore `delivery-acks.db`, `notify-sent.db` or `as.sqlite` by hand, move aside that database's `-wal`, `-shm` and `-journal` files first.
 
@@ -390,7 +390,7 @@ Check that nothing is left: `systemctl --user list-units 'dot-bridge-*'` on Linu
 
 ### From 0.2.0
 
-0.2.0 uses schema 49; this release supports schema 65. Stop the service and take the consistent backup above **before first startup**. Include the subscription key at `bridge.db.secrets/storage.key` and built-in-AS `as-storage.key` when present; do not copy either `bridge.db.secrets/owner.sqlite` or `as-owner.sqlite` lock file. Preserve the private permissions and the artifact bytes, receipts and positive ACK proof.
+0.2.0 uses schema 49; this release supports schema 66. Stop the service and take the consistent backup above **before first startup**. Include the subscription key at `bridge.db.secrets/storage.key` and built-in-AS `as-storage.key` when present; do not copy either `bridge.db.secrets/owner.sqlite` or `as-owner.sqlite` lock file. Preserve the private permissions and the artifact bytes, receipts and positive ACK proof.
 
 The table comes from a source review of `Store.migrate()` and the helper migrations it calls. The migration batch runs in one `BEGIN IMMEDIATE` transaction. “Additive” describes the SQL, not backward compatibility:
 

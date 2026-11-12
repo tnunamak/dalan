@@ -2,7 +2,7 @@
 
 This guide takes you from a built-in OAuth connection to one completed job. Use ChatGPT on the web with custom MCP connections enabled for your account or workspace; UI labels can vary. The owner runs Dalan and approves the connection; the ChatGPT user connects the worker and starts its run. One person can perform both roles.
 
-**Just trying it?** Follow the [README hosted trial](../README.md#quickstart), including its release-status note: until the release, run `node bin/dalan.mjs try` from the checkout, because npm 0.5.2 has no hosted trial. It opens a temporary public route, prints the connector URL and the steps, and confirms that ChatGPT finished a demo job. The rest of this guide sets up a permanent bridge.
+**Just trying it?** Follow the [README hosted trial](../README.md#quickstart). It prints the connector URL and steps for a short hosted demo, then returns the agent's report to your terminal. The rest of this guide sets up a permanent bridge.
 
 ## Owner setup
 
