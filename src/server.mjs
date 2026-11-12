@@ -212,6 +212,8 @@ const iconBytes=fs.readFileSync(new URL('../docs/t3-connector-icon.png',import.m
 const iconSource=`data:image/png;base64,${iconBytes.toString('base64')}`;
 if(Buffer.byteLength(iconSource)>10000) throw new Error('server icon exceeds 10 KB');
 const serverInfo={name:catalogProfile==='legacy-v46'?'dot-bridge':'dalan',version:catalogProfile==='legacy-v46'?'0.2.0':'0.6.1',icons:[{src:iconSource,mimeType:'image/png',sizes:['128x128']}]};
+const packageVersion=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
+const serverInfo={name:catalogProfile==='legacy-v46'?'dot-bridge':'dalan',version:catalogProfile==='legacy-v46'?'0.2.0':packageVersion,icons:[{src:iconSource,mimeType:'image/png',sizes:['128x128']}]};
 // A quiet-delivery job in profile mode has no T3 thread; its response must not carry the T3 fields. Legacy profile keeps them.
 const withoutT3=response=>{ if(legacyProfile||response.delivery_mode!=='none') return response; const {t3_muted,thread_id,...rest}=response; return rest; };
 function mayPrepareCheckMetadata(response,worker,subject=null) {
@@ -431,8 +433,7 @@ if(fs.existsSync(catalogGuardFile)) {
   const normalize=value=>Array.isArray(value)?value.map(normalize):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,normalize(value[key])])):value;
   const ordered=catalogs=>Object.fromEntries(Object.keys(catalogs).sort().map(worker=>[worker,[...catalogs[worker]].sort((a,b)=>a.name.localeCompare(b.name))]));
   const actual=Object.fromEntries([...workers.workers.keys()].map(worker=>[worker,catalogProfile==='legacy-v46'?tools.filter(t=>!(t3Tools.has(t.name)||notifyTools.has(t.name))||hasCapability(workers,worker,'t3')):tools]));
-  const version=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
-  if(guard.version!==version||JSON.stringify(normalize(ordered(guard.catalogs??{})))!==JSON.stringify(normalize(ordered(actual))))throw new Error('service catalog guard mismatch');
+  if(guard.version!==packageVersion||JSON.stringify(normalize(ordered(guard.catalogs??{})))!==JSON.stringify(normalize(ordered(actual))))throw new Error('service catalog guard mismatch');
 }
 // A refusal that must stay tells the worker the next call and what to change; workers often do not retry a bare "invalid X".
 const argumentFixes={
@@ -1017,8 +1018,7 @@ const adminServer=http.createServer(async(req,res)=>{
         await dispatch({method:'ping'},principal);
         catalogs[worker]=(await dispatch({method:'tools/list'},principal)).tools;
       }
-      const version=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
-      return json(res,200,{version,catalogs,port:publicServer.address()?.port,self_check:true,update_protocol:1});
+      return json(res,200,{version:packageVersion,catalogs,port:publicServer.address()?.port,self_check:true,update_protocol:1});
     }
     dryRequested=url.pathname==='/submit-preview';
     log({kind:'admin_call',route:url.pathname,method:req.method});
