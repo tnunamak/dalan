@@ -645,7 +645,8 @@ test('process inspection separates failed checks from exit and reads Linux and m
   assert.deepEqual(processCommand(123, { ...linux, run: () => { throw error('ENOENT'); }, probe() {} }), { state: 'unknown' }, 'missing ps is not exit');
   let reads = 0;
   assert.deepEqual(processCommand(123, { ...linux, readFile: () => stat(String(++reads)) }), { state: 'unknown' }, 'PID reuse during ps is not a coherent identity');
-  const darwin = { platform: 'darwin', run: (_cmd, args) => {
+  const darwin = { platform: 'darwin', run: (_cmd, args, opts) => {
+    assert.equal(opts.env.LC_ALL, 'C'); assert.equal(opts.env.TZ, 'UTC');
     assert.deepEqual(args, ['-p', '123', '-o', 'lstart=,command=']);
     return { status: 0, stdout: 'Wed Nov 11 01:02:03 2026 tailscale cert\n' };
   } };

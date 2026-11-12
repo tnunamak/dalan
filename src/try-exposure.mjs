@@ -170,7 +170,7 @@ function recoverStaleFunnel(home, tailscale, recordName = 'trial') {
 const SOCKET_PATH_LIMIT = 100; // a unix socket path must fit sun_path (104 on macOS, 108 on Linux)
 const nodeCli = (sock, env) => args => spawnSync('tailscale', [`--socket=${sock}`, ...args], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
 // Inspection failure is not evidence of exit. Read Linux start ticks on both sides of ps so command and identity belong
-// to the same process. macOS supplies its start timestamp and command in one ps snapshot.
+// to the same process. macOS supplies its start timestamp and command in one ps snapshot, with a fixed locale and timezone.
 export const processCommand = (pid, { platform = process.platform, run = spawnSync, readFile = fs.readFileSync, probe = pid => process.kill(pid, 0) } = {}) => {
   const unknown = { state: 'unknown' }, absent = { state: 'absent' };
   if (!Number.isInteger(pid) || pid <= 0) return unknown;
@@ -183,7 +183,7 @@ export const processCommand = (pid, { platform = process.platform, run = spawnSy
   try {
     const before = platform === 'linux' ? startTicks() : null;
     if (!['linux', 'darwin'].includes(platform)) return unknown;
-    const out = run('ps', ['-p', String(pid), '-o', platform === 'darwin' ? 'lstart=,command=' : 'command='], { encoding: 'utf8', timeout: 5000 });
+    const out = run('ps', ['-p', String(pid), '-o', platform === 'darwin' ? 'lstart=,command=' : 'command='], { encoding: 'utf8', timeout: 5000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } });
     if (out.error || out.status !== 0 || !out.stdout?.trim()) {
       // Even ps exit 1 can be an inspection failure; only ESRCH confirms absence.
       try { probe(pid); } catch (error) { if (error.code === 'ESRCH') return absent; }
