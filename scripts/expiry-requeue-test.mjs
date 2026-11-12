@@ -207,7 +207,7 @@ try {
     s.finish('mg_finished',f.claim_id,'completed','done','ok');
     const snapshot=()=>JSON.stringify([s.db.prepare('SELECT request_id,payload,payload_hash,status,created_at,valid_until FROM assignments ORDER BY request_id').all(),s.db.prepare('SELECT * FROM claims ORDER BY request_id').all().map(({lease_boot_id,lease_deadline_monotonic_ms,...row})=>row),s.db.prepare('SELECT * FROM reports ORDER BY request_id').all()]);
     const before=snapshot();
-    s.db.exec('DROP TABLE destination_blocks; DROP TABLE destination_approvals; ALTER TABLE claims DROP COLUMN connection_id; ALTER TABLE claims DROP COLUMN destination_revision; ALTER TABLE assignments DROP COLUMN expiry_requeues; PRAGMA user_version=58;');s.db.close();
+    s.db.exec('DROP TABLE policy_work_orders; DROP TABLE destination_blocks; DROP TABLE destination_approvals; ALTER TABLE claims DROP COLUMN connection_id; ALTER TABLE claims DROP COLUMN destination_revision; ALTER TABLE assignments DROP COLUMN expiry_requeues; PRAGMA user_version=58;');s.db.close();
     s=new Store(file,{now:()=>now,limits});
     assert(s.db.prepare('PRAGMA user_version').get().user_version===66&&snapshot()===before,'F6 v58 rows changed');
     assert(s.db.prepare('SELECT expiry_requeues FROM assignments').all().every(r=>r.expiry_requeues===0),'F6 existing rows not initialized');
