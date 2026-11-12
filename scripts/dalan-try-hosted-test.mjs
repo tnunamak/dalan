@@ -676,7 +676,9 @@ test('a real live writer survives failed ps and identity reads, then its confirm
     fs.writeFileSync(file, JSON.stringify({ dir, certOut: out, certPid: child.pid, certCmd: identity.command, certStart: identity.start }));
     for (const fault of [
       { run: () => ({ status: null, error: Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }) }) },
-      { readFile: () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } },
+      ...(process.platform === 'linux'
+        ? [{ readFile: () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } }]
+        : [{ run: () => ({ status: 0, stdout: 'invalid start identity' }) }]),
     ]) {
       const lines = [];
       assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => processCommand(pid, fault), say: line => lines.push(line), kill() { assert.fail('writer is not signalled'); } }), []);
