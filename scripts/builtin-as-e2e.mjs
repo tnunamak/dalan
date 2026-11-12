@@ -18,6 +18,7 @@ import { createHash, createHmac, createCipheriv, createDecipheriv, createPublicK
 import { CALLBACK, Jar, Vendor, form, hit, pkce } from './live-trial/fake-vendor.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { fetchFresh as fetch } from '../src/test-support/fetch.mjs';
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
@@ -152,8 +153,9 @@ class Bridge {
   }
   sql(query, ...args) { const db = new DatabaseSync(path.join(this.config, 'as.sqlite')); db.exec('PRAGMA busy_timeout=5000'); try { return /^\s*select/i.test(query) ? db.prepare(query).all(...args) : db.prepare(query).run(...args); } finally { db.close(); } }
   bridgeDb(query, ...args) { const db = new DatabaseSync(path.join(this.home, '.local/share/dot-bridge/bridge.db')); db.exec('PRAGMA busy_timeout=5000'); try { return /^\s*select/i.test(query) ? db.prepare(query).all(...args) : db.prepare(query).run(...args); } finally { db.close(); } }
-  async rpc(bearer, method, params = {}) {
-    const res = await fetch(this.resource, { method: 'POST', headers: { 'content-type': 'application/json', ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method, params }) });
+  async rpc(bearer, method, params = {}, publicHost = null) {
+    const request = publicHost ? fetchForPublicHost(publicHost) : fetch;
+    const res = await request(this.resource, { method: 'POST', headers: { 'content-type': 'application/json', ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method, params }) });
     const text = await res.text();
     return { status: res.status, headers: res.headers, body: text ? JSON.parse(text) : null };
   }
@@ -1487,7 +1489,7 @@ try {
       };
       const externalSubscription = await bridge.rpc(token(), 'events/subscribe', {
         name: 'assignment.available', arguments: {}, delivery: { mode: 'webhook', url: externalReceiver.url, secret: `whsec_${randomBytes(32).toString('base64')}` },
-      });
+      }, new URL(audience).host);
       assert.equal(externalSubscription.status, 200, 'external OAuth worker can subscribe after restart');
 
       const externalRequest = `req_mode_external_${randomUUID().slice(0, 8)}`;

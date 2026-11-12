@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
+const fetch=fetchForPublicHost('catalog-fixture.invalid');
 // Real loopback HTTP catalogs. All identities, keys and state are disposable fixtures.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

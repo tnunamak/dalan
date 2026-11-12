@@ -10,6 +10,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { CALLBACK, Vendor } from './live-trial/fake-vendor.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
+import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
@@ -288,7 +289,8 @@ try {
     await check(`route absent in ${mode.name} mode (404 even with a token file present)`, async () => {
       fs.writeFileSync(path.join(mode.config, 'signal-token'), `${'e'.repeat(64)}\n`, { mode: 0o600 });
       await mode.start().catch(() => { throw new Error(`${mode.name} bridge did not start`); });
-      assert.equal((await fetch(signalUrl(mode.pub, 'e'.repeat(64)))).status, 404);
+      const request = mode === oauthMode ? fetchForPublicHost('example.invalid') : fetch;
+      assert.equal((await request(signalUrl(mode.pub, 'e'.repeat(64)))).status, 404);
       const r = mode.cli(['connect', 'signal-token']);
       assert.notEqual(r.code, 0, 'owner command must fail without the built-in server');
       await mode.stop();

@@ -25,7 +25,7 @@ const nativeClaimId = (adapter, alias) => adapter.nativeClaim(alias);
 // Send a request and drop the connection right after the bytes are flushed: the server commits, the client never reads the reply.
 function postDropReply(adapter, subject, name, args) {
   return new Promise(resolve => {
-    const req = http.request({ host: '127.0.0.1', port: adapter.port, method: 'POST', path: `/${adapter.secret}/mcp`, headers: { 'content-type': 'application/json', authorization: `Bearer ${adapter.token(subject)}` } });
+    const req = http.request({ host: '127.0.0.1', port: adapter.port, method: 'POST', path: `/${adapter.secret}/mcp`, headers: { host: 'dot-bridge.example.test', 'content-type': 'application/json', authorization: `Bearer ${adapter.token(subject)}` } });
     req.on('error', () => resolve({ dropped: true }));
     req.on('finish', () => setTimeout(() => { req.destroy(); resolve({ dropped: true }); }, 5));
     req.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }));
