@@ -139,7 +139,10 @@ try {
   }
   assert.equal((await adapter.admin('GET','/status')).value.owner_waiter_count,1);
   await adapter.control({op:'advance',to:10001});await adapter.tick();
-  const expiredWait=await deadlineWait;
+  let wakeDeadline;
+  const expiredWait=await Promise.race([deadlineWait,new Promise((_,reject)=>{
+    wakeDeadline=setTimeout(()=>reject(new Error('expiry sweep did not wake the owner before wait timeout')),1000);
+  })]).finally(()=>clearTimeout(wakeDeadline));
   assert.equal(expiredWait.value.status,'cancelled');assert.equal(expiredWait.value.cancelled_reason,'expired');
   assert.equal(adapter.q1('SELECT state FROM policy_work_orders WHERE request_id=?',deadlinePayload.request_id).state,'cancelled');
   const timeoutPayload={...assignment('req_pull_wait_boundary'),valid_until:new Date(adapter.baseMs+11000).toISOString()};
@@ -152,6 +155,9 @@ try {
   assert.equal((await adapter.admin('GET','/status')).value.owner_waiter_count,1);
   await adapter.control({op:'advance',to:11001});
   assert.equal((await boundaryWait).value.status,'cancelled');
+  // The adapter captures maintenance timers; without tick(), the parent remains
+  // unswept. Only the real wait timeout can return its projected terminal state.
+  assert.equal(adapter.q1('SELECT state FROM policy_work_orders WHERE request_id=?',timeoutPayload.request_id).state,'queued');
   // Exercise the owner CLI against the real private socket, including the
   // durable receipt used before and after materialization.
   const cli=(...args)=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,['bin/dalan.mjs',...args],{env:fixtureEnv(adapter.home)});let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.on('error',reject);child.on('close',code=>resolve({code,stdout,stderr}));});
