@@ -7,6 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { acquireAsOwner, asFiles, LIFETIMES, PAIRING_MINUTES, loadAsConfig, loadKeys, isLoopbackCallback, matchesCallback, parseAsConfig, parseCallbackPattern, parseNativeLoopback, saveAsCallbacks, untrusted } from './as-files.mjs';
 import { AsStore, LIMITS, normalizeCode, showCode } from './as-store.mjs';
+import { matchRegisteredRedirect, validateRedirectUri } from './redirect-policy.mjs';
+import { approvalFacts, approvalRecord, describeClient } from './client-approval.mjs';
 
 // The built-in authorization server. The protocol (registration, PKCE, codes, tokens, rotation, revocation) is the maintained
 // oidc-provider library. This file holds only configuration, the owner-approval policy around it, and the lookup that turns a
@@ -53,17 +55,11 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
   if (!secure && !allowHttp && !loopback) throw new Error('as: an http public_url needs the explicit test flag');
   let patterns = config.patterns;
   if (new URL(resource).origin !== publicUrl.origin) throw new Error('as: resource must live on the public URL');
-  const callbackAllowed = uri => matchesCallback(patterns, uri);
+  // Who may register is decided by the redirect URI's own properties (src/redirect-policy.mjs), never by a list of vendors or a client name.
+  // Owner-added patterns from older versions stay valid, so an existing registration keeps working; they only add, never restrict.
+  const callbackAllowed = uri => validateRedirectUri(uri).ok || matchesCallback(patterns, uri);
   // Native registrations ignore only the port; the approved request still binds the full redirect URI.
-  const registeredRedirectAllowed = (client, redirect) => client?.redirectUris?.some(uri => {
-    if(uri===redirect)return true;
-    try {
-      const requested = parseNativeLoopback(redirect);
-      const registered = parseNativeLoopback(uri);
-      return requested.loopback && registered.loopback
-        && requested.hostname === registered.hostname && requested.pathname === registered.pathname;
-    } catch { return false; }
-  });
+  const registeredRedirectAllowed = (client, redirect) => matchRegisteredRedirect(client?.redirectUris, redirect);
 
   const policy = (ctx, metadata) => {
     if (Buffer.byteLength(JSON.stringify(metadata)) > 4096 || (metadata.client_name?.length ?? 0) > 128 || (metadata.redirect_uris?.length ?? 0) > 8 || metadata.redirect_uris?.some(uri => uri.length > 512)) throw new errors.InvalidClientMetadata('client metadata exceeds the size limit');
@@ -71,7 +67,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     for (const uri of metadata.redirect_uris) {
       if (!callbackAllowed(uri)) {
         log({ kind: 'as_registration_refused' });
-        throw new errors.InvalidClientMetadata('redirect_uris must each match an allowed vendor callback (dalan connect allow-callback)');
+        throw new errors.InvalidClientMetadata('redirect_uris must each be a plain https URL or a native loopback URL (http://127.0.0.1, http://[::1] or http://localhost)');
       }
     }
     const nativeRedirects = metadata.redirect_uris.map(uri => isLoopbackCallback(new URL(uri)));
@@ -349,7 +345,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
       const scopes = requestedScopes(details.params.scope);
       const redirect = details.params.redirect_uri;
       if (!scopes.some(s => ACCEPTED_SCOPES.includes(s))) return page(res, 400, 'No usable scope', '<p>The app asked for no scope that this bridge offers.</p>');
-      if (!client || !registeredRedirectAllowed(client, redirect) || !callbackAllowed(redirect)) return page(res, 400, 'Callback not allowed', '<p>The app\'s callback address is not on this bridge\'s allowed list.</p>');
+      if (!client || !registeredRedirectAllowed(client, redirect) || !callbackAllowed(redirect)) return page(res, 400, 'Callback not allowed', '<p>The app\'s callback address is not an address this bridge accepts (a plain https URL, or a native loopback URL registered by the app).</p>');
       if (details.params.resource !== resource) return page(res, 400, 'Wrong resource', '<p>The app did not ask for this bridge\'s resource.</p>');
       try {
         pairing = store.pairingFor(uid, { client_id: client.clientId, client_name: untrusted(client.clientName), redirect_uri: redirect, resource, scopes: scopes.join(' '), interaction_expires_at: details.exp * 1000 }, window);
@@ -361,7 +357,9 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     if (!window || window.worker !== pairing.worker) return page(res, 403, 'Not accepting connections', '<p>This bridge is not accepting new connections right now.</p>');
     const code = showCode(pairing.code);
     const native = isLoopbackCallback(new URL(pairing.redirect_uri));
-    page(res, 200, 'Connect to Dalan', `<p>Pairing code</p><p class="code">${html(code)}</p><p>Run approval on the bridge computer:</p><pre>dalan connect approve ${html(code)} --worker ${html(pairing.worker)}</pre>${native ? '<p>Native client, identity not verified: host and name prove nothing. The owner must compare this code with the teammate\'s browser page over a trusted channel. The redirect confirmation is only a typo check, not proof of identity.</p>' : ''}<p>This page waits. It checks again every few seconds.</p>`, { refresh: 3 });
+    const facts = approvalFacts(describeClient({ name: pairing.client_name, clientId: pairing.client_id, redirectUri: pairing.redirect_uri, worker: pairing.worker, issuer: shownIssuer, resource: shownResource(pairing.resource), scopes: pairing.scopes.split(' '), code }));
+    const factList = `<dl>${facts.map(([label, value]) => `<dt>${html(label)}</dt><dd>${html(value)}</dd>`).join('')}</dl>`;
+    page(res, 200, 'Connect to Dalan', `<p>Pairing code</p><p class="code">${html(code)}</p>${factList}<p>Run approval on the bridge computer:</p><pre>dalan connect approve ${html(code)} --worker ${html(pairing.worker)}</pre>${native ? '<p>Native client, identity not verified: host and name prove nothing. The owner must compare this code with the teammate\'s browser page over a trusted channel. The redirect confirmation is only a typo check, not proof of identity.</p>' : '<p>The client name and redirect above are set by the app and are not verified. The owner approves only the code that matches this page.</p>'}<p>This page waits. It checks again every few seconds.</p>`, { refresh: 3 });
   }
   async function complete(req, res, details, pairing, client) {
     const connection = store.connectionByGrant(pairing.grant_id);
@@ -387,16 +385,21 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
   };
   // The owner CLI never prints the bridge path secret (approve output checks this), so show the resource's origin and shape only.
   const shownResource = resource => `${new URL(resource).origin}/<secret>/mcp`;
-  const pendingView = pairing => ({
-    code: showCode(pairing.code), worker: pairing.worker, client_id: pairing.client_id, client_name: untrusted(pairing.client_name), client_name_untrusted: true,
-    native: isLoopbackCallback(new URL(pairing.redirect_uri)),
-    redirect_uri: pairing.redirect_uri, resource: shownResource(pairing.resource), scopes: pairing.scopes.split(' '), age_seconds: Math.max(0, Math.round((now() - pairing.created_at) / 1000)),
-    expires_in_seconds: Math.max(0, Math.round((pairing.expires_at - now()) / 1000)),
-  });
+  const shownIssuer = `${publicUrl.origin}/<secret>/oauth`; // the issuer carries the secret path prefix too
+  const pendingView = pairing => {
+    const shown = describeClient({ name: pairing.client_name, clientId: pairing.client_id, redirectUri: pairing.redirect_uri, worker: pairing.worker, issuer: shownIssuer, resource: '', scopes: [] });
+    return {
+      code: showCode(pairing.code), worker: pairing.worker, client_id: pairing.client_id, client_name: untrusted(pairing.client_name), client_name_untrusted: true,
+      native: isLoopbackCallback(new URL(pairing.redirect_uri)),
+      redirect_uri: pairing.redirect_uri, redirect_host: shown.redirect_host, redirect_origin: shown.redirect_origin, redirect_punycode: shown.redirect_punycode,
+      resource: shownResource(pairing.resource), scopes: pairing.scopes.split(' '), age_seconds: Math.max(0, Math.round((now() - pairing.created_at) / 1000)),
+      expires_in_seconds: Math.max(0, Math.round((pairing.expires_at - now()) / 1000)),
+    };
+  };
   const known = worker => typeof worker === 'string' && workerNames().includes(worker);
   const ops = {
     addClient({ redirectUri, name } = {}) {
-      if (!callbackAllowed(redirectUri)) throw new Error('redirect_uri must match an allowed vendor callback');
+      if (!callbackAllowed(redirectUri)) throw new Error('redirect_uri must be a plain https URL or a native loopback URL');
       if (name !== undefined && (typeof name !== 'string' || name.length > 100 || !untrusted(name, 80))) throw new Error('name must be a non-empty string of at most 100 characters');
       const metadata = {
         client_id: randomUUID(), redirect_uris: [redirectUri], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
@@ -409,7 +412,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
       delete persisted.client_secret_expires_at;
       const createdAt = store.addStaticClient(client.clientId, persisted);
       log({ kind: 'static_client_added', client_id: client.clientId });
-      return { client_id: client.clientId, created_at: new Date(createdAt).toISOString() };
+      return { client_id: client.clientId, token_endpoint_auth_method: 'none', redirect_uris: [redirectUri], created_at: new Date(createdAt).toISOString() };
     },
     clients() {
       return { clients: store.clientRows().map(({ client_id, metadata, created_at, is_static }) => ({
@@ -472,7 +475,8 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
         const { connection_id, replaced } = store.commitApproval({ code: pairing.code, worker, grantId, snapshot: pairing, replace });
         if (replaced) store.revokeGrant(replaced.grant_id, 'replaced');
         log({ kind: 'connection_approved', connection_id, worker, client_id: pairing.client_id, replaced: !!replaced });
-        return { approved: true, connection_id, worker, grant_id: grantId, client_id: pairing.client_id, redirect_uri: pairing.redirect_uri, scopes: pairing.scopes.split(' '), replaced: replaced?.connection_id ?? null };
+        const approval = approvalRecord({ worker, issuer: shownIssuer, resource: shownResource(pairing.resource), clientId: pairing.client_id, redirectUri: pairing.redirect_uri, scopes: pairing.scopes.split(' '), approvedAt: now(), connectionId: connection_id });
+        return { approved: true, connection_id, worker, grant_id: grantId, client_id: pairing.client_id, redirect_uri: pairing.redirect_uri, redirect_origin: approval.redirectOrigin, approval, scopes: pairing.scopes.split(' '), replaced: replaced?.connection_id ?? null };
       } catch (error) {
         store.failPairing(pairing.code);
         if (grantId) { try { store.revokeGrant(grantId, 'approval_failed'); } catch { /* the grant has no connection row; deleting its rows is enough */ } }
@@ -482,7 +486,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     list() {
       const window = store.window();
       return { window: window ? { worker: window.worker, expires_at: new Date(window.expires_at).toISOString() } : null, callbacks: patterns.map(p => p.pattern),
-        connections: store.connections().map(c => ({ connection_id: c.connection_id, worker: c.worker, client_id: c.client_id, redirect_uri: c.redirect_uri, scopes: c.scopes.split(' '), created_at: new Date(c.created_at).toISOString(), revoked_at: c.revoked_at === null ? null : new Date(c.revoked_at).toISOString(), revoked_reason: c.revoked_reason })) };
+        connections: store.connections().map(c => ({ connection_id: c.connection_id, worker: c.worker, client_id: c.client_id, redirect_uri: c.redirect_uri, redirect_origin: validateRedirectUri(c.redirect_uri).origin ?? null, scopes: c.scopes.split(' '), created_at: new Date(c.created_at).toISOString(), revoked_at: c.revoked_at === null ? null : new Date(c.revoked_at).toISOString(), revoked_reason: c.revoked_reason })) };
     },
     revoke({ worker }) {
       if (!known(worker)) throw new Error('unknown worker');

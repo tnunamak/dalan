@@ -1,17 +1,19 @@
 // Proves a live `dalan try` public address works as a real OAuth client sees it, step by step, without claude.ai:
-// discovery, dynamic registration with the client's published callback, PKCE authorize, the owner's approval in the trial
+// discovery, dynamic registration with an ordinary HTTPS callback, PKCE authorize, the owner's approval in the trial
 // terminal, the token exchange, then an authenticated MCP initialize, tools/list and one read-only tool call.
 // One line per step. No token, authorization code, pairing code, secret path or URL is ever written to the output.
 import { createHash, randomBytes } from 'node:crypto';
 import { safeDiagnostic } from './diagnostic.mjs';
-import { CLIENTS } from './try-hosted-clients.mjs';
 import { authorizationServerMetadataUrl, onOrigin, TRIAL_ORIGIN_RULE } from './try-exposure.mjs';
 import { mcpResponseText } from './mcp-sse.mjs';
 
 const MCP_PROTOCOL = '2025-11-25';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, say = () => {}, approveWaitMs = 300_000, requestMs = 30_000, signal } = {}) {
+// The check registers a throwaway generic client. Its redirect is an ordinary HTTPS URL: the bridge accepts any plain one.
+export const SELFCHECK_REDIRECT = 'https://selfcheck.example/oauth/callback';
+
+export async function runSelfCheck({ url, redirect = SELFCHECK_REDIRECT, fetchImpl = fetch, say = () => {}, approveWaitMs = 300_000, requestMs = 30_000, signal } = {}) {
   let mcp;
   try { mcp = new URL(url); } catch { mcp = null; }
   if (!mcp || !['https:', 'http:'].includes(mcp.protocol)) { // the message is fixed: the supplied text may be a credential
@@ -19,7 +21,7 @@ export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, 
     say('RESULT FAIL');
     return { ok: false, results: [{ name: 'input', status: 'FAIL', detail: 'the trial URL is not a valid web address' }] };
   }
-  const callback = CLIENTS[client].callbacks.find(c => typeof c === 'string'); // the client's stable, published callback
+  const callback = redirect;
   const results = [];
   let failed = false;
   const step = async (name, fn) => {
@@ -68,7 +70,7 @@ export async function runSelfCheck({ url, client = 'claude', fetchImpl = fetch, 
     if (!meta.code_challenge_methods_supported?.includes('S256')) throw new Error('S256 is not supported');
     ctx.meta = meta;
   });
-  await step(`registration: ${client}'s published callback is accepted as a public client`, async () => {
+  await step(`registration: an ordinary HTTPS callback is accepted as a public client`, async () => {
     const res = await get(ctx.meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ redirect_uris: [callback], client_name: 'dalan self-check', token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] }) });
     if (res.status !== 201) throw new Error(`HTTP ${res.status}`);
