@@ -607,7 +607,7 @@ function assertRepoAllowed(worker,assignment) {
   }
 }
 function admitPolicyWorker(worker,assignment,execution,approvedRevision) {
-  assertTarget(currentRepoPolicy(),worker);
+  assertTarget(repoPolicyFor(assignment),worker);
   assertRepoAllowed(worker,assignment);
   const snapshot=store.destinationSnapshot(worker,execution,assignment);
   if((snapshot?.revision??null)!==(approvedRevision??null)||snapshot&&!snapshot.policy.allowed||snapshot?.connections_digest==='sha256:'+createHash('sha256').update('[]').digest('hex')) throw new Error('policy destination approval changed or unavailable');

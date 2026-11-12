@@ -42,7 +42,9 @@ async function fixture(t,{native=false}={}) {
   Object.assign(env,{HOME:home,NODE_ENV:'test',DALAN_LOOPBACK:'1',DALAN_AUTH_MODE:'builtin',DALAN_PORT:String(port),DALAN_ENABLE_WORKSPACE:'1',DALAN_GITHUB_URL_ACME_PROJECT:repository,TEST_CLAIM_SHA:sha,...(native?{DALAN_CATALOG_PROFILE:'protocol-v0'}:{})});
   fs.mkdirSync(config,{recursive:true,mode:0o700});
   fs.writeFileSync(path.join(config,'limits.json'),JSON.stringify({max_claimed_outer_assignments:6}),{mode:0o600});
-  fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'worker',workers:{dot:{destination:declaration,repos:['acme/project']},other:{}}}),{mode:0o600});
+  const workersFile=path.join(config,'workers.json');
+  const writeWorkers=value=>fs.writeFileSync(workersFile,typeof value==='string'?value:JSON.stringify(value),{mode:0o600});
+  writeWorkers({default_execution:'worker',workers:{dot:{destination:declaration,repos:['acme/project']},other:{}}});
   execFileSync(process.execPath,['bin/dalan.mjs','as-init','--public-url',`http://127.0.0.1:${port}`],{cwd:code,env,stdio:'pipe'});
   const barrier=path.join(home,'barrier.mjs');
   fs.writeFileSync(barrier,`import {pathToFileURL} from 'node:url';
@@ -94,7 +96,8 @@ Workspace.prototype.quiesce=async function(id,...args) {
     const preview=await admin('/submit-preview',body);assert.ok(preview.destination_disclosure,JSON.stringify(preview));
     const result=await admin('/submit',{...body,destination_revision:preview.destination_disclosure.revision});assert.ok(!result.error,JSON.stringify(result));
   }
-  return {a,auth,child,connect,submit,rpc,sha,dbFile:path.join(data,'bridge.db')};
+  return {a,auth,child,connect,submit,rpc,admin,writeWorkers,sha,home,dbFile:path.join(data,'bridge.db'),
+    logFile:path.join(home,'.local/state/dalan/requests.jsonl')};
 }
 
 test('built-in HTTP replacement cannot replay or claim an old approval',{timeout:30000},async t=>{
@@ -150,4 +153,45 @@ for(const native of [false,true]) test('built-in revoke during awaited PR prefli
     assert.equal(db.prepare('SELECT count(*) n FROM claim_command_receipts WHERE job=?').get(id).n,0);
     assert.equal(db.prepare("SELECT count(*) n FROM protocol_events WHERE request_id=? AND event_type='claimed'").get(id).n,0);
   } finally {db.close();}
+});
+
+test('policy claim masks workers.json detail after successful held PR preflight',{timeout:30000},async t=>{
+  const f=await fixture(t),id='req_http_policy_privacy',canary='PRIVATE_CONFIG_CANARY_PULL_63c1';
+  const good={default_execution:'worker',workers:{dot:{destination:declaration,repos:['acme/project'],workspaceAllowed:true},other:{}}};
+  f.writeWorkers(good);
+  const validUntil=new Date(Date.now()+3600000).toISOString();
+  const body={assignment:{...assignment(id),inputs:[{github_repo:'acme/project',pr_number:7,base_sha:f.sha,head_sha:f.sha}],
+    scope_paths:['README.md'],prepared_at:new Date(Date.now()-1000).toISOString(),valid_until:validUntil},
+    routing:{version:1,allowed_workers:['dot'],fan_out:1,deadline_at:validUntil},owner_token:'owner',delivery:'none',execution:'worker'};
+  const preview=await f.admin('/submit-preview',body);
+  assert.ok(preview.destination_disclosures?.dot,JSON.stringify(preview));
+  const submitted=await f.admin('/submit',{...body,destination_revisions:{dot:preview.destination_disclosures.dot.revision}});
+  assert.ok(submitted.work_order_id,JSON.stringify(submitted));
+  const initial=await f.rpc(f.a,'get',{request_id:id});
+  assert.equal(initial.status,'queued',JSON.stringify(initial));
+
+  const armed=once(f.child,'message');f.child.send({armPreflight:true});assert.deepEqual((await armed)[0],{armed:true});
+  const barrier=once(f.child,'message');
+  const claiming=f.rpc(f.a,'claim',{request_id:id,claimant:'privacy-test',acquisition_id:'acq_'+id});claiming.catch(()=>{});
+  assert.deepEqual((await barrier)[0],{preflight:true});
+  f.writeWorkers({default_execution:'worker',workers:{dot:{destination:declaration,repos:[canary+'/../fixture'],workspaceAllowed:true},other:{}}});
+  f.child.send({continue:true});
+  const result=await claiming;
+  const expected=JSON.stringify({error:'destination_configuration_invalid',request_id:id,
+    message:'Current destination configuration is unavailable or invalid; restore it before a new admission. Cause: configuration could not be loaded'});
+  assert.equal(result.error,expected);
+  assert.doesNotMatch(result.error,new RegExp(canary+'|workers\\.json|'+f.home.replaceAll('.','\\.')));
+
+  const db=new DatabaseSync(f.dbFile,{readOnly:true});
+  try {
+    const order=db.prepare('SELECT state,child_request_id FROM policy_work_orders WHERE request_id=?').get(id);
+    assert.equal(order.state,'queued');
+    assert.equal(order.child_request_id,null);
+    assert.equal(db.prepare('SELECT count(*) n FROM assignments WHERE request_id=?').get(id).n,0);
+    assert.equal(db.prepare('SELECT count(*) n FROM claims WHERE request_id=?').get(id).n,0);
+  } finally {db.close();}
+
+  const diagnostic=fs.readFileSync(f.logFile,'utf8').split('\n').map(line=>line.trim()).filter(Boolean).map(JSON.parse)
+    .find(entry=>entry.kind==='destination_configuration_error'&&entry.reason?.includes(canary));
+  assert.ok(diagnostic,'owner-side log should retain the configuration diagnosis');
 });
