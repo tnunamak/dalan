@@ -263,4 +263,34 @@ try {
     assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(path.join(f.home, 'versions', '0.7.0', 'node_modules', '@tnunamak', 'dalan')));
     assert.ok(fs.existsSync(path.join(f.home, 'update-backup', 'snapshot', '.snapshot-complete.json')));
   }
+  {
+    // P2: a rolled-back release is not retried by later runs unless retry is explicit.
+    const failOnce = f => { let armed = true; return async (_r, action) => { if (action === 'daemon-reload' && armed) { armed = false; throw new Error('reload failed'); } f.events.push(action); }; };
+    const f = fixture(); f.seams.controlService = failOnce(f); f.seams.healthTimeoutMs = 200;
+    await assert.rejects(updateService({ home: f.home }, f.seams), /reload failed/);
+    assert.equal(serviceStatus({ home: f.home }).failed_release, '0.7.0');
+    f.events.length = 0;
+    const skipped = await updateService({ home: f.home }, f.seams);
+    assert.equal(skipped.outcome, 'skipped_failed_release'); assert.equal(skipped.failed_version, '0.7.0');
+    assert.equal(skipped.current_version, '0.6.0'); assert.equal(skipped.latest_version, '0.7.0');
+    assert.deepEqual(f.events, []);
+    assert.equal(serviceStatus({ home: f.home }).failed_release, '0.7.0');
+    const retried = await updateService({ home: f.home, retry: true }, f.seams);
+    assert.equal(retried.outcome, 'updated'); assert.ok(f.events.includes('install'));
+    assert.equal(serviceStatus({ home: f.home }).failed_release, null);
+    assert.equal(fs.existsSync(path.join(f.home, 'update-failed.json')), false);
+  }
+  for (const [label, next] of [['newer version', { version: '0.8.0', dist: { integrity: 'sha512-test' } }], ['different integrity', { dist: { integrity: 'sha512-other' } }]]) {
+    const f = fixture(); let armed = true;
+    f.seams.controlService = async (_r, action) => { if (action === 'daemon-reload' && armed) { armed = false; throw new Error('reload failed'); } f.events.push(action); };
+    f.seams.healthTimeoutMs = 200;
+    await assert.rejects(updateService({ home: f.home }, f.seams), /reload failed/);
+    f.events.length = 0;
+    const newer = { ...release, ...next };
+    f.seams.latestRelease = async () => newer;
+    f.seams.probeCandidate = async () => ({ version: newer.version, catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } });
+    const r = await updateService({ home: f.home }, f.seams);
+    assert.equal(r.outcome, 'updated', label); assert.ok(f.events.includes('install'), label);
+    assert.equal(serviceStatus({ home: f.home }).failed_release, null, label);
+  }
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

@@ -218,7 +218,7 @@ dalan service auto-update off --home HOME_PATH
 dalan service auto-update on --home HOME_PATH
 ```
 
-The home defaults to `~/.local/share/dalan-service`; pass the home used for installation if it differs. `service status` shows the selected version, saved automatic-update preference and last update result. Use `systemctl --user list-timers` to inspect the actual timer schedule. Turning updates off prevents future starts; it does not cancel an update already running. Preference changes refuse while an update holds the home lock.
+The home defaults to `~/.local/share/dalan-service`; pass the home used for installation if it differs. `service status` shows the selected version, saved automatic-update preference and last update result. Use `systemctl --user list-timers` to inspect the actual timer schedule. Turning updates off prevents future starts; it does not cancel an update already running. Preference changes refuse while an update holds the home lock. A release that was rolled back is recorded and skipped on later runs, including the timer; `dalan service update --retry` tries it again, and a newer or republished release is attempted normally. `service status` shows it as `failed_release`.
 
 `--check` queries the public npm registry for the latest stable `@tnunamak/dalan` version and reports availability without installation or restart. A normal update installs the exact release under `HOME_PATH/versions/<version>`, with npm integrity checks and install scripts disabled. The registry's integrity value binds the downloaded bytes to its metadata; it is not an independent publisher signature. The original package must remain available until the first successful update. Later starts use the selected package through `HOME_PATH/current`.
 
