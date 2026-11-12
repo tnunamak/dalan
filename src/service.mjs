@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
 import { defaultPath } from './paths.mjs';
-import { initAsFiles } from './as-files.mjs';
+import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
 import { resolveGozarCommand } from './try-exposure.mjs';
@@ -390,22 +390,21 @@ export async function installService(o, seams = {}) {
     : resolveGozarCommand({ env, resolveBundled: seams.resolveBundled, which: seams.which });
   if (!gozar.binary) fail('Gozar is unavailable; reinstall @tnunamak/dalan with its dependencies, or install gozar on PATH or set GOZAR_BIN to an executable path, then retry service install.');
   assertGozarStatePath(env);
+  const needsEnrollmentRestart = replaceLegacyUnit || !!previous && (!previous.repo || previous.enrollment_pending === true);
   const spawn = seams.spawn ?? spawnSync;
   runCommand('systemctl', ['--user', 'show-environment'], { env, spawn });
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
   if (!homeScope.hasReceipt) writePrivate(receiptFile, `${JSON.stringify({ ...installReceipt(o.home, configDir, o, profile.workers), repo, node, unit_dir: unitDir, auto_update: autoUpdate }, null, 2)}\n`);
   if (!hasCurrent) fs.symlinkSync(repo, current);
   const homeFiles = prepareHome(o, profile);
+  if (needsEnrollmentRestart) {
+    writeAtomic(receiptFile, `${JSON.stringify({ ...previous, repo: previous.repo ?? repo, node, unit_dir: unitDir, auto_update: autoUpdate, enrollment_pending: true }, null, 2)}\n`);
+  }
   if (replaceLegacyUnit) fs.writeFileSync(path.join(unitDir, `${name}.service`), files[`${name}.service`]);
   writeUnits(unitDir, files);
-  if (previous && !previous.repo) {
-    const temporary = `${receiptFile}.enroll`;
-    fs.writeFileSync(temporary, `${JSON.stringify({ ...previous, repo, node, unit_dir: unitDir, auto_update: autoUpdate }, null, 2)}\n`, { mode: 0o600, flag: 'w' });
-    fs.renameSync(temporary, receiptFile);
-  }
   runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn });
   runCommand('systemctl', ['--user', 'enable', '--now', ...enable], { env, spawn });
-  if (replaceLegacyUnit) runCommand('systemctl', ['--user', 'restart', `${name}.service`], { env, spawn });
+  if (needsEnrollmentRestart) runCommand('systemctl', ['--user', 'restart', `${name}.service`], { env, spawn });
   const dataDir = defaultPath(o.home, '.local/share/dot-bridge');
   const ready = await (seams.waitForSocket ?? socketIsReady)(path.join(dataDir, 'admin.sock'), seams.socketTimeoutMs ?? 30000);
   if (!ready) fail(`Dalan did not start on its admin socket; the unit and home remain for inspection: systemctl --user status ${name}.service`);
@@ -422,6 +421,11 @@ export async function installService(o, seams = {}) {
     fail(`Gozar did not verify the service route; the bridge is running and the service route needs repair: ${JSON.stringify(routeReply).slice(0, 1500)}`);
   }
   await setAutoUpdate({ home: o.home, enabled: autoUpdate }, { ...seams, env, spawn });
+  if (needsEnrollmentRestart) {
+    const enrolled = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    delete enrolled.enrollment_pending;
+    writeAtomic(receiptFile, `${JSON.stringify(enrolled, null, 2)}\n`);
+  }
   return { schema_version: 1, home: o.home, unit: `${name}.service`, units: Object.keys(files), port: o.port,
     workers: profile.workers, public_url: `${o.origin}/<secret>/mcp`, resource_url_file: homeFiles.resourceFile,
     target: o.target.value, started: true, route: routeReply.route, auto_update: autoUpdate };

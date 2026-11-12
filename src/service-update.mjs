@@ -140,27 +140,36 @@ async function probeReady(probe, home, receipt, attempts = 40) {
   }
   throw error ?? new Error('service did not become ready');
 }
-async function recover(home, receipt, control, probe) {
-  const file = path.join(home, 'update-transaction.json'); if (!fs.existsSync(file)) return;
-  const tx = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (tx.home !== home || !tx.oldRepo || !tx.snapshot) fail('invalid interrupted update transaction');
+async function recover(home, control, probe) {
+  const file = path.join(home, 'update-transaction.json');
+  let txStat;
+  try { txStat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  if (!txStat.isFile() || txStat.isSymbolicLink() || (txStat.mode & 0o777) !== 0o600) fail('update transaction must be a private regular file');
+  let tx;
+  try { tx = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fail('update transaction is invalid JSON'); }
+  const oldReceipt = tx?.oldReceipt;
+  if (tx.home !== home || !oldReceipt || oldReceipt.home !== home || oldReceipt.schema_version !== 1 || !oldReceipt.unit ||
+      !tx.oldRepo || !tx.oldVersion || !tx.snapshot || !['prepared', 'switched', 'committed'].includes(tx.phase)) fail('invalid interrupted update transaction');
+  if (tx.unitFile !== (oldReceipt.unit ? unitPath(oldReceipt, home) : null) || !tx.oldCatalogs || typeof tx.oldCatalogs !== 'object') fail('update transaction control data is invalid');
+  const backupRoot = path.join(home, 'update-backup');
+  if (path.resolve(tx.snapshot) !== path.join(backupRoot, 'snapshot')) fail('update transaction snapshot path is invalid');
   if (tx.phase === 'committed') {
     fs.rmSync(file, { force: true });
     try { fs.rmSync(path.dirname(tx.snapshot), { recursive: true, force: true }); } catch { /* committed service stays selected */ }
     return;
   }
   if (tx.phase === 'prepared') {
-    await control(receipt, 'restart');
-    const live = await probeReady(probe, home, { ...receipt, repo: tx.oldRepo });
+    await control(oldReceipt, 'restart');
+    const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo });
     if (live.version !== tx.oldVersion || tx.oldCatalogs && !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs))) fail('interrupted update recovery could not verify old service');
   }
   else {
     validateSnapshot(tx);
-    await control(receipt, 'stop'); select(home, tx.oldRepo);
+    await control(oldReceipt, 'stop'); select(home, tx.oldRepo);
     if (tx.unitFile && tx.oldUnit != null) atomic(tx.unitFile, tx.oldUnit);
     for (const item of ['.config', '.local']) replaceTree(path.join(tx.snapshot, item), path.join(home, item));
-    await control(receipt, 'daemon-reload'); await control(receipt, 'restart');
-    const live = await probeReady(probe, home, { ...receipt, repo: tx.oldRepo });
+    await control(oldReceipt, 'daemon-reload'); await control(oldReceipt, 'restart');
+    const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo });
     if (tx.oldCatalogs && (live.version !== tx.oldVersion || !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs)))) fail('interrupted update recovery restored selection but old service health failed');
   }
   fs.rmSync(file, { force: true }); fs.rmSync(path.dirname(tx.snapshot), { recursive: true, force: true });
@@ -192,8 +201,8 @@ export async function updateService({ home, check = false, yes = false }, seams 
   const resultFile = path.join(home, 'update-result.json');
   let result;
   try {
+    await recover(home, control, probe);
     const { value: receipt, file: receiptFile } = readReceipt(home);
-    await recover(home, receipt, control, probe);
     let current = path.join(home, 'current');
     let oldRepo = fs.existsSync(current) ? fs.realpathSync(current) : receipt.repo;
     if (!oldRepo || !fs.existsSync(oldRepo)) fail('current service repository is missing');
@@ -225,7 +234,7 @@ export async function updateService({ home, check = false, yes = false }, seams 
     if (configurationDigest(home, receipt) !== digestBeforeRecheck || digestBeforeRecheck !== configBeforeCandidate) fail('service configuration changed during update; retry after connector refresh');
     const unitFile = receipt.unit ? unitPath(receipt, home) : null;
     const txDir = path.join(home, 'update-backup'); privateDir(txDir);
-    const tx = { home, oldRepo, candidate, snapshot: path.join(txDir, 'snapshot'), unitFile, oldUnit: unitFile && fs.existsSync(unitFile) ? fs.readFileSync(unitFile, 'utf8') : null, oldCatalogs: base.catalogs, oldVersion, phase: 'prepared' };
+    const tx = { home, oldRepo, candidate, snapshot: path.join(txDir, 'snapshot'), unitFile, oldUnit: unitFile && fs.existsSync(unitFile) ? fs.readFileSync(unitFile, 'utf8') : null, oldCatalogs: base.catalogs, oldVersion, oldReceipt: { ...receipt }, phase: 'prepared' };
     if (unitFile && tx.oldUnit == null) fail(`service unit is missing: ${unitFile}`);
     atomic(path.join(home, 'update-transaction.json'), JSON.stringify(tx));
     try {

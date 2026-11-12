@@ -30,6 +30,25 @@ function fixture(overrides = {}) {
   };
   return { home, events, seams, repo };
 }
+function interruptedSwitch(f, { config = 'present', receiptCommitted = false } = {}) {
+  const candidate = path.join(f.home, 'versions', '0.7.0', 'node_modules', '@tnunamak', 'dalan');
+  fs.mkdirSync(candidate, { recursive: true }); fs.writeFileSync(path.join(candidate, 'package.json'), JSON.stringify({ name: '@tnunamak/dalan', version: '0.7.0' }));
+  const receiptFile = path.join(f.home, '.config', 'dot-bridge', 'service-install.json');
+  const oldReceipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  const txDir = path.join(f.home, 'update-backup'), snapshot = path.join(txDir, 'snapshot');
+  fs.mkdirSync(snapshot, { recursive: true }); fs.cpSync(path.join(f.home, '.config'), path.join(snapshot, '.config'), { recursive: true });
+  fs.writeFileSync(path.join(snapshot, '.snapshot-complete.json'), JSON.stringify({ complete: true, roots: { '.config': true, '.local': false } }));
+  if (receiptCommitted) fs.writeFileSync(receiptFile, JSON.stringify({ ...oldReceipt, repo: candidate, version: '0.7.0' }), { mode: 0o600 });
+  if (config === 'missing') fs.rmSync(path.join(f.home, '.config'), { recursive: true, force: true });
+  if (config === 'partial') {
+    fs.rmSync(path.join(f.home, '.config'), { recursive: true, force: true });
+    fs.mkdirSync(path.join(f.home, '.config'), { recursive: true });
+    fs.writeFileSync(path.join(f.home, '.config', 'partial'), 'interrupted restore');
+  }
+  fs.unlinkSync(path.join(f.home, 'current')); fs.symlinkSync(path.relative(f.home, candidate), path.join(f.home, 'current'));
+  fs.writeFileSync(path.join(f.home, 'update-transaction.json'), JSON.stringify({ home: f.home, oldRepo: f.repo, candidate, snapshot, unitFile: path.join(f.home, 'units', 'dalan-unit.service'), oldUnit: `WorkingDirectory=${f.repo}\nExecStart=${process.execPath} ${f.repo}/src/server.mjs\n`, oldCatalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] }, oldVersion: '0.6.0', oldReceipt, phase: 'switched' }), { mode: 0o600 });
+  return { candidate, oldReceipt };
+}
 
 try {
   {
@@ -70,27 +89,30 @@ try {
   }
   {
     const f = fixture();
-    const candidate = path.join(f.home, 'versions', '0.7.0', 'node_modules', '@tnunamak', 'dalan');
-    fs.mkdirSync(candidate, { recursive: true }); fs.writeFileSync(path.join(candidate, 'package.json'), JSON.stringify({ name: '@tnunamak/dalan', version: '0.7.0' }));
-    const txDir = path.join(f.home, 'update-backup'), snapshot = path.join(txDir, 'snapshot');
-    fs.mkdirSync(snapshot, { recursive: true }); fs.cpSync(path.join(f.home, '.config'), path.join(snapshot, '.config'), { recursive: true });
-    fs.writeFileSync(path.join(snapshot, '.snapshot-complete.json'), JSON.stringify({ complete: true, roots: { '.config': true, '.local': false } }));
-    fs.writeFileSync(path.join(f.home, '.config', 'dot-bridge', 'marker'), 'mutated');
-    fs.unlinkSync(path.join(f.home, 'current')); fs.symlinkSync(path.relative(f.home, candidate), path.join(f.home, 'current'));
-    fs.writeFileSync(path.join(f.home, 'update-transaction.json'), JSON.stringify({ home: f.home, oldRepo: f.repo, candidate, snapshot, unitFile: path.join(f.home, 'units', 'dalan-unit.service'), oldUnit: `WorkingDirectory=${f.repo}\nExecStart=${process.execPath} ${f.repo}/src/server.mjs\n`, oldCatalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] }, oldVersion: '0.6.0', phase: 'switched' }));
+    const { candidate } = interruptedSwitch(f, { receiptCommitted: true });
     await updateService({ home: f.home }, { ...f.seams, latestRelease: async () => ({ ...release, version: '0.6.0' }) });
     assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
-    assert.equal(fs.existsSync(path.join(f.home, '.config', 'dot-bridge', 'marker')), false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, '.config', 'dot-bridge', 'service-install.json'), 'utf8')).version, undefined);
     assert.equal(fs.existsSync(path.join(f.home, '.config', 'dot-bridge', 'service-catalog.json')), false);
     assert.deepEqual(f.events.slice(0, 3), ['stop', 'daemon-reload', 'restart']);
+    assert.notEqual(candidate, fs.realpathSync(path.join(f.home, 'current')));
+  }
+  for (const configState of ['missing', 'partial']) {
+    const f = fixture();
+    const { candidate, oldReceipt } = interruptedSwitch(f, { config: configState });
+    const controlReceipts = [];
+    const seams = { ...f.seams, latestRelease: async () => ({ ...release, version: '0.6.0' }), controlService: async (r, action) => { controlReceipts.push(r); f.events.push(action); } };
+    await updateService({ home: f.home }, seams);
+    assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, '.config', 'dot-bridge', 'service-install.json'), 'utf8')).home, f.home);
+    assert.deepEqual(f.events.slice(0, 3), ['stop', 'daemon-reload', 'restart']);
+    assert.ok(controlReceipts.every(r => r.repo === oldReceipt.repo));
+    assert.notEqual(candidate, fs.realpathSync(path.join(f.home, 'current')));
   }
   {
     const f = fixture();
-    const candidate = path.join(f.home, 'versions', '0.7.0', 'node_modules', '@tnunamak', 'dalan');
-    fs.mkdirSync(candidate, { recursive: true }); fs.writeFileSync(path.join(candidate, 'package.json'), JSON.stringify({ name: '@tnunamak/dalan', version: '0.7.0' }));
-    const snapshot = path.join(f.home, 'update-backup', 'snapshot'); fs.mkdirSync(snapshot, { recursive: true });
-    fs.unlinkSync(path.join(f.home, 'current')); fs.symlinkSync(path.relative(f.home, candidate), path.join(f.home, 'current'));
-    fs.writeFileSync(path.join(f.home, 'update-transaction.json'), JSON.stringify({ home: f.home, oldRepo: f.repo, candidate, snapshot, oldVersion: '0.6.0', phase: 'switched' }));
+    const { candidate } = interruptedSwitch(f);
+    fs.rmSync(path.join(f.home, 'update-backup', 'snapshot', '.snapshot-complete.json'));
     fs.writeFileSync(path.join(f.home, '.config', 'dot-bridge', 'keep'), 'important');
     await assert.rejects(updateService({ home: f.home }, f.seams), /snapshot is missing or incomplete/);
     assert.equal(fs.readFileSync(path.join(f.home, '.config', 'dot-bridge', 'keep'), 'utf8'), 'important');

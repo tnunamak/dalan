@@ -98,6 +98,17 @@ test('new installs default on, retries preserve opt-out, explicit opt-in works',
     const enrolled = await installService(options, seams);
     assert.equal(enrolled.auto_update, false, 'old installs enroll without changing their update preference');
     assert(JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json'))).unit_dir);
+    // The unit was written, but the installer died before the old process restarted.
+    fs.writeFileSync(path.join(f.config, 'service-install.json'), JSON.stringify(oldReceipt));
+    calls.length = 0;
+    await installService(options, seams);
+    assert(calls.some(call => call[0] === 'systemctl' && call[2] === 'restart'), 'enrollment resumes even when the unit already matches');
+    const pending = JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json')));
+    fs.writeFileSync(path.join(f.config, 'service-install.json'), JSON.stringify({ ...pending, enrollment_pending: true }));
+    calls.length = 0;
+    await installService(options, seams);
+    assert(calls.some(call => call[0] === 'systemctl' && call[2] === 'restart'), 'committed enrollment receipt still requires pending restart');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json'))).enrollment_pending, undefined);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

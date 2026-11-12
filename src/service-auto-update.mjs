@@ -32,20 +32,20 @@ export async function setAutoUpdate({ home, enabled }, seams = {}) {
   if (typeof enabled !== 'boolean') throw new Error('auto-update requires on or off');
   home = path.resolve(home);
   if (fs.realpathSync(home) !== home) throw new Error('service home must not use a symlink');
-  const config = defaultPath(home, '.config/dot-bridge');
-  const receiptFile = path.join(config, 'service-install.json');
-  const info = fs.lstatSync(receiptFile);
-  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) throw new Error('service receipt must be a private regular file');
-  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-  if (receipt.home !== home || !receipt.unit_dir || !receipt.node) throw new Error('reinstall this service with the current Dalan release before enabling automatic updates');
-  if (!safePath.test(receipt.unit_dir) || !path.isAbsolute(receipt.unit_dir) || fs.realpathSync(receipt.unit_dir) !== receipt.unit_dir) throw new Error('service unit directory must be a real absolute directory');
   const releaseLock = acquireUpdateLock(home);
-  const spawn = seams.spawn ?? spawnSync;
-  const run = args => {
-    const result = spawn('systemctl', ['--user', ...args], { encoding: 'utf8', env: seams.env ?? process.env, timeout: 30000, maxBuffer: 1024 * 1024 });
-    if (result.error || result.status !== 0) throw new Error(`systemctl ${args.join(' ')} failed: ${result.error?.message ?? result.stderr ?? result.status}`);
-  };
   try {
+    const config = defaultPath(home, '.config/dot-bridge');
+    const receiptFile = path.join(config, 'service-install.json');
+    const info = fs.lstatSync(receiptFile);
+    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) throw new Error('service receipt must be a private regular file');
+    const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    if (receipt.home !== home || !receipt.unit_dir || !receipt.node) throw new Error('reinstall this service with the current Dalan release before enabling automatic updates');
+    if (!safePath.test(receipt.unit_dir) || !path.isAbsolute(receipt.unit_dir) || fs.realpathSync(receipt.unit_dir) !== receipt.unit_dir) throw new Error('service unit directory must be a real absolute directory');
+    const spawn = seams.spawn ?? spawnSync;
+    const run = args => {
+      const result = spawn('systemctl', ['--user', ...args], { encoding: 'utf8', env: seams.env ?? process.env, timeout: 30000, maxBuffer: 1024 * 1024 });
+      if (result.error || result.status !== 0) throw new Error(`systemctl ${args.join(' ')} failed: ${result.error?.message ?? result.stderr ?? result.status}`);
+    };
     const { files, timer } = autoUpdateUnits(receipt);
     // Refuse collisions before replacing either generated unit.
     for (const [name, text] of Object.entries(files)) {
