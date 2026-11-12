@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "clients": [
+    {
+      "id": "chatgpt",
+      "name": "ChatGPT",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIGZpbGw9IiMxMGEzN2YiLz48dGV4dCB4PSIzMiIgeT0iNDIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjMwIiBmb250LXdlaWdodD0iNzAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmZmIj5DPC90ZXh0Pjwvc3ZnPg==",
+      "verifiedRedirectOrigins": [
+        "https://chatgpt.com"
+      ],
+      "deepLink": null,
+      "setupHints": [
+        "Open ChatGPT's custom connector setup. Menu names vary by plan and release.",
+        "Enter the complete MCP endpoint and choose OAuth with automatic (dynamic) client registration.",
+        "Compare the pairing code on the browser page with the code on the bridge computer before approving."
+      ],
+      "evidence": {
+        "sourceUrl": "https://developers.openai.com/plugins/deploy/connect-chatgpt",
+        "checkedAt": "2026-11-12",
+        "runtimeTested": false
+      }
+    },
+    {
+      "id": "claude",
+      "name": "Claude",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIGZpbGw9IiNkOTc3NTciLz48dGV4dCB4PSIzMiIgeT0iNDIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjMwIiBmb250LXdlaWdodD0iNzAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmZmIj5DPC90ZXh0Pjwvc3ZnPg==",
+      "verifiedRedirectOrigins": [
+        "https://claude.ai"
+      ],
+      "deepLink": null,
+      "setupHints": [
+        "Open Customize, then Connectors, and add a custom connector.",
+        "Enter the complete MCP endpoint and choose Register automatically.",
+        "Compare the pairing code on the browser page with the code on the bridge computer before approving."
+      ],
+      "evidence": {
+        "sourceUrl": "https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp",
+        "checkedAt": "2026-11-12",
+        "runtimeTested": false
+      }
+    },
+    {
+      "id": "muse",
+      "name": "Muse",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIGZpbGw9IiM2ZDVkZmMiLz48dGV4dCB4PSIzMiIgeT0iNDIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjMwIiBmb250LXdlaWdodD0iNzAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmZmIj5NPC90ZXh0Pjwvc3ZnPg==",
+      "verifiedRedirectOrigins": [
+        "https://agent.meta.ai"
+      ],
+      "deepLink": null,
+      "setupHints": [
+        "Add a remote MCP server in Muse and enter the complete MCP endpoint.",
+        "Start its OAuth sign-in and leave the Dalan sign-in page open.",
+        "Compare the pairing code on the browser page with the code on the bridge computer before approving."
+      ],
+      "evidence": {
+        "sourceUrl": "https://agent.meta.ai/",
+        "checkedAt": "2026-11-12",
+        "runtimeTested": false
+      }
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIGZpbGw9IiMxZjI5MzciLz48dGV4dCB4PSIzMiIgeT0iNDIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjMwIiBmb250LXdlaWdodD0iNzAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmZmIj5DPC90ZXh0Pjwvc3ZnPg==",
+      "verifiedRedirectOrigins": [
+        "https://www.cursor.com"
+      ],
+      "deepLink": {
+        "template": "cursor://anysphere.cursor-deeplink/mcp/install?name={name}&config={config}",
+        "encoding": "base64-json",
+        "sourceUrl": "https://cursor.com/docs/mcp/install-links",
+        "checkedAt": "2026-11-12"
+      },
+      "setupHints": [
+        "Open the install link on the computer that runs Cursor, review the server it adds, and install it.",
+        "Cursor shows its own sign-in prompt for the server. Compare the pairing code before approving."
+      ],
+      "evidence": {
+        "sourceUrl": "https://cursor.com/docs/mcp/install-links",
+        "checkedAt": "2026-11-12",
+        "runtimeTested": false
+      }
+    },
+    {
+      "id": "vscode",
+      "name": "VS Code",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIGZpbGw9IiMwMDdhY2MiLz48dGV4dCB4PSIzMiIgeT0iNDIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjMwIiBmb250LXdlaWdodD0iNzAwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZmZmIj5WPC90ZXh0Pjwvc3ZnPg==",
+      "verifiedRedirectOrigins": [],
+      "deepLink": {
+        "template": "vscode:mcp/install?{config}",
+        "encoding": "url-component",
+        "sourceUrl": "https://code.visualstudio.com/api/extension-guides/ai/mcp",
+        "checkedAt": "2026-11-12"
+      },
+      "setupHints": [
+        "Open the install link on the computer that runs VS Code. It opens the server editor so you can review the configuration first.",
+        "Start the server from VS Code and finish its sign-in. Compare the pairing code before approving."
+      ],
+      "evidence": {
+        "sourceUrl": "https://code.visualstudio.com/api/extension-guides/ai/mcp",
+        "checkedAt": "2026-11-12",
+        "runtimeTested": false
+      }
+    }
+  ]
+}

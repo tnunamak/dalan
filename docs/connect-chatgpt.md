@@ -1,6 +1,8 @@
 # Connect ChatGPT as a Dalan worker
 
-This guide takes you from a built-in OAuth connection to one completed job. Use ChatGPT on the web with custom MCP connections enabled for your account or workspace; UI labels can vary. The owner runs Dalan and approves the connection; the ChatGPT user connects the worker and starts its run. One person can perform both roles.
+This guide takes you from a built-in OAuth connection to one completed job. Dalan accepts any MCP client that supports OAuth with Dynamic Client Registration (DCR) and PKCE; ChatGPT is one example, and the steps below are optional conveniences for it. The owner runs Dalan and approves the connection by matching a code; the ChatGPT user connects the worker and starts its run. One person can perform both roles. Use ChatGPT on the web with custom MCP connections enabled for your account or workspace; UI labels can vary.
+
+A client you have not listed here follows the same flow: give it the complete MCP URL, let it register itself, then compare the code and redirect in the pending attempt before you approve. Dalan shows a curated name and icon only when the redirect's exact HTTPS origin is a known one, such as `https://chatgpt.com`. That label is a convenience, not proof of who is connecting, and it never decides whether you may approve.
 
 **Just trying it?** Follow the [README hosted trial](../README.md#quickstart). It prints the connector URL and steps for a short hosted demo, then returns the agent's report to your terminal. The rest of this guide sets up a permanent bridge.
 
@@ -20,16 +22,7 @@ This guide takes you from a built-in OAuth connection to one completed job. Use 
    dalan connect start --worker NAME
    ```
 
-   The response shows an open window for `NAME`; the default is ten minutes. Fresh init already allows `https://chatgpt.com/connector_platform_oauth_redirect` and the callback-ID form `https://chatgpt.com/connector/oauth/*`. An existing installation retains its saved allowlist. If its attempt uses the exact callback observed below and that callback is absent, add it before retrying.
-
-   ```sh
-   printf 'Exact ChatGPT callback shown for this connection: '
-   IFS= read -r CALLBACK_URL
-   dalan connect allow-callback "$CALLBACK_URL"
-   unset CALLBACK_URL
-   ```
-
-   Compare the complete value with ChatGPT's displayed redirect before running the command. Add only that verified callback, then restart the connection flow.
+   The response shows an open window for `NAME`; the default is ten minutes. No callback list is needed: ChatGPT registers itself, and you compare its redirect when you approve.
 
 ## ChatGPT user setup
 
@@ -43,7 +36,7 @@ This guide takes you from a built-in OAuth connection to one completed job. Use 
    dalan connect pending
    ```
 
-   Match the code on the browser page, worker `NAME`, resource, client ID, callback and requested scopes. The client name is untrusted text. Compare the callback with the exact redirect shown by ChatGPT for this connection; it may be the stable redirect or a callback-ID-specific redirect described in [Resolve the exact callback](chatgpt-worker-onboarding.md#2-resolve-the-exact-callback-before-registration). If attempts are ambiguous or a value differs unexpectedly, resolve that before approval.
+   Match the code on the browser page, worker `NAME`, resource, client ID, redirect and requested scopes. The client name is untrusted text; a curated ChatGPT label appears only for an exact `https://chatgpt.com` redirect and does not replace the code match. ChatGPT may use the stable redirect or a callback-ID-specific redirect described in [Check the redirect](chatgpt-worker-onboarding.md#2-check-the-redirect-before-approval). If attempts are ambiguous or a value differs unexpectedly, resolve that before approval.
 
    ```sh
    dalan connect approve CODE --worker NAME
@@ -78,6 +71,6 @@ If ChatGPT says “Couldn't discover OAuth settings” or “Some app settings w
 
 HTTP 421 means the incoming Host does not match the configured public origin, including any non-default port. Preserve Host through the proxy; forwarding a different `X-Forwarded-Host` does not fix it. See [network setup](service-setup.md).
 
-If the pairing window expired, open it again with `dalan connect start --worker NAME`, restart connection in ChatGPT and compare the new code with pending attempts. If registration reports an unallowed callback, compare its exact scheme, host and path with the expected ChatGPT redirect before adding it. Public discovery probes do not prove browser approval, token exchange or authenticated MCP calls work.
+If the pairing window expired, open it again with `dalan connect start --worker NAME`, restart connection in ChatGPT and compare the new code with pending attempts. If registration is refused, read the reason, then compare the redirect's exact scheme, host and path with what ChatGPT shows for this connection. Public discovery probes do not prove browser approval, token exchange or authenticated MCP calls work.
 
 This guide covers ChatGPT on the web; set up a mobile browser separately. Repeat the first job after you reconnect or change endpoint settings, and configure [wake hooks or schedules](pull-workers.md) only after manual jobs work.

@@ -47,11 +47,13 @@ Open `$DALAN_HOME/resource-url` privately and use its entire URL in step 2. Do n
 
 ## 2. Connect Muse as the worker
 
-The bridge ships this exact callback in its default allow-list:
+Dalan's flow is generic: any MCP client that supports OAuth with Dynamic Client Registration (DCR) and PKCE can connect, and you approve it by matching the code. Muse is one such client. No callback list needs editing. Muse has used this redirect:
 
 ```text
 https://agent.meta.ai/api/hatch/oauth/callback
 ```
+
+A curated Muse name and icon appear only when the redirect's exact origin is `https://agent.meta.ai`. A lookalike host, another port or plain HTTP shows only the generic label. The label is a convenience and never a reason to approve.
 
 Start a pairing window:
 
@@ -67,7 +69,7 @@ On the bridge computer:
 dalan connect pending
 ```
 
-Compare the code with the one in your browser. Check that the worker is `muse`, the redirect is the callback above and the resource identifies your bridge. Check the scopes: ordinary jobs need `dalan.read` and `dalan.work`. The older `dot-bridge.read` and `dot-bridge.work` names are aliases. The bridge also advertises `t3.read` and `t3.write`; those names do not replace the Dalan job scopes. Do not approve an unexpected connection or rely on its client name, which the app supplies.
+Compare the code with the one in your browser. Check that the worker is `muse`, the redirect is the one Muse showed for this connection (the value above, unless Muse's documentation says otherwise) and the resource identifies your bridge. Check the scopes: ordinary jobs need `dalan.read` and `dalan.work`. The older `dot-bridge.read` and `dot-bridge.work` names are aliases. The bridge also advertises `t3.read` and `t3.write`; those names do not replace the Dalan job scopes. Do not approve an unexpected connection or rely on its client name, which the app supplies.
 
 Replace `CODE` with your matching pending code:
 
@@ -156,7 +158,7 @@ Do not use `rejected`: it is not a supported decision word. This records your re
 
 - **Public DNS or HTTPS check fails.** Setup prints `FAIL public DNS:` or `FAIL public HTTPS:`. Read its suggested next step. The service and home remain in place; use the printed retry-check command after fixing the issue, rather than rerunning setup against the same home.
 - **The sign-in page says `Not accepting connections` or `Connection attempt invalid or expired`.** Open a new pairing window with `dalan connect start --worker muse`, restart sign-in in Muse, and compare the new code with `dalan connect pending`.
-- **The callback is refused.** The bridge can report `Callback not allowed` or refuse registration because the redirect does not match an allowed callback. Obtain the exact current callback from Muse's connection flow or provider documentation. Verify that it belongs to the client before allowing it with `dalan connect allow-callback 'EXACT_HTTPS_CALLBACK'`, then restart sign-in. Do not broaden the allow-list to an entire domain.
+- **Registration is refused.** The bridge refuses a redirect that is not a valid HTTPS URL, or that carries credentials or a fragment. Read the reason, compare the redirect with what Muse's connection flow shows, then restart sign-in. Do not approve a connection whose redirect you cannot match to the client you started.
 - **Codex cannot reach the bridge.** A CLI error beginning `cannot reach the bridge:` means the selected home's bridge is not running. Check the absolute `DALAN_HOME` in the Codex entry, then run `dalan status --json` in an owner shell with that same home and inspect the service. Do not register the public URL as Codex's requester endpoint.
 - **Approval says the worker already has an active connection.** Inspect `dalan connect list`. Continue with the existing intended Muse connection, or deliberately revoke it before pairing again. Do not approve a different client just because it calls itself Muse.
 
