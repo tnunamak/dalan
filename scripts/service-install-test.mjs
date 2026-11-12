@@ -276,7 +276,7 @@ try {
   assert.equal(cli.status, 0, cli.stderr);
   const cliResult = JSON.parse(cli.stdout);
   assert.equal(cliResult.started, false);
-  assert.deepEqual(cliResult.units, [cliResult.unit]);
+  assert.deepEqual(cliResult.units, [cliResult.unit, cliResult.unit.replace('.service', '-update.service'), cliResult.unit.replace('.service', '-update.timer')]);
   assert.equal(fs.existsSync(path.join(cliHome, '.config/dalan/workers.json')), false, 'write-units-only does not create worker or auth state');
 
   const missingLan = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), 'service', 'install', '--home', path.join(root, 'bad-lan'), '--public-url', 'https://cli.example.test', '--port', '8798', '--target', '192.0.2.10:8799', '--worker', 'dot', '--write-units-only'], { env, encoding: 'utf8' });
@@ -290,7 +290,7 @@ try {
     '--target', '127.0.0.2:8798', '--lan-port', '8798', '--worker', 'dot', '--write-units-only', '--json'], { env, encoding: 'utf8' });
   assert.equal(samePortCli.status, 0, samePortCli.stderr);
   const samePortResult = JSON.parse(samePortCli.stdout);
-  assert.equal(samePortResult.units.length, 3);
+  assert.equal(samePortResult.units.length, 5);
   assert.match(fs.readFileSync(path.join(unitDir, samePortResult.unit.replace('.service', '-target.socket')), 'utf8'), /ListenStream=127\.0\.0\.2:8798/);
 
   const beforeRejectedUnits = fs.readdirSync(unitDir).sort();

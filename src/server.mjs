@@ -422,6 +422,18 @@ const scopeFor=name=>t3ReadTools.has(name)||readTools.has(name)?'dalan.read':'da
 // Same name mapping as the protected-resource metadata and the 401 challenge, so all three surfaces agree.
 const advertisedScope=name=>wireScope(scopeFor(name),legacyScopeNames(oauth));
 if(oauth) for(const item of tools) item.securitySchemes=[{type:'oauth2',scopes:[advertisedScope(item.name)]}];
+// During an update, refuse a changed catalog before either listener can expose it.
+const catalogGuardFile=path.join(configDir,'service-catalog.json');
+if(fs.existsSync(catalogGuardFile)) {
+  const info=fs.lstatSync(catalogGuardFile);
+  if(!info.isFile()||info.isSymbolicLink()||(info.mode&0o777)!==0o600)throw new Error('service catalog guard mismatch');
+  const guard=JSON.parse(fs.readFileSync(catalogGuardFile,'utf8'));
+  const normalize=value=>Array.isArray(value)?value.map(normalize):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,normalize(value[key])])):value;
+  const ordered=catalogs=>Object.fromEntries(Object.keys(catalogs).sort().map(worker=>[worker,[...catalogs[worker]].sort((a,b)=>a.name.localeCompare(b.name))]));
+  const actual=Object.fromEntries([...workers.workers.keys()].map(worker=>[worker,catalogProfile==='legacy-v46'?tools.filter(t=>!(t3Tools.has(t.name)||notifyTools.has(t.name))||hasCapability(workers,worker,'t3')):tools]));
+  const version=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
+  if(guard.version!==version||JSON.stringify(normalize(ordered(guard.catalogs??{})))!==JSON.stringify(normalize(ordered(actual))))throw new Error('service catalog guard mismatch');
+}
 // A refusal that must stay tells the worker the next call and what to change; workers often do not retry a bare "invalid X".
 const argumentFixes={
   finish:{
@@ -994,6 +1006,19 @@ const adminServer=http.createServer(async(req,res)=>{
     if(url.pathname.startsWith('/protocol/service/')) {
       if(!protocolServices||req.method!=='POST')return json(res,404,{error:'not found'});
       return json(res,200,await protocolServices.invoke(url.pathname.slice('/protocol/service/'.length),req.headers['x-protocol-service-capability'],body));
+    }
+    if(url.pathname==='/service-check'&&req.method==='GET') {
+      adminOperator(req);
+      const catalogs={};
+      for(const worker of workers.workers.keys()) {
+        const principal={worker,subject:'service-self-check',local:true};
+        const initialized=await dispatch({method:'initialize',params:{protocolVersion:'2025-11-25'}},principal);
+        if(!initialized.capabilities?.tools)throw new Error('service self-check: initialize failed');
+        await dispatch({method:'ping'},principal);
+        catalogs[worker]=(await dispatch({method:'tools/list'},principal)).tools;
+      }
+      const version=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
+      return json(res,200,{version,catalogs,port:publicServer.address()?.port,self_check:true,update_protocol:1});
     }
     dryRequested=url.pathname==='/submit-preview';
     log({kind:'admin_call',route:url.pathname,method:req.method});

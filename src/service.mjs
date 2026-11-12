@@ -11,6 +11,7 @@ import { initAsFiles } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
 import { resolveGozarCommand } from './try-exposure.mjs';
+import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 
 const REPO = fileURLToPath(new URL('..', import.meta.url));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/;
@@ -49,10 +50,11 @@ function validateTopology({ port, target, lanPort = null, verifyCmd }) {
 function parseOptions(argv, env) {
   const parsed = parseArgs(argv, {
     values: ['--home', '--public-url', '--port', '--target', '--worker', '--verify-cmd', '--gozar-bin', '--lan-port'],
-    flags: ['--write-units-only', '--enable-workspace', '--enable-t3', '--json', '--help'],
+    flags: ['--write-units-only', '--enable-workspace', '--enable-t3', '--auto-update', '--no-auto-update', '--json', '--help'],
   });
   if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
   if (parsed['--help']) return { help: true };
+  if (parsed['--auto-update'] && parsed['--no-auto-update']) fail('choose --auto-update or --no-auto-update');
   const home = path.resolve(parsed['--home'] ?? path.join(os.homedir(), '.local/share/dalan-service'));
   if (!SAFE_PATH.test(home)) fail('--home contains characters that cannot be written safely in a systemd unit');
   const origin = parseOrigin(parsed['--public-url']);
@@ -74,7 +76,8 @@ function parseOptions(argv, env) {
   const gozarBin = parsed['--gozar-bin'];
   if (gozarBin !== undefined && (!gozarBin || gozarBin.startsWith('-'))) fail('--gozar-bin must name a command');
   return { home, origin, port, target, lanPort, enableWorkspace: parsed['--enable-workspace'] === true, enableT3: parsed['--enable-t3'] === true, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
-    gozarBin, writeUnitsOnly: parsed['--write-units-only'] === true, json: parsed['--json'] === true };
+    gozarBin, autoUpdate: parsed['--auto-update'] ? true : parsed['--no-auto-update'] ? false : undefined,
+    writeUnitsOnly: parsed['--write-units-only'] === true, json: parsed['--json'] === true };
 }
 
 function assertRealDirectoryPath(target, { owner = false } = {}) {
@@ -204,7 +207,7 @@ function checkHomeScope(home, configDir, o, workers) {
   if (!fs.existsSync(home)) return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
   const rootEntries = fs.readdirSync(home);
   if (!rootEntries.length) return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
-  const rootAllowed = ['.config', '.local', '.tmp', 'resource-url'];
+  const rootAllowed = ['.config', '.local', '.tmp', 'resource-url', 'current', 'versions', 'update-result.json', 'update-transaction.json', 'update-backup', 'update-lock.sqlite', 'update-lock.sqlite-journal'];
   if (rootEntries.some(name => !rootAllowed.includes(name))) fail(`${home} contains unrelated data; use a fresh home or one created by dalan service migrate-workers`);
   if (!rootEntries.includes('.config')) fail(`${home} has no Dalan config directory; refusing to adopt it`);
   const configRoot = path.join(home, '.config');
@@ -221,6 +224,7 @@ function checkHomeScope(home, configDir, o, workers) {
   const receiptFile = path.join(configDir, 'service-install.json');
   const entries = fs.readdirSync(configDir);
   const hasReceipt = entries.includes('service-install.json');
+  if (!hasReceipt && rootEntries.some(name => !['.config', '.local', '.tmp', 'resource-url'].includes(name))) fail(`${home} contains update data without a service receipt`);
   if (hasReceipt) {
     const info = fs.lstatSync(receiptFile);
     if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) fail(`${receiptFile} must be a private regular file`);
@@ -351,13 +355,33 @@ export async function installService(o, seams = {}) {
   const configDir = path.dirname(profile.file);
   const homeScope = checkHomeScope(o.home, configDir, o, profile.workers);
   const proxy = o.target.host === '127.0.0.1' && o.target.port === o.port ? null : (seams.proxy ?? findProxy());
-  const { files, enable, name } = unitFiles(o, { home: o.home, repo: seams.repo ?? REPO, node: seams.node ?? nodePath(process.execPath), proxy });
+  const repo = seams.repo ?? REPO, node = seams.node ?? nodePath(process.execPath);
+  const receiptFile = homeScope.receiptFile;
+  const previous = homeScope.hasReceipt ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
+  const autoUpdate = o.autoUpdate ?? previous?.auto_update ?? !homeScope.hasReceipt;
+  const current = path.join(o.home, 'current');
+  const hasCurrent = fs.existsSync(current) || (() => { try { fs.lstatSync(current); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } })();
+  if (hasCurrent && !fs.lstatSync(current).isSymbolicLink()) fail(`${current} must be the service package symlink`);
+  const { files, enable, name } = unitFiles(o, { home: o.home, repo: current, node, proxy });
+  const updateUnits = autoUpdateUnits({ home: o.home, unit: name, node });
+  Object.assign(files, updateUnits.files);
+  let replaceLegacyUnit = false;
   // Check every collision before creating the bridge home or the first unit file.
   for (const [filename, text] of Object.entries(files)) {
     const file = path.join(unitDir, filename);
-    if (fs.existsSync(file) && (!fs.lstatSync(file).isFile() || fs.readFileSync(file, 'utf8') !== text)) fail(`${file} already exists with different contents; refusing to overwrite it`);
+    if (fs.existsSync(file) && (!fs.lstatSync(file).isFile() || fs.readFileSync(file, 'utf8') !== text)) {
+      const actual = fs.lstatSync(file).isFile() ? fs.readFileSync(file, 'utf8') : '';
+      const oldRepo = actual.match(/^WorkingDirectory=(.+)$/m)?.[1];
+      const oldNode = actual.match(/^ExecStart=(\S+) /m)?.[1];
+      const expected = filename === `${name}.service` && previous && oldRepo && oldNode && SAFE_PATH.test(oldRepo) && SAFE_PATH.test(oldNode)
+        ? unitFiles(o, { home: o.home, repo: oldRepo, node: oldNode, proxy }).files[filename] : null;
+      // Only the exact former generated unit can be enrolled or retried after interruption.
+      if (expected && actual === expected) replaceLegacyUnit = true;
+      else fail(`${file} already exists with different contents; refusing to overwrite it`);
+    }
   }
   if (o.writeUnitsOnly) {
+    if (replaceLegacyUnit) fail('rerun without --write-units-only to enroll an existing service for updates');
     writeUnits(unitDir, files);
     return { schema_version: 1, home: o.home, unit: `${name}.service`, units: Object.keys(files), target: o.target.value, started: false, route: null };
   }
@@ -369,11 +393,19 @@ export async function installService(o, seams = {}) {
   const spawn = seams.spawn ?? spawnSync;
   runCommand('systemctl', ['--user', 'show-environment'], { env, spawn });
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  if (!homeScope.hasReceipt) writePrivate(homeScope.receiptFile, `${JSON.stringify(installReceipt(o.home, configDir, o, profile.workers), null, 2)}\n`);
+  if (!homeScope.hasReceipt) writePrivate(receiptFile, `${JSON.stringify({ ...installReceipt(o.home, configDir, o, profile.workers), repo, node, unit_dir: unitDir, auto_update: autoUpdate }, null, 2)}\n`);
+  if (!hasCurrent) fs.symlinkSync(repo, current);
   const homeFiles = prepareHome(o, profile);
+  if (replaceLegacyUnit) fs.writeFileSync(path.join(unitDir, `${name}.service`), files[`${name}.service`]);
   writeUnits(unitDir, files);
+  if (previous && !previous.repo) {
+    const temporary = `${receiptFile}.enroll`;
+    fs.writeFileSync(temporary, `${JSON.stringify({ ...previous, repo, node, unit_dir: unitDir, auto_update: autoUpdate }, null, 2)}\n`, { mode: 0o600, flag: 'w' });
+    fs.renameSync(temporary, receiptFile);
+  }
   runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn });
   runCommand('systemctl', ['--user', 'enable', '--now', ...enable], { env, spawn });
+  if (replaceLegacyUnit) runCommand('systemctl', ['--user', 'restart', `${name}.service`], { env, spawn });
   const dataDir = defaultPath(o.home, '.local/share/dot-bridge');
   const ready = await (seams.waitForSocket ?? socketIsReady)(path.join(dataDir, 'admin.sock'), seams.socketTimeoutMs ?? 30000);
   if (!ready) fail(`Dalan did not start on its admin socket; the unit and home remain for inspection: systemctl --user status ${name}.service`);
@@ -389,9 +421,10 @@ export async function installService(o, seams = {}) {
   if (routeReply.route.verification?.status !== 'verified') {
     fail(`Gozar did not verify the service route; the bridge is running and the service route needs repair: ${JSON.stringify(routeReply).slice(0, 1500)}`);
   }
+  await setAutoUpdate({ home: o.home, enabled: autoUpdate }, { ...seams, env, spawn });
   return { schema_version: 1, home: o.home, unit: `${name}.service`, units: Object.keys(files), port: o.port,
     workers: profile.workers, public_url: `${o.origin}/<secret>/mcp`, resource_url_file: homeFiles.resourceFile,
-    target: o.target.value, started: true, route: routeReply.route };
+    target: o.target.value, started: true, route: routeReply.route, auto_update: autoUpdate };
 }
 
 export async function serviceMain(argv, seams = {}) {
@@ -400,8 +433,26 @@ export async function serviceMain(argv, seams = {}) {
     const { migrationMain } = await import('./service-migrate-workers.mjs');
     return migrationMain(args);
   }
+  if (['update', 'status', 'auto-update'].includes(action)) {
+    const parsed = parseArgs(args, { values: ['--home'], flags: ['--check', '--yes', '--json', '--help'] });
+    if (parsed['--help']) return serviceMain(['help'], seams);
+    const home = path.resolve(parsed['--home'] ?? path.join(os.homedir(), '.local/share/dalan-service'));
+    let result;
+    if (action === 'auto-update') {
+      if (parsed._.length !== 1 || !['on', 'off'].includes(parsed._[0]) || parsed['--check'] || parsed['--yes']) fail('use dalan service auto-update on|off [--home DIR]');
+      result = await setAutoUpdate({ home, enabled: parsed._[0] === 'on' }, seams);
+    } else {
+      if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
+      if (parsed['--check'] && parsed['--yes']) fail('--check cannot be used with --yes');
+      if (action === 'status' && (parsed['--check'] || parsed['--yes'])) fail('service status does not accept --check or --yes');
+      const updater = await import('./service-update.mjs');
+      result = await updater[action === 'status' ? 'serviceStatus' : 'updateService']({ home, check: !!parsed['--check'], yes: !!parsed['--yes'] }, seams);
+    }
+    (seams.out ?? console.log)(parsed['--json'] ? JSON.stringify(result) : JSON.stringify(result, null, 2));
+    return result;
+  }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]');
+    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Linux systemd only.');
     return null;
   }
   if (action !== 'install') fail('use dalan service install or dalan service migrate-workers');

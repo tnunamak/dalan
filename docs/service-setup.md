@@ -206,6 +206,36 @@ From a source checkout, use `node scripts/worker-bridge-setup.mjs` with the same
 
 It should mark the existing exposure verified. A 404 from unauthenticated `/admin` proves the expected public route answers, not that OAuth pairing or a worker job works, so complete both separately.
 
+## Service updates
+
+For the Linux service made by `dalan service install`, new installs enable a systemd user timer that runs once daily with up to one hour of random delay. A missed run can run after the user manager next starts. Installation with `--no-auto-update` disables the timer; `--auto-update` explicitly enables it. Reinstalling preserves the saved choice unless you pass one of those flags. The timer needs your systemd user manager to run; it does not configure login lingering.
+
+```sh
+dalan service update --check --home HOME_PATH
+dalan service update --home HOME_PATH
+dalan service status --home HOME_PATH --json
+dalan service auto-update off --home HOME_PATH
+dalan service auto-update on --home HOME_PATH
+```
+
+The home defaults to `~/.local/share/dalan-service`; pass the home used for installation if it differs. `service status` shows the selected version, saved automatic-update preference and last update result. Use `systemctl --user list-timers` to inspect the actual timer schedule. Turning updates off prevents future starts; it does not cancel an update already running. Preference changes refuse while an update holds the home lock.
+
+`--check` queries the public npm registry for the latest stable `@tnunamak/dalan` version and reports availability without installation or restart. A normal update installs the exact release under `HOME_PATH/versions/<version>`, with npm integrity checks and install scripts disabled. The registry's integrity value binds the downloaded bytes to its metadata; it is not an independent publisher signature. The original package must remain available until the first successful update. Later starts use the selected package through `HOME_PATH/current`.
+
+Before switching, Dalan starts the candidate on a scratch loopback port against a private copy of the service configuration and fresh mutable state. It checks initialization, ping and complete tool descriptors for every configured worker, then compares them with the running bridge. An unreachable worker, failed check or incomplete catalog stops the update. This local check does not test the public HTTPS route or hosted-client OAuth sign-in.
+
+If a descriptor changes, the candidate stays staged and the last result is `connector_refresh_required`. To authorize switching to that release, run:
+
+```sh
+dalan service update --yes --home HOME_PATH
+```
+
+Refresh the Dalan connector in each hosted client after that switch. `--yes` allows the catalog change; it does not skip integrity, scratch checks or post-restart health checks. The timer never supplies it. Equal catalogs permit an automatic switch, but they cannot prove equal tool behavior or authorization semantics. Restarting interrupts connections and can interrupt in-progress requests.
+
+For a switch, Dalan stops the bridge, saves its persistent configuration and data, selects the candidate, restarts the unit and checks local health and catalogs. On failure it stops the candidate, restores the previous selection and saved state, then restarts and checks the old version. A failed rollback is reported separately. An interrupted switch leaves a transaction record for recovery on the next update attempt. Retention keeps three staged versions, including the active and previous versions. This is update recovery, not a replacement for your own backups.
+
+An installation made before 0.6.1 needs to enroll first: install the current Dalan package, then repeat its original `dalan service install` command with the same home, origin, port and target. Enrollment preserves keys and worker grants, changes the unit's package path and restarts it. Its timer stays off unless you pass `--auto-update` or run `service auto-update on`. A modified unit is refused for inspection. These update commands cover the service made by `dalan service install`; the older `worker-bridge-setup.mjs` Linux/macOS units are not enrolled automatically. `service install` has no launchd support.
+
 ## Remove a generated service
 
 Use the same worker and home that created it. The full list of things an uninstall must remove (service, homes, trial home, client entries, lock file) is in [operations](operations.md#remove-an-installation).
