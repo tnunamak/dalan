@@ -16,7 +16,7 @@ fs.mkdirSync(userHome, { mode: 0o700 });
 const xdg = path.join(userHome, '.config');
 const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg };
 const calls = [];
-const route = { origin: 'https://bridge.example.test', target: '192.0.2.10:8789', verification: { status: 'verified', method: 'challenge' } };
+const route = { origin: 'https://bridge.example.test', target: '192.0.2.10:8787', verification: { status: 'verified', method: 'challenge' } };
 const spawn = (command, args) => {
   calls.push([command, ...args]);
   return command === 'gozar'
@@ -27,7 +27,7 @@ const spawn = (command, args) => {
 try {
   const home = path.join(root, 'bridge');
   const result = await installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8789', workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
     env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn, waitForSocket: async () => true,
   });
@@ -50,7 +50,7 @@ try {
   assert(callsBeforeGozar > 0, 'Gozar route is registered after systemd starts the service');
   assert(calls.some(call => call.join(' ').includes('enable --now') && call.join(' ').includes('target.socket')));
   assert.deepEqual(calls[callsBeforeGozar].slice(0, 6), ['gozar', 'service', 'add', '--origin', 'https://bridge.example.test', '--target']);
-  assert(calls[callsBeforeGozar].includes('192.0.2.10:8789'));
+  assert(calls[callsBeforeGozar].includes('192.0.2.10:8787'));
   assert.equal(calls[callsBeforeGozar].at(-1), '--json');
 
   const migratedHome = path.join(root, 'migrated');
@@ -81,6 +81,56 @@ try {
   const missingLan = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), 'service', 'install', '--home', path.join(root, 'bad-lan'), '--public-url', 'https://cli.example.test', '--port', '8798', '--target', '192.0.2.10:8799', '--worker', 'dot', '--write-units-only'], { env, encoding: 'utf8' });
   assert.notEqual(missingLan.status, 0);
   assert.match(missingLan.stderr, /requires --lan-port/);
+
+
+  const samePortHome = path.join(root, 'same-port-cli');
+  const samePortCli = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), 'service', 'install',
+    '--home', samePortHome, '--public-url', 'https://cli.example.test', '--port', '8798',
+    '--target', '127.0.0.2:8798', '--lan-port', '8798', '--worker', 'dot', '--write-units-only', '--json'], { env, encoding: 'utf8' });
+  assert.equal(samePortCli.status, 0, samePortCli.stderr);
+  const samePortResult = JSON.parse(samePortCli.stdout);
+  assert.equal(samePortResult.units.length, 3);
+  assert.match(fs.readFileSync(path.join(unitDir, samePortResult.unit.replace('.service', '-target.socket')), 'utf8'), /ListenStream=127\.0\.0\.2:8798/);
+
+  const beforeRejectedUnits = fs.readdirSync(unitDir).sort();
+  for (const [label, target, lanPort, verifyCmd, error] of [
+    ['translation', '192.0.2.10:8799', 8799, undefined, /translated target ports/],
+    ['empty-command', '192.0.2.10:8799', 8799, '   ', /nonempty/],
+    ['wildcard', '0.0.0.0:8798', 8798, undefined, /wildcard/],
+    ['missing-lan', '192.0.2.10:8798', undefined, undefined, /requires --lan-port/],
+    ['mismatched-lan', '192.0.2.10:8798', 8797, undefined, /requires --lan-port/],
+  ]) {
+    const rejectedHome = path.join(root, label);
+    const beforeCalls = calls.length;
+    await assert.rejects(installService({ home: rejectedHome, origin: route.origin, port: 8798,
+      target, lanPort, verifyCmd, workers: ['dot'] }, { env, platform: 'linux', spawn }), error);
+    assert.equal(fs.existsSync(rejectedHome), false);
+    assert.equal(calls.length, beforeCalls, 'invalid topology must not call systemctl or Gozar');
+    const args = [path.join(repo, 'bin/dalan.mjs'), 'service', 'install', '--home', rejectedHome,
+      '--public-url', route.origin, '--port', '8798', '--target', target, '--worker', 'dot', '--write-units-only'];
+    if (lanPort !== undefined) args.push('--lan-port', String(lanPort));
+    if (verifyCmd !== undefined) args.push('--verify-cmd', verifyCmd);
+    const rejected = spawnSync(process.execPath, args, { env, encoding: 'utf8' });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, error);
+    assert.equal(fs.existsSync(rejectedHome), false);
+    assert.deepEqual(fs.readdirSync(unitDir).sort(), beforeRejectedUnits, 'invalid topology must not write units');
+  }
+
+  const verifyCmd = 'trusted-check --origin "https://bridge.example.test"';
+  const translatedCalls = [];
+  const translated = await installService({ home: path.join(root, 'translated'), origin: route.origin, port: 8798,
+    target: '192.0.2.10:8799', lanPort: 8799, verifyCmd, workers: ['dot'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+    spawn: (command, args) => {
+      translatedCalls.push([command, ...args]);
+      return { status: 0, stdout: command === 'gozar' ? JSON.stringify({ schemaVersion: 1,
+        route: { ...route, target: '192.0.2.10:8799', verification: { status: 'verified', method: 'host-command' } } }) : '', stderr: '' };
+    }, waitForSocket: async () => true,
+  });
+  assert.equal(translated.started, true);
+  const translatedGozar = translatedCalls.find(call => call[0] === 'gozar');
+  assert.deepEqual(translatedGozar.slice(-3), ['--verify-cmd', verifyCmd, '--json']);
 
   const oldHome = path.join(root, 'existing-bridge-data');
   fs.mkdirSync(path.join(oldHome, '.local/share/dalan'), { recursive: true, mode: 0o700 });
@@ -129,8 +179,8 @@ try {
 
   for (const field of ['origin', 'target']) {
     const mismatchHome = path.join(root, `mismatch-${field}`);
-    await assert.rejects(installService({ home: mismatchHome, origin: route.origin, port: 8796,
-      target: route.target, workers: ['dot'], gozarBin: 'gozar' }, {
+    await assert.rejects(installService({ home: mismatchHome, origin: route.origin, port: 8787,
+      target: route.target, lanPort: 8787, workers: ['dot'], gozarBin: 'gozar' }, {
       env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
       spawn: command => command === 'gozar'
         ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route: { ...route, [field]: field === 'origin' ? 'https://wrong.example.test' : '192.0.2.11:8789' } }) }

@@ -18,6 +18,8 @@ fs.mkdirSync(tempRoot, { recursive: true });
 const root = fs.mkdtempSync(path.join(tempRoot, 'dalan-one-bridge-'));
 fs.writeFileSync(path.join(root, '.fleet-owner.json'), JSON.stringify({ thread_id: 'one-bridge-b8', disposable: true, tim_driven: true }) + '\n', { mode: 0o600 });
 const workers = ['dot', 'muse', 'duet-default', 'duet-dondo'];
+// Linux can bind the loopback backend and address-only forwarder to one numeric port.
+const forwardHost = process.platform === 'linux' ? '127.0.0.2' : '127.0.0.1';
 const stubBin = path.join(root, 'bin');
 fs.mkdirSync(stubBin, { recursive: true });
 fs.writeFileSync(path.join(stubBin, 't3code'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
@@ -86,7 +88,7 @@ async function stop() {
 
 function rawRequest({ host, path: requestPath, method = 'POST', headers = {}, body = '' }) {
   return new Promise((resolve, reject) => {
-    const request = http.request({ host: '127.0.0.1', port: forwardPort ?? port, path: requestPath, method, headers: { host, ...headers } }, response => {
+    const request = http.request({ host: forwardHost, port: forwardPort ?? port, path: requestPath, method, headers: { host, ...headers } }, response => {
       let text = '';
       response.setEncoding('utf8').on('data', chunk => { text += chunk; });
       response.on('end', () => resolve({ status: response.statusCode, text }));
@@ -132,8 +134,8 @@ function submit(requestId, worker) {
 async function main() {
   try {
     port = await reservedPort();
-    forwardPort = await reservedPort();
-    publicUrl = `http://127.0.0.1:${forwardPort}`;
+    forwardPort = process.platform === 'linux' ? port : await reservedPort();
+    publicUrl = `http://${forwardHost}:${forwardPort}`;
     serverEnv.DALAN_PORT = String(port);
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(configDir, 'workers.json'), JSON.stringify({
@@ -152,7 +154,7 @@ async function main() {
     await waitForReady();
     // Exercise the installed Linux forwarding program when available; other hosts use a transparent test forwarder.
     if (process.platform === 'linux' && fs.existsSync('/usr/bin/systemd-socket-activate') && fs.existsSync('/usr/lib/systemd/systemd-socket-proxyd')) {
-      socketActivator = spawn('/usr/bin/systemd-socket-activate', ['-l', `127.0.0.1:${forwardPort}`, '/usr/lib/systemd/systemd-socket-proxyd', `127.0.0.1:${port}`], { stdio: ['ignore', 'ignore', 'pipe'] });
+      socketActivator = spawn('/usr/bin/systemd-socket-activate', ['-l', `${forwardHost}:${forwardPort}`, '/usr/lib/systemd/systemd-socket-proxyd', `127.0.0.1:${port}`], { stdio: ['ignore', 'ignore', 'pipe'] });
       let activationLog = '';
       socketActivator.stderr.on('data', chunk => { activationLog += chunk; });
       for (let attempt = 0; attempt < 100; attempt++) {
@@ -167,7 +169,7 @@ async function main() {
         for (const socket of [client, upstream]) { forwardedSockets.add(socket); socket.on('close', () => forwardedSockets.delete(socket)); socket.on('error', () => { client.destroy(); upstream.destroy(); }); }
         client.pipe(upstream); upstream.pipe(client);
       });
-      await new Promise((resolve, reject) => { forwarder.once('error', reject); forwarder.listen(forwardPort, '127.0.0.1', resolve); });
+      await new Promise((resolve, reject) => { forwarder.once('error', reject); forwarder.listen(forwardPort, forwardHost, resolve); });
     }
     const envText = fs.readFileSync(path.join(configDir, 'env'), 'utf8');
     secret = envText.match(/^BRIDGE_PATH_SECRET=(.+)$/m)?.[1];
@@ -269,7 +271,10 @@ async function main() {
     const nonceB = randomBytes(32).toString('hex');
     const probeA = await serviceProbe(nonceA);
     assert.equal(probeA.status, 200, `service probe A returned ${probeA.status}`);
-    assert.equal(probeA.value.schemaVersion, 1);
+    assert.equal(probeA.value.schemaVersion, 2);
+    assert.equal(probeA.value.authority, exactHost);
+    assert.equal(probeA.value.localPort, port);
+    if (process.platform === 'linux') assert.equal(probeA.value.localPort, forwardPort, 'strict Gozar proof needs the declared target port');
     assert.equal(probeA.value.nonce, nonceA);
     assert.match(probeA.value.instanceId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     assert.match(probeA.value.proof, /^[0-9a-f]{64}$/, 'Gozar verifier response needs a 256-bit hex proof');
@@ -283,7 +288,7 @@ async function main() {
     assert.equal(probeB.value.instanceId, probeA.value.instanceId, 'service instance ID changed between verifier requests');
     assert.match(probeB.value.proof, /^[0-9a-f]{64}$/);
     assert.notEqual(probeB.value.proof, probeA.value.proof, 'different nonce unexpectedly reused a proof');
-    assert.equal((await serviceProbe('invalid')).status, 400, 'malformed Gozar verifier nonce was accepted');
+    assert.equal((await serviceProbe('invalid')).status, 404, 'malformed Gozar verifier nonce was accepted');
     assert.equal((await serviceProbe(nonceA, 'evil.example')).status, 421, 'Gozar verifier ignored the configured public Host');
     console.log('PASS unauthenticated Gozar verifier echoes valid nonces, keeps one instance ID, binds deterministic proofs to nonce, rejects bad nonce, and enforces Host');
   } finally {

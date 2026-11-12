@@ -29,11 +29,11 @@ dalan service install \
   --home "$HOME/.local/share/dalan-service" \
   --public-url https://bridge.example.com \
   --port 8787 \
-  --target 192.0.2.10:8789 \
-  --lan-port 8789
+  --target 192.0.2.10:8787 \
+  --lan-port 8787
 ```
 
-The Dalan process listens on `127.0.0.1:8787`. With `--lan-port`, systemd opens the address and matching port in `--target` and forwards it to that loopback listener. A separate target requires this explicit option. Use an address configured on this computer. Add `--enable-workspace` or `--enable-t3` to enable those host capabilities; each worker must also have its own workspace or T3 grant. Without these options both host capabilities are disabled. If Gozar runs on the same computer and can reach loopback directly, set `--target 127.0.0.1:8787`. `gozar service add` runs after systemd starts the bridge; install succeeds only when Gozar returns a verified route. If the origin filters the Gozar verifier by source IP, pass the trusted host check with `--verify-cmd COMMAND`.
+The Dalan process listens on `127.0.0.1:8787`. With `--lan-port`, systemd opens the address and matching port in `--target` and forwards it to that loopback listener. A separate target requires this explicit option, even when its numeric port equals the bridge port. Use a distinct non-wildcard address configured on this computer: the example binds 192.0.2.10:8787 separately from 127.0.0.1:8787. Do not use 0.0.0.0 for a same-port forwarder because it collides with loopback. Challenge verification binds the actual receiving socket port to the declared target port; its challenge path has no port override. Translating to a different numeric port is allowed only with an explicit nonempty trusted `--verify-cmd COMMAND`, not challenge verification. Add `--enable-workspace` or `--enable-t3` to enable those host capabilities; each worker must also have its own workspace or T3 grant. Without these options both host capabilities are disabled. If Gozar runs on the same computer and can reach loopback directly, set `--target 127.0.0.1:8787`. `gozar service add` runs after systemd starts the bridge; install succeeds only when Gozar returns a verified route. If the origin filters the Gozar verifier by source IP, pass the trusted host check with `--verify-cmd COMMAND`.
 
 Set `DALAN_HOME` to the selected home. The private MCP URL is stored in `$DALAN_HOME/resource-url` with mode 0600. Point the client's connector at that URL and sign in separately for each worker. Repository jobs remain blocked until their allowlists are present. Use the unit name printed by install with `systemctl --user status UNIT`, then confirm the public origin returns 404 for `/admin` and accepts the secret MCP path with its original Host header.
 

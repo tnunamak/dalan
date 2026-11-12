@@ -34,6 +34,17 @@ function parseTarget(value) {
   return { host: match[1], port, value: `${match[1]}:${port}` };
 }
 
+function validateTopology({ port, target, lanPort = null, verifyCmd }) {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('--port must be a fixed port from 1024 through 65535');
+  if (lanPort !== null && (!Number.isInteger(lanPort) || lanPort < 1024 || lanPort > 65535)) fail('--lan-port must be a port from 1024 through 65535');
+  const direct = target.host === '127.0.0.1' && target.port === port;
+  if (!direct && lanPort !== target.port) fail('a forwarded --target requires --lan-port matching its port');
+  if (direct && lanPort !== null) fail('--lan-port needs a separate --target address and port');
+  if (!direct && target.port === port && target.host === '0.0.0.0') fail('same-port --target must not use wildcard 0.0.0.0; it collides with the loopback listener');
+  if (verifyCmd != null && (typeof verifyCmd !== 'string' || !verifyCmd.trim() || verifyCmd.length > 4096)) fail('--verify-cmd must be a nonempty command of at most 4096 characters');
+  if (target.port !== port && !(typeof verifyCmd === 'string' && verifyCmd.trim())) fail('translated target ports require an explicit nonempty --verify-cmd; challenge verification binds the receiving port');
+}
+
 function parseOptions(argv, env) {
   const parsed = parseArgs(argv, {
     values: ['--home', '--public-url', '--port', '--target', '--worker', '--verify-cmd', '--gozar-bin', '--lan-port'],
@@ -48,10 +59,7 @@ function parseOptions(argv, env) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('--port must be a fixed port from 1024 through 65535');
   const target = parseTarget(parsed['--target']);
   const lanPort = parsed['--lan-port'] === undefined ? null : Number(parsed['--lan-port']);
-  if (lanPort !== null && (!Number.isInteger(lanPort) || lanPort < 1024 || lanPort > 65535 || lanPort === port)) fail('--lan-port must be a distinct port from 1024 through 65535');
-  const direct = target.host === '127.0.0.1' && target.port === port;
-  if (!direct && lanPort !== target.port) fail('a forwarded --target requires --lan-port matching its port');
-  if (direct && lanPort !== null) fail('--lan-port needs a separate --target address and port');
+  validateTopology({ port, target, lanPort, verifyCmd: parsed['--verify-cmd'] });
   const workers = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--worker') workers.push(argv[++i]);
@@ -271,8 +279,9 @@ export async function installService(o, seams = {}) {
   const env = seams.env ?? process.env;
   if ((seams.platform ?? process.platform) !== 'linux') fail('dalan service install currently requires Linux with a systemd user manager');
   if (!path.isAbsolute(o.home) || !SAFE_PATH.test(o.home)) fail('--home must be an absolute systemd-safe path');
-  const target = typeof o.target === 'string' ? parseTarget(o.target) : o.target;
+  const target = parseTarget(typeof o.target === 'string' ? o.target : `${o.target?.host}:${o.target?.port}`);
   o = { ...o, target };
+  validateTopology(o);
   assertRealDirectoryPath(path.dirname(o.home), { owner: true });
   assertRealDirectoryPath(o.home, { owner: true });
   const profile = profileFor(o.home, o.workers ?? []);

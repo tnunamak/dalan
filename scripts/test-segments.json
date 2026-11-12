@@ -24,6 +24,7 @@
   "node --test scripts/dalan-help-test.mjs",
   "node --test scripts/dalan-submit-brief-test.mjs",
   "node scripts/service-migrate-workers-test.mjs",
+  "node scripts/service-verifier-test.mjs",
   "node scripts/service-install-test.mjs",
   "node scripts/one-bridge-workers-e2e.mjs",
   "node scripts/test-listing-test.mjs",
