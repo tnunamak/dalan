@@ -333,7 +333,7 @@ async function waitDrained() {
   }
 }
 async function main() {
-  let result, waitOutput=false, plainOutput=false;
+  let result, waitOutput=false, plainOutput=false, earlyId=false;
   const help=resolveHelp([command,...args]);
   if(help){ if(help.stream==='stdout') console.log(help.text); else console.error(help.text); process.exitCode=help.code; return; }
   switch (command) {
@@ -506,6 +506,8 @@ async function main() {
       }
       for(const w of result?.submission_warnings??[]) console.error(`dalan: WARNING: ${w}`);
       if(dryRun) { if(!json) console.error(formatVerdict(result)); process.exitCode=VERDICT_EXIT[result.verdict]??0; break; }
+      // A person driving a worker by hand needs the ID while the wait runs. On a terminal the lines go to stdout; piped, they go to stderr so stdout stays the one JSON result.
+      if(args.includes('--wait')&&!json) { (process.stdout.isTTY?console.log:console.error)(`Request ID: ${id}\nSend your worker: ${workerPrompt(id)}`); earlyId=true; }
       if(args.includes('--wait')) { result=await waitForAssignment(id,option('--timeout')); indexArtifacts(id,result); waitOutput=true; process.exitCode=waitExitCode(result.status); if(!json) waitTimeoutNote(id,result); }
       // Discovery labels are not capabilities. Report only the persisted, validated binding.
       const producer=typeof saved.producer==='string'&&producerPattern.test(saved.producer)?saved.producer:null;
@@ -514,7 +516,7 @@ async function main() {
         binding,wake:args.includes('--wait')?'wait_returned':delivery==='none'?'not_registered_by_this_submit':'delivery_destination'};
       if(json) result={...result,recovery};
       // Human mode: one plain next step on stderr, so stdout stays the JSON document. --json carries the full recovery record.
-      else endNote=`${briefGiven?`Request ID: ${id}\nSend your worker: ${workerPrompt(id)}\n`:''}Next: ${recovery.wake==='wait_returned'?`read the result with: ${recovery.get}`:recovery.wake==='delivery_destination'?`the result goes to ${delivery}; check it any time with: ${recovery.get}`:`send your worker the job, then run: ${cli} wait ${id} (check it any time with: ${recovery.get})`}${recovery.inbox?`. List your jobs with: ${recovery.inbox}`:''}`;
+      else endNote=`${briefGiven&&!earlyId?`Request ID: ${id}\nSend your worker: ${workerPrompt(id)}\n`:''}Next: ${recovery.wake==='wait_returned'?`read the result with: ${recovery.get}`:recovery.wake==='delivery_destination'?`the result goes to ${delivery}; check it any time with: ${recovery.get}`:`send your worker the job, then run: ${cli} wait ${id} (check it any time with: ${recovery.get})`}${recovery.inbox?`. List your jobs with: ${recovery.inbox}`:''}`;
       // On a terminal, a person reads the output: show the human lines instead of the JSON receipt. Piped output stays
       // the JSON document, so scripts that read submit's standard output keep working; --json always prints it.
       if(!json&&!waitOutput&&process.stdout.isTTY) { result=`Request ID: ${id}${briefGiven?`\nSend your worker: ${workerPrompt(id)}`:''}`; plainOutput=true; endNote=endNote.split('\n').filter(l=>!l.startsWith('Request ID: ')&&!l.startsWith('Send your worker: ')).join('\n'); }

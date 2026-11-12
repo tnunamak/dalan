@@ -23,6 +23,7 @@
   "node --test scripts/dalan-cli-test.mjs",
   "node --test scripts/dalan-help-test.mjs",
   "node --test scripts/dalan-submit-brief-test.mjs",
+  "node --test scripts/submit-wait-output-test.mjs",
   "node scripts/service-migrate-workers-test.mjs",
   "node scripts/workspace-policy-held-claim-e2e.mjs",
   "node scripts/service-verifier-test.mjs",
