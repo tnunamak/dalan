@@ -45,6 +45,7 @@ import { acquireAsOwner, loadAsConfig, loadKeys } from './as-files.mjs';
 import { createSignal } from './signal.mjs';
 import { adminSocketPathError } from './admin-socket.mjs';
 import { createToolRegistry, createT3PostHandler, RegistryError } from './tool-registry.mjs';
+import { createServiceVerifier } from './service-verifier.mjs';
 
 export async function main({protocolServiceAdapters,loopbackOnly=false}={}) {
 if(typeof loopbackOnly!=='boolean')throw new Error('loopbackOnly must be boolean');
@@ -896,12 +897,14 @@ async function dispatch(message,principal) {
     default: throw Object.assign(new Error('method not found'),{code:-32601});
   }
 }
+const verifyService=builtinMode&&readEnv('DALAN_GOZAR_SERVICE')==='1'?createServiceVerifier():null;
 const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)=>{
   const outcome=req.url===publicPath?beginMcpOutcome(req,res,log,toolNames,!!oauth):null;
   try {
     if(loopback && !loopbackRequestAllowed(req, `http://127.0.0.1:${port}`)) { log({kind:'mcp_inbound',status:403,route:'loopback',ua:uaToken(req)}); res.writeHead(403); res.end(); return; }
     // Built-in mode serves only its configured host, which also blocks DNS rebinding of the loopback listener.
     if(as&&!as.hostOk(req)) { log({kind:'mcp_inbound',status:421,route:'host',ua:uaToken(req)}); res.writeHead(421); res.end(); return; }
+    if(verifyService?.(req,res)) return;
     if(!as && req.url==='/.well-known/oauth-protected-resource' && oauthMetadata && req.method==='GET') return json(res,200,protectedResource(oauthMetadata));
     // RFC 9728 / MCP auth: clients first try metadata suffixed with the MCP path, whose resource is the exact MCP URL.
     if(req.url===`/.well-known/oauth-protected-resource${publicPath}` && oauthMetadata && req.method==='GET') { if(as)res.setHeader('Cache-Control','no-store'); log({kind:'mcp_inbound',status:200,route:'resource_metadata',http_method:req.method,auth_header_present:false,ua:uaToken(req)}); return json(res,200,protectedResource(oauthMetadata,new URL(publicPath,oauthMetadata.OAUTH_AUDIENCE).href)); }

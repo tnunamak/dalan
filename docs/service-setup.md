@@ -2,6 +2,42 @@
 
 Use this guide after a first job works with `dalan try`, when you want a bridge that keeps running or a worker on another computer. Built-in OAuth binds the bridge to `127.0.0.1`; a tunnel or HTTPS reverse proxy forwards worker traffic to that listener. The owner CLI uses a private Unix socket, which must never be exposed through the proxy.
 
+## Install one bridge for several workers
+
+On Linux, `dalan service install` creates a systemd user service and registers its HTTPS origin as a Gozar service route. Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. The bridge uses built-in OAuth and the stable MCP catalog for every worker. Its auth keys, worker allowlists and job queue stay in one private home.
+
+First prepare the public origin so it forwards to the address in `--target`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. The proxy must pass the secret MCP path, the OAuth discovery and authorization paths, `/signal/*` when used, and `/.well-known/gozar/service` with its query string. TLS terminates at the proxy. Keep the secret path out of proxy logs.
+
+For existing installations, create the new home and copy each worker's repository allowlist. Replace the example paths with the old bridge homes on this computer:
+
+```sh
+dalan service migrate-workers \
+  --home "$HOME/.local/share/dalan-service" \
+  --source "$HOME/.config/dot-bridge/workers.json" \
+  --source "$HOME/OLD_BRIDGE_TWO/.config/dot-bridge/workers.json" \
+  --source "$HOME/OLD_BRIDGE_THREE/.config/dot-bridge/workers.json"
+```
+
+The helper reads the source files without changing them. If an older home has no `workers.json`, it can read the adjacent `workers-repos.json` migration journal. It preserves worker names and repository allowlists, and copies supported worker capabilities and guidance. It does not copy OAuth registrations, tokens, jobs or results. The new bridge starts with `default_execution: none`. For a brand-new bridge, skip migration and pass `--worker NAME` once for each worker instead; those initial workers have empty repository allowlists, no capabilities, and no host execution.
+
+Replace `192.0.2.10` below with the address configured on this computer, then run the install after the proxy route reaches the target:
+
+```sh
+dalan service install \
+  --home "$HOME/.local/share/dalan-service" \
+  --public-url https://bridge.example.com \
+  --port 8787 \
+  --target 192.0.2.10:8789
+```
+
+The Dalan process listens on `127.0.0.1:8787`. When `--target` differs, systemd opens the requested target address and forwards it to that loopback listener. Use an address configured on this computer. If Gozar runs on the same computer and can reach loopback directly, set `--target 127.0.0.1:8787`. `gozar service add` runs after systemd starts the bridge; install succeeds only when Gozar returns a verified route. If the origin filters the Gozar verifier by source IP, pass the trusted host check with `--verify-cmd COMMAND`.
+
+Set `DALAN_HOME` to the selected home. The private MCP URL is stored in `$DALAN_HOME/resource-url` with mode 0600. Point the client's connector at that URL and sign in separately for each worker. Repository jobs remain blocked until their allowlists are present. Use the unit name printed by install with `systemctl --user status UNIT`, then confirm the public origin returns 404 for `/admin` and accepts the secret MCP path with its original Host header.
+
+The service starts when the systemd user manager starts. Without lingering, that may happen only after the user logs in after a reboot. If the bridge must start before login, ask an administrator to run `loginctl enable-linger USER` for the account that owns the bridge.
+
+`--write-units-only` writes the systemd unit files without initializing the bridge home, starting systemd or calling Gozar. It is for offline inspection; run the normal install to finish setup.
+
 ## Keep a local trial working
 
 Setup has no local-only service mode, and it needs either `--public-url https://HOST` or `--expose tailscale` (or `--expose ngrok`, for the [ngrok](https://ngrok.com/) tunnel service), so a service always has an HTTPS origin. Dalan does not supply a launchd or systemd recipe for a bridge that serves only `127.0.0.1`, and it cannot convert the paired trial home into a service. Do not point setup at the trial home: it needs a fresh home.
