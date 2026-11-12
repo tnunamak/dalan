@@ -169,11 +169,38 @@ function recoverStaleFunnel(home, tailscale, recordName = 'trial') {
 // trial is gone.
 const SOCKET_PATH_LIMIT = 100; // a unix socket path must fit sun_path (104 on macOS, 108 on Linux)
 const nodeCli = (sock, env) => args => spawnSync('tailscale', [`--socket=${sock}`, ...args], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env });
-// The command line of a process, or null. `ps` exists on Linux and macOS; /proc does not exist on macOS.
-export const processCommand = pid => {
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  const out = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 5000 });
-  return out.status === 0 && out.stdout.trim() ? out.stdout.trim() : null;
+// Inspection failure is not evidence of exit. Read Linux start ticks on both sides of ps so command and identity belong
+// to the same process. macOS supplies its start timestamp and command in one ps snapshot, with a fixed locale and timezone.
+export const processCommand = (pid, { platform = process.platform, run = spawnSync, readFile = fs.readFileSync, probe = pid => process.kill(pid, 0) } = {}) => {
+  const unknown = { state: 'unknown' }, absent = { state: 'absent' };
+  if (!Number.isInteger(pid) || pid <= 0) return unknown;
+  const startTicks = () => {
+    const stat = readFile(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    if (!/^\d+$/.test(fields[19] ?? '')) throw new Error('invalid process start time');
+    return fields[19];
+  };
+  try {
+    const before = platform === 'linux' ? startTicks() : null;
+    if (!['linux', 'darwin'].includes(platform)) return unknown;
+    const out = run('ps', ['-p', String(pid), '-o', platform === 'darwin' ? 'lstart=,command=' : 'command='], { encoding: 'utf8', timeout: 5000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } });
+    if (out.error || out.status !== 0 || !out.stdout?.trim()) {
+      // Even ps exit 1 can be an inspection failure; only ESRCH confirms absence.
+      try { probe(pid); } catch (error) { if (error.code === 'ESRCH') return absent; }
+      return unknown;
+    }
+    if (platform === 'linux') {
+      const after = startTicks();
+      return before === after ? { state: 'present', command: out.stdout.trim(), start: before } : unknown;
+    }
+    const match = /^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/.exec(out.stdout.trim());
+    return match ? { state: 'present', command: match[2], start: match[1].replace(/\s+/g, ' ') } : unknown;
+  } catch (error) {
+    if (['ENOENT', 'ESRCH'].includes(error.code)) {
+      try { probe(pid); } catch (probeError) { if (probeError.code === 'ESRCH') return absent; }
+    }
+    return unknown;
+  }
 };
 const defaultRegistry = env => path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'dalan', 'trial-nodes');
 // A key, a login link or a node key never reaches the daemon log.
@@ -193,24 +220,30 @@ export const redactTailnetNames = (text, names = [], { strict = false } = {}) =>
 
 // Ends the daemons of trials that no longer run. A record is stale when its trial process is gone (or its PID now runs something
 // else); the daemon is ended only if its command line still names the socket this trial started it with.
-const safeList = dir => { try { return fs.readdirSync(dir); } catch { return []; } };
-export async function sweepTrialNodes({ registry, processCmd = processCommand, kill = (pid, sig) => process.kill(pid, sig), clock = { sleep } }) {
+export async function sweepTrialNodes({ registry, processCmd = processCommand, kill = (pid, sig) => process.kill(pid, sig), clock = { sleep }, say = () => {} }) {
   let names = []; try { names = fs.readdirSync(registry).filter(n => n.endsWith('.json')); } catch { return []; }
   const ended = [];
   for (const name of names) {
     const file = path.join(registry, name);
     let rec; try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fs.rmSync(file, { force: true }); continue; }
-    if (Number.isInteger(rec.owner) && rec.owner !== process.pid && rec.ownerCmd && processCmd(rec.owner) === rec.ownerCmd) continue; // its trial still runs
-    if (Number.isInteger(rec.pid) && rec.sock && processCmd(rec.pid)?.includes(rec.sock)) {
-      try { kill(rec.pid, 'SIGTERM'); } catch { /* gone */ }
-      for (let i = 0; i < 20 && processCmd(rec.pid)?.includes(rec.sock); i++) await clock.sleep(100);
-      if (processCmd(rec.pid)?.includes(rec.sock)) { try { kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } }
+    if (Number.isInteger(rec.owner) && rec.owner !== process.pid && rec.ownerCmd) {
+      const owner = processCmd(rec.owner);
+      if (owner.state === 'unknown' || (owner.state === 'present' && owner.command === rec.ownerCmd)) continue; // its trial may still run
     }
-    // A certificate check that outlived its trial still writes into its folder: while it runs (same PID, same command line), its
-    // folder and this record stay; the next sweep removes them once it has exited.
-    if (Number.isInteger(rec.certPid) && rec.certCmd && processCmd(rec.certPid) === rec.certCmd) {
-      if (rec.dir && path.basename(rec.dir) === 'tsnode') for (const entry of safeList(rec.dir)) if (path.join(rec.dir, entry) !== rec.certOut) fs.rmSync(path.join(rec.dir, entry), { recursive: true, force: true });
-      continue;
+    if (Number.isInteger(rec.pid) && rec.sock && processCmd(rec.pid).command?.includes(rec.sock)) {
+      try { kill(rec.pid, 'SIGTERM'); } catch { /* gone */ }
+      for (let i = 0; i < 20 && processCmd(rec.pid).command?.includes(rec.sock); i++) await clock.sleep(100);
+      if (processCmd(rec.pid).command?.includes(rec.sock)) { try { kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } }
+    }
+    // Missing identities (including older records) cannot prove PID reuse. Unknown inspection keeps all files and the debt.
+    if (rec.certOut) {
+      const cert = processCmd(rec.certPid);
+      const different = cert.state === 'present' && rec.certStart && cert.start && cert.start !== rec.certStart;
+      if (cert.state !== 'absent' && !different) {
+        const unknown = cert.state !== 'present' || !cert.start || !rec.certStart;
+        say(`TLS certificate cleanup deferred: ${unknown ? 'process identity unknown' : 'child still running'} (${rec.hostname ?? name}).`);
+        continue;
+      }
     }
     if (rec.dir && path.basename(rec.dir) === 'tsnode') fs.rmSync(rec.dir, { recursive: true, force: true });
     fs.rmSync(file, { force: true });
@@ -232,10 +265,10 @@ export function tailscaleNodeProvider({
       if (!which('tailscaled') || !which('tailscale')) return { ok: false, line: 'tailscaled is not installed, so a separate Tailscale node cannot be started', fix: 'Install Tailscale (it includes tailscaled) from https://tailscale.com/download, or free Funnel port 443 on this computer.' };
       return { ok: true };
     },
-    recover: () => sweepTrialNodes({ registry, processCmd, clock }),
+    recover: ({ say } = {}) => sweepTrialNodes({ registry, processCmd, clock, say }),
     async start({ gatePort, home, say = () => {}, signal }) {
       signal?.throwIfAborted();
-      await sweepTrialNodes({ registry, processCmd, clock });
+      await sweepTrialNodes({ registry, processCmd, clock, say });
       const dir = path.join(home, 'tsnode'), sock = path.join(dir, 'tailscaled.sock'), hostname = `dalan-trial-${newId()}`;
       if (Buffer.byteLength(sock) > SOCKET_PATH_LIMIT) throw new Error('the trial home path is too long for a Tailscale socket; choose a shorter --home');
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -246,7 +279,7 @@ export function tailscaleNodeProvider({
       fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
       fs.mkdirSync(registry, { recursive: true, mode: 0o700 });
       const recordFile = path.join(registry, `${hostname}.json`);
-      const writeRecord = pid => fs.writeFileSync(recordFile, JSON.stringify({ dir, sock, hostname, pid, home, owner: process.pid, ownerCmd: processCmd(process.pid), created_at: new Date().toISOString() }), { mode: 0o600 });
+      const writeRecord = pid => fs.writeFileSync(recordFile, JSON.stringify({ dir, sock, hostname, pid, home, owner: process.pid, ownerCmd: processCmd(process.pid).command ?? null, created_at: new Date().toISOString() }), { mode: 0o600 });
       writeRecord(null); // ownership is recorded before the first process exists
       const run = runCli(sock, childEnv);
       const logFile = path.join(dir, 'tailscaled.log');
@@ -306,35 +339,49 @@ export function tailscaleNodeProvider({
       else {
         const out = fs.mkdtempSync(path.join(node.dir, 'tlscheck-'));
         let timer = null, child = null, gone = true, exited = null;
+        const recordCert = fields => {
+          const rec = JSON.parse(fs.readFileSync(node.recordFile, 'utf8'));
+          const pending = node.recordFile + '.cert-tmp';
+          try {
+            fs.writeFileSync(pending, JSON.stringify({ ...rec, ...fields }), { mode: 0o600 });
+            fs.renameSync(pending, node.recordFile);
+          } finally { fs.rmSync(pending, { force: true }); }
+        };
         try {
+          // Persist the folder before spawning. If later identity persistence fails, this marker still prevents a sweep deleting it.
+          recordCert({ certOut: out, certPid: null, certCmd: null, certStart: null });
           child = spawnChild('tailscale', [`--socket=${node.sock}`, 'cert', `--cert-file=${path.join(out, 'cert')}`, `--key-file=${path.join(out, 'key')}`, dnsName], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
           let said = '';
           for (const stream of [child.stdout, child.stderr]) { stream?.setEncoding?.('utf8'); stream?.on('data', chunk => { if (said.length < 2000) said += chunk; }); }
           gone = false;
-          exited = new Promise(resolve => { const done = code => { gone = true; resolve(code); }; child.once('exit', done); child.once('error', () => done(-1)); });
+          exited = new Promise(resolve => child.once('exit', code => { gone = true; resolve(code); }));
+          const failed = new Promise(resolve => child.once('error', () => { if (!child.pid) gone = true; resolve(-1); }));
+          node.certChild = { out, exited };
+          const identity = processCmd(child.pid);
+          recordCert({ certPid: child.pid ?? null, certCmd: identity.command ?? null, certStart: identity.start ?? null });
           const aborted = new Promise(resolve => { if (signal?.aborted) resolve('aborted'); else signal?.addEventListener('abort', () => resolve('aborted'), { once: true }); });
-          const code = await Promise.race([exited, aborted, new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), certWaitMs); })]);
+          const code = await Promise.race([exited, failed, aborted, new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), certWaitMs); })]);
           const first = said.split('\n').map(l => l.trim()).find(Boolean);
           verdict = code === 0 ? 'ok' : code === 'aborted' ? 'error (cancelled)' : code === 'timeout' ? `error (no answer in ${Math.round(certWaitMs / 1000)} s)` : `error (${first ? redact(safeDiagnostic(first, 120)) : `exit ${code}`})`;
-          // A child that is still running is ended before its files are removed: SIGTERM, then one SIGKILL after a short grace.
-          for (const sig of code === 'aborted' || code === 'timeout' ? ['SIGTERM', 'SIGKILL'] : []) {
-            if (gone) break;
-            child.kill(sig);
-            await Promise.race([exited, clock.sleep(killGraceMs)]);
-          }
         } catch (error) { verdict = `error (${redact(safeDiagnostic(error.message, 120))})`; }
         finally {
           clearTimeout(timer);
-          // The files go only after a confirmed exit. Otherwise they stay inside tsnode, which the node's stop and the sweep delete.
-          if (gone) fs.rmSync(out, { recursive: true, force: true });
+          // Every path, including a record-write or process-control error, attempts termination before handing off cleanup debt.
+          for (const sig of ['SIGTERM', 'SIGKILL']) {
+            if (gone) break;
+            try { child.kill(sig); } catch { /* a failed signal does not prove exit */ }
+            await Promise.race([exited, clock.sleep(killGraceMs)]);
+          }
+          // The files go only after confirmed exit. Otherwise stop and the sweep retain them as cleanup debt.
+          if (gone) {
+            fs.rmSync(out, { recursive: true, force: true });
+            node.certChild = null;
+            try { recordCert({ certOut: null, certPid: null, certCmd: null, certStart: null }); }
+            catch { say('TLS certificate cleanup record could not be cleared; a later sweep may retain it.'); }
+          }
           else {
             node.certChild = { out, exited }; // the node's stop keeps owning it
-            // And so does the registry: a later sweep must not delete the folder while this process runs.
-            try {
-              const rec = JSON.parse(fs.readFileSync(node.recordFile, 'utf8'));
-              fs.writeFileSync(node.recordFile, JSON.stringify({ ...rec, certPid: child?.pid ?? null, certCmd: child?.pid ? processCmd(child.pid) : null, certOut: out }), { mode: 0o600 });
-            } catch { /* no record to extend */ }
-            say(`TLS certificate check did not stop (termination not confirmed); its files stay in ${out} until the node is removed.`);
+            say(`TLS certificate check did not stop (termination not confirmed); its files stay in ${out} until exit is confirmed.`);
           }
         }
       }
