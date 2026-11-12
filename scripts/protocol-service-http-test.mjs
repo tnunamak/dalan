@@ -34,7 +34,7 @@ try {
   await unchanged(job,()=>a.admin('POST','/protocol/service/dispatch',body),/unauthorized/);
   await unchanged(job,()=>a.admin('POST','/protocol/service/dispatch',body,undefined,{serviceRole:'observer'}),/unauthorized/);
   await unchanged(job,()=>a.admin('POST','/protocol/service/dispatch',{...body,destination:'elsewhere'},undefined,{serviceRole:'dispatcher'}),/invalid_input/);
-  const publicStatus=await new Promise((resolve,reject)=>{const req=http.request({host:'127.0.0.1',port:a.port,path:'/protocol/service/dispatch',method:'POST'},res=>{res.resume();res.once('end',()=>resolve(res.statusCode));});req.once('error',reject);req.end('{}');});
+  const publicStatus=await new Promise((resolve,reject)=>{const req=http.request({host:'127.0.0.1',port:a.port,path:'/protocol/service/dispatch',method:'POST',headers:{host:'dot-bridge.example.test'}},res=>{res.resume();res.once('end',()=>resolve(res.statusCode));});req.once('error',reject);req.end('{}');});
   assert.equal(publicStatus,404);
   const first=ok(await a.admin('POST','/protocol/service/dispatch',body,undefined,{serviceRole:'dispatcher'}));
   assert.deepEqual(first,{delivery,state:'sending'});
