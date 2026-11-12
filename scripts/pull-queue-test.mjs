@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn,spawnSync} from 'node:child_process';
-import {sign} from 'node:crypto';
+import {sign,randomUUID} from 'node:crypto';
 import {Store} from '../src/store.mjs';
 import {parseWorkers} from '../src/workers.mjs';
 import {routingPolicy} from '../src/pull-queue.mjs';
@@ -23,6 +23,40 @@ const acquire=(id,worker='alpha',extra={})=>store.pullQueue.acquire(id,{worker,s
 const count=()=>store.db.prepare('SELECT count(*) n FROM assignments').get().n;
 try {
   store=new Store(path.join(root,'store.db'),{workers:profile,capacity:50,destinationProfile:()=>profile});
+  for(const failure of ['removed','revoked']) {
+    const live={alpha:[randomUUID()],beta:[randomUUID()]};
+    const connections={alpha:live.alpha[0],beta:live.beta[0]},owner=randomUUID();
+    const profile=parseWorkers({workers:{alpha:{},beta:{}},default_execution:'worker'},{builtin:true,builtinConnectionIds:worker=>live[worker]??[]});
+    let now=Date.now();
+    const store=new Store(path.join(root,'manual-'+failure+'.db'),{workers:profile,destinationProfile:()=>profile,connectionIsLive:id=>Object.values(live).flat().includes(id),now:()=>now});
+    const admit=worker=>{if(!profile.workers.has(worker)||!live[worker]?.length)throw new Error('worker unavailable');};
+    const options={delivery:{mode:'none'},environmentId:'',execution:'worker',review:false,priority:'normal',meta:null};
+    const create=(id,allowed)=>{
+      const payload={schema_version:1,request_id:id,brief:'Read supplied text.',inputs:[],execution_scope:'read-only',expected_output:'One report.'};
+      const routing=routingPolicy({version:1,allowed_workers:allowed,deadline_at:new Date(now+3600000).toISOString()},payload);
+      return store.pullQueue.submit(payload,payload,options,routing,{},owner);
+    };
+    const acquire=(id,worker)=>store.pullQueue.acquire(id,{worker,subject:worker,connectionId:connections[worker],claimant:worker,acquisitionId:randomUUID(),capacity:10,leaseMs:1000,admit});
+    try {
+      const original='req_'+randomUUID(),replacement='req_'+randomUUID();create(original,['alpha','beta']);
+      const first=acquire(original,'alpha');
+      if(failure==='removed')profile.workers.delete('alpha');
+      live.alpha=[];now+=1001;
+      assert.ok(store.sweepStaleLeases().includes(original));
+      store.owner(original,owner);store.cancel(original,'Owner replaces unavailable worker');
+      assert.throws(()=>store.progress(original,first.claim_id,'Late progress','alpha',false,'alpha',null,null,connections.alpha),/invalid claim/);
+      assert.throws(()=>store.finish(original,first.claim_id,'completed','Late','Late','alpha',null,'alpha',null,null,connections.alpha),/invalid claim/);
+      create(replacement,['beta']);store.owner(replacement,owner);
+      assert.ok(store.pullQueue.list('beta',admit).items.some(item=>item.request_id===replacement));
+      const second=acquire(replacement,'beta');
+      store.finish(replacement,second.claim_id,'completed','Read supplied text','Read supplied text','beta',null,'beta',null,null,connections.beta);
+      assert.equal(store.get(original).status,'cancelled');assert.equal(store.get(original).report,null);
+      assert.equal(store.get(replacement).status,'finished');
+      store.decide(replacement,'accepted');assert.equal(store.ownerInbox(replacement).decision,'accepted');
+      assert.equal(store.db.prepare('SELECT count(*) n FROM reports').get().n,1);
+      console.log(`PASS ${failure} holder: owner cancels old order; fresh beta order completes once; old grant denied`);
+    } finally {store.db.close();}
+  }
   put('req_pull_basic');assert.equal(count(),0);
   assert.equal(store.pullQueue.list('stranger',admit).items.length,0);
   assert.throws(()=>store.pullQueue.get('req_pull_basic','stranger',admit),/assignment not found/);

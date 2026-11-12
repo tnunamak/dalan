@@ -118,7 +118,14 @@ children remain hints. Lease expiry and abandonment use the ordinary child
 recovery path with a fresh acquisition ID, once prior work has verifiably stopped.
 There is no second result slot or cross-worker retry.
 
-The advertised MCP tool definitions are unchanged in every catalog profile.
+If the acquired worker is removed or its connection is revoked, lease expiry does
+not offer the order to a different worker. The owner must cancel the submitted
+request ID and submit a fresh request ID for the remaining eligible workers.
+Check that any previous external work has stopped before resubmitting; bridge
+cancellation alone cannot prove that. The cancelled order and its history remain
+separate from the replacement and its result.
+
+Pool submission uses the existing MCP tool definitions.
 `pull-catalog-hash-test.mjs` pins all four profiles with T3 tools off and on.
 The database upgrade is additive schema 66; use a pre-upgrade backup to return to
 an older Dalan build.
