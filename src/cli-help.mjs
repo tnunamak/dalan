@@ -23,7 +23,7 @@ export const COMMANDS = [
       'Install: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]',
       'New installs enable a daily update timer with up to one hour of jitter. Existing preferences are preserved.',
       'Update: dalan service update [--check|--yes] [--home DIR] [--json]. --check only reports availability.',
-      'Updates install side by side, check every worker catalog, then restart and health-check the bridge. Failures restore the previous install and saved state.',
+      'Updates install side by side, check every worker catalog, then restart and health-check the bridge. Failures attempt to restore the previous install and saved state; a failed rollback is reported.',
       'Changed tool descriptors stage without switching. Refresh the hosted connectors when you explicitly switch with --yes. The timer never supplies --yes.',
       'Automatic updates: dalan service auto-update on|off [--home DIR]. Status: dalan service status [--home DIR] [--json] shows the last result.',
       'Service installation and update timers require Linux systemd; launchd is not supported by this command.',
