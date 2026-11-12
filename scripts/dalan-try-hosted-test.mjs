@@ -569,14 +569,14 @@ test('the trial\'s own node: the certificate check ends on cancel, escalates pas
   await sleepMs(30);
   const leftover = path.dirname(b.events.cert.files[0]); fs.writeFileSync(path.join(leftover, 'key'), 'PRIVATE-KEY-BODY');
   const deferred = [];
-  const held = await sweepTrialNodes({ registry: b.registry, processCmd: pid => pid === 5555 ? { state: 'unknown' } : { state: 'absent' }, say: line => deferred.push(line), kill() {}, clock: { sleep: async () => {} } });
+  const held = (await sweepTrialNodes({ registry: b.registry, processCmd: pid => pid === 5555 ? { state: 'unknown' } : { state: 'absent' }, say: line => deferred.push(line), kill() {}, clock: { sleep: async () => {} } })).ended;
   assert.deepEqual(held, []);
   assert.equal(b.events.certAlive, true);
   assert.equal(fs.existsSync(leftover), true, 'failed inspection cannot delete files under a live writer');
   assert.match(deferred.join('\n'), /certificate.*unknown/i);
   b.events.cert.child.kill('SIGTERM'); await pendingB;
   assert.equal(b.events.certAlive, false, 'the fake really exited before cleanup');
-  const ended = await sweepTrialNodes({ registry: b.registry, processCmd: () => ({ state: 'absent' }), kill() {}, clock: { sleep: async () => {} } });
+  const ended = (await sweepTrialNodes({ registry: b.registry, processCmd: () => ({ state: 'absent' }), kill() {}, clock: { sleep: async () => {} } })).ended;
   assert.deepEqual(ended, ['dalan-trial-abc123']);
   assert.equal(fs.existsSync(leftover), false, 'the sweep removed the key');
   await b.node.stop();
@@ -620,12 +620,12 @@ test('the trial\'s own node: outputs wait for a late exit, and are kept for the 
   assert.deepEqual(fs.readdirSync(never.registry), ['dalan-trial-abc123.json'], 'the record stays, so the sweep finishes the job');
   // Owner and daemon are gone but the cert child still runs: the sweep keeps its folder and the record; after its exit it removes both.
   const alive = pid => pid === 5555 && never.events.certAlive ? { state: 'present', command: 'tailscale cert', start: '100' } : { state: 'absent' };
-  const kept1 = await sweepTrialNodes({ registry: never.registry, processCmd: alive, kill() {}, clock: { sleep: async () => {} } });
+  const kept1 = (await sweepTrialNodes({ registry: never.registry, processCmd: alive, kill() {}, clock: { sleep: async () => {} } })).ended;
   assert.deepEqual(kept1, [], 'nothing is ended while the cert child runs');
   assert.equal(fs.existsSync(kept), true, 'its folder stays');
   assert.deepEqual(fs.readdirSync(never.registry), ['dalan-trial-abc123.json'], 'and so does the record');
   const unknownLines = [];
-  const unknown = await sweepTrialNodes({ registry: never.registry, processCmd: pid => pid === 5555 ? { state: 'unknown' } : { state: 'absent' }, say: line => unknownLines.push(line), kill() {}, clock: { sleep: async () => {} } });
+  const unknown = (await sweepTrialNodes({ registry: never.registry, processCmd: pid => pid === 5555 ? { state: 'unknown' } : { state: 'absent' }, say: line => unknownLines.push(line), kill() {}, clock: { sleep: async () => {} } })).ended;
   assert.deepEqual(unknown, []);
   assert.equal(never.events.certAlive, true);
   assert.equal(fs.existsSync(kept), true);
@@ -633,7 +633,7 @@ test('the trial\'s own node: outputs wait for a late exit, and are kept for the 
   assert.match(unknownLines.join('\n'), /certificate.*unknown/i);
   never.events.cert.child.exitCode = 0; never.events.cert.child.emit('exit', 0);
   assert.equal(never.events.certAlive, false, 'confirmed fake exit precedes cleanup');
-  const ended = await sweepTrialNodes({ registry: never.registry, processCmd: alive, kill() {}, clock: { sleep: async () => {} } });
+  const ended = (await sweepTrialNodes({ registry: never.registry, processCmd: alive, kill() {}, clock: { sleep: async () => {} } })).ended;
   assert.deepEqual(ended, ['dalan-trial-abc123']);
   assert.equal(fs.existsSync(kept), false, 'removed after the exit is confirmed');
   assert.deepEqual(fs.readdirSync(never.registry), []);
@@ -690,14 +690,14 @@ test('a real live writer survives failed ps and identity reads, then its confirm
         : [{ run: () => ({ status: 0, stdout: 'invalid start identity' }) }]),
     ]) {
       const lines = [];
-      assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : processCommand(pid, fault), say: line => lines.push(line), kill() { assert.fail('writer is not signalled'); } }), []);
+      assert.deepEqual((await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : processCommand(pid, fault), say: line => lines.push(line), kill() { assert.fail('writer is not signalled'); } })).ended, []);
       assert.equal(isAlive(child.pid), true); assert.equal(fs.existsSync(out), true); assert.equal(fs.existsSync(file), true);
       assert.match(lines.join('\n'), /certificate.*unknown/i);
     }
   } finally { child.kill(); await gone; }
-  assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : processCommand(pid) }), ['debt.json']);
+  assert.deepEqual((await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : processCommand(pid) })).ended, ['debt.json']);
   assert.equal(fs.existsSync(out), false); assert.equal(fs.existsSync(file), false);
-  assert.deepEqual(await sweepTrialNodes({ registry }), [], 'cleanup is idempotent');
+  assert.deepEqual((await sweepTrialNodes({ registry })).ended, [], 'cleanup is idempotent');
 });
 
 test('initial certificate identity lookup failure persists cleanup debt before stop and sweep', async () => {
@@ -712,7 +712,7 @@ test('initial certificate identity lookup failure persists cleanup debt before s
   assert.equal(rec.certStart, null);
   await pending; await h.node.stop();
   const lines = [];
-  const held = await sweepTrialNodes({ registry: h.registry, processCmd: pid => pid === 5555 ? { state: 'present', command: 'tailscale cert', start: '100' } : { state: 'absent' }, say: line => lines.push(line), kill() {} });
+  const held = (await sweepTrialNodes({ registry: h.registry, processCmd: pid => pid === 5555 ? { state: 'present', command: 'tailscale cert', start: '100' } : { state: 'absent' }, say: line => lines.push(line), kill() {} })).ended;
   assert.deepEqual(held, []); assert.equal(h.events.certAlive, true);
   assert.equal(fs.existsSync(rec.certOut), true); assert.equal(fs.existsSync(file), true);
   assert.match(lines.join('\n'), /certificate.*unknown/i);
@@ -756,7 +756,7 @@ test('failed certificate identity persistence keeps the durable unknown marker a
   assert.match(h.lines.join('\n'), /identity persistence failure/);
   await h.node.stop();
   const lines = [];
-  assert.deepEqual(await sweepTrialNodes({ registry: h.registry, processCmd: pid => pid === process.pid ? { state: 'absent' } : processCommand(pid), say: line => lines.push(line), kill() {} }), []);
+  assert.deepEqual((await sweepTrialNodes({ registry: h.registry, processCmd: pid => pid === process.pid ? { state: 'absent' } : processCommand(pid), say: line => lines.push(line), kill() {} })).ended, []);
   assert.equal(fs.existsSync(rec.certOut), true); assert.equal(fs.existsSync(file), true);
   assert.deepEqual(fs.readdirSync(h.registry), ['dalan-trial-abc123.json'], 'atomic-update scratch is removed');
   assert.match(lines.join('\n'), /certificate.*unknown/i);
@@ -783,7 +783,7 @@ test('certificate cleanup debt survives unknown inspection and releases only on 
     const file = path.join(registry, 'debt.json');
     fs.writeFileSync(file, JSON.stringify({ dir, certOut: out, certPid: 5555, certCmd: 'tailscale cert', certStart: savedStart, owner }));
     const lines = [];
-    const ended = await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : inspection, say: line => lines.push(line), kill() { assert.fail('certificate PID must not be signalled'); } });
+    const ended = (await sweepTrialNodes({ registry, processCmd: pid => pid === owner ? { state: 'absent' } : inspection, say: line => lines.push(line), kill() { assert.fail('certificate PID must not be signalled'); } })).ended;
     assert.equal(fs.existsSync(out), !releases, label);
     assert.equal(fs.existsSync(file), !releases, label);
     assert.equal(ended.length, releases ? 1 : 0, label);
@@ -902,7 +902,7 @@ test('leftover trial daemons are found in any later run, by registry and a porta
   try {
     const h = nodeHarness({ upBehaviour: 'ok', registry });
     // A trial in a DIFFERENT home sweeps the registry: the crashed trial's daemon ends, the running one stays.
-    const ended = await h.node.recover();
+    const { ended } = await h.node.recover();
     assert.deepEqual(ended, ['crashed']);
     await sleepMs(200);
     assert.equal(isAlive(crashed.daemon.pid), false, 'the crashed trial\'s daemon was ended');
@@ -1820,7 +1820,7 @@ test('node sweep protects owners without recorded identity and requires start id
     fs.writeFileSync(file, JSON.stringify({ owner: 12345, ownerCmd: null, ownerStart: recordedStart, pid: 23456, dir, sock }));
     let daemonAlive = true;
     const killed = [];
-    const ended = await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? owner : daemonAlive ? { state: 'present', command: `tailscaled --socket=${sock}`, start: '20' } : { state: 'absent' }, kill(pid) { killed.push(pid); daemonAlive = false; }, clock: { sleep: async () => {} } });
+    const ended = (await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? owner : daemonAlive ? { state: 'present', command: `tailscaled --socket=${sock}`, start: '20' } : { state: 'absent' }, kill(pid) { killed.push(pid); daemonAlive = false; }, clock: { sleep: async () => {} } })).ended;
     assert.equal(killed.length, reclaim ? 1 : 0, label);
     assert.equal(ended.length, reclaim ? 1 : 0, label);
     assert.equal(fs.existsSync(file), !reclaim, label);
@@ -1834,7 +1834,7 @@ test('node sweep retains unreadable records and directories of daemons whose exi
   const dir = path.join(registry, 'tsnode'); fs.mkdirSync(dir);
   const file = path.join(registry, 'trial.json');
   fs.writeFileSync(file, JSON.stringify({ owner: 12345, pid: 23456, sock: path.join(dir, 'daemon.sock'), dir }));
-  assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? { state: 'absent' } : { state: 'unknown' }, kill() { assert.fail('unknown process must not be killed'); } }), []);
+  assert.deepEqual((await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? { state: 'absent' } : { state: 'unknown' }, kill() { assert.fail('unknown process must not be killed'); } })).ended, []);
   assert.ok(fs.existsSync(broken), 'an unparseable record is retained');
   assert.ok(fs.existsSync(file), 'unknown daemon keeps recovery record');
   assert.ok(fs.existsSync(dir), 'unknown daemon keeps its socket directory');
@@ -1884,7 +1884,7 @@ test('node sweeps require a present socket identity before signalling and retain
     const dir = path.join(registry, 'tsnode'); fs.mkdirSync(dir);
     const sock = path.join(dir, 'daemon.sock'), file = path.join(registry, 'trial.json');
     fs.writeFileSync(file, JSON.stringify({ owner: 12345, pid: 23456, sock, dir, ...overrides }));
-    assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? { state: 'absent' } : inspectDaemon(sock), kill() { assert.fail(`${label} must not authorize a signal`); } }), [], label);
+    assert.deepEqual((await sweepTrialNodes({ registry, processCmd: pid => pid === 12345 ? { state: 'absent' } : inspectDaemon(sock), kill() { assert.fail(`${label} must not authorize a signal`); } })).ended, [], label);
     assert.ok(fs.existsSync(file), label); assert.ok(fs.existsSync(dir), label);
   }
 });
@@ -1927,7 +1927,7 @@ test('failed hosted startup preserves a surviving daemon through the outer clean
     assert.ok(fs.existsSync(record), 'the later run can recover this node');
     assert.match(run.out, /cleanup is unconfirmed/);
     h.events.daemon.exitCode = 0; h.events.daemon.emit('exit', 0);
-    assert.deepEqual(await sweepTrialNodes({ registry: h.registry, processCmd: () => ({ state: 'absent' }) }), ['dalan-trial-abc123']);
+    assert.deepEqual((await sweepTrialNodes({ registry: h.registry, processCmd: () => ({ state: 'absent' }) })).ended, ['dalan-trial-abc123']);
     assert.equal(fs.existsSync(dir), false); assert.equal(fs.existsSync(record), false);
   } finally { await run.close(); process.exitCode = originalExit; }
 });
@@ -1949,4 +1949,99 @@ test('failed hosted startup retains node files when cleanup reports writer debt 
       await run.close();
     }
   } finally { process.exitCode = originalExit; }
+});
+
+// Recovery debt from an earlier owner must survive the next trial's complete lifecycle.
+function retainedNodeFixture(name, identity) {
+  const home = path.join(tmp, name), dir = path.join(home, 'tsnode');
+  const registry = fs.mkdtempSync(path.join(tmp, 'retained-registry-'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(home, '.dalan-trial'), 'created by `dalan try`\n');
+  const sock = path.join(dir, 'tailscaled.sock'), file = path.join(registry, 'old-node.json');
+  fs.writeFileSync(sock, 'old socket sentinel');
+  fs.mkdirSync(path.join(dir, 'state'));
+  fs.writeFileSync(path.join(dir, 'state', 'sentinel'), 'old state sentinel');
+  const record = { home, dir, sock, hostname: 'old-node', owner: 12345, pid: 23456,
+    ...(identity === 'certificate' ? { certOut: dir, certPid: 34567, certStart: '10' } : {}) };
+  fs.writeFileSync(file, JSON.stringify(record));
+  const calls = [];
+  const provider = tailscaleNodeProvider({ registry, which: () => '/fake/tailscale',
+    processCmd: pid => pid === (identity === 'daemon' ? 23456 : 34567) ? { state: 'unknown' } : { state: 'absent' },
+    spawnChild() { calls.push('spawn'); throw new Error('retained node was spawned'); },
+    runCli() { calls.push('CLI'); throw new Error('retained socket was used'); },
+  });
+  const snapshot = () => [dir, sock, path.join(dir, 'state'), path.join(dir, 'state', 'sentinel'), file].map(p => {
+    const stat = fs.statSync(p);
+    return { path: p, ino: stat.ino, mode: stat.mode, mtime: stat.mtimeMs, content: stat.isFile() ? fs.readFileSync(p, 'utf8') : fs.readdirSync(p) };
+  });
+  return { home, dir, sock, file, registry, calls, provider, snapshot, before: snapshot() };
+}
+
+for (const identity of ['daemon', 'certificate']) {
+  test(`retained ${identity}: tailscale-node restart refuses before any node spawn, CLI or write`, async t => {
+    const fixture = retainedNodeFixture(`rn-${identity}`, identity);
+    const writes = [];
+    for (const method of ['mkdirSync', 'writeFileSync', 'appendFileSync', 'rmSync', 'unlinkSync', 'renameSync', 'chmodSync']) {
+      const original = fs[method];
+      t.mock.method(fs, method, function (target, ...args) {
+        if (typeof target === 'string' && [fixture.dir, fixture.registry].some(root => target === root || target.startsWith(`${root}${path.sep}`))) writes.push([method, target]);
+        return original.call(this, target, ...args);
+      });
+    }
+    const busy = { name: 'tailscale', probe: () => ({ ok: false, busy: true, line: 'busy', fix: 'free 443' }) };
+    const run = await hostedRun(`rn-${identity}`, { argv: ['--route', 'tailscale'], providers: [busy, fixture.provider] });
+    try {
+      const result = await run.finished;
+      assert.deepEqual(fixture.calls, [], 'no process or CLI may touch the retained node');
+      assert.deepEqual(writes, [], 'no write may even be attempted against retained resources');
+      assert.deepEqual(fixture.snapshot(), fixture.before, 'no retained file or directory may change');
+      assert.ok(result.error?.message.includes(fixture.home), 'refusal names the retained home');
+      assert.match(result.error.message, /try --public.*--route tailscale.*--home /, 'refusal gives a fresh-home command');
+      assert.match(result.error.message, /unconfirmed|cannot confirm/i);
+    } finally { await run.close(); }
+  });
+
+  for (const failure of [true, false]) {
+    test(`retained ${identity}: localhost.run preserves node and recovery record on ${failure ? 'startup failure' : 'normal stop'}`, async () => {
+      const name = `rr-${identity}-${failure}`;
+      const fixture = retainedNodeFixture(name, identity), relay = fakeRoute();
+      if (failure) relay.provider.start = async () => { throw new Error('injected relay startup failure'); };
+      const run = await hostedRun(name, { argv: ['--route', 'localhost.run'], providers: [relay.provider, fixture.provider] });
+      try {
+        if (failure) assert.match((await run.finished).error?.message ?? '', /injected relay startup failure/);
+        else { await run.handoff(); assert.equal((await run.close()).error, undefined); }
+        assert.deepEqual(fixture.calls, [], 'relay never touches the retained socket');
+        assert.deepEqual(fixture.snapshot(), fixture.before, 'retained directory and registry survive final cleanup');
+        assert.equal(fs.existsSync(path.join(run.home, '.hosted-lock')), false, 'trial lock released');
+        assert.equal(fs.existsSync(path.join(run.home, 'resource-url')), false, 'trial credential removed');
+      } finally { await run.close(); }
+    });
+  }
+}
+
+test('node recovery returns retained home and socket debt, then releases it after confirmed exit', async () => {
+  const fixture = retainedNodeFixture('rd-api', 'daemon');
+  const result = await fixture.provider.recover();
+  assert.deepEqual(result, { ended: [], retained: [{ home: fixture.home, sock: fixture.sock }] });
+  assert.deepEqual(fixture.snapshot(), fixture.before);
+  assert.deepEqual(await sweepTrialNodes({ registry: fixture.registry, processCmd: () => ({ state: 'absent' }) }), { ended: ['old-node'], retained: [] });
+  assert.equal(fs.existsSync(fixture.dir), false);
+  assert.equal(fs.existsSync(fixture.file), false);
+  const h = nodeHarness({ registry: fixture.registry });
+  try {
+    await h.node.start({ gatePort: 6161, home: fixture.home });
+    assert.ok(h.events.spawned.length, 'confirmed release permits a new node in the same home');
+  } finally { await h.node.stop(); }
+});
+
+test('retained node debt from another home does not preserve this trial\'s disposable node files', async () => {
+  const fixture = retainedNodeFixture('rd-other', 'daemon'), relay = fakeRoute();
+  const run = await hostedRun('rd-new', { providers: [relay.provider, fixture.provider] });
+  try {
+    await run.handoff();
+    const disposable = path.join(run.home, 'tsnode'); fs.mkdirSync(disposable);
+    assert.equal((await run.close()).error, undefined);
+    assert.equal(fs.existsSync(disposable), false, 'unrelated debt does not disable ordinary cleanup');
+    assert.deepEqual(fixture.snapshot(), fixture.before);
+  } finally { await run.close(); }
 });

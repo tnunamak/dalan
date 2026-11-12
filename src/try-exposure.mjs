@@ -190,11 +190,13 @@ export const redactTailnetNames = (text, names = [], { strict = false } = {}) =>
 // Ends the daemons of trials that no longer run. A record is stale when its trial process is gone (or its PID now runs something
 // else); the daemon is ended only if its command line still names the socket this trial started it with.
 export async function sweepTrialNodes({ registry, processCmd = processCommand, kill = (pid, sig) => process.kill(pid, sig), clock = { sleep }, say = () => {} }) {
-  let names = []; try { names = fs.readdirSync(registry).filter(n => n.endsWith('.json')); } catch { return []; }
-  const ended = [];
+  let names = []; try { names = fs.readdirSync(registry).filter(n => n.endsWith('.json')); } catch (error) { if (error.code === 'ENOENT') return { ended: [], retained: [] }; throw error; }
+  const ended = [], retained = [];
   for (const name of names) {
     const file = path.join(registry, name);
-    let rec; try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { continue; }
+    let rec; try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { retained.push({ home: null, sock: null }); continue; }
+    // Keep the ownership boundary even when a record cannot be safely reclaimed.
+    retained.push({ home: rec?.home ?? (typeof rec?.dir === 'string' ? path.dirname(rec.dir) : null), sock: rec?.sock ?? null });
     if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue;
     if (Number.isInteger(rec.pid) && (!Number.isInteger(rec.owner) || typeof rec.sock !== 'string' || !rec.sock)) continue;
     if (Number.isInteger(rec.owner)) {
@@ -226,8 +228,9 @@ export async function sweepTrialNodes({ registry, processCmd = processCommand, k
     if (rec.dir && path.basename(rec.dir) === 'tsnode') fs.rmSync(rec.dir, { recursive: true, force: true });
     fs.rmSync(file, { force: true });
     ended.push(rec.hostname ?? name);
+    retained.pop();
   }
-  return ended;
+  return { ended, retained };
 }
 
 export function tailscaleNodeProvider({
@@ -246,8 +249,11 @@ export function tailscaleNodeProvider({
     recover: ({ say } = {}) => sweepTrialNodes({ registry, processCmd, clock, say }),
     async start({ gatePort, home, say = () => {}, signal }) {
       signal?.throwIfAborted();
-      await sweepTrialNodes({ registry, processCmd, clock, say });
+      const { retained } = await sweepTrialNodes({ registry, processCmd, clock, say });
       const dir = path.join(home, 'tsnode'), sock = path.join(dir, 'tailscaled.sock'), hostname = `dalan-trial-${newId()}`;
+      if (retained.some(debt => debt.home === home || debt.sock === sock || (!debt.home && !debt.sock))) {
+        throw Object.assign(new Error(`Cannot confirm that the earlier Tailscale node in ${home} has stopped; its files are retained.`), { tryKind: 'node_retained' });
+      }
       if (Buffer.byteLength(sock) > SOCKET_PATH_LIMIT) throw new Error('the trial home path is too long for a Tailscale socket; choose a shorter --home');
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       // tailscaled keeps its TLS certificates under its var root (--statedir). --state=mem: gives it none, so without this directory

@@ -199,7 +199,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     return true;
   };
 
-  let gate = null, route = null, routeStopped = null, cleaned = true;
+  let gate = null, route = null, routeStopped = null, cleaned = true, keepRecoveredNode = false;
   let releaseHome;
   try { releaseHome = acquireHomeLock(home); } catch (error) { lines.close(); throw error; }
   try {
@@ -207,7 +207,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     say('Checking public routes…');
     gate = await createGate();
     // A trial that was killed earlier may have left a Tailscale node of its own running; end it before this one starts.
-    for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended ${ended.join(', ')} left by an earlier trial.`); }
+    for (const provider of providers) {
+      const recovery = await provider.recover?.().catch(() => ({ retained: [{ home: null, sock: null }] }));
+      const ended = Array.isArray(recovery) ? recovery : recovery?.ended;
+      keepRecoveredNode ||= recovery?.retained?.some(debt => debt.home === home || debt.sock === path.join(home, 'tsnode/tailscaled.sock') || (!debt.home && !debt.sock)) ?? false;
+      if (ended?.length) say(`Ended ${ended.join(', ')} left by an earlier trial.`);
+    }
     signal?.throwIfAborted();
     try {
       for (const message of routeMessages) say(message);
@@ -216,6 +221,10 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     }
     catch (error) {
       routeStopped = error?.routeCleanup ?? routeStopped;
+      if (error?.tryKind === 'node_retained') {
+        keepRecoveredNode = true;
+        error.message += `\nStart a fresh trial with: ${cli} try --public --client ${client} --route ${routeChoice} --home ${shellQuote(path.join(realHome, '.local/share', `dalan-hosted-${randomBytes(3).toString('hex')}`))}`;
+      }
       if (error && typeof error === 'object' && !signal?.aborted) {
         error.tryKind ??= 'route_start';
         // A real route never turns into a trial link without the owner choosing it.
@@ -369,7 +378,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     await stopServer();
     await gate?.close();
     // The connector URL and the bridge's secrets are no use after the trial and stay on disk for nobody.
-    removeTrialSecrets(home, configDir, { keepConfig: STABLE_ORIGIN_ROUTES.has(route?.provider.name), keepNode: Boolean(routeStopped?.keepNode) });
+    removeTrialSecrets(home, configDir, { keepConfig: STABLE_ORIGIN_ROUTES.has(route?.provider.name), keepNode: keepRecoveredNode || Boolean(routeStopped?.keepNode) });
     releaseHome();
     cleaned = routeStopped ? routeStopped.removed : true;
     if (!cleaned) { process.exitCode = 1; out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n${routeStopped.command ? `Remove it with:\n${commandLine(routeStopped.command)}\n` : ''}`); }
