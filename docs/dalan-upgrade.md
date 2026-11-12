@@ -51,7 +51,7 @@ An empty new `AUTH_MODE` is treated as unset so a templated variable cannot mask
 
 ## Upgrade an npm install
 
-Releases before 0.4.0 were published as `dot-bridge`. The old package installs `dot-*` commands, including `dot-worker`, `dot-deadman` and `dot-heartbeat`; Dalan installs `dalan` and `dalan-*` only. Remove the old package first so those old commands leave `PATH`; this removes only the code and leaves every bridge home, database and key alone, so a service that still names that code must be pointed at the new copy before it starts. Run step 1 while the old service is running. Then stop the service in step 2 and take the [backup](operations.md#upgrade-and-rollback) in step 3 before replacing code. Replace `NAME` with the worker name.
+Releases before 0.4.0 were published as `dot-bridge`. The old package installs the commands `dot-worker`, `dot-deadman` and `dot-heartbeat`, among others; Dalan installs `dalan` and `dalan-*` only. Remove the old package first so those old commands leave `PATH`; this removes only the code and leaves every bridge home, database and key alone, so a service that still names that code must be pointed at the new copy before it starts. Run step 1 while the old service is running. Then stop the service in step 2 and take the [backup](operations.md#upgrade-and-rollback) in step 3 before replacing code. Replace `NAME` with the worker name.
 
 1. Drain, while the old service still runs. Put the new release in a scratch directory, so the old install stays in place, and run the drain from there with the service's own HOME and environment (see the drain paragraph in the [checklist](#pre-upgrade-checklist)):
 

@@ -15,7 +15,8 @@ const root = fs.mkdtempSync(path.join(scratch, 'dalan-service-install-'));
 const userHome = path.join(root, 'user');
 fs.mkdirSync(userHome, { mode: 0o700 });
 const xdg = path.join(userHome, '.config');
-const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg };
+// Gozar's state-path rule inspects every ancestor, so keep the host's directory modes out of these tests.
+const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: '/' };
 const calls = [];
 const route = { origin: 'https://bridge.example.test', target: '192.0.2.10:8787', verification: { status: 'verified', method: 'challenge' } };
 const spawn = (command, args) => {
@@ -83,11 +84,16 @@ try {
   const wideBridge = path.join(root, 'wide-bridge');
   await assert.rejects(installService({ home: wideBridge, origin: route.origin, port: 8787,
     target: route.target, lanPort: 8787, workers: ['dot'], gozarBin: 'gozar' }, {
-    env: { ...env, HOME: wideHome, XDG_CONFIG_HOME: xdg }, platform: 'linux', node: '/usr/bin/node',
+    env: { ...env, HOME: wideHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: undefined }, platform: 'linux', node: '/usr/bin/node',
     repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn(command, args) { wideCalls.push([command, ...args]); return { status: 0, stdout: '' }; },
     waitForSocket: async () => true,
-  }), error => error.message.includes(`chmod go-w ${path.join(wideHome, '.local')}`) && !error.message.includes('\n'));
+  }), error => {
+    // Gozar checks from the filesystem root down, so a host ancestor that is already group-writable is named first.
+    const named = /Run: chmod go-w (\S+)/.exec(error.message)?.[1];
+    return named !== undefined && !error.message.includes('\n') && (fs.statSync(named).mode & 0o022) !== 0
+      && path.join(wideHome, '.local').startsWith(named);
+  });
   assert.deepEqual(wideCalls, [], 'unsafe Gozar state path refuses before any command runs');
   assert.equal(fs.existsSync(wideBridge), false, 'unsafe Gozar state path refuses before creating the bridge home');
   assert.equal(fs.existsSync(path.join(xdg, 'systemd/user')) && fs.readdirSync(path.join(xdg, 'systemd/user')).some(f => f.includes('wide-bridge')), false);
