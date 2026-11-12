@@ -455,16 +455,30 @@ export function localhostRunProvider({ env = process.env, spawnChild = spawn, wh
 }
 
 // ---- Gozar (transport only; Dalan still owns sign-in and identity) --------------------------------------------------------
-export function gozarProvider({ env = process.env, which = name => whichOnPath(name, env), run = execFile } = {}) {
-  let binary = null, port = null;
-  const command = args => new Promise((resolve, reject) => {
-    run(binary, args, { env, encoding: 'utf8', timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+export function gozarProvider({ env = process.env, which = name => whichOnPath(name, env), run = execFile, pollMs = 3000 } = {}) {
+  let binary = null, port = null, sessionId = null;
+  let watching = false, timer = null, wakeWatcher = () => {}, watcher = Promise.resolve();
+  const command = (args, { status = false } = {}) => new Promise((resolve, reject) => {
+    run(binary, args, { env, encoding: 'utf8', timeout: status ? 15_000 : 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
       let reply;
       try { reply = JSON.parse(stdout); } catch { reject(new Error('Gozar did not return valid JSON')); return; }
-      if (error || reply?.error) { reject(new Error(`Gozar: ${safeDiagnostic(reply?.error ?? 'command failed', 240)}`)); return; }
+      // Status exits 1 with valid, withdrawn-readiness JSON when no controller is running.
+      if ((error && !(status && error.code === 1 && reply?.snapshot)) || reply?.error) {
+        reject(Object.assign(new Error(`Gozar: ${safeDiagnostic(reply?.error ?? 'command failed', 240)}`), { gozarReply: reply })); return;
+      }
       resolve(reply);
     });
   });
+  const status = target => command(['status', '--port', String(target), '--json'], { status: true });
+  const removed = snapshot => snapshot && !snapshot.published && !snapshot.candidate &&
+    !snapshot.resources?.some(resource => resource.cleanup !== 'removed') &&
+    (snapshot.phase === 'stopped' || (snapshot.phase === 'unknown' && snapshot.limitations?.some(line => /^Controller unavailable:/.test(line))));
+  const stopWatcher = async () => {
+    watching = false;
+    clearTimeout(timer);
+    wakeWatcher();
+    await watcher;
+  };
   return {
     name: 'gozar',
     probe() {
@@ -478,24 +492,54 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
       signal?.throwIfAborted();
       if (!binary) throw new Error('gozar: probe() must succeed before start()');
       if (!Number.isInteger(gatePort) || gatePort < 1 || gatePort > 65535) throw new Error('the local gate port is not valid');
-      port = gatePort; // Keep the exact target even if expose fails, so startRoute can remove a partial route.
-      // Pin the trial adapter: auto recommendation can select a machine's existing Tailscale instead.
-      // Wait for expose to settle before cleanup, including on Ctrl-C: it launches a background controller.
-      const reply = await command(['expose', '--port', String(port), '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'localhost-run']);
+      // Expose silently reuses an existing controller. Refuse it before acquiring any cleanup responsibility.
+      const before = await status(gatePort);
+      if (!removed(before.snapshot)) throw new Error(`port ${gatePort} already has a Gozar route; stop it first: gozar stop --port ${gatePort}`);
+      signal?.throwIfAborted();
+      port = gatePort;
+      // Pin the trial adapter; never let auto recommendation select the machine's Tailscale.
+      // Let expose settle before cleanup: it starts a background controller even if the caller cancels.
+      let reply;
+      try { reply = await command(['expose', '--port', String(port), '--client-reach', 'internet', '--yes', '--json', '--transport', 'https', '--sse', '--adapter', 'localhost-run']); }
+      catch (error) { sessionId = error.gozarReply?.snapshot?.sessionId ?? null; throw error; }
+      sessionId = reply?.snapshot?.sessionId ?? null;
       signal?.throwIfAborted();
       const origin = reply?.snapshot?.published;
       let url; try { url = new URL(origin); } catch { /* rejected below */ }
-      if (reply?.snapshot?.phase !== 'published-ready' || !url || url.protocol !== 'https:' || url.origin !== origin) throw new Error('Gozar did not publish a ready HTTPS origin');
-      return { origin };
+      if (typeof sessionId !== 'string' || !sessionId || reply?.snapshot?.phase !== 'published-ready' || !url || url.protocol !== 'https:' || url.origin !== origin) throw new Error('Gozar did not publish a ready HTTPS origin with a session identity');
+      let ended;
+      const exited = new Promise(resolve => { ended = resolve; });
+      const ownedPort = port, ownedSession = sessionId;
+      watching = true;
+      watcher = (async () => {
+        while (watching) {
+          await new Promise(resolve => { wakeWatcher = resolve; timer = setTimeout(resolve, pollMs); timer.unref?.(); });
+          if (!watching) break;
+          try {
+            const current = (await status(ownedPort)).snapshot;
+            if (current?.sessionId === ownedSession && current.phase === 'published-ready' && current.published === origin) continue;
+          } catch { /* Unobservable readiness cannot keep the trial alive. */ }
+          if (watching) ended();
+          break;
+        }
+      })();
+      return { origin, exited };
     },
     async stop() {
+      await stopWatcher();
       if (port === null) return { removed: true };
       const cleanupCommand = `gozar stop --port ${port}`;
       try {
+        const current = (await status(port)).snapshot;
+        if (removed(current) || (sessionId && current?.sessionId && current.sessionId !== sessionId)) {
+          port = null; sessionId = null;
+          return { removed: true };
+        }
+        // Without the expose receipt, or after controller identity is lost, port-only stop is unsafe.
+        if (!sessionId || current?.sessionId !== sessionId) throw new Error('Gozar session ownership could not be confirmed; leaving the route untouched');
         const reply = await command(['stop', '--port', String(port), '--json']);
-        const snapshot = reply.snapshot;
-        if (!snapshot || snapshot.published || snapshot.resources?.some(resource => resource.cleanup !== 'removed') || reply.localCleanupFailures?.length || ['cleanup-pending', 'stopping'].includes(snapshot.phase)) throw new Error('Gozar route cleanup is unconfirmed');
-        port = null;
+        if (!removed(reply.snapshot) || reply.localCleanupFailures?.length) throw new Error('Gozar route cleanup is unconfirmed');
+        port = null; sessionId = null;
         return { removed: true };
       } catch (error) { return { removed: false, detail: error.message, command: cleanupCommand }; }
     },
