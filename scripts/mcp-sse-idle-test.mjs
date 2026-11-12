@@ -10,6 +10,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { reservedPort } from '../src/test-support/port.mjs';
 import { defaultPath } from '../src/paths.mjs';
 import { acceptsMcpEventStream, beginMcpEventStream, mcpResponseText } from '../src/mcp-sse.mjs';
+import { createBuiltinHttpServer } from '../src/builtin-http.mjs';
+import { createGate } from '../src/try-exposure.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
@@ -146,6 +148,51 @@ globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? 20
   const secret = fs.readFileSync(defaultPath(home, '.config/dot-bridge/env'), 'utf8').match(/^BRIDGE_PATH_SECRET=(.+)$/m)?.[1];
   check(secret, 'server path secret missing');
 
+  // Reproduce the hosted chain: client -> public relay -> gate -> bridge. Connection is hop-by-hop;
+  // the streamed response must not force a keep-alive policy across those separate sockets.
+  const chainBackend = createBuiltinHttpServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const rpc = JSON.parse(body);
+    if (!Object.hasOwn(rpc, 'id')) { res.writeHead(202); res.end(); return; }
+    const stream = beginMcpEventStream(res);
+    setTimeout(() => stream.finish(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { resultType: 'complete', protocolVersion: '2025-11-25' } })), 5);
+  });
+  await new Promise(resolve => chainBackend.listen(0, '127.0.0.1', resolve));
+  const gate = await createGate();
+  let publicRelay = null;
+  try {
+    gate.open(chainBackend.address().port);
+    publicRelay = http.createServer((req, res) => {
+      const forward = http.request({ host: '127.0.0.1', port: gate.port, method: req.method, path: req.url, headers: req.headers }, answer => {
+        res.writeHead(answer.statusCode, answer.headers);
+        answer.pipe(res);
+      });
+      forward.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+      req.pipe(forward);
+    });
+    await new Promise(resolve => publicRelay.listen(0, '127.0.0.1', resolve));
+    const publicUrl = `http://127.0.0.1:${publicRelay.address().port}/${secret}/mcp`;
+    for (let i = 0; i < 5; i++) {
+      const init = await fetch(publicUrl, { method: 'POST', headers: { connection: 'close', accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: `gate-init-${i}`, method: 'initialize', params: { protocolVersion: '2025-11-25' } }) });
+      assert.equal(init.status, 200, `gated initialize ${i}`);
+      assert.match(init.headers.get('content-type') ?? '', /^text\/event-stream/);
+      assert.equal(init.headers.get('connection'), 'close');
+      const initialized = JSON.parse(mcpResponseText(await init.text()));
+      assert.equal(initialized.id, `gate-init-${i}`);
+      const notification = await fetch(publicUrl, { method: 'POST', headers: { connection: 'close', accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-protocol-version': initialized.result.protocolVersion },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
+      assert.equal(notification.status, 202, `gated initialized notification ${i}`);
+      assert.equal(await notification.text(), '');
+    }
+  } finally {
+    publicRelay?.closeAllConnections();
+    if (publicRelay) await new Promise(resolve => publicRelay.close(resolve));
+    await gate.close();
+    chainBackend.closeAllConnections();
+    await new Promise(resolve => chainBackend.close(resolve));
+  }
+
   const catalog = await request({ port, pathname: `/${secret}/mcp`, headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 'catalog-1', method: 'tools/list' }) });
   const waitSchema = JSON.parse(catalog.text).result.tools.find(tool => tool.name === 't3_thread_wait').inputSchema.properties.timeoutMs;
@@ -206,6 +253,7 @@ globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? 20
   assert.equal(plain.headers['content-type'], 'application/json');
   assert.equal(JSON.parse(plain.text).id, 'json-1');
   console.log('PASS authenticated SSE requests wait until bearer verification');
+  console.log('PASS five Connection: close SSE initialize / notification rounds through fake relay and real gate');
   console.log('PASS 150-second delayed read-only call survives the 120-second scaled idle proxy with one final event');
   console.log('PASS SSE parser ignores comments, joins multiline data, and disconnect clears heartbeat timer');
   console.log('PASS unnegotiated client still receives JSON');

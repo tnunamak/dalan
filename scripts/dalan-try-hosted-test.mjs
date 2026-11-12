@@ -1786,7 +1786,7 @@ test('two public identity failures interrupt an unanswered approval and ignore l
     if (failIdentity) { failedChecks++; return new Response('', { status: 502 }); }
     return readyGozarFetch(...args);
   };
-  const run = await hostedRun('gozar-identity-loss-during-approval', {
+  const run = await hostedRun('route-loss', {
     argv: ['--route', 'gozar'], providers: [route.provider], fetchImpl,
     watchPublicIdentity: options => watchPublicIdentity({ ...options, intervalMs: 10, retryMs: 10, timeoutMs: 500 }),
   });

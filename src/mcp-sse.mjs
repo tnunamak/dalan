@@ -19,7 +19,7 @@ export function beginMcpEventStream(res, { heartbeatMs = 20_000, setIntervalFn =
   res.once('close', stop);
   res.once('finish', stop);
   res.once('error', stop);
-  res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive' });
+  res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform' });
   const heartbeat = () => {
     if (!active || res.destroyed) { stop(); return; }
     res.write(HEARTBEAT);
