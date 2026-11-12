@@ -233,7 +233,7 @@ export async function updateService({ home, check = false, yes = false }, seams 
     if (!completeCatalogs(base, tested, workers)) fail('candidate self-check failed or worker catalogs are incomplete');
     const changedCatalog = !catalogsEqual(base, tested, workers);
     if (changedCatalog && !yes) {
-      result = { outcome: 'connector_refresh_required', current_version: oldVersion, candidate_version: r.version, connector_refresh_required: true, message: 'Worker tool catalogs changed. Run service update --yes to switch, then refresh hosted connectors.' };
+      result = { outcome: 'connector_refresh_required', current_version: oldVersion, candidate_version: r.version, connector_refresh_required: true, message: 'Worker tool catalogs changed. Run dalan service update --yes with the same --home to switch, then refresh hosted connectors.' };
       prune(home, oldVersion, r.version);
       return result;
     }
