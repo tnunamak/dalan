@@ -377,12 +377,17 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
 
   // ---- owner operations (called from the owner Unix socket only) -------------------------------------------------
   // Some web apps register multiple clients during one connection flow, so an older pending web code for the same worker
-  // may no longer finish its token exchange. Those older codes stay visible, marked superseded by the newest web one.
+  // may no longer finish its token exchange. Those older codes stay visible, marked superseded by the newest web one at the same redirect origin.
   // Native (loopback) pairings are never superseded: each is approved by its own code only.
   const supersede = views => {
-    const newest = views.filter(view => !view.native).at(-1);
-    return views.map(view => view.native || view === newest ? view : { ...view, superseded: true, superseded_by: newest.code });
+    const newestByOrigin = new Map();
+    for (const view of views) if (!view.native) newestByOrigin.set(new URL(view.redirect_uri).origin, view);
+    return views.map(view => {
+      const newest = view.native ? null : newestByOrigin.get(new URL(view.redirect_uri).origin);
+      return !newest || view === newest ? view : { ...view, superseded: true, superseded_by: newest.code };
+    });
   };
+
   // The owner CLI never prints the bridge path secret (approve output checks this), so show the resource's origin and shape only.
   const shownResource = resource => `${new URL(resource).origin}/<secret>/mcp`;
   const shownIssuer = `${publicUrl.origin}/<secret>/oauth`; // the issuer carries the secret path prefix too

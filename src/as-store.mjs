@@ -390,8 +390,8 @@ export class AsStore {
     return this.db.prepare("SELECT * FROM pairings WHERE state='pending' AND expires_at>? ORDER BY created_at").all(now).map(row => this.#resource(row));
   }
   // Atomic reservation: exactly one approval wins a pending code, and it reserves only that code.
-  // A web pairing (https redirect to a fixed vendor) is refused while a newer web pairing is pending for the same worker:
-  // an app that registered again abandons its older attempts, and a re-registration reaches the same vendor.
+  // A web pairing (https redirect) is refused while a newer web pairing at the same redirect origin is pending for the same worker:
+  // an app that registered again abandons its older attempts, and a re-registration reaches the same origin. Other origins never displace it.
   // A native pairing (loopback redirect) is never refused for a newer attempt and never displaces another one: its
   // redirect names no party, so a newer registrant must not take the owner's approval from an older teammate.
   reserve(code) {
@@ -400,9 +400,11 @@ export class AsStore {
       const row = this.db.prepare("SELECT rowid AS rid, * FROM pairings WHERE code=? AND state='pending' AND expires_at>?").get(code, now);
       if (!row) return false;
       if (!isLoopbackCallback(new URL(row.redirect_uri))) {
+        // Only a newer web pairing at the SAME redirect origin displaces this one. A client at another origin cannot starve it.
+        const origin = new URL(row.redirect_uri).origin;
         const newer = this.db.prepare("SELECT redirect_uri FROM pairings WHERE state='pending' AND expires_at>? AND worker=? AND rowid<>? AND (created_at>? OR (created_at=? AND rowid>?))")
           .all(now, row.worker, row.rid, row.created_at, row.created_at, row.rid);
-        if (newer.some(p => !isLoopbackCallback(new URL(p.redirect_uri)))) return false;
+        if (newer.some(p => !isLoopbackCallback(new URL(p.redirect_uri)) && new URL(p.redirect_uri).origin === origin)) return false;
       }
       return this.db.prepare("UPDATE pairings SET state='approving' WHERE code=? AND state='pending'").run(code).changes === 1;
     });

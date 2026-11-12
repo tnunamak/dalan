@@ -327,6 +327,43 @@ try {
     } finally { await full.stop(); }
   });
 
+  await check('G13', 'pairing starvation: a client at another origin cannot displace a pending pairing; the same origin keeps the newest-code rule', async () => {
+    const legit = new Vendor(bridge, 'https://legit.example/cb');
+    bridge.start_window('lark');
+    assert.equal((await legit.register()).status, 201);
+    const flow = await legit.begin({});
+    assert.ok(flow.code);
+    // An unseen client at origin B registers and opens attempts again and again during the open window.
+    for (let i = 0; i < 4; i++) {
+      const noisy = new Vendor(bridge, `https://noisy.example/cb${i}`);
+      assert.equal((await noisy.register()).status, 201);
+      assert.ok((await noisy.begin({})).code);
+    }
+    const view = bridge.pending().pending.find(p => p.code === flow.code);
+    assert.ok(view && !view.superseded, 'the older pairing at origin A is not marked superseded by origin B');
+    const approved = bridge.approve(flow.code, 'lark');
+    assert.equal(approved.code, 0, approved.stderr + approved.stdout);
+    const callback = await legit.finish(flow);
+    assert.equal(callback.stage, 'callback', JSON.stringify(callback));
+    assert.equal((await legit.exchange(callback.code, flow.pkce.verifier)).status, 200);
+    // Same origin: a newer pending pairing still supersedes the older one (an app that registered again).
+    bridge.start_window('duet');
+    const a = new Vendor(bridge, 'https://same-origin.example/cb');
+    assert.equal((await a.register()).status, 201);
+    const older = await a.begin({});
+    const b = new Vendor(bridge, 'https://same-origin.example/cb');
+    assert.equal((await b.register()).status, 201);
+    const newer = await b.begin({});
+    assert.ok(older.code && newer.code);
+    const pend = bridge.pending().pending;
+    assert.equal(pend.find(p => p.code === older.code).superseded, true, 'older same-origin pairing is superseded');
+    assert.ok(!pend.find(p => p.code === newer.code).superseded);
+    const refused = bridge.approve(older.code, 'duet');
+    assert.notEqual(refused.code, 0, 'the older same-origin code cannot be approved');
+    assert.match(refused.stderr + refused.stdout, /superseded/);
+    assert.equal(bridge.approve(newer.code, 'duet').code, 0);
+  });
+
   await check('G12', 'a legacy owner pattern still works but adds nothing: allow-callback with a wildcard keeps older registrations valid', async () => {
     assert.equal(bridge.cli(['connect', 'allow-callback', 'https://legacy.example/oauth/*']).code, 0);
     const vendor = new Vendor(bridge, 'https://legacy.example/oauth/abc123');
