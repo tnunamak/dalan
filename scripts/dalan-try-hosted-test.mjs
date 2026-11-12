@@ -428,7 +428,7 @@ test('route choice: trial links are localhost.run, a real route is only Tailscal
   assert.equal(refused.record.started, 0);
 });
 
-function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
+function nodeHarness({ certInspection, killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 'ok', upBehaviour = 'login-then-ok', host = {}, env = {}, loginWaitMs = 200, registry, daemonOutput = [], loginChunks = ['\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n'] } = {}) {
   const fake = fakeTailscale(host);
   const events = { spawned: [], daemon: null, envs: [], keyDuringUp: null };
   registry ??= fs.mkdtempSync(path.join(tmp, 'registry-'));
@@ -447,12 +447,13 @@ function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 
       child.kill = sig => {
         events.cert.signals.push(sig); events.cert.dirAtKill = fs.existsSync(path.dirname(events.cert.files[0]));
         if ((certBehaviour === 'stubborn' || certBehaviour === 'late') && sig !== 'SIGKILL') return true; // ignores SIGTERM
-        if (certBehaviour === 'immortal') return true; // ignores everything
+        if (['immortal', 'error-live'].includes(certBehaviour)) return true; // ignores everything
         child.signalCode = sig;
         setTimeout(() => { events.cert.dirAtExit = fs.existsSync(path.dirname(events.cert.files[0])); child.emit('exit', null); }, certBehaviour === 'late' ? 150 : 10);
         return true;
       };
       setImmediate(() => {
+        if (certBehaviour === 'error-live') child.emit('error', new Error('process-control failure'));
         if (certBehaviour === 'ok') { for (const f of events.cert.files) fs.writeFileSync(f, '-----BEGIN PRIVATE KEY-----\nPRIVATE-KEY-BODY\n-----END PRIVATE KEY-----\n'); child.exitCode = 0; child.emit('exit', 0); }
         if (certBehaviour === 'error-named') { child.stderr.write('500 Internal Server Error: no cert for box.tail1234.ts.net (owner@example.com)\n'); child.exitCode = 1; child.emit('exit', 1); }
         if (certBehaviour === 'error') { child.stderr.write('500 Internal Server Error: no TailscaleVarRoot\n'); child.exitCode = 1; child.emit('exit', 1); }
@@ -474,7 +475,7 @@ function nodeHarness({ killGraceMs = 2000, certWaitMs = 60_000, certBehaviour = 
     return fake.spawnChild(cmd, args, opts);
   };
   const lines = [];
-  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200, certWaitMs, killGraceMs, processCmd: pid => pid === 5555 ? (events.certAlive ? 'tailscale cert' : null) : processCommand(pid) });
+  const node = tailscaleNodeProvider({ env: { PATH: process.env.PATH, ...env }, spawnChild, runCli: () => fake.run, which: () => '/usr/bin/x', registry, clock: { sleep: async ms => { await sleepMs(ms === 250 ? 1 : ms); } }, newId: () => 'abc123', loginWaitMs, daemonWaitMs: 200, certWaitMs, killGraceMs, processCmd: pid => pid === 5555 ? (certInspection ? certInspection(events) : events.certAlive ? { state: 'present', command: 'tailscale cert', start: '100' } : { state: 'absent' }) : processCommand(pid) });
   return { node, fake, events, lines, registry, say: l => lines.push(l) };
 }
 const liveProcess = marker => spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)', '--', marker], { stdio: 'ignore' });
@@ -559,10 +560,18 @@ test('the trial\'s own node: the certificate check ends on cancel, escalates pas
   const pendingB = b.node.diagnose({ home: homeB, say() {} });
   await sleepMs(30);
   const leftover = path.dirname(b.events.cert.files[0]); fs.writeFileSync(path.join(leftover, 'key'), 'PRIVATE-KEY-BODY');
-  const ended = await sweepTrialNodes({ registry: b.registry, processCmd: () => null, kill() {}, clock: { sleep: async () => {} } });
+  const deferred = [];
+  const held = await sweepTrialNodes({ registry: b.registry, processCmd: () => ({ state: 'unknown' }), say: line => deferred.push(line), kill() {}, clock: { sleep: async () => {} } });
+  assert.deepEqual(held, []);
+  assert.equal(b.events.certAlive, true);
+  assert.equal(fs.existsSync(leftover), true, 'failed inspection cannot delete files under a live writer');
+  assert.match(deferred.join('\n'), /certificate.*unknown/i);
+  b.events.cert.child.kill('SIGTERM'); await pendingB;
+  assert.equal(b.events.certAlive, false, 'the fake really exited before cleanup');
+  const ended = await sweepTrialNodes({ registry: b.registry, processCmd: () => ({ state: 'absent' }), kill() {}, clock: { sleep: async () => {} } });
   assert.deepEqual(ended, ['dalan-trial-abc123']);
   assert.equal(fs.existsSync(leftover), false, 'the sweep removed the key');
-  b.events.cert.child.kill('SIGTERM'); await pendingB; await b.node.stop();
+  await b.node.stop();
   // 2. A child that ignores SIGTERM is killed, and the outputs are removed only after it has exited.
   const c = nodeHarness({ certBehaviour: 'stubborn', certWaitMs: 50, killGraceMs: 50 });
   const homeC = fs.mkdtempSync(path.join(tmp, 'node-'));
@@ -602,15 +611,171 @@ test('the trial\'s own node: outputs wait for a late exit, and are kept for the 
   assert.deepEqual(fs.readdirSync(path.join(homeN, 'tsnode')), [path.basename(kept)], 'and removes the rest');
   assert.deepEqual(fs.readdirSync(never.registry), ['dalan-trial-abc123.json'], 'the record stays, so the sweep finishes the job');
   // Owner and daemon are gone but the cert child still runs: the sweep keeps its folder and the record; after its exit it removes both.
-  const alive = pid => pid === 5555 ? 'tailscale cert' : null;
+  const alive = pid => pid === 5555 && never.events.certAlive ? { state: 'present', command: 'tailscale cert', start: '100' } : { state: 'absent' };
   const kept1 = await sweepTrialNodes({ registry: never.registry, processCmd: alive, kill() {}, clock: { sleep: async () => {} } });
   assert.deepEqual(kept1, [], 'nothing is ended while the cert child runs');
   assert.equal(fs.existsSync(kept), true, 'its folder stays');
   assert.deepEqual(fs.readdirSync(never.registry), ['dalan-trial-abc123.json'], 'and so does the record');
-  const ended = await sweepTrialNodes({ registry: never.registry, processCmd: () => null, kill() {}, clock: { sleep: async () => {} } });
+  const unknownLines = [];
+  const unknown = await sweepTrialNodes({ registry: never.registry, processCmd: () => ({ state: 'unknown' }), say: line => unknownLines.push(line), kill() {}, clock: { sleep: async () => {} } });
+  assert.deepEqual(unknown, []);
+  assert.equal(never.events.certAlive, true);
+  assert.equal(fs.existsSync(kept), true);
+  assert.equal(fs.existsSync(path.join(never.registry, 'dalan-trial-abc123.json')), true);
+  assert.match(unknownLines.join('\n'), /certificate.*unknown/i);
+  never.events.cert.child.exitCode = 0; never.events.cert.child.emit('exit', 0);
+  assert.equal(never.events.certAlive, false, 'confirmed fake exit precedes cleanup');
+  const ended = await sweepTrialNodes({ registry: never.registry, processCmd: alive, kill() {}, clock: { sleep: async () => {} } });
   assert.deepEqual(ended, ['dalan-trial-abc123']);
   assert.equal(fs.existsSync(kept), false, 'removed after the exit is confirmed');
   assert.deepEqual(fs.readdirSync(never.registry), []);
+});
+
+test('process inspection separates failed checks from exit and reads Linux and macOS start identity', async () => {
+  const error = code => Object.assign(new Error(code), { code });
+  const stat = start => '123 (name with ) spaces) S ' + [...Array(18).fill('0'), start, '0'].join(' ');
+  const linux = { platform: 'linux', readFile: () => stat('100'), run: () => ({ status: 0, stdout: 'tailscale cert\n' }) };
+  assert.deepEqual(processCommand(123, linux), { state: 'present', command: 'tailscale cert', start: '100' });
+  for (const failure of [{ status: null, error: error('ETIMEDOUT') }, { status: 1, stdout: '', stderr: 'denied' }, { status: 0, stdout: '' }]) {
+    assert.deepEqual(processCommand(123, { ...linux, run: () => failure, probe() {} }), { state: 'unknown' });
+  }
+  assert.deepEqual(processCommand(123, { ...linux, readFile: () => { throw error('EACCES'); } }), { state: 'unknown' });
+  assert.deepEqual(processCommand(123, { ...linux, readFile: () => 'malformed' }), { state: 'unknown' });
+  assert.deepEqual(processCommand(123, { ...linux, readFile: () => { throw error('ENOENT'); }, probe: () => { throw error('ESRCH'); } }), { state: 'absent' });
+  assert.deepEqual(processCommand(123, { ...linux, run: () => { throw error('ENOENT'); }, probe() {} }), { state: 'unknown' }, 'missing ps is not exit');
+  let reads = 0;
+  assert.deepEqual(processCommand(123, { ...linux, readFile: () => stat(String(++reads)) }), { state: 'unknown' }, 'PID reuse during ps is not a coherent identity');
+  const darwin = { platform: 'darwin', run: (_cmd, args) => {
+    assert.deepEqual(args, ['-p', '123', '-o', 'lstart=,command=']);
+    return { status: 0, stdout: 'Wed Nov 11 01:02:03 2026 tailscale cert\n' };
+  } };
+  assert.deepEqual(processCommand(123, darwin), { state: 'present', command: 'tailscale cert', start: 'Wed Nov 11 01:02:03 2026' });
+  assert.deepEqual(processCommand(123, { platform: 'darwin', run: () => ({ status: 1 }), probe() {} }), { state: 'unknown' });
+  assert.deepEqual(processCommand(123, { platform: 'darwin', run: () => ({ status: 1 }), probe: () => { throw error('EPERM'); } }), { state: 'unknown' });
+  assert.deepEqual(processCommand(123, { platform: 'darwin', run: () => ({ status: 1 }), probe: () => { throw error('ESRCH'); } }), { state: 'absent' });
+  const child = liveProcess('inspect-start-identity');
+  try {
+    await sleepMs(100);
+    const inspected = processCommand(child.pid);
+    assert.equal(inspected.state, 'present'); assert.ok(inspected.start); assert.match(inspected.command, /inspect-start-identity/);
+  } finally { const gone = new Promise(resolve => child.once('exit', resolve)); child.kill(); await gone; }
+  assert.deepEqual(processCommand(child.pid), { state: 'absent' });
+});
+
+test('a real live writer survives failed ps and identity reads, then its confirmed exit releases debt', async () => {
+  const registry = fs.mkdtempSync(path.join(tmp, 'registry-'));
+  const dir = path.join(fs.mkdtempSync(path.join(tmp, 'real-debt-')), 'tsnode'), out = path.join(dir, 'tlscheck-owned');
+  fs.mkdirSync(out, { recursive: true }); fs.writeFileSync(path.join(out, 'key'), 'private');
+  const child = liveProcess('certificate-writer');
+  const gone = new Promise(resolve => child.once('exit', resolve));
+  const file = path.join(registry, 'debt.json');
+  try {
+    await sleepMs(100);
+    const identity = processCommand(child.pid); assert.equal(identity.state, 'present');
+    fs.writeFileSync(file, JSON.stringify({ dir, certOut: out, certPid: child.pid, certCmd: identity.command, certStart: identity.start }));
+    for (const fault of [
+      { run: () => ({ status: null, error: Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }) }) },
+      { readFile: () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } },
+    ]) {
+      const lines = [];
+      assert.deepEqual(await sweepTrialNodes({ registry, processCmd: pid => processCommand(pid, fault), say: line => lines.push(line), kill() { assert.fail('writer is not signalled'); } }), []);
+      assert.equal(isAlive(child.pid), true); assert.equal(fs.existsSync(out), true); assert.equal(fs.existsSync(file), true);
+      assert.match(lines.join('\n'), /certificate.*unknown/i);
+    }
+  } finally { child.kill(); await gone; }
+  assert.deepEqual(await sweepTrialNodes({ registry }), ['debt.json']);
+  assert.equal(fs.existsSync(out), false); assert.equal(fs.existsSync(file), false);
+  assert.deepEqual(await sweepTrialNodes({ registry }), [], 'cleanup is idempotent');
+});
+
+test('initial certificate identity lookup failure persists cleanup debt before stop and sweep', async () => {
+  const h = nodeHarness({ certBehaviour: 'immortal', certWaitMs: 20, killGraceMs: 20, certInspection: () => ({ state: 'unknown' }) });
+  const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await h.node.start({ gatePort: 6161, home, say: h.say });
+  const pending = h.node.diagnose({ home, say: h.say });
+  await sleepMs(5);
+  const file = path.join(h.registry, 'dalan-trial-abc123.json');
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(rec.certPid, 5555, 'ownership recorded while diagnose is still waiting');
+  assert.equal(rec.certStart, null);
+  await pending; await h.node.stop();
+  const lines = [];
+  const held = await sweepTrialNodes({ registry: h.registry, processCmd: pid => pid === 5555 ? { state: 'present', command: 'tailscale cert', start: '100' } : { state: 'absent' }, say: line => lines.push(line), kill() {} });
+  assert.deepEqual(held, []); assert.equal(h.events.certAlive, true);
+  assert.equal(fs.existsSync(rec.certOut), true); assert.equal(fs.existsSync(file), true);
+  assert.match(lines.join('\n'), /certificate.*unknown/i);
+  h.events.cert.child.exitCode = 0; h.events.cert.child.emit('exit', 0);
+  await sweepTrialNodes({ registry: h.registry, processCmd: () => ({ state: 'absent' }), kill() {} });
+  assert.equal(fs.existsSync(file), false); assert.equal(fs.existsSync(rec.certOut), false);
+});
+
+test('process-control errors after spawn do not confirm certificate exit', async () => {
+  const h = nodeHarness({ certBehaviour: 'error-live', killGraceMs: 20 });
+  const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await h.node.start({ gatePort: 6161, home, say: h.say });
+  await h.node.diagnose({ home, say: h.say });
+  await h.node.stop();
+  const out = path.dirname(h.events.cert.files[0]);
+  assert.equal(h.events.certAlive, true); assert.equal(fs.existsSync(out), true);
+  assert.deepEqual(h.events.cert.signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(fs.existsSync(path.join(h.registry, 'dalan-trial-abc123.json')), true);
+  h.events.cert.child.exitCode = 0; h.events.cert.child.emit('exit', 0);
+  await sweepTrialNodes({ registry: h.registry, processCmd: () => ({ state: 'absent' }), kill() {} });
+});
+
+test('failed certificate identity persistence keeps the durable unknown marker and reports debt', async t => {
+  const h = nodeHarness({ certBehaviour: 'immortal', killGraceMs: 20 });
+  const home = fs.mkdtempSync(path.join(tmp, 'node-'));
+  await h.node.start({ gatePort: 6161, home, say: h.say });
+  const file = path.join(h.registry, 'dalan-trial-abc123.json');
+  const rename = fs.renameSync;
+  let failed = false;
+  const mocked = t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === file && JSON.parse(fs.readFileSync(from, 'utf8')).certPid === 5555) {
+      failed = true; throw new Error('injected identity persistence failure');
+    }
+    return rename(from, to);
+  });
+  await h.node.diagnose({ home, say: h.say });
+  mocked.mock.restore();
+  assert.equal(failed, true);
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(rec.certPid, null); assert.ok(rec.certOut);
+  assert.match(h.lines.join('\n'), /identity persistence failure/);
+  await h.node.stop();
+  const lines = [];
+  assert.deepEqual(await sweepTrialNodes({ registry: h.registry, processCmd: processCommand, say: line => lines.push(line), kill() {} }), []);
+  assert.equal(fs.existsSync(rec.certOut), true); assert.equal(fs.existsSync(file), true);
+  assert.deepEqual(fs.readdirSync(h.registry), ['dalan-trial-abc123.json'], 'atomic-update scratch is removed');
+  assert.match(lines.join('\n'), /certificate.*unknown/i);
+  h.events.cert.child.exitCode = 0; h.events.cert.child.emit('exit', 0);
+  // The placeholder has no PID to inspect. It remains manual cleanup debt even after this test ends the writer.
+});
+
+test('certificate cleanup debt survives unknown inspection and releases only on exit or identity mismatch', async () => {
+  for (const [label, inspection, savedStart, releases] of [
+    ['lookup failed', { state: 'unknown' }, '100', false],
+    ['identity lookup failed', { state: 'unknown', command: 'tailscale cert' }, '100', false],
+    ['same child', { state: 'present', command: 'tailscale cert', start: '100' }, '100', false],
+    ['same start with changed command', { state: 'present', command: 'other', start: '100' }, '100', false],
+    ['current start missing', { state: 'present', command: 'tailscale cert' }, '100', false],
+    ['legacy identity missing', { state: 'present', command: 'tailscale cert', start: '100' }, null, false],
+    ['confirmed exit', { state: 'absent' }, '100', true],
+    ['PID reused with same command', { state: 'present', command: 'tailscale cert', start: '101' }, '100', true],
+    ['PID reused with different command', { state: 'present', command: 'other', start: '101' }, '100', true],
+  ]) {
+    const registry = fs.mkdtempSync(path.join(tmp, 'registry-'));
+    const dir = path.join(fs.mkdtempSync(path.join(tmp, 'debt-')), 'tsnode'), out = path.join(dir, 'tlscheck-owned');
+    fs.mkdirSync(out, { recursive: true }); fs.writeFileSync(path.join(out, 'key'), 'private');
+    const file = path.join(registry, 'debt.json');
+    fs.writeFileSync(file, JSON.stringify({ dir, certOut: out, certPid: 5555, certCmd: 'tailscale cert', certStart: savedStart }));
+    const lines = [];
+    const ended = await sweepTrialNodes({ registry, processCmd: () => inspection, say: line => lines.push(line), kill() { assert.fail('certificate PID must not be signalled'); } });
+    assert.equal(fs.existsSync(out), !releases, label);
+    assert.equal(fs.existsSync(file), !releases, label);
+    assert.equal(ended.length, releases ? 1 : 0, label);
+    if (inspection.state === 'unknown' || (inspection.state === 'present' && !inspection.start) || !savedStart) assert.match(lines.join('\n'), /certificate.*unknown/i, label);
+  }
 });
 
 test('the trial\'s own node: the identity is cached at sign-in; with none known, any email in the log and the error line is redacted', async () => {
@@ -716,7 +881,7 @@ test('leftover trial daemons are found in any later run, by registry and a porta
     const owner = ownerAlive ? liveProcess(`--owner-${name}`) : null;
     const ownerPid = owner ? owner.pid : await deadPid();
     await sleepMs(150); // let `ps` see both command lines
-    fs.writeFileSync(path.join(registry, `${name}.json`), JSON.stringify({ dir, sock, hostname: name, pid: daemon.pid, owner: ownerPid, ownerCmd: processCommand(ownerPid) ?? `node -e 0 --owner-${name}`, home: path.join(root, name) }));
+    fs.writeFileSync(path.join(registry, `${name}.json`), JSON.stringify({ dir, sock, hostname: name, pid: daemon.pid, owner: ownerPid, ownerCmd: processCommand(ownerPid).command ?? `node -e 0 --owner-${name}`, home: path.join(root, name) }));
     return { daemon, owner, dir };
   };
   const crashed = await mk('crashed', { ownerAlive: false });
