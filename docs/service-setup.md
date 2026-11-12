@@ -6,6 +6,8 @@ Use this guide after a first job works with `dalan try`, when you want a bridge 
 
 On Linux, `dalan service install` creates a systemd user service and registers its HTTPS origin as a Gozar service route. Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. The bridge uses built-in OAuth. Moving a connector to the new URL requires reauthorization and a catalog refresh. All workers use the same stable catalog. The process-wide `legacy-v46` setting remains available for other installations. Its auth keys, worker allowlists and job queue stay in one private home.
 
+`dalan service install` is Linux-only. It creates a unit named `dalan-<10 hex>.service`; install prints the exact name. It does not check or warn whether user lingering is enabled. Without lingering, the user service manager may start only after login; ask an administrator to enable lingering if the bridge must start before login.
+
 First prepare the public origin so it forwards to the address in `--target`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. The proxy must pass the secret MCP path, the OAuth discovery and authorization paths, `/signal/*` when used, and `/.well-known/gozar/service` with its query string. TLS terminates at the proxy. Keep the secret path out of proxy logs.
 
 For existing installations, create the new home and copy each worker's repository allowlist. Replace the example paths with the old bridge homes on this computer:
@@ -18,7 +20,7 @@ dalan service migrate-workers \
   --source "$HOME/OLD_BRIDGE_THREE/.config/dot-bridge/workers.json"
 ```
 
-The helper reads the source files without changing them. If an older home has no `workers.json`, it can read the adjacent `workers-repos.json` migration journal. It preserves worker names and repository allowlists, and copies supported worker capabilities and guidance. It does not copy OAuth registrations, tokens, jobs or results. The new bridge starts with `default_execution: none`. Workspace access defaults to denied; add `--workspace-worker NAME` for each worker whose old bridge had an audited workspace grant. Existing explicit `workspaceAllowed` and T3 capability settings are retained. Destination declarations are copied, but old destination approvals bind old jobs and connections, so each new job requires a fresh approval.
+The helper reads the source files without changing them. If an older home has no `workers.json`, it can read the adjacent `workers-repos.json` migration journal. It preserves worker names and repository allowlists, and copies supported worker capabilities and guidance. It does not copy OAuth registrations, tokens, jobs or results. The new bridge starts with `default_execution: none`. Workspace access defaults to denied; add `--workspace-worker NAME` for each worker that needs an explicit workspace grant. This option records the owner's grant; it does not require an earlier audit record. Existing explicit `workspaceAllowed` and T3 capability settings are retained. Destination declarations are copied, but old destination approvals bind old jobs and connections, so each new job requires a fresh approval.
 
 Optionally pass `--source-db PATH` for each old job database. The helper opens it read-only and writes a private `service-migration.json` checklist containing active subscription counts, callback origins and destination approval counts. It omits callback paths, query strings, signing secrets and encrypted records. This checklist grants no authority. Re-enrol every connector, call `events/subscribe` with a fresh signing key, and approve each new destination revision. Without `--source-db`, the checklist still records those required steps but has no old subscription inventory. For a brand-new bridge, skip migration and pass `--worker NAME` once for each worker instead; those initial workers have empty repository allowlists, no capabilities, and no host execution.
 
@@ -40,6 +42,18 @@ Set `DALAN_HOME` to the selected home. The private MCP URL is stored in `$DALAN_
 The service starts when the systemd user manager starts. Without lingering, that may happen only after the user logs in after a reboot. If the bridge must start before login, ask an administrator to run `loginctl enable-linger USER` for the account that owns the bridge.
 
 `--write-units-only` writes the systemd unit files without initializing the bridge home, starting systemd or calling Gozar. It is for offline inspection; run the normal install to finish setup.
+
+### Restarting and backing up built-in sign-ins
+
+With compatible code, a restart using the same private home and issuer preserves an unexpired built-in OAuth access token while its grant and connection remain live. The issuer includes the public origin and secret path. Access tokens last up to one hour.
+
+Before an upgrade or restore, stop the bridge and every other writer and make a consistent SQLite backup. Preserve the complete active private config directory, including `as.json`, `as-jwks.json`, `as-cookie-keys.json`, `as.sqlite` and its sibling `as-storage.key`; the keys alone cannot restore sign-ins. Follow the [backup and rollback steps](operations.md#upgrade-and-rollback).
+
+For the built-in public-client flow, a client that loses a refresh response can recover it only by retrying the identical request within five seconds, while the successor token and connection remain live. A retry after that window can fail and require the client to pair again. This is not a promise of recovery after a longer outage or across incompatible code or storage changes.
+
+## Legacy setup with `scripts/worker-bridge-setup.mjs`
+
+The sections below document the separate legacy setup script, not `dalan service install`. The script supports the Linux and macOS setup options shown below. In particular, its `dot-bridge-NAME.service` unit name and lingering warning do not apply to `dalan service install`.
 
 ## Keep a local trial working
 
@@ -66,7 +80,7 @@ If you want only a bridge on this computer that stays up, run the server in a te
 
 ## Owner setup
 
-You need the installed package (from `npm install -g @tnunamak/dalan`) or a checkout, a stable Node.js 24 LTS or newer executable, a fresh private bridge home, and a free port from 1024 through 65535. Use short, space-free paths without symlinks; on Linux, starting the service needs a running systemd user manager; on macOS, it needs the user's launchd domain (`user/UID`), which exists while that user has a login session. The script checks those before writing a service with `--start`.
+You need the installed package (from `npm install -g @tnunamak/dalan`) or a checkout, a stable Node.js 24 LTS or newer executable, a fresh private bridge home, and a free port from 1024 through 65535. Use short, space-free paths without symlinks; on Linux, starting the service needs a running systemd user manager; on macOS, it needs the user's launchd domain (`user/UID`), which exists while that user has a login session. `worker-bridge-setup.mjs` does not check the Node.js version.
 
 On macOS the service is a LaunchAgent. A LaunchAgent starts when you log in to the Mac and stops when you log out, so it does not run after a reboot until someone logs in and you cannot rely on it for unattended availability.
 
@@ -87,7 +101,7 @@ The domain and label are the ones that `worker-bridge-setup.mjs` writes.
 
 The bridge and the worker come back by separate rules:
 
-- **Bridge, Linux.** The generated unit is wanted by `default.target`, so it starts when your systemd user manager starts. Without lingering, that is your first login after the reboot; with lingering (an administrator runs `loginctl enable-linger USER`; setup warns when it is off), it is the boot. Check with `systemctl --user is-active dot-bridge-NAME.service`, which must print `active`.
+- **Bridge, Linux.** The generated unit is wanted by `default.target`, so it starts when your systemd user manager starts. Without lingering, that is your first login after the reboot; with lingering (an administrator runs `loginctl enable-linger USER`; the legacy setup script warns when it is off), it is the boot. Check with `systemctl --user is-active dot-bridge-NAME.service`, which must print `active`.
 - **Bridge, macOS.** It starts at your login, as described above.
 - **Worker, both systems.** Dalan has no worker scheduler, and nothing wakes the worker when the bridge returns. Jobs wait in the queue until a worker run claims them. The supported way is manual, and it takes three steps. First wait until `dalan status --json` answers, with `DALAN_HOME` set to the service home. Then prompt the worker in its own client, for example: "Use Dalan to list pending work. Claim the oldest job you may claim, read it, report progress and finish it exactly as instructed. Stop when nothing is pending." In Codex, `codex exec "PROMPT" < /dev/null` runs that without a screen (see [worker clients](worker-clients.md)). Last, check that the job moved: `dalan wait REQUEST_ID` returns `finished`, or `dalan get REQUEST_ID --json` shows the report.
 

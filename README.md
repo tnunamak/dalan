@@ -186,7 +186,11 @@ Any client that speaks HTTP MCP and completes the bridge's OAuth sign-in can be 
 
 ## Upgrade
 
-Read the release notes before an upgrade. This release changes the worker tool list. After you upgrade, refresh the Dalan connection once in each worker client.
+Read the release notes and follow the ordered [upgrade guide](docs/dalan-upgrade.md) before an upgrade. This release changes the worker tool list. After you upgrade, refresh the Dalan connection once in each worker client.
+
+For a compatible-code restart, built-in OAuth keeps an unexpired access token only when the bridge uses the same private home and issuer and its grant and connection remain live. Access tokens last up to one hour. Before an upgrade or restore, stop the bridge and every other writer, then make a consistent SQLite backup. Preserve the complete active private config directory, including `as.json`, `as-jwks.json`, `as-cookie-keys.json`, `as.sqlite` and its sibling `as-storage.key`; the keys alone cannot restore sign-ins. Follow the [backup and rollback steps](docs/operations.md#upgrade-and-rollback).
+
+For the built-in public-client flow, a client that loses a refresh response can recover it only by retrying the identical request within five seconds, while the successor token and connection remain live. A retry after that window can fail and require the client to pair again. This is not a promise of recovery after a longer outage or across incompatible code or storage changes.
 
 ## Reference
 
