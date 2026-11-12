@@ -33,8 +33,17 @@ async function rawTool(name,args){const secret=fs.readFileSync(path.join(config,
 async function tool(name,args){const result=await rawTool(name,args);if(result.isError)throw new Error(result.content?.[0]?.text??'tool failed');return JSON.parse(result.content[0].text);}
 const {Store}=await import('../src/store.mjs');
 const receipts=path.join(home,'.local/share/dot-bridge/receipts'),ownerToken=randomUUID();
-function submit(execution_scope,inputs=[{revision:'fixture'}]){const request_id=`req_${randomUUID()}`,assignment={schema_version:1,request_id,brief:'workspace policy fixture',inputs,expected_output:'report',execution_scope},store=new Store(dbFile);store.submit(assignment,'thread','env',ownerToken);store.db.close();fs.mkdirSync(receipts,{recursive:true});fs.writeFileSync(path.join(receipts,`${createHash('sha256').update(request_id).digest('hex')}.json`),JSON.stringify({request_id,token:ownerToken,body:JSON.stringify(assignment),thread:'thread'}),{mode:0o600});return request_id;}
-function activeClaims(request_id){const store=new Store(dbFile);try{return store.db.prepare("SELECT count(*) n FROM claims WHERE request_id=? AND state='active'").get(request_id).n;}finally{store.db.close();}}
+function submit(execution_scope,inputs=[{revision:'fixture'}],fields={}){const request_id=`req_${randomUUID()}`,assignment={schema_version:1,request_id,brief:'workspace policy fixture',inputs,expected_output:'report',execution_scope,...fields},store=new Store(dbFile);store.submit(assignment,'thread','env',ownerToken);store.db.close();fs.mkdirSync(receipts,{recursive:true});fs.writeFileSync(path.join(receipts,`${createHash('sha256').update(request_id).digest('hex')}.json`),JSON.stringify({request_id,token:ownerToken,body:JSON.stringify(assignment),thread:'thread'}),{mode:0o600});return request_id;}
+function withStore(fn){const store=new Store(dbFile);try{return fn(store);}finally{store.db.close();}}
+function activeClaims(request_id){return withStore(store=>store.db.prepare("SELECT count(*) n FROM claims WHERE request_id=? AND state='active'").get(request_id).n);}
+function stateOf(request_id){return withStore(store=>({
+  report:store.db.prepare('SELECT workspace_evidence FROM reports WHERE request_id=?').get(request_id)??null,
+  lateEvidence:store.db.prepare('SELECT count(*) n FROM late_evidence WHERE request_id=?').get(request_id).n,
+  workspaces:store.db.prepare('SELECT count(*) n FROM workspaces WHERE request_id=?').get(request_id).n,
+  checkRuns:store.db.prepare('SELECT count(*) n FROM check_runs WHERE request_id=?').get(request_id).n,
+  artifacts:store.db.prepare('SELECT count(*) n FROM artifacts WHERE request_id=?').get(request_id).n,
+}));}
+function writeOtherWorker(){fs.writeFileSync(workersFile,JSON.stringify({workers:{other:{connections:[{issuer,subject:'other',client_id:randomUUID()}],repos:[]}}}),{mode:0o600});}
 async function stop(){if(service&&service.exitCode===null&&service.signalCode===null){const exited=new Promise(resolve=>service.once('exit',resolve));service.kill('SIGTERM');await exited;}}
 try {
   launch(true);await waitReady();
@@ -42,6 +51,79 @@ try {
   const claim=await tool('claim',{request_id:implementation,claimant:'allowed'});
   const files=await tool('list_files',{request_id:implementation,claim_id:claim.claim_id});assert.ok(files.files.includes('hello.txt'),'workspaceAllowed=true grants workspace access');
   writeWorkers(false);const denied=await rawTool('list_files',{request_id:implementation,claim_id:claim.claim_id});assert.equal(denied.isError,true);assert.match(denied.content[0].text,/capability_not_enabled/,'workspaceAllowed=false denies workspace access');await tool('finish',{request_id:implementation,claim_id:claim.claim_id,outcome:'completed',summary:'done',result:'done'});
+
+  // A held implementation claim with no workspace grant or workspace effects
+  // needs only its stored claim authority to file a plain report.
+  writeWorkers(false);const plainImplementation=submit('implementation'),plainImplementationClaim=await tool('claim',{request_id:plainImplementation,claimant:'plain-implementation'});
+  assert.equal(withStore(store=>store.db.prepare('SELECT count(*) n FROM workspaces WHERE request_id=?').get(plainImplementation).n),0,'plain finish fixture has no workspace');
+  const noWorkspace=await rawTool('list_files',{request_id:plainImplementation,claim_id:plainImplementationClaim.claim_id});assert.equal(noWorkspace.isError,true,'ungranted claim cannot create workspace state');
+  fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
+  const foreignFinish=await rawTool('finish',{request_id:plainImplementation,claim_id:randomUUID(),outcome:'completed',summary:'foreign',result:'must be refused'});
+  assert.equal(foreignFinish.isError,true,'a foreign claim cannot use the broken-policy finish fallback');assert.match(foreignFinish.content[0].text,/invalid claim/);
+  const artifactFinish=await rawTool('finish',{request_id:plainImplementation,claim_id:plainImplementationClaim.claim_id,outcome:'completed',summary:'artifact',result:'must validate',artifact_ids:[`art_${randomUUID()}`]});
+  assert.equal(artifactFinish.isError,true,'an explicit artifact request cannot use the broken-policy finish fallback');assert.match(artifactFinish.content[0].text,/destination_configuration_invalid/);
+  assert.equal(stateOf(plainImplementation).report,null,'foreign and artifact finish attempts did not persist a report');
+  const plainFinish=await rawTool('finish',{request_id:plainImplementation,claim_id:plainImplementationClaim.claim_id,outcome:'completed',summary:'done without workspace',result:'done'});
+  assert.equal(plainFinish.isError,false,'plain finish of non-workspace implementation claim must survive broken policy');
+  assert.ok(stateOf(plainImplementation).report,'plain report committed after optional policy failure');
+
+  // Removing the held worker from a valid profile still permits the existing plain-report behavior.
+  writeWorkers(false);const removedImplementation=submit('implementation'),removedImplementationClaim=await tool('claim',{request_id:removedImplementation,claimant:'removed-implementation'});
+  writeOtherWorker();await tool('finish',{request_id:removedImplementation,claim_id:removedImplementationClaim.claim_id,outcome:'completed',summary:'worker removed',result:'done'});
+  assert.ok(stateOf(removedImplementation).report,'held plain report survives removal of its worker from a valid profile');
+
+  // A missing profile is the same optional-policy failure for a plain held report.
+  writeWorkers(false);const missingProfile=submit('implementation'),missingProfileClaim=await tool('claim',{request_id:missingProfile,claimant:'missing-profile'});
+  fs.rmSync(workersFile);const missingFinish=await rawTool('finish',{request_id:missingProfile,claim_id:missingProfileClaim.claim_id,outcome:'completed',summary:'profile missing',result:'done'});
+  assert.equal(missingFinish.isError,false,'plain finish survives removal of the workspace profile');assert.ok(stateOf(missingProfile).report);
+
+  // Declared output paths remain required workspace evidence when the policy read fails.
+  writeWorkers(false);const outputAssignment=submit('implementation',[{github_repo:'example-owner/fixture',base_sha:base}],{output_paths:['result.txt']});
+  const outputClaim=await tool('claim',{request_id:outputAssignment,claimant:'output-path'});fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
+  const outputFinish=await rawTool('finish',{request_id:outputAssignment,claim_id:outputClaim.claim_id,outcome:'completed',summary:'output path',result:'must not bypass'});
+  assert.equal(outputFinish.isError,true,'output_paths cannot use the broken-policy fallback');assert.match(outputFinish.content[0].text,/destination_configuration_invalid/);
+  assert.equal(stateOf(outputAssignment).report,null,'output-path finish refusal did not persist a report');
+  withStore(store=>store.abandon(outputAssignment,{actor:'operator',reason:'fixture released after required-evidence refusal'}));
+
+  // Workspace and check evidence remain intact while policy is unavailable, then are captured after it is restored.
+  writeWorkers(true);const evidenceRequest=submit('implementation',[{github_repo:'example-owner/fixture',base_sha:base}]);
+  const evidenceClaim=await tool('claim',{request_id:evidenceRequest,claimant:'evidence'});
+  await tool('list_files',{request_id:evidenceRequest,claim_id:evidenceClaim.claim_id});
+  const checkRunId=`check_${randomUUID()}`,checkNow=new Date().toISOString(),checkOutput='fixture check output';
+  withStore(store=>{
+    store.db.prepare("INSERT INTO check_jobs(id,request_id,claim_id,check_id,diff_sha256,status,started_at,finished_at,output_preview) VALUES(?,?,?,?,?,'completed',?,?,?)")
+      .run(checkRunId,evidenceRequest,evidenceClaim.claim_id,'fixture-check','fixture-diff',checkNow,checkNow,checkOutput);
+    store.db.prepare('INSERT INTO check_runs(id,request_id,claim_id,check_id,exit_code,timed_out,output_artifact_id,output_sha256,duration_ms,created_at,diff_sha256,phase,evidence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(checkRunId,evidenceRequest,evidenceClaim.claim_id,'fixture-check',0,0,'',createHash('sha256').update(checkOutput).digest('hex'),1,checkNow,'fixture-diff','check',JSON.stringify({skipped_segments:0,skipped_segment_names:[],phase:'check',trust:'bridge_verified'}));
+  });
+  const beforeBrokenFinish=stateOf(evidenceRequest);fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
+  const evidenceFinish=await rawTool('finish',{request_id:evidenceRequest,claim_id:evidenceClaim.claim_id,outcome:'completed',summary:'evidence',result:'must capture'});
+  assert.equal(evidenceFinish.isError,true,'existing workspace/check evidence requires a readable workspace policy');assert.match(evidenceFinish.content[0].text,/destination_configuration_invalid/);
+  const afterBrokenFinish=stateOf(evidenceRequest);assert.equal(afterBrokenFinish.report,null);assert.equal(afterBrokenFinish.workspaces,beforeBrokenFinish.workspaces);assert.equal(afterBrokenFinish.checkRuns,beforeBrokenFinish.checkRuns);assert.equal(afterBrokenFinish.artifacts,beforeBrokenFinish.artifacts);
+  writeWorkers(true);await tool('finish',{request_id:evidenceRequest,claim_id:evidenceClaim.claim_id,outcome:'completed',summary:'evidence restored',result:'captured'});
+  const evidence=JSON.parse(stateOf(evidenceRequest).report.workspace_evidence);
+  assert.ok(evidence.patch_artifact?.artifact_id,'restored policy captured the existing workspace snapshot');
+  assert.ok(evidence.checks.some(check=>check.check_id==='fixture-check'&&check.evidence?.trust==='bridge_verified'),'restored policy preserved existing check evidence');
+
+  // Abandoned, cancelled, and expired grants cannot use the plain-finish fallback.
+  writeWorkers(false);const abandonedRequest=submit('implementation'),abandonedClaim=await tool('claim',{request_id:abandonedRequest,claimant:'abandoned'});
+  withStore(store=>store.abandon(abandonedRequest,{actor:'operator',reason:'fixture claim revocation'}));
+  fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
+  const abandonedFinish=await rawTool('finish',{request_id:abandonedRequest,claim_id:abandonedClaim.claim_id,outcome:'completed',summary:'stale claim',result:'must be refused'});
+  assert.equal(abandonedFinish.isError,true,'abandoned claim cannot use the broken-policy fallback');assert.match(abandonedFinish.content[0].text,/invalid claim/);assert.equal(stateOf(abandonedRequest).report,null);
+
+  writeWorkers(false);const cancelledRequest=submit('implementation'),cancelledClaim=await tool('claim',{request_id:cancelledRequest,claimant:'cancelled'});
+  fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});withStore(store=>store.cancel(cancelledRequest,'fixture cancellation'));
+  const cancelledFinish=await rawTool('finish',{request_id:cancelledRequest,claim_id:cancelledClaim.claim_id,outcome:'completed',summary:'cancelled claim',result:'must not commit'});
+  assert.equal(cancelledFinish.isError,true,'cancelled claim cannot use the broken-policy fallback');assert.match(cancelledFinish.content[0].text,/assignment_cancelled/);
+  assert.equal(stateOf(cancelledRequest).report,null);assert.equal(stateOf(cancelledRequest).lateEvidence,1,'cancelled finish remains audit-only');
+
+  writeWorkers(false);const expiredRequest=submit('implementation'),expiredClaim=await tool('claim',{request_id:expiredRequest,claimant:'expired',lease_ms:1000});
+  withStore(store=>store.db.prepare('UPDATE claims SET lease_deadline_at=?,lease_deadline_monotonic_ms=0 WHERE request_id=?').run(new Date(0).toISOString(),expiredRequest));
+  fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
+  const expiredFinish=await rawTool('finish',{request_id:expiredRequest,claim_id:expiredClaim.claim_id,outcome:'completed',summary:'expired claim',result:'must be refused'});
+  assert.equal(expiredFinish.isError,true,'expired claim cannot use the broken-policy fallback');assert.match(expiredFinish.content[0].text,/lease_expired/);assert.equal(stateOf(expiredRequest).report,null);
+  withStore(store=>store.abandon(expiredRequest,{actor:'operator',reason:'lease_expired'}));
 
   writeWorkers(true);const held=submit('read-only'),heldClaim=await tool('claim',{request_id:held,claimant:'held'});
   fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
@@ -69,7 +151,7 @@ try {
 
   // Removing the worker must not strand an already held non-workspace grant either.
   writeWorkers(false);const removed=submit('read-only'),removedClaim=await tool('claim',{request_id:removed,claimant:'removed'});
-  fs.writeFileSync(workersFile,JSON.stringify({workers:{other:{connections:[{issuer,subject:'other',client_id:'other-client'}],repos:[]}}}),{mode:0o600});
+  writeOtherWorker();
   assert.equal((await tool('claim',{request_id:removed,claimant:'removed'})).claim_id,removedClaim.claim_id);
   await tool('get',{request_id:removed});
   const foreign=await rawTool('progress',{request_id:removed,claim_id:randomUUID(),note:'foreign'});assert.equal(foreign.isError,true,'foreign grant remains refused');
@@ -83,5 +165,5 @@ try {
   writeWorkers(true);const hostOff=submit('implementation',[{github_repo:'example-owner/fixture',base_sha:base}]);const offClaim=await tool('claim',{request_id:hostOff,claimant:'host-off'});await stop();launch(false);await waitReady();fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
   const offWorkspace=await rawTool('list_files',{request_id:hostOff,claim_id:offClaim.claim_id});
   assert.equal(offWorkspace.isError,true);assert.match(offWorkspace.content[0].text,/capability_not_enabled/,'host workspace disabled fails closed without reading malformed profile');
-  console.log('PASS workspace policy: held claim control survives broken profile; workspace use, fresh grants and disabled modes fail closed');
+  console.log('PASS workspace policy: plain held finish survives missing/broken profile; required evidence and stale claims remain protected');
 } finally {await stop();await new Promise(resolve=>jwks.close(resolve));fs.rmSync(home,{recursive:true,force:true});}

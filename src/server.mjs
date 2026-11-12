@@ -224,6 +224,13 @@ function mayPrepareCheckMetadata(response,worker,subject=null) {
     (subject===null||claim.subject===subject)&&!store.leaseExpired(claim);
 }
 function workerWorkspaceAllowed(worker,requestId=null) { const policy=repoPolicyFor({request_id:requestId});return policy.legacy||policy.workers.get(worker)?.workspaceAllowed===true; }
+function hasWorkspaceFinishEvidence(requestId) {
+  return !!store.db.prepare(`SELECT
+    EXISTS(SELECT 1 FROM workspaces WHERE request_id=?) OR
+    EXISTS(SELECT 1 FROM check_jobs WHERE request_id=?) OR
+    EXISTS(SELECT 1 FROM check_runs WHERE request_id=?) OR
+    EXISTS(SELECT 1 FROM artifacts WHERE request_id=?) AS present`).get(requestId,requestId,requestId,requestId).present;
+}
 function withAvailableChecks(response,workerSurface=false,worker='dot',subject=null,workspaceAllowed=null) {
   response=withoutT3(response);
   const artifacts=store.sealedUploads(response.request_id,{clientIds:workerSurface});
@@ -850,7 +857,18 @@ async function dispatchTool(name,a,principal,notifyMeta) {
           store.assertQuestionsResolved(requestId,claimId,a.outcome);
           const request=store.get(requestId);
           const needsWorkspace=workspaceEnabled&&(a.artifact_ids?.length||request.assignment.execution_scope==='implementation'||request.assignment.output_paths?.length);
-          const workerWorkspaceEnabled=needsWorkspace&&workerWorkspaceAllowed(worker,requestId);
+          const assignmentNeedsWorkspace=request.assignment.execution_scope==='implementation'||request.assignment.output_paths?.length;
+          const requiredWorkspaceEvidence=!!(a.artifact_ids?.length||request.assignment.output_paths?.length);
+          let workerWorkspaceEnabled=false;
+          if(needsWorkspace) {
+            try { workerWorkspaceEnabled=workerWorkspaceAllowed(worker,requestId); }
+            catch(error) {
+              if(error.destination?.error!=='destination_configuration_invalid') throw error;
+              if(requiredWorkspaceEvidence||assignmentNeedsWorkspace&&hasWorkspaceFinishEvidence(requestId)) throw error;
+              // A failed optional policy read may fall back only when finish has no workspace state, checks,
+              // artifacts, output paths, or explicitly requested artifacts. Store.finish still enforces the claim.
+            }
+          }
           if(a.artifact_ids?.length) { if(!workerWorkspaceEnabled) throw new Error('capability_not_enabled'); store.assertSealedArtifacts(requestId,claimId,a.artifact_ids); }
           if(workerWorkspaceEnabled) await workspace.makeRoom(requestId);
           // Recheck after the last await. The evidence capture below runs inside the finish transaction, after finishOnce's own
