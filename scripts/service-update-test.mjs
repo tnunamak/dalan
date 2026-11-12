@@ -327,4 +327,34 @@ try {
     assert.equal(r.outcome, 'updated', label); assert.ok(f.events.includes('install'), label);
     assert.equal(serviceStatus({ home: f.home }).failed_release, null, label);
   }
+  {
+    // A 0.6.0/0.6.1 service has no `current` link, no receipt.repo/node/unit_dir, and its package lives outside the updater tree.
+    // The first update must adopt it from the unit itself, keep the unit's node binary, and need no hand step.
+    const f = fixture();
+    const receiptFile = path.join(f.home, '.config', 'dot-bridge', 'service-install.json');
+    const legacyReceipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    for (const key of ['repo', 'node', 'unit_dir']) delete legacyReceipt[key];
+    fs.writeFileSync(receiptFile, JSON.stringify(legacyReceipt), { mode: 0o600 });
+    const legacyRepo = path.join(tmp, 'global-prefix', 'lib', 'node_modules', '@tnunamak', 'dalan'); fs.mkdirSync(legacyRepo, { recursive: true });
+    fs.writeFileSync(path.join(legacyRepo, 'package.json'), JSON.stringify({ name: '@tnunamak/dalan', version: '0.6.0' }));
+    fs.unlinkSync(path.join(f.home, 'current'));
+    const xdg = path.join(tmp, 'xdg'), unitDir = path.join(xdg, 'systemd', 'user'); fs.mkdirSync(unitDir, { recursive: true });
+    const misoNode = '/opt/mise/installs/node/24.22.1/bin/node';
+    const unitFile = path.join(unitDir, 'dalan-unit.service');
+    fs.writeFileSync(unitFile, `[Service]\nWorkingDirectory=${legacyRepo}\nExecStart=${misoNode} ${legacyRepo}/src/server.mjs\n`, { mode: 0o600 });
+    let probedWith; const previousXdg = process.env.XDG_CONFIG_HOME; process.env.XDG_CONFIG_HOME = xdg;
+    try {
+      f.seams.probeService = async home => ({ version: fs.existsSync(path.join(home, 'current')) && fs.realpathSync(path.join(home, 'current')).includes('0.7.0') ? '0.7.0' : '0.6.0', catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } });
+      f.seams.probeCandidate = async (_home, receipt) => { probedWith = receipt; return { version: '0.7.0', catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } }; };
+      const r = await updateService({ home: f.home }, f.seams);
+      assert.equal(r.outcome, 'updated');
+    } finally { if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previousXdg; }
+    assert.equal(probedWith.node, misoNode, 'the candidate runs under the service node binary, not the updater node');
+    const adopted = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    assert.equal(adopted.node, misoNode); assert.equal(adopted.unit_dir, unitDir);
+    assert.ok(adopted.repo.includes(`${path.sep}0.7.0${path.sep}`));
+    const unit = fs.readFileSync(unitFile, 'utf8');
+    assert.ok(unit.includes(`ExecStart=${misoNode} ${path.join(f.home, 'current')}/src/server.mjs`), unit);
+    assert.ok(fs.existsSync(legacyRepo), 'the original package stays until a later update succeeds');
+  }
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

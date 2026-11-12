@@ -2,6 +2,15 @@
 
 This file lists user-visible changes, newest first. Check the section for your target release before you upgrade.
 
+## 0.6.2
+
+- Add `dalan service update`, `--check`, automatic-update on/off and update status for Linux systemd services. New installs enable daily checks with jitter. Releases install side by side with npm integrity checks, local self-checks and a complete tool-catalog comparison for each configured worker. Changed descriptors stage until an explicit `--yes`; refresh hosted connectors after that switch. Failed switches attempt to restore the previous package and saved persistent state, and report rollback failures. See [service updates](docs/service-setup.md#service-updates) for limits and enrollment of older services.
+- A candidate release is now checked with synthetic keys made for the check. It never receives the service keys.
+- An interrupted update is recovered when the service starts (`dalan service recover` runs before the server), not only at the next update. It does nothing while an update is running.
+- While an update switches, the restarted bridge refuses worker calls, OAuth requests and owner commands with a retryable 503 and runs no background writer until the update commits or rolls back. A rollback can no longer lose a change that was acknowledged.
+- A release that was rolled back is skipped by the daily timer until a newer release or a different package appears. `dalan service update --retry` tries it again. `dalan service status` shows the failed release.
+- The first `dalan service update` adopts a service installed by 0.6.0 or 0.6.1 and keeps the node binary its unit uses.
+
 ## 0.6.1
 
 - `dalan service install` now uses the Gozar that ships with Dalan. A `gozar` command on `PATH` is no longer required. An explicit `--gozar-bin` still wins; otherwise Dalan uses the bundled copy, then `GOZAR_BIN`, then `PATH`. If none is found, the command stops before it creates any unit.
@@ -9,7 +18,6 @@ This file lists user-visible changes, newest first. Check the section for your t
 - When another program replaces the Tailscale Funnel rule of a stopped trial, Dalan leaves it alone and no longer prints a command that would switch off that port.
 - Muse is now described as the cloud agent at muse.ai in the Muse and worker-client guides. These guides also say that either a Tailscale route or the Gozar relay can supply public HTTPS.
 - Documentation fixes: the generated service environment list in the upgrade guide is complete, the old-package command list matches the one at the top of that guide, and the local MCP guide tells you to use the Home line a public trial prints.
-- Add `dalan service update`, `--check`, automatic-update on/off and update status for Linux systemd services. New installs enable daily checks with jitter. Releases install side by side with npm integrity checks, local self-checks and a complete tool-catalog comparison for each configured worker. Changed descriptors stage until an explicit `--yes`; refresh hosted connectors after that switch. Failed switches attempt to restore the previous package and saved persistent state, and report rollback failures. See [service updates](docs/service-setup.md#service-updates) for limits and enrollment of older services.
 
 ## 0.6.0
 

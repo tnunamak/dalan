@@ -17,7 +17,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 test('isolated two-worker bridge stages, switches with consent, and restores data on restart failure', { timeout: 90000 }, async () => {
   const root = fs.mkdtempSync(path.join(scratch, 'uj-')), home = path.join(root, 'h');
   let child, errors = '', failRestart = false;
-  const installOptions = { home, origin: 'https://update.example.test', port: 18791, target: '127.0.0.1:18791', workers: ['fern', 'muse'], enableWorkspace: true, enableT3: true, autoUpdate: false };
+  const installOptions = { home, origin: 'https://update.example.test', port: 18791, target: '127.0.0.1:18791', workers: ['fern', 'muse'], gozarBin: 'gozar', enableWorkspace: true, enableT3: true, autoUpdate: false };
   const env = { ...process.env, XDG_CONFIG_HOME: path.join(root, 'xdg') };
   const cli = args => {
     const result = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args, '--json'], {

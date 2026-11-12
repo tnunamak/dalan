@@ -112,10 +112,23 @@ function validateSnapshot(tx) {
 }
 function unitPath(receipt, home) {
   if (!/^[A-Za-z0-9_.@-]+$/.test(String(receipt.unit ?? ''))) fail('invalid service unit name in receipt');
-  const dir = receipt.unit_dir || path.join(os.homedir(), '.config/systemd/user');
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const dir = receipt.unit_dir || path.join(xdg && path.isAbsolute(xdg) ? xdg : path.join(os.homedir(), '.config'), 'systemd/user');
   if (!path.isAbsolute(dir) || dir.includes('\n')) fail('invalid service unit directory in receipt');
   const name = String(receipt.unit).endsWith('.service') ? String(receipt.unit) : `${receipt.unit}.service`;
   return path.join(dir, name);
+}
+// A 0.6.0 or 0.6.1 receipt names no package, node binary or unit directory. Read them from the unit that runs the service,
+// so the first update adopts the install with no hand step and keeps the node binary the service already uses.
+function adoptInstall(receipt, home) {
+  if (receipt.repo && receipt.node && receipt.unit_dir) return receipt;
+  const file = unitPath(receipt, home);
+  let text;
+  try { const st = fs.lstatSync(file); if (!st.isFile() || st.isSymbolicLink()) fail('not a regular file'); text = fs.readFileSync(file, 'utf8'); }
+  catch { fail(`cannot read the service unit to adopt this install: ${file}`); }
+  const repo = text.match(/^WorkingDirectory=(.+)$/m)?.[1], exec = text.match(/^ExecStart=(\S+) (\S+)$/m);
+  if (!repo || !exec || exec[2] !== `${repo}/src/server.mjs` || !path.isAbsolute(repo) || !path.isAbsolute(exec[1])) fail(`service unit does not contain a supported Dalan command: ${file}`);
+  return { ...receipt, repo: receipt.repo ?? repo, node: receipt.node ?? exec[1], unit_dir: receipt.unit_dir ?? path.dirname(file) };
 }
 function rewriteUnit(file, current, home) {
   if (!fs.existsSync(file)) fail(`service unit is missing: ${file}`);
@@ -242,7 +255,7 @@ export async function updateService({ home, check = false, yes = false, retry = 
   const healthTimeoutMs = seams.healthTimeoutMs ?? HEALTH_TIMEOUT_MS;
   if (!Number.isFinite(healthTimeoutMs) || healthTimeoutMs <= 0) fail('healthTimeoutMs must be a positive finite duration');
   if (check) {
-    const { value: receipt } = readReceipt(home), active = fs.existsSync(path.join(home, 'current')) ? fs.realpathSync(path.join(home, 'current')) : receipt.repo;
+    const receipt = adoptInstall(readReceipt(home).value, home), active = fs.existsSync(path.join(home, 'current')) ? fs.realpathSync(path.join(home, 'current')) : receipt.repo;
     if (!active) fail('current service repository is missing');
     const current = JSON.parse(fs.readFileSync(path.join(active, 'package.json'), 'utf8')).version;
     const r = await latest(receipt); const forward = releaseVersion(r, current);
@@ -256,7 +269,8 @@ export async function updateService({ home, check = false, yes = false, retry = 
   let result, attempted;
   try {
     await recover(home, control, probe, healthTimeoutMs);
-    const { value: receipt, file: receiptFile } = readReceipt(home);
+    const { value: storedReceipt, file: receiptFile } = readReceipt(home);
+    const receipt = adoptInstall(storedReceipt, home);
     let current = path.join(home, 'current');
     let oldRepo = fs.existsSync(current) ? fs.realpathSync(current) : receipt.repo;
     if (!oldRepo || !fs.existsSync(oldRepo)) fail('current service repository is missing');

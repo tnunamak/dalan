@@ -31,6 +31,7 @@
   "node --test scripts/service-update-test.mjs",
   "node --test scripts/service-update-runtime-test.mjs",
   "node --test scripts/service-update-journey-test.mjs",
+  "node scripts/service-update-gate-test.mjs",
   "node scripts/one-bridge-workers-e2e.mjs",
   "node scripts/test-listing-test.mjs",
   "node --test scripts/dalan-cli-errors-test.mjs",

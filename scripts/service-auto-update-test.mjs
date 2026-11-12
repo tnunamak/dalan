@@ -72,7 +72,7 @@ test('new installs default on, retries preserve opt-out, explicit opt-in works',
   fs.rmSync(f.home, { recursive: true });
   const calls = [];
   const env = { ...process.env, XDG_CONFIG_HOME: path.join(f.root, 'xdg') };
-  const options = { home: f.home, origin: 'https://bridge.example.test', port: 18789, target: '127.0.0.1:18789', workers: ['fern'] };
+  const options = { home: f.home, origin: 'https://bridge.example.test', port: 18789, target: '127.0.0.1:18789', workers: ['fern'], gozarBin: 'gozar' };
   const seams = { env, platform: 'linux', spawn: (cmd, args) => {
     calls.push([cmd, ...args]);
     return { status: 0, stdout: cmd === 'gozar' ? JSON.stringify({ schemaVersion: 1, route: { origin: options.origin, target: options.target, verification: { status: 'verified' } } }) : '' };
@@ -93,6 +93,7 @@ test('new installs default on, retries preserve opt-out, explicit opt-in works',
     fs.writeFileSync(path.join(f.config, 'service-install.json'), JSON.stringify(oldReceipt));
     const serviceFile = path.join(receipt.unit_dir, `${receipt.unit}.service`);
     fs.writeFileSync(serviceFile, fs.readFileSync(serviceFile, 'utf8')
+      .replace(/^ExecStartPre=.*\n/m, '') // 0.6.0 and 0.6.1 units have no recovery step
       .replace(/^WorkingDirectory=.*$/m, 'WorkingDirectory=/opt/previous-dalan')
       .replace(path.join(f.home, 'current', 'src/server.mjs'), '/opt/previous-dalan/src/server.mjs'));
     const enrolled = await installService(options, seams);
