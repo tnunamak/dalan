@@ -54,7 +54,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.8.0",
-    "@tnunamak/gozar": "^0.1.0",
+    "@tnunamak/gozar": "0.1.0",
     "oidc-provider": "9.13.0"
   },
   "devDependencies": {
