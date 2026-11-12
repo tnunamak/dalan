@@ -805,14 +805,32 @@ try {
     assert.equal((await server.rpc(token('client-stranger', { connection_id: 'client-lark' }), 'tools/list')).status, 403);
   });
 
-  await check('tools/list drops the T3 tools and notify_owner for a worker without the t3 capability, and keeps them for the worker', async () => {
-    const names = async bearer => (await server.rpc(bearer, 'tools/list')).body.result.tools.map(t => t.name);
-    const dot = await names(T.dot), lark = await names(T.lark), grok = await names(T.grok);
-    for (const name of t3Names) { assert.ok(dot.includes(name), `worker lost ${name}`); assert.ok(!lark.includes(name), `lark sees ${name}`); assert.ok(!grok.includes(name), `grok sees ${name}`); }
-    for (const name of ['list_pending', 'claim', 'get', 'finish', 'artifact_chunk']) assert.ok(lark.includes(name));
+  await check('enabled tools/list stays identical across workers with different T3 authority', async () => {
+    const catalog = async bearer => (await server.rpc(bearer, 'tools/list')).body.result.tools;
+    const dot = await catalog(T.dot), lark = await catalog(T.lark), grok = await catalog(T.grok);
+    assert.deepEqual(lark, dot, 'worker capability must not change the advertised catalog');
+    assert.deepEqual(grok, dot, 'worker capability must not change the advertised catalog');
+    const names = dot.map(t => t.name);
+    for (const name of t3Names) assert.ok(names.includes(name), `stable catalog lost ${name}`);
+    for (const name of ['list_pending', 'claim', 'get', 'finish', 'artifact_chunk']) assert.ok(names.includes(name));
   });
 
-  await check('a worker without the t3 capability cannot call T3 tools or notify_owner; the worker can; the refusal is audited', async () => {
+  await check('disabled global T3 switch gives heterogeneous workers the same catalog and denies T3 calls', async () => {
+    const disabled = await startServer('catalog-disabled', liveProfile, { envOverrides: { DALAN_ENABLE_T3_TOOLS: '0' } });
+    servers.push(disabled);
+    assert.notEqual(disabled.port, null, `disabled server did not start: ${disabled.stderr}`);
+    const catalog = async bearer => (await disabled.rpc(bearer, 'tools/list')).body.result.tools;
+    const dot = await catalog(T.dot), lark = await catalog(T.lark);
+    assert.deepEqual(lark, dot, 'global feature switch must not create per-worker catalogs');
+    assert.equal(dot.filter(tool => tool.name.startsWith('t3_')).length, 0, 'disabled global switch retained T3 tools');
+    for (const bearer of [T.dot, T.lark]) {
+      const denied = await disabled.tool(bearer, 't3_thread_list', { status: 'all' });
+      assert.equal(denied.ok, false);
+      assert.match(denied.error, /unknown tool/);
+    }
+  });
+
+  await check('process-wide advertised T3 names do not grant call authority; denial remains audited', async () => {
     for (const name of t3Names) {
       const args = name.startsWith('notify_') ? { text: 'hi' } : name === 't3_thread_read' ? { threadId: 'thread_a' } : {};
       const refused = await server.tool(T.lark, name, args);

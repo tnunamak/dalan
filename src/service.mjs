@@ -151,7 +151,10 @@ function profileFor(home, workers) {
     try { profile = parseWorkers(JSON.parse(fs.readFileSync(file, 'utf8')), { builtin: true }); }
     catch (error) { fail(`${file} is not a built-in OAuth worker profile: ${error.message}`); }
     if (!profile.workers.size || profile.legacy) fail(`${file} must contain a built-in OAuth worker profile`);
-    if (workers.length) fail(`${file} already exists; omit --worker and keep its workers and repository grants`);
+    const configuredWorkers = [...profile.workers.keys()].sort();
+    if (workers.length && JSON.stringify([...workers].sort()) !== JSON.stringify(configuredWorkers)) {
+      fail(`${file} already exists; omit --worker or pass its exact worker set, and keep its workers and repository grants`);
+    }
     return { file, workers: [...profile.workers.keys()], existing: true };
   }
   if (!workers.length) fail(`no ${file}; run dalan service migrate-workers first or pass --worker NAME`);

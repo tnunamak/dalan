@@ -77,15 +77,15 @@ const secondTool = {
   handler: { kind: 't3_post', thread_id: 'thread-lead-fixed' },
 };
 
-// The advertised tools/list is fixed per (catalog profile, worker capability) and registry changes never alter it. Both are
-// pinned here: profile "stable" and the capabilities of the legacy-mode worker "dot" (notify_owner, no t3 tools).
+// The advertised tools/list is fixed per modern catalog profile and global T3 setting; registry changes never alter it.
+// Pin profile "stable" with T3 disabled. Advertised names do not grant per-worker authority.
 // What a worker may actually use varies with the registry and is read through list_tools, not tools/list.
 const s = await startServer({ DALAN_CATALOG_PROFILE: 'stable' });
 try {
   const listBytes = async () => JSON.stringify((await s.rpc('tools/list')).tools);
   const before = await listBytes();
   const names = JSON.parse(before).map(t => t.name);
-  assert.deepEqual(names, ['list_pending', 'claim', 'get', 'ack_message', 'progress', 'finish', 'list_files', 'read_file', 'apply_patch', 'run_check', 'workspace_result', 'artifact_chunk', 'notify_owner', 'list_tools', 'call_tool_read', 'call_tool_write'], 'pinned advertised tools for (stable, worker)');
+  assert.deepEqual(names, ['list_pending', 'claim', 'get', 'ack_message', 'progress', 'finish', 'list_files', 'read_file', 'apply_patch', 'run_check', 'workspace_result', 'artifact_chunk', 'notify_owner', 'list_tools', 'call_tool_read', 'call_tool_write'], 'pinned advertised tools for (stable, T3 off)');
   assert(!names.includes('owner_message'));
   const listing = async () => JSON.parse((await s.call('list_tools', {})).text);
   const write = (tool, args, extra = {}) => s.call('call_tool_write', { tool, arguments: args, ...extra });

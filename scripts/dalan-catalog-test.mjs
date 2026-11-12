@@ -8,6 +8,7 @@ import http from 'node:http';
 import {DatabaseSync} from 'node:sqlite';
 
 const root=path.resolve(new URL('..',import.meta.url).pathname);
+const packageVersion=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 // The parent fixture holds the tools that must survive an upgrade. The earlier notification alias is not among them: it was removed,
 // and `notify_owner` is the only notification tool.
 // Catalog v2 added annotations and the `list_tools`, `call_tool_read` and `call_tool_write` registry tools; list_files gained paging earlier.
@@ -118,7 +119,9 @@ test('explicit T3 opt-in allows only announced schema changes; default refuses r
   }
   const emptyHome=path.join(scratch,'empty-catalog');fs.mkdirSync(path.join(emptyHome,'.config/dot-bridge'),{recursive:true,mode:0o700});
   const empty=await start(root,emptyHome,'legacy-v46',undefined,{DALAN_CATALOG_PROFILE:''});
-  assert.equal((await empty.rpc('initialize')).serverInfo.name,'dalan','empty new catalog setting intentionally selects stable, overriding the legacy pin');
+  const initialized=await empty.rpc('initialize');
+  assert.equal(initialized.serverInfo.name,'dalan','empty new catalog setting intentionally selects stable, overriding the legacy pin');
+  assert.equal(initialized.serverInfo.version,packageVersion,'modern server info must track the package version');
   assert((await empty.tools()).some(tool=>tool.name==='notify_owner'));await empty.stop();
  } finally {
   for(const child of running)if(child.exitCode===null&&child.signalCode===null)await new Promise(resolve=>{child.once('exit',resolve);child.kill('SIGTERM');});

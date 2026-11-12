@@ -2,7 +2,7 @@
 
 With `DALAN_ENABLE_T3_TOOLS=1`, the bridge exposes a small T3 thread wrapper (list, read, create, send, wait and set) through its existing OAuth MCP connection. The wrapper uses `t3code --json --origin http://127.0.0.1:3773` with argument arrays. It can address any T3 project or thread the local CLI can address by an ID of at most 128 bytes; the other tools reject a longer ID from a list result. The bridge does not scope a thread to the worker that calls it: a worker with the `t3` capability has the owner's full authority over every local thread. The tools are off by default, and a fresh `dalan init` worker profile has no `t3` capability. The CLI currently obtains a short-lived administrative T3 session for each operation; the bridge's approved OAuth subject and per-tool scopes remain the remote boundary.
 
-These calls use owner-granted, job-independent authority. They require no `request_id` or `claim_id` and have no assignment epoch, so they are outside job-scoped authority checks, and job expiry or cancellation does not revoke them. To enable the six thread tools, set `DALAN_ENABLE_T3_TOOLS=1` and grant the worker `capabilities: ["t3"]`; both checks apply, including for the legacy single-worker profile, which keeps its capability but still needs the environment setting. When the tools are hidden, direct calls are rejected. Capability, OAuth scope and audit admission always apply.
+These calls use owner-granted, job-independent authority. They require no `request_id` or `claim_id` and have no assignment epoch, so they are outside job-scoped authority checks, and job expiry or cancellation does not revoke them. To advertise the six thread tools, set `DALAN_ENABLE_T3_TOOLS=1`; each call also requires the worker's `capabilities: ["t3"]`, including for the legacy single-worker profile. When the global setting is off, direct calls are rejected as unknown tools. Capability, OAuth scope and audit admission always apply.
 
 | MCP tool | Scope | Operation |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ These calls use owner-granted, job-independent authority. They require no `reque
 
 `dalan tell "text"` adds a durable lightweight message to a worker's `list_pending` inbox and emits the existing `assignment.available` event with `{message_id,title}`. The event uses the signed webhook retry path, so an existing subscription can notify a client that supports wake-up. The worker reads it with `get {request_id: message_id}` and removes it from the pending list with `ack_message {message_id}`. Messages do not need assignment claim or finish. `tell` accepts `--json` and `--worker NAME` (default: `dot` if that worker exists, else the only configured worker; with several workers and no `dot`, pass `--worker`); `dalan untell MESSAGE_ID [--worker NAME]` withdraws a pending message.
 
-The `notify_owner` tool retains its `t3` capability, work scope and audit checks. It remains available independently of `DALAN_ENABLE_T3_TOOLS`; this flag controls only the six `t3_thread_*` operations. The `legacy-v46` pin advertises no notification tool. The earlier notification alias was removed.
+The `notify_owner` tool retains its `t3` capability, work scope and audit checks. Modern catalogs advertise it independently of `DALAN_ENABLE_T3_TOOLS`; this flag controls only the six `t3_thread_*` operations. A worker without `t3` can see the name but its call is denied and audited. The `legacy-v46` pin advertises no notification tool. The earlier notification alias was removed.
 
 ## Notification retries outside the job lifecycle
 
@@ -76,7 +76,7 @@ The workspace install and check phases both run in a sandbox with its own networ
 
 ## Who may hold the t3 capability
 
-The t3 tools act as the owner, with no per-job binding. Pairing a client never grants this capability; the bridge reads it only from the owner's `workers.json`, where it declares that a worker is the owner's own harness. The tools take any thread, project or directory and are not bound to a job, a worker or a repository. Never give `capabilities: ["t3"]` to a worker you do not fully trust with every T3 thread on the computer. A worker without the capability does not see these tools, and a direct call is refused and audited. With the tools on, startup prints a notice naming each worker that holds the capability.
+The t3 tools act as the owner, with no per-job binding. Pairing a client never grants this capability; the bridge reads it only from the owner's `workers.json`, where it declares that a worker is the owner's own harness. The tools take any thread, project or directory and are not bound to a job, a worker or a repository. Never give `capabilities: ["t3"]` to a worker you do not fully trust with every T3 thread on the computer. Modern catalogs advertise the same names to every worker; a worker without the capability receives a denied and audited result when it calls them. With the tools on, startup prints a notice naming each worker that holds the capability.
 
 ## Adding abilities without a Refresh
 

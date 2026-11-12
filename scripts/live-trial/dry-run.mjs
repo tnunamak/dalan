@@ -278,7 +278,9 @@ async function main() {
     const listedTools = await mcpRpc(manifest, accessToken, 'tools/list');
     const names = listedTools.body?.result?.tools?.map(tool => tool.name) ?? [];
     pass(listedTools.status === 200 && names.length > 0, 'worker tools/list succeeds');
-    pass(!names.some(name => /^t3_|^notify_owner$/.test(name)), 'worker tools/list exposes no T3 tools or notify_owner');
+    pass(!names.some(name => /^t3_/.test(name)) && names.includes('notify_owner'), 'global T3-off catalog is process-wide and advertises notify_owner');
+    const notifyDenied = await mcpTool(manifest, accessToken, 'notify_owner', { text: 'synthetic denied call' });
+    pass(notifyDenied.isError && /worker_capability_denied/.test(notifyDenied.text), 'advertised notify_owner remains denied without the worker capability');
 
     const pending = await mcpTool(manifest, accessToken, 'list_pending');
     pass(!pending.isError && pending.value.assignments.some(item => item.request_id === jobs.worker_request_id), 'fixture-a sees its explicitly targeted job');

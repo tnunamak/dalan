@@ -129,7 +129,7 @@ Check the owner-side records:
 HOME='<home printed by setup>' node scripts/live-trial/verify.mjs --home '<home printed by setup>'
 ```
 
-The verifier checks the active connection binding, claim and report attribution, nonce, target isolation, and that the profile has no T3 capability. A dry run also authenticates as the fake worker and checks actual `tools/list`, cross-worker claim denial, and the unknown-worker 403 boundary. The live connector holds its own OAuth token, so the owner verifier cannot inspect fixture-a's live `tools/list`; check the connector's displayed tool catalog for the same absence.
+The verifier checks the active connection binding, claim and report attribution, nonce, target isolation, and that the profile has no T3 capability. A dry run also authenticates as the fake worker and checks actual `tools/list`, denied optional-tool calls, cross-worker claim denial, and the unknown-worker 403 boundary. The live connector holds its own OAuth token, so the owner verifier cannot inspect fixture-a's live `tools/list`; check that it receives the process-wide catalog selected by the configured profile and global T3 switch, and that calls without `t3` are denied.
 
 The current built-in AS returns 401 for a revoked or unknown opaque token. It returns 403 when a valid token names a worker that is absent from the configured profile. The dry run checks both cases.
 
@@ -175,7 +175,7 @@ If Funnel off fails or status still shows the trial route, teardown exits non-ze
 - fixture-a's client authentication method works with the built-in AS. The fake client uses `none`; verify the real client's authentication method against this server.
 - fixture-a follows the browser pairing interaction and returns through the exact redirect URI with the authorization code and state intact.
 - fixture-a supports the bridge's Streamable HTTP/MCP behavior and a protocol version the bridge advertises. The dry run covers JSON requests; it does not test fixture-a's SSE handling.
-- The real connector's tool catalog contains only the expected fixture-a tools, with no T3 tools and no `notify_owner`.
+- The real connector receives the process-wide catalog selected by `DALAN_CATALOG_PROFILE` and `DALAN_ENABLE_T3_TOOLS`. With T3 tools globally disabled, `t3_thread_*` names are absent and `notify_owner` is advertised; verify that fixture-a cannot call it without the `t3` capability.
 - Confirm how the worker schedules pulls and whether a completed assignment can be fetched within its polling window.
 - Public HTTPS port 443 reaches only the loopback bridge listener. Confirm the selected Mac Funnel or Linux trial host route and turn it off during teardown.
 

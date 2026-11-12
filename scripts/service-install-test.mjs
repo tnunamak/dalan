@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,7 +9,7 @@ import { defaultPath } from '../src/paths.mjs';
 import { installService } from '../src/service.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const scratch = path.join(os.homedir(), '.tmp');
+const scratch = process.env.DOT_BRIDGE_SERVICE_INSTALL_TMP ?? path.join(os.homedir(), '.tmp');
 fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
 const root = fs.mkdtempSync(path.join(scratch, 'dalan-service-install-'));
 const userHome = path.join(root, 'user');
@@ -22,6 +23,19 @@ const spawn = (command, args) => {
   return command === 'gozar'
     ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route }), stderr: '' }
     : { status: 0, stdout: '', stderr: '' };
+};
+const privateState = home => {
+  const paths = [
+    '.config/dot-bridge/workers.json', '.config/dot-bridge/service-install.json',
+    '.config/dot-bridge/as.json', '.config/dot-bridge/as-jwks.json',
+    '.config/dot-bridge/as-cookie-keys.json', '.config/dot-bridge/env', 'resource-url',
+  ];
+  return Object.fromEntries(paths.map(relative => {
+    const file = path.join(home, relative);
+    if (!fs.existsSync(file)) return [relative, null];
+    const stat = fs.lstatSync(file);
+    return [relative, { mode: stat.mode & 0o777, sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex') }];
+  }));
 };
 
 try {
@@ -52,6 +66,15 @@ try {
   assert.deepEqual(calls[callsBeforeGozar].slice(0, 6), ['gozar', 'service', 'add', '--origin', 'https://bridge.example.test', '--target']);
   assert(calls[callsBeforeGozar].includes('192.0.2.10:8787'));
   assert.equal(calls[callsBeforeGozar].at(-1), '--json');
+
+  const installState = privateState(home);
+  const exactRetry = await installService({ home, origin: 'https://bridge.example.test', port: 8787,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
+    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+    spawn, waitForSocket: async () => true,
+  });
+  assert.equal(exactRetry.started, true);
+  assert.deepEqual(privateState(home), installState, 'an exact --worker retry must preserve keys, policy, grants and receipt');
 
   const migratedHome = path.join(root, 'migrated');
   const migratedConfig = defaultPath(migratedHome, '.config/dot-bridge');
@@ -171,11 +194,13 @@ try {
       : { status: 0, stdout: '', stderr: '' }, waitForSocket: async () => true,
   });
   await assert.rejects(retryInstall(['dot']), /did not verify the service route/);
+  const failedRouteState = privateState(retryHome);
   firstGozarCall = false;
-  const retried = await retryInstall([]);
+  const retried = await retryInstall(['dot']);
   assert.equal(retried.route.verification.status, 'verified', 'an exact own-install receipt permits a safe retry');
+  assert.deepEqual(privateState(retryHome), failedRouteState, 'route retry must preserve keys, policy, grants and receipt');
   await assert.rejects(installService({ home: retryHome, origin: 'https://changed.example.test', port: 8791,
-    target: '127.0.0.1:8791', workers: [] }, { env, platform: 'linux' }), /belongs to a different service configuration/);
+    target: '127.0.0.1:8791', workers: ['dot'] }, { env, platform: 'linux' }), /belongs to a different service configuration/);
 
   for (const field of ['origin', 'target']) {
     const mismatchHome = path.join(root, `mismatch-${field}`);

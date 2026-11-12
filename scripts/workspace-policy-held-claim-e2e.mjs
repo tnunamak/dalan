@@ -51,6 +51,22 @@ try {
   await tool('progress',{request_id:held,claim_id:heldClaim.claim_id,note:'still working'});
   await tool('finish',{request_id:held,claim_id:heldClaim.claim_id,outcome:'completed',summary:'recovered',result:'done'});
 
+  // A held implementation claim also remains usable after its optional workspace
+  // policy source breaks, but its retry must not advertise checks or restore workspace access.
+  writeWorkers(true);const heldWorkspace=submit('implementation',[{github_repo:'example-owner/fixture',base_sha:base}]);
+  const heldWorkspaceClaim=await tool('claim',{request_id:heldWorkspace,claimant:'held-workspace'});
+  fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
+  const workspaceRetry=await tool('claim',{request_id:heldWorkspace,claimant:'held-workspace'});
+  assert.equal(workspaceRetry.claim_id,heldWorkspaceClaim.claim_id,'broken optional workspace policy stranded the existing claim');
+  assert.deepEqual(workspaceRetry.available_checks,[],'broken workspace policy advertised checks');
+  assert.equal(workspaceRetry.available_checks_error,'destination_configuration_invalid','missing sanitized workspace policy diagnostic');
+  const heldWorkspaceDenied=await rawTool('list_files',{request_id:heldWorkspace,claim_id:heldWorkspaceClaim.claim_id});
+  assert.equal(heldWorkspaceDenied.isError,true,'broken workspace policy granted workspace access');
+  assert.match(heldWorkspaceDenied.content[0].text,/destination_configuration_invalid/);
+  await tool('progress',{request_id:heldWorkspace,claim_id:heldWorkspaceClaim.claim_id,note:'control survives broken workspace policy'});
+  writeWorkers(true);
+  await tool('finish',{request_id:heldWorkspace,claim_id:heldWorkspaceClaim.claim_id,outcome:'completed',summary:'workspace policy restored',result:'done'});
+
   // Removing the worker must not strand an already held non-workspace grant either.
   writeWorkers(false);const removed=submit('read-only'),removedClaim=await tool('claim',{request_id:removed,claimant:'removed'});
   fs.writeFileSync(workersFile,JSON.stringify({workers:{other:{connections:[{issuer,subject:'other',client_id:'other-client'}],repos:[]}}}),{mode:0o600});

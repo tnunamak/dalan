@@ -137,12 +137,13 @@ try {
       }
     });
 
-    await check('worker: tools/list has no t3_* tool and no notify_owner', async () => {
+    await check('worker: process-wide tools/list omits globally disabled T3 tools but advertises notify_owner', async () => {
       const list = await server.rpc(W, 'tools/list');
       assert.equal(list.status, 200);
       const names = list.body.result.tools.map(t => t.name);
       for (const name of ['list_pending', 'claim', 'progress', 'finish', 'get']) assert.ok(names.includes(name), `missing ${name}`);
-      assert.deepEqual(names.filter(n => /^t3_|^notify_owner$/.test(n)), []);
+      assert.deepEqual(names.filter(n => /^t3_/.test(n)), []);
+      assert.ok(names.includes('notify_owner'), 'process-wide catalog must not hide names by worker capability');
     });
 
     let claim;

@@ -59,7 +59,7 @@ These are bridge requirements. A code mismatch, expired window or unexpected cal
 
 Anthropic's test guide says to verify connected state, review **Tool permissions**, then enable the connector from **+ → Connectors** in a chat and confirm an actual tool call. [Test guide](https://claude.com/docs/connectors/building/testing#test-in-claude-as-a-custom-connector)
 
-For this smoke, require `list_pending`, `get`, `claim`, `progress` and `finish`; `ack_message` is only for messages. The generic no-T3 profile must expose neither `t3_thread_*` nor `notify_owner`. Repository tools may depend on existing host configuration, but are unnecessary and must not be called for the execution-none job. Verify the actual `claim` schema, including optional `acquisition_id`, instead of importing ChatGPT's refresh behavior. Missing tools or excess privileges are owner blockers; do not expand policy.
+For this smoke, require `list_pending`, `get`, `claim`, `progress` and `finish`; `ack_message` is only for messages. With global T3 tools disabled, the process-wide catalog omits `t3_thread_*` and still advertises `notify_owner`; the worker's missing `t3` capability must make a direct `notify_owner` call fail. Advertised names do not grant authority. Repository tools may depend on existing host configuration, but are unnecessary and must not be called for the execution-none job. Verify the actual `claim` schema, including optional `acquisition_id`, instead of importing ChatGPT's refresh behavior. Missing tools or excess privileges are owner blockers; do not expand policy.
 
 ## 4. One owner-submitted text smoke
 

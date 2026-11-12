@@ -264,7 +264,12 @@ try {
     assert.equal(ownerResult.json().report.result, 'fixture result for owner', 'owner CLI did not receive the worker result');
     assert.equal(main.bridgeDb("SELECT count(*) n FROM subscriptions WHERE state='active'")[0].n, 0, 'manual onboarding created a recurring subscription');
     const names = async bearer => (await main.rpc(bearer, 'tools/list')).body.result.tools.map(t => t.name);
-    assert.ok(!(await names(lark.access)).includes('notify_owner'), 'a worker without the t3 capability sees T3 tools');
+    const larkNames = await names(lark.access), duetNames = await names(duet.access);
+    assert.deepEqual(duetNames, larkNames, 'worker capability must not change the process-wide catalog');
+    assert.ok(larkNames.includes('notify_owner'), 'advertising a tool does not grant its capability');
+    const notifyDenied = await main.tool(lark.access, 'notify_owner', { text: 'synthetic denied call' });
+    assert.equal(notifyDenied.ok, false);
+    assert.match(notifyDenied.error, /worker_capability_denied/);
     const refreshed = await vendor.refresh(lark.refresh);
     assert.equal(refreshed.status, 200, JSON.stringify(refreshed.body));
     assert.notEqual(refreshed.body.refresh_token, lark.refresh); lark.refresh = refreshed.body.refresh_token; lark.access = refreshed.body.access_token;

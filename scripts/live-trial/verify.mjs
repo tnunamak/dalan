@@ -25,7 +25,9 @@ async function checkWorkerApi(manifest, jobs, token) {
   expect(listed.status === 200, 'worker tools/list did not return HTTP 200');
   const names = listed.body?.result?.tools?.map(tool => tool.name) ?? [];
   expect(names.length > 0, 'worker tools/list returned no tools');
-  expect(!names.some(name => /^t3_|^notify_owner$/.test(name)), 'fixture-a tools/list includes a T3 tool');
+  expect(!names.some(name => /^t3_/.test(name)) && names.includes('notify_owner'), 'fixture-a receives the process-wide T3-off catalog');
+  const notifyDenied = await mcpTool(manifest, token, 'notify_owner', { text: 'synthetic denied call' });
+  expect(notifyDenied.isError && /worker_capability_denied/.test(notifyDenied.text), 'advertised notify_owner remains denied without the worker capability');
 
   const pending = await mcpTool(manifest, token, 'list_pending');
   expect(pending.status === 200 && !pending.isError, 'worker list_pending failed');

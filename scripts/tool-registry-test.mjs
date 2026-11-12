@@ -311,7 +311,7 @@ test('registering or removing a tool leaves the served tools/list byte for byte 
   const home = path.join(scratch, 'server-home');
   fs.mkdirSync(path.join(home, '.config/dot-bridge'), { recursive: true, mode: 0o700 });
   const port = await reservedPort();
-  // The advertised list is fixed per (catalog profile, worker capability); both are pinned here. Registry changes never alter it.
+  // The advertised list is fixed per modern catalog profile and global T3 setting. Registry changes never alter it.
   const env = { HOME: home, DALAN_HOME: home, DALAN_LEGACY_PROFILE: '1', DALAN_CATALOG_PROFILE: 'stable', PATH: process.env.PATH, NODE_ENV: 'test', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_PORT: String(port) };
   const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '', errors = '';

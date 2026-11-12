@@ -211,7 +211,7 @@ const protocolServices=catalogProfile==='protocol-v0'?createProtocolServices(sto
 const iconBytes=fs.readFileSync(new URL('../docs/t3-connector-icon.png',import.meta.url));
 const iconSource=`data:image/png;base64,${iconBytes.toString('base64')}`;
 if(Buffer.byteLength(iconSource)>10000) throw new Error('server icon exceeds 10 KB');
-const serverInfo={name:catalogProfile==='legacy-v46'?'dot-bridge':'dalan',version:catalogProfile==='legacy-v46'?'0.2.0':'0.5.2',icons:[{src:iconSource,mimeType:'image/png',sizes:['128x128']}]};
+const serverInfo={name:catalogProfile==='legacy-v46'?'dot-bridge':'dalan',version:catalogProfile==='legacy-v46'?'0.2.0':'0.6.0',icons:[{src:iconSource,mimeType:'image/png',sizes:['128x128']}]};
 // A quiet-delivery job in profile mode has no T3 thread; its response must not carry the T3 fields. Legacy profile keeps them.
 const withoutT3=response=>{ if(legacyProfile||response.delivery_mode!=='none') return response; const {t3_muted,thread_id,...rest}=response; return rest; };
 function mayPrepareCheckMetadata(response,worker,subject=null) {
@@ -233,7 +233,16 @@ function withAvailableChecks(response,workerSurface=false,worker='dot',subject=n
   const checks=store.db.prepare("SELECT j.id check_run_id,j.check_id,CASE WHEN j.status='completed' THEN COALESCE(r.diff_sha256,j.diff_sha256) ELSE j.diff_sha256 END diff_sha256,j.status,j.error,j.output_preview,r.exit_code,r.timed_out,r.output_artifact_id,r.output_sha256,r.duration_ms,r.evidence FROM check_jobs j LEFT JOIN check_runs r ON r.id=j.id WHERE j.request_id=? ORDER BY j.started_at").all(response.request_id).map(withEvidence);
   const blocker=workerSurface?null:queuedRepositoryBlocker(response);
   const enriched={...response,artifacts,checks,...(blocker?{queue_blocker:blocker}:{}),...(checks.some(c=>c.evidence)?{not_identified:NOT_IDENTIFIED}:{})};
-  if(!workspaceEnabled||response.assignment?.execution_scope!=='implementation'||workerSurface&&!(workspaceAllowed??workerWorkspaceAllowed(worker,response.request_id))) return enriched;
+  if(!workspaceEnabled||response.assignment?.execution_scope!=='implementation') return enriched;
+  if(workerSurface&&workspaceAllowed===null) {
+    try { workspaceAllowed=workerWorkspaceAllowed(worker,response.request_id); }
+    catch(error) {
+      // Workspace metadata is optional response enrichment. A damaged current profile
+      // must deny workspace preparation without discarding an already-held claim.
+      return {...enriched,available_checks:[],available_checks_error:error?.destination?.error??'workspace_policy_unavailable'};
+    }
+  }
+  if(workerSurface&&!workspaceAllowed) return enriched;
   const target=store.db.prepare('SELECT target_worker FROM assignments WHERE request_id=?').get(response.request_id)?.target_worker??worker;
   if(!mayPrepareCheckMetadata(response,target,subject)) return {...enriched,available_checks:[],available_checks_error:'repository_policy_denied'};
   const execution=response.execution??store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(response.request_id).execution;
@@ -787,7 +796,7 @@ async function dispatchTool(name,a,principal,notifyMeta) {
       const requestId=id(a.request_id),claimant=str(a.claimant,'claimant',128),ctx=commandContext('claim',{claimant,acquisition_id:a.acquisition_id??null,lease_ms:a.lease_ms??null}),row=store.get(requestId),held=row.claim?.state==='active'?row.claim:null,retry=holdsLiveGrant(worker,requestId,claimant,subject,a.acquisition_id);
       if(!retry)assertRepoAllowed(worker,row.assignment);
       const needsWorkspace=workspaceEnabled&&(row.assignment.execution_scope==='implementation'||row.assignment.output_paths?.length);
-      let workspaceAllowed=false;
+      let workspaceAllowed=null;
       store.refuseExpired(requestId);
       // Retry a successful claim without a new remote dependency, and skip it for a live rival claim that the Store will refuse.
       // A fresh claim, a claim after abandon and an expired-lease takeover are each a new admission. The Store
@@ -909,7 +918,9 @@ async function dispatch(message,principal) {
     case 'server/discover': return {ttlMs:0,cacheScope:'private',supportedVersions:['2026-07-28'],capabilities:{tools:{},events:{}},_meta:{'io.modelcontextprotocol/serverInfo':serverInfo}};
     case 'initialize': return {protocolVersion:['2025-11-25','2025-06-18','2025-03-26','2024-11-05'].includes(p.protocolVersion)?p.protocolVersion:'2025-11-25',capabilities:{tools:{},events:{}},serverInfo};
     case 'ping': return {};
-    case 'tools/list': return {ttlMs:0,cacheScope:'private',tools:tools.filter(t=>!(t3Tools.has(t.name)||notifyTools.has(t.name))||hasCapability(workers,principal.worker,'t3'))};
+    // Modern catalogs are process-wide. A worker's capability controls tools/call authority, not its cached schemas.
+    // legacy-v46 keeps its pinned per-worker surface for compatibility.
+    case 'tools/list': return {ttlMs:0,cacheScope:'private',tools:catalogProfile==='legacy-v46'?tools.filter(t=>!(t3Tools.has(t.name)||notifyTools.has(t.name))||hasCapability(workers,principal.worker,'t3')):tools};
     case 'tools/call': { try { return {content:[{type:'text',text:JSON.stringify(redactOutput(await tool(p.name,p.arguments??{},principal,notifyTools.has(p.name)?p._meta:undefined)))}],isError:false}; } catch(e) { const error={content:[{type:'text',text:publicErrorText(e,`tool ${toolNames.has(p.name)?p.name:'unknown'}`)}],isError:true};if(oauth&&e.message==='insufficient_scope')error._meta={'mcp/www_authenticate':[[challenge(oauth,scopeFor(p.name)),'error="insufficient_scope"','error_description="Required scope is missing"'].join(', ')]};return error; } }
     case 'events/list': return {events:[event]};
     case 'events/subscribe': if(oauth)needScope(principal,'dalan.read');return subscribe(p,principal);
