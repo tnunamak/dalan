@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { acquireUpdateLock } from '../src/service-update-lock.mjs';
-import { updateService, serviceStatus } from '../src/service-update.mjs';
+import { spawnSync } from 'node:child_process';
+import { updateService, serviceStatus, recoverService } from '../src/service-update.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-update-test-'));
 const release = { name: '@tnunamak/dalan', version: '0.7.0', dist: { integrity: 'sha512-test' } };
@@ -96,6 +97,39 @@ try {
     assert.equal(fs.existsSync(path.join(f.home, '.config', 'dot-bridge', 'service-catalog.json')), false);
     assert.deepEqual(f.events.slice(0, 3), ['stop', 'daemon-reload', 'restart']);
     assert.notEqual(candidate, fs.realpathSync(path.join(f.home, 'current')));
+  }
+  {
+    // Updater killed after the pin was written: a plain service start must recover with no control seam.
+    const pin = home => path.join(home, '.config', 'dot-bridge', 'service-catalog.json');
+    const killed = () => {
+      const f = fixture(); const { candidate } = interruptedSwitch(f);
+      fs.writeFileSync(pin(f.home), JSON.stringify({ version: '0.7.0', catalogs: {} }));
+      fs.writeFileSync(path.join(f.home, '.config', 'dot-bridge', 'junk'), 'candidate state');
+      return { f, candidate };
+    };
+    const assertRecovered = f => {
+      assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
+      assert.equal(fs.existsSync(pin(f.home)), false); assert.equal(fs.existsSync(path.join(f.home, '.config', 'dot-bridge', 'junk')), false);
+      assert.equal(fs.existsSync(path.join(f.home, 'update-transaction.json')), false);
+      assert.equal(fs.existsSync(path.join(f.home, 'update-backup')), false);
+      assert.ok(fs.existsSync(path.join(f.home, '.config', 'dot-bridge', 'workers.json')));
+    };
+    { const { f } = killed(); assert.deepEqual(recoverService({ home: f.home }), { outcome: 'recovered' }); assertRecovered(f); assert.deepEqual(f.events, []);
+      assert.deepEqual(recoverService({ home: f.home }), { outcome: 'nothing_pending' }); }
+    { const { f, candidate } = killed(), lock = acquireUpdateLock(f.home);
+      try { assert.deepEqual(recoverService({ home: f.home }), { outcome: 'update_running' }); } finally { lock(); }
+      assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(candidate));
+      assert.ok(fs.existsSync(pin(f.home))); assert.ok(fs.existsSync(path.join(f.home, 'update-transaction.json'))); }
+    { const f = fixture(); assert.deepEqual(recoverService({ home: f.home }), { outcome: 'nothing_pending' }); }
+    { const { f } = killed();
+      const run = spawnSync(process.execPath, [path.resolve('bin/dalan.mjs'), 'service', 'recover', '--home', f.home, '--quiet'], { encoding: 'utf8' });
+      assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout, ''); assertRecovered(f); }
+  }
+  {
+    const f = fixture(); await updateService({ home: f.home }, f.seams);
+    const unit = fs.readFileSync(path.join(f.home, 'units', 'dalan-unit.service'), 'utf8');
+    const pre = unit.split('\n').filter(l => l.startsWith('ExecStartPre='));
+    assert.deepEqual(pre, [`ExecStartPre=${process.execPath} ${path.join(f.home, 'current')}/bin/dalan.mjs service recover --home ${f.home} --quiet`]);
   }
   for (const configState of ['missing', 'partial']) {
     const f = fixture();

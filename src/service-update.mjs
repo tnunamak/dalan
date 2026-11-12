@@ -117,7 +117,7 @@ function unitPath(receipt, home) {
   const name = String(receipt.unit).endsWith('.service') ? String(receipt.unit) : `${receipt.unit}.service`;
   return path.join(dir, name);
 }
-function rewriteUnit(file, current) {
+function rewriteUnit(file, current, home) {
   if (!fs.existsSync(file)) fail(`service unit is missing: ${file}`);
   const st = fs.lstatSync(file);
   if (!st.isFile() || st.isSymbolicLink()) fail(`service unit must be a regular file: ${file}`);
@@ -128,7 +128,11 @@ function rewriteUnit(file, current) {
   const after = before.split('\n').map(line => /^WorkingDirectory=/.test(line) ? `WorkingDirectory=${current}` : /^ExecStart=/.test(line) ? line.replace(/\/src\/server\.mjs(?:\s.*)?$/, `${path.sep}src${path.sep}server.mjs`) : line).join('\n');
   // Preserve the selected package in ExecStart, including its node executable prefix.
   const fixed = after.replaceAll(`${oldRepo}/src/server.mjs`, `${current}/src/server.mjs`);
-  atomic(file, fixed); fs.chmodSync(file, st.mode & 0o777); return before;
+  const lines = fixed.split('\n').filter(l => !/^ExecStartPre=.*\sservice recover\s/.test(l));
+  const i = lines.findIndex(l => /^ExecStart=/.test(l));
+  const execLine = lines[i].slice('ExecStart='.length), nodeBin = execLine.slice(0, execLine.indexOf(' '));
+  lines.splice(i + 1, 0, `ExecStartPre=${nodeBin} ${current}/bin/dalan.mjs service recover --home ${home} --quiet`);
+  atomic(file, lines.join('\n')); fs.chmodSync(file, st.mode & 0o777); return before;
 }
 function select(home, repo) {
   const current = path.join(home, 'current'), tmp = path.join(home, `.current-${randomUUID()}`);
@@ -155,10 +159,10 @@ async function probeReady(probe, home, receipt, healthTimeoutMs = HEALTH_TIMEOUT
   }
   throw new Error(`service health check timed out after ${healthTimeoutMs}ms${error ? `: ${error.message}` : ''}`);
 }
-async function recover(home, control, probe, healthTimeoutMs) {
+function readJournal(home) {
   const file = path.join(home, 'update-transaction.json');
   let txStat;
-  try { txStat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  try { txStat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   if (!txStat.isFile() || txStat.isSymbolicLink() || (txStat.mode & 0o777) !== 0o600) fail('update transaction must be a private regular file');
   let tx;
   try { tx = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fail('update transaction is invalid JSON'); }
@@ -166,28 +170,60 @@ async function recover(home, control, probe, healthTimeoutMs) {
   if (tx.home !== home || !oldReceipt || oldReceipt.home !== home || oldReceipt.schema_version !== 1 || !oldReceipt.unit ||
       !tx.oldRepo || !tx.oldVersion || !tx.snapshot || !['prepared', 'switched', 'committed'].includes(tx.phase)) fail('invalid interrupted update transaction');
   if (tx.unitFile !== (oldReceipt.unit ? unitPath(oldReceipt, home) : null) || !tx.oldCatalogs || typeof tx.oldCatalogs !== 'object') fail('update transaction control data is invalid');
-  const backupRoot = path.join(home, 'update-backup');
-  if (path.resolve(tx.snapshot) !== path.join(backupRoot, 'snapshot')) fail('update transaction snapshot path is invalid');
+  if (path.resolve(tx.snapshot) !== path.join(home, 'update-backup', 'snapshot')) fail('update transaction snapshot path is invalid');
+  return { file, tx };
+}
+// Put the old package, unit and saved state back on disk. Touches no service and probes nothing.
+function restoreFiles(home, tx) {
+  validateSnapshot(tx);
+  select(home, tx.oldRepo);
+  if (tx.unitFile && tx.oldUnit != null) atomic(tx.unitFile, tx.oldUnit);
+  for (const item of ['.config', '.local']) replaceTree(path.join(tx.snapshot, item), path.join(home, item));
+}
+function discardJournal(home, tx) {
+  fs.rmSync(path.join(home, 'update-transaction.json'), { force: true });
+  fs.rmSync(path.dirname(tx.snapshot), { recursive: true, force: true });
+}
+function restoreFromJournal(home, tx) {
   if (tx.phase === 'committed') {
-    fs.rmSync(file, { force: true });
+    fs.rmSync(path.join(home, 'update-transaction.json'), { force: true });
     try { fs.rmSync(path.dirname(tx.snapshot), { recursive: true, force: true }); } catch { /* committed service stays selected */ }
     return;
   }
+  if (tx.phase === 'switched') restoreFiles(home, tx);
+  discardJournal(home, tx);
+}
+// Run at service start (ExecStartPre): finish filesystem recovery without touching systemd.
+export function recoverService({ home }) {
+  home = path.resolve(home ?? fail('home is required'));
+  if (!fs.existsSync(path.join(home, 'update-transaction.json'))) return { outcome: 'nothing_pending' };
+  let release;
+  try { release = acquireUpdateLock(home); }
+  catch (error) { if (/already running/.test(error.message)) return { outcome: 'update_running' }; throw error; }
+  try {
+    const journal = readJournal(home);
+    if (!journal) return { outcome: 'nothing_pending' };
+    restoreFromJournal(home, journal.tx);
+    return { outcome: 'recovered' };
+  } finally { release(); }
+}
+async function recover(home, control, probe, healthTimeoutMs) {
+  const journal = readJournal(home);
+  if (!journal) return;
+  const { tx } = journal, oldReceipt = tx.oldReceipt;
+  if (tx.phase === 'committed') return restoreFromJournal(home, tx);
   if (tx.phase === 'prepared') {
     await control(oldReceipt, 'restart');
     const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo }, healthTimeoutMs);
     if (live.version !== tx.oldVersion || tx.oldCatalogs && !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs))) fail('interrupted update recovery could not verify old service');
-  }
-  else {
+  } else {
     validateSnapshot(tx);
-    await control(oldReceipt, 'stop'); select(home, tx.oldRepo);
-    if (tx.unitFile && tx.oldUnit != null) atomic(tx.unitFile, tx.oldUnit);
-    for (const item of ['.config', '.local']) replaceTree(path.join(tx.snapshot, item), path.join(home, item));
+    await control(oldReceipt, 'stop'); restoreFiles(home, tx);
     await control(oldReceipt, 'daemon-reload'); await control(oldReceipt, 'restart');
     const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo }, healthTimeoutMs);
     if (tx.oldCatalogs && (live.version !== tx.oldVersion || !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs)))) fail('interrupted update recovery restored selection but old service health failed');
   }
-  fs.rmSync(file, { force: true }); fs.rmSync(path.dirname(tx.snapshot), { recursive: true, force: true });
+  discardJournal(home, tx);
 }
 function actualWorkers(home) {
   const file = path.join(defaultPath(home, '.config/dot-bridge'), 'workers.json');
@@ -269,7 +305,7 @@ export async function updateService({ home, check = false, yes = false, retry = 
       tx.phase = 'switched'; atomic(path.join(home, 'update-transaction.json'), JSON.stringify(tx));
       atomic(defaultPath(home, '.config/dot-bridge', 'service-catalog.json'), JSON.stringify({ version: r.version, catalogs: tested.catalogs }));
       select(home, candidate);
-      if (unitFile) rewriteUnit(unitFile, current);
+      if (unitFile) rewriteUnit(unitFile, current, home);
       await control(receipt, 'daemon-reload'); await control(receipt, 'restart');
       const live = await probeReady(probe, home, { ...receipt, repo: candidate }, healthTimeoutMs);
       if (live.version !== r.version || !completeCatalogs(tested, live, workers) || !catalogsEqual(tested, live, workers)) fail('updated service health or worker catalogs failed');

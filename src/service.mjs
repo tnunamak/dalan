@@ -108,7 +108,7 @@ function nodePath(execPath) {
 
 function unitName(home) { return `dalan-${createHash('sha256').update(home).digest('hex').slice(0, 10)}`; }
 
-function unitFiles(o, { home, repo = REPO, node = nodePath(process.execPath), proxy = null } = {}) {
+function unitFiles(o, { home, repo = REPO, node = nodePath(process.execPath), proxy = null, recover = true } = {}) {
   const name = unitName(home);
   for (const [label, value] of [['home', home], ['repo', repo], ['node', node]]) {
     if (!SAFE_PATH.test(value)) fail(`${label} contains characters that cannot be written safely in a systemd unit`);
@@ -117,6 +117,7 @@ function unitFiles(o, { home, repo = REPO, node = nodePath(process.execPath), pr
     [`${name}.service`]: [
       '[Unit]', 'Description=Dalan worker bridge', 'After=network-online.target', '', '[Service]',
       `WorkingDirectory=${repo}`, `ExecStart=${node} ${path.join(repo, 'src/server.mjs')}`,
+      ...(recover ? [`ExecStartPre=${node} ${path.join(repo, 'bin/dalan.mjs')} service recover --home ${home} --quiet`] : []),
       `Environment=HOME=${home}`, 'Environment=NODE_ENV=production', 'Environment=DALAN_AUTH_MODE=builtin',
       'Environment=DALAN_BIND_HOST=127.0.0.1', 'Environment=DALAN_GOZAR_SERVICE=1', 'Environment=DALAN_CATALOG_PROFILE=stable',
       `Environment=DALAN_ENABLE_WORKSPACE=${o.enableWorkspace ? '1' : '0'}`, `Environment=DALAN_ENABLE_T3_TOOLS=${o.enableT3 ? '1' : '0'}`,
@@ -374,7 +375,7 @@ export async function installService(o, seams = {}) {
       const oldRepo = actual.match(/^WorkingDirectory=(.+)$/m)?.[1];
       const oldNode = actual.match(/^ExecStart=(\S+) /m)?.[1];
       const expected = filename === `${name}.service` && previous && oldRepo && oldNode && SAFE_PATH.test(oldRepo) && SAFE_PATH.test(oldNode)
-        ? unitFiles(o, { home: o.home, repo: oldRepo, node: oldNode, proxy }).files[filename] : null;
+        ? unitFiles(o, { home: o.home, repo: oldRepo, node: oldNode, proxy, recover: false }).files[filename] : null;
       // Only the exact former generated unit can be enrolled or retried after interruption.
       if (expected && actual === expected) replaceLegacyUnit = true;
       else fail(`${file} already exists with different contents; refusing to overwrite it`);
@@ -441,6 +442,16 @@ export async function serviceMain(argv, seams = {}) {
     const { migrationMain } = await import('./service-migrate-workers.mjs');
     return migrationMain(args);
   }
+  if (action === 'recover') {
+    const parsed = parseArgs(args, { values: ['--home'], flags: ['--quiet', '--help'] });
+    if (parsed['--help']) return serviceMain(['help'], seams);
+    if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
+    const home = path.resolve(parsed['--home'] ?? path.join(os.homedir(), '.local/share/dalan-service'));
+    const { recoverService } = await import('./service-update.mjs');
+    const result = recoverService({ home });
+    if (!parsed['--quiet']) (seams.out ?? console.log)(JSON.stringify(result));
+    return result;
+  }
   if (['update', 'status', 'auto-update'].includes(action)) {
     const parsed = parseArgs(args, { values: ['--home'], flags: ['--check', '--yes', '--retry', '--json', '--help'] });
     if (parsed['--help']) return serviceMain(['help'], seams);
@@ -461,10 +472,10 @@ export async function serviceMain(argv, seams = {}) {
     return result;
   }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. --retry retries a release that was rolled back. Linux systemd only.');
+    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Linux systemd only.');
     return null;
   }
-  if (action !== 'install') fail('use dalan service install, update, auto-update, status or migrate-workers');
+  if (action !== 'install') fail('use dalan service install, update, auto-update, status, recover or migrate-workers');
   const o = parseOptions(args, seams.env ?? process.env);
   if (o.help) return serviceMain(['help'], seams);
   const result = await installService(o, seams);
