@@ -1888,3 +1888,23 @@ test('node sweeps require a present socket identity before signalling and retain
     assert.ok(fs.existsSync(file), label); assert.ok(fs.existsSync(dir), label);
   }
 });
+
+test('a Funnel port taken after route selection cannot move an ephemeral identity into the stable default home', async () => {
+  const oldHome = process.env.HOME;
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dfr-')); process.env.HOME = fakeHome;
+  let probes = 0;
+  const fallback = fakeRoute('tailscale-node');
+  const host = { name: 'tailscale', probe: () => ++probes === 1 ? { ok: true } : { ok: false, busy: true, line: 'busy', fix: 'free 443' }, start: async () => { throw new Error('Funnel port 443 was taken by another rule after the check'); }, stop: async () => ({ removed: true }) };
+  const run = await hostedRun('fallback-race', { noHome: true, argv: ['--route', 'tailscale'], providers: [host, fallback.provider] });
+  try {
+    const result = await Promise.race([run.finished, sleepMs(2000).then(() => ({ error: new Error('route selection changed instead of refusing the new rule') }))]);
+    assert.match(result.error?.message ?? '', /taken by another rule/);
+    assert.equal(probes, 1, 'the home and startup use the same provider decision');
+    assert.equal(fallback.record.started, 0, 'the ephemeral node cannot write into the stable home');
+    assert.equal(fs.existsSync(path.join(fakeHome, '.local/share/dalan-hosted-chatgpt/.config/dalan/as.json')), false);
+  } finally {
+    await run.close();
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+  }
+});

@@ -14,7 +14,7 @@ import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
 import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText, hostedPrompt } from './try-hosted-clients.mjs';
-import { PUBLIC_READY_MS, createGate, gozarProvider, localhostRunProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
+import { PUBLIC_READY_MS, createGate, gozarProvider, localhostRunProvider, selectRouteProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 
@@ -112,7 +112,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const spec = CLIENTS[client];
   const realHome = fs.realpathSync(os.homedir());
   // Only the host's usable Funnel has a stable identity; its ephemeral fallback needs a new home.
-  const stableHome = realRoute && providers.find(provider => provider.name === 'tailscale')?.probe().ok;
+  const routeMessages = [];
+  let selectedProvider, selectionError;
+  try { selectedProvider = selectRouteProvider({ route: routeChoice, providers, say: line => routeMessages.push(line), signal }); }
+  catch (error) { selectionError = error; } // Report startup failures after the home and cleanup context are ready.
+  const stableHome = selectedProvider?.name === 'tailscale';
   const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', stableHome ? `dalan-hosted-${client}` : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
   errorContext.home = home;
   const cliPath = errorContext.shellCli ?? shellQuote(path.join(repo, 'bin/dalan.mjs'));
@@ -205,7 +209,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     // A trial that was killed earlier may have left a Tailscale node of its own running; end it before this one starts.
     for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended ${ended.join(', ')} left by an earlier trial.`); }
     signal?.throwIfAborted();
-    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal, client }); }
+    try {
+      for (const message of routeMessages) say(message);
+      if (selectionError) throw selectionError;
+      route = await startRoute({ selectedProvider, gatePort: gate.port, home, say, signal });
+    }
     catch (error) {
       if (error && typeof error === 'object' && !signal?.aborted) {
         error.tryKind ??= 'route_start';

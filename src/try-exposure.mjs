@@ -596,8 +596,28 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
 // `localhost.run` is the trial route (anonymous, automatic). `tailscale` is the real route: this computer's Tailscale on :443 when no
 // rule uses it, else a Tailscale node of the trial's own. An explicit route shows its own failure and never falls back to the other:
 // a real route never becomes a trial link without the owner choosing it. A rule that already holds 443 is never changed.
-export async function startRoute({ route = 'localhost.run', providers, gatePort, home, say, signal }) {
+export function selectRouteProvider({ route = 'localhost.run', providers, say = () => {}, signal }) {
   const named = name => providers.find(p => p.name === name);
+  signal?.throwIfAborted();
+  if (route === 'localhost.run' || route === 'gozar') {
+    const provider = named(route), probe = provider.probe();
+    if (!probe.ok) throw new Error(probe.fix);
+    return provider;
+  }
+  if (route !== 'tailscale') throw new Error(`unknown route ${route}`);
+  const host = named('tailscale').probe();
+  let choice = null, why = host.fix;
+  if (host.ok) choice = named('tailscale');
+  else if (host.busy && named('tailscale-node')) {
+    const node = named('tailscale-node').probe();
+    if (node.ok) { say(`${host.line} Starting a separate Tailscale node for this trial.`); choice = named('tailscale-node'); }
+    else { say(host.line); why = `${host.fix} (${node.fix})`; }
+  } else say(host.line);
+  if (!choice) throw new Error(why);
+  return choice;
+}
+
+export async function startRoute({ route = 'localhost.run', providers, selectedProvider, gatePort, home, say, signal }) {
   // A start that fails is cleaned up before anything else happens, so a failed route never leaves a rule, node or process behind.
   const attempt = async provider => {
     signal?.throwIfAborted();
@@ -610,23 +630,7 @@ export async function startRoute({ route = 'localhost.run', providers, gatePort,
       throw error;
     }
   };
-  signal?.throwIfAborted();
-  if (route === 'localhost.run' || route === 'gozar') {
-    const provider = named(route), probe = provider.probe();
-    if (!probe.ok) throw new Error(probe.fix);
-    return attempt(provider);
-  }
-  if (route !== 'tailscale') throw new Error(`unknown route ${route}`);
-  const host = named('tailscale').probe();
-  let choice = null, why = host.fix;
-  if (host.ok) choice = named('tailscale');
-  else if (host.busy && named('tailscale-node')) {
-    const node = named('tailscale-node').probe();
-    if (node.ok) { say(`${host.line} Starting a separate Tailscale node for this trial.`); choice = named('tailscale-node'); }
-    else { say(host.line); why = `${host.fix} (${node.fix})`; }
-  } else say(host.line);
-  if (!choice) throw new Error(why);
-  return attempt(choice);
+  return attempt(selectedProvider ?? selectRouteProvider({ route, providers, say, signal }));
 }
 
 // A trial constraint, not an OAuth rule: RFC 8414 lets an authorization server live on another origin. A trial's bridge serves its own
