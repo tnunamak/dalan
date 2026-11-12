@@ -124,7 +124,7 @@ export class PullQueue {
         const receipt=JSON.parse(row.receipt),held=this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id);
         if(held?.claimant!==claimant||held?.lease_ms!==(leaseMs??this.store.limits.leaseMs))throw new Error('acquisition_id conflict');
         this.store.assertClaim(id,receipt.claim_id,subject,worker);
-        this.store.assertWorkerConnection(id,receipt.claim_id,subject,worker,connectionId);
+        this.store.assertRetryConnection(id,held,worker,connectionId);
         return {...receipt,duplicate:true};
       }
       if(row.state!=='queued') throw new Error('assignment cancelled');
@@ -147,6 +147,13 @@ export class PullQueue {
       const row=this.row(id);if(!row||row.child_request_id) return null;
       this.db.prepare("UPDATE policy_work_orders SET state='cancelled',cancelled_at=COALESCE(cancelled_at,?),cancelled_reason=COALESCE(cancelled_reason,?) WHERE request_id=?").run(this.store.stamp(),reason,id);
       return {request_id:id,status:'cancelled',cancellation_requested:true,authority_revoked:true,compute_stopped:false};
+    });
+  }
+  sweepExpired(limit=100) {
+    return this.store.inTransaction(()=>{
+      const rows=this.db.prepare("SELECT request_id FROM policy_work_orders WHERE state='queued' AND json_extract(routing,'$.deadline_at')<=? ORDER BY json_extract(routing,'$.deadline_at'),rowid LIMIT ?").all(this.store.stamp(),limit);
+      for(const row of rows)this.cancel(row.request_id,'expired');
+      return rows.map(row=>row.request_id);
     });
   }
 }

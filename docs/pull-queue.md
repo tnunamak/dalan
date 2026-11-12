@@ -89,6 +89,18 @@ destination drift or connection-set drift removes an offer from that worker and
 refuses a new acquisition. A committed live acquisition retry follows the existing
 grant fences; changing policy does not silently replace its holder.
 
+Acquisition commits the child, claim and parent winner in one SQLite transaction.
+A crash before commit leaves the work order available with no child or claim.
+A crash after commit can lose the reply; retrying the same acquisition returns
+the saved child and claim, subject to the ordinary live-grant checks.
+
+The deadline prevents a new acquisition and becomes the child's `valid_until`.
+As with ordinary assignments, that field limits queue admission; it does not
+stop an already active claim. Cancel the submitted request ID to revoke an
+active child's authority. Cancellation does not prove external compute stopped.
+The child's report and owner decision remain linked by the submitted request ID
+and `work_order_id`; a finished report is not an accepted result.
+
 Version 1 discovers unacquired work through polling `list_pending`. It adds no
 availability event for an unacquired work order. Existing events for materialized
 children remain hints. Lease expiry and abandonment use the ordinary child

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {spawn} from 'node:child_process';
+import {spawn,spawnSync} from 'node:child_process';
 import {sign} from 'node:crypto';
 import {Store} from '../src/store.mjs';
 import {parseWorkers} from '../src/workers.mjs';
@@ -40,6 +40,8 @@ try {
   assert.throws(()=>acquire('req_pull_basic'),/invalid claim|finished|active|lease/);
   assert.equal(store.get('req_pull_basic').report.summary,'Inspected.');
   store.decide('req_pull_basic','accepted');
+  assert.equal(store.ownerInbox('req_pull_basic').decision,'accepted');
+  assert.equal(store.get('req_pull_basic').work_order_id,grant.work_order_id);
   assert.throws(()=>store.submit(assignment('req_pull_basic'),{mode:'none'},'',owner),/reserved/);
   put('req_pull_rollback');const before=count(),original=store.claimInTransaction;
   store.claimInTransaction=()=>{throw new Error('injected after child insertion');};
@@ -50,10 +52,32 @@ try {
   store.db.prepare=sql=>sql.startsWith('UPDATE policy_work_orders SET state=')?{run(){throw new Error('injected before slot receipt');}}:originalUpdate(sql);
   assert.throws(()=>acquire('req_pull_rollback'),/injected/);store.db.prepare=originalUpdate;
   assert.equal(count(),before);assert.equal(store.db.prepare('SELECT count(*) n FROM claims WHERE request_id=?').get('req_pull_rollback').n,0);
+  // Kill a real writer with uncommitted child/claim/parent changes. Reopening
+  // SQLite must recover the entire transaction, including its winner binding.
+  const crashFile=path.join(root,'crash.mjs');
+  fs.writeFileSync(crashFile,`import {Store} from ${JSON.stringify(new URL('../src/store.mjs',import.meta.url).href)};import {parseWorkers} from ${JSON.stringify(new URL('../src/workers.mjs',import.meta.url).href)};const mode=process.argv[2],id=process.argv[3],profile=parseWorkers({workers:{alpha:{},beta:{}}},{builtin:true}),s=new Store(${JSON.stringify(path.join(root,'store.db'))},{workers:profile,destinationProfile:()=>profile});const kill=()=>process.kill(process.pid,'SIGKILL');if(mode==='child'){const submit=s.submitInTransaction.bind(s);s.submitInTransaction=(...args)=>{submit(...args);kill();};}if(mode==='parent'){const prepare=s.db.prepare.bind(s.db);s.db.prepare=sql=>{const stmt=prepare(sql);return sql.startsWith("UPDATE policy_work_orders SET state='acquired'")?{run(...args){stmt.run(...args);kill();}}:stmt;};}s.pullQueue.acquire(id,{worker:'alpha',subject:'alpha',connectionId:null,claimant:'alpha',acquisitionId:'acq_alpha',capacity:50,preflight:null,admit:()=>{}});if(mode==='committed')kill();`);
+  for(const mode of ['child','parent','committed']) {
+    const id='req_pull_crash_'+mode;put(id);
+    const child=spawnSync(process.execPath,[crashFile,mode,id],{timeout:10000});assert.equal(child.signal,'SIGKILL',child.stderr?.toString());
+    store.db.close();store=new Store(path.join(root,'store.db'),{workers:profile,capacity:50,destinationProfile:()=>profile});
+    const row=store.pullQueue.row(id);
+    if(mode==='committed') {
+      const receipt=JSON.parse(row.receipt),retry=acquire(id);
+      assert.equal(retry.duplicate,true);assert.equal(retry.claim_id,receipt.claim_id);
+      assert.equal(retry.child_request_id,receipt.child_request_id);
+    } else {
+      assert.equal(row.state,'queued');assert.equal(row.child_request_id,null);
+      assert.equal(store.hasAssignment(id),false);
+      assert.equal(store.db.prepare('SELECT count(*) n FROM claims WHERE request_id=?').get(id).n,0);
+      assert.ok(acquire(id,'beta').claim_id);
+    }
+    assert.equal(store.db.prepare('SELECT count(*) n FROM assignments WHERE request_id=?').get(id).n,1);
+  }
   put('req_pull_cancel');store.cancel('req_pull_cancel','owner stopped');assert.throws(()=>acquire('req_pull_cancel'),/cancelled/);
   put('req_pull_repo',{inputs:[{github_repo:'acme/repo',base_sha:'a'.repeat(40)}]});
   profile.workers.get('alpha').repos=[];
   assert.ok(!store.pullQueue.list('alpha',admit).items.some(item=>item.request_id==='req_pull_repo'));
+  assert.throws(()=>store.pullQueue.get('req_pull_repo','alpha',admit),/not found/);
   assert.throws(()=>acquire('req_pull_repo'),/repository denied/);profile.workers.get('alpha').repos=['acme/repo'];
   for(let i=0;i<105;i++)put(`req_pull_page_${String(i).padStart(3,'0')}`,{}, {...options,priority:i===0?'background':'normal'});
   let page=store.pullQueue.list('alpha',admit),all=[...page.items];assert.equal(page.items.length,50);assert.ok(page.next_page_request_id);
@@ -106,6 +130,28 @@ try {
   await adapter.control({op:'advance',to:2001});
   const secondEpoch=await adapter.mcp('W1','claim',{request_id:recoveryPayload.request_id,claimant:'second-run',acquisition_id:'new-recovery',lease_ms:1000});assert.ok(secondEpoch.value,secondEpoch.error);assert.equal(secondEpoch.value.epoch,2);assert.notEqual(secondEpoch.value.claim_id,firstEpoch.claim_id);
   assert.equal(adapter.q1('SELECT child_request_id FROM policy_work_orders WHERE request_id=?',recoveryPayload.request_id).child_request_id,recoveryPayload.request_id);
+  const deadlinePayload={...assignment('req_pull_wait_deadline'),valid_until:new Date(adapter.baseMs+10000).toISOString()};
+  r=await adapter.admin('POST','/submit',{...body,assignment:deadlinePayload});assert.ok(r.value,r.error);
+  const deadlineWait=adapter.admin('GET','/wait?id='+deadlinePayload.request_id+'&timeout=3',undefined,owner);
+  for(let i=0;i<100;i++) {
+    if((await adapter.admin('GET','/status')).value.owner_waiter_count===1)break;
+    await new Promise(resolve=>setTimeout(resolve,10));
+  }
+  assert.equal((await adapter.admin('GET','/status')).value.owner_waiter_count,1);
+  await adapter.control({op:'advance',to:10001});await adapter.tick();
+  const expiredWait=await deadlineWait;
+  assert.equal(expiredWait.value.status,'cancelled');assert.equal(expiredWait.value.cancelled_reason,'expired');
+  assert.equal(adapter.q1('SELECT state FROM policy_work_orders WHERE request_id=?',deadlinePayload.request_id).state,'cancelled');
+  const timeoutPayload={...assignment('req_pull_wait_boundary'),valid_until:new Date(adapter.baseMs+11000).toISOString()};
+  r=await adapter.admin('POST','/submit',{...body,assignment:timeoutPayload});assert.ok(r.value,r.error);
+  const boundaryWait=adapter.admin('GET','/wait?id='+timeoutPayload.request_id+'&timeout=1',undefined,owner);
+  for(let i=0;i<100;i++) {
+    if((await adapter.admin('GET','/status')).value.owner_waiter_count===1)break;
+    await new Promise(resolve=>setTimeout(resolve,10));
+  }
+  assert.equal((await adapter.admin('GET','/status')).value.owner_waiter_count,1);
+  await adapter.control({op:'advance',to:11001});
+  assert.equal((await boundaryWait).value.status,'cancelled');
   // Exercise the owner CLI against the real private socket, including the
   // durable receipt used before and after materialization.
   const cli=(...args)=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,['bin/dalan.mjs',...args],{env:fixtureEnv(adapter.home)});let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.on('error',reject);child.on('close',code=>resolve({code,stdout,stderr}));});

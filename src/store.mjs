@@ -2735,6 +2735,7 @@ export class Store {
       this.db.prepare("UPDATE watches SET state='suppressed',updated_at=? WHERE request_id=? AND state IN ('armed','fired')").run(at,row.request_id);
       cancelled.push(row.request_id);
     }
+    cancelled.push(...this.pullQueue.sweepExpired(Math.max(0,limit-rows.length)));
     cancelled.requeued=requeued;
     return cancelled;
   }); }

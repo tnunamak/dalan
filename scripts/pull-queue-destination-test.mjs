@@ -32,6 +32,13 @@ try {
   assert.equal(store.get(payload.request_id).valid_until,routing.deadline_at);
   assert.equal(store.destinationApproval(payload.request_id).revision,approvals.alpha);
   assert.equal(store.get(payload.request_id).claim.connection_id,'conn-alpha');
+  // A lost reply is still recoverable after an owner edits destination metadata,
+  // as on ordinary claims. Changing the approved connection set is different.
+  provider='Changed after grant';current=profile();
+  assert.equal(acquire().claim_id,grant.claim_id);
+  connections.alpha=['conn-alpha','conn-new'];current=profile();
+  assert.throws(()=>acquire(),/approved connection set changed/);
+  connections.alpha=['conn-alpha'];provider=declaration.provider;current=profile();
   // An acquired slot stays bound to the same child. Ordinary abandonment and
   // regrant produce a fresh epoch for that worker, never a second child.
   store.abandon(payload.request_id,{actor:'operator',reason:'worker stopped'});
@@ -46,6 +53,17 @@ try {
   assert.throws(()=>routingPolicy({...routing,fan_out:2},payload),/fan_out/);
   assert.throws(()=>routingPolicy({...routing,worker_class:'any'},payload),/supported fields/);
   assert.throws(()=>routingPolicy(routing,{...payload,execution_scope:'implementation'}),/read-only/);
+  const expiring={...payload,request_id:'req_policy_deadline'},deadline=new Date(now+1000).toISOString();
+  store.pullQueue.submit(expiring,expiring,opts,{...routing,deadline_at:deadline},approvals,'owner');
+  now+=1001;
+  assert.equal(store.get(expiring.request_id).status,'cancelled');
+  assert.ok(!store.pullQueue.list('alpha',admit).items.some(item=>item.request_id===expiring.request_id));
+  assert.throws(()=>store.pullQueue.get(expiring.request_id,'alpha',admit),/not found/);
+  assert.throws(()=>store.pullQueue.acquire(expiring.request_id,{worker:'alpha',subject:'subject',connectionId:'conn-alpha',claimant:'run',acquisitionId:'expired',capacity:10,preflight:null,admit}),/deadline expired/);
+  assert.equal(store.hasAssignment(expiring.request_id),false);
+  assert.ok(store.sweepExpired().includes(expiring.request_id));
+  assert.equal(store.pullQueue.row(expiring.request_id).cancelled_reason,'expired');
+  assert.equal(store.sweepExpired().includes(expiring.request_id),false);
   const queued={...payload,request_id:'req_policy_pending_owner'};store.pullQueue.submit(queued,queued,opts,routing,approvals,'owner');
   assert.equal(store.ownerInbox(queued.request_id).brief,queued.brief);assert.equal(store.markInboxRead(queued.request_id,'test'),false);
   assert.equal(store.cancelIfQueued(queued.request_id).cancelled,true);assert.equal(store.cancelIfQueued(queued.request_id).cancelled,false);

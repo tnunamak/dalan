@@ -551,7 +551,14 @@ async function attachWaiter(req,res,requestId,timeoutMs,consume=true) {
     if(waiters.get(requestId)!==waiter) return;
     waiters.delete(requestId);
     let blocker=null;
-    try { blocker=queuedRepositoryBlocker(store.get(requestId)); } catch { /* the request may have expired while waiting */ }
+    try {
+      const row=store.get(requestId);
+      if(['finished','cancelled'].includes(row.status)) {
+        store.recordFetched(requestId);if(consume)store.recordConsumed(requestId,'wait');
+        return json(res,200,waitSummary(requestId));
+      }
+      blocker=queuedRepositoryBlocker(row);
+    } catch { /* the request may have expired while waiting */ }
     json(res,200,blocker?{status:'blocker',report_summary:null,blocker_text:blocker.message,artifact_ids:[],queue_blocker:blocker}:{status:'timeout',report_summary:null,blocker_text:null,artifact_ids:[]});
   },timeoutMs);
   waiter.timer.unref();
