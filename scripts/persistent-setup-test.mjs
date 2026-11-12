@@ -2,6 +2,7 @@
 // scripts/worker-bridge-setup.mjs: unit content, modes, refusals, --start and the second-run refusal.
 // Runs with a fake systemctl first on PATH and a throwaway XDG_CONFIG_HOME; it never touches real units or homes.
 import assert from 'node:assert/strict';
+import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -160,8 +161,6 @@ try {
   assert(!authFailure.message.includes('fixture-token-must-not-leak'), 'authentication recovery does not echo credential-bearing errors');
   assert(lines.some(l => /^WorkingDirectory=\/.+/.test(l)), 'absolute working directory');
   assert(!service.includes(secret) && !/KEY=.+|TOKEN|SECRET/.test(service.replace('UnsetEnvironment=OPENAI_API_KEY ANTHROPIC_API_KEY', '')), 'no secrets in the unit');
-  const exposureFile=path.join(home,'dot-bridge-lark.exposure.json');
-  fs.writeFileSync(exposureFile,JSON.stringify({mode:'tailscale',worker:'lark',dns_name:'lark-bridge.example.test',public_url:'https://lark-bridge.example.test',public_port:443,local_port:18788}),{mode:0o600});
   const beforeRetry={home:snapshotTree(home),unit:fs.readFileSync(path.join(unitDir,'dot-bridge-lark.service'),'utf8')};
   const retryArgs=['--retry-public-check','--worker','lark','--public-url','https://lark-bridge.example.test','--port','18788','--home',home];
   let checkCalls=0;
@@ -336,15 +335,12 @@ try {
   assert(!fs.existsSync(path.join(unitDir, 'dot-bridge-offline.service')), 'unavailable manager left no unit');
   assert.deepEqual(fs.readFileSync(calls, 'utf8').trim().split('\n').slice(-1), ['--user show-environment'], 'only the read-only manager probe ran');
   const unavailableExposureHome = path.join(root, 'le');
-  let linuxFunnelApplied = false;
-  assert.throws(() => run(['--worker', 'offline-exposure', '--port', '18789', '--home', unavailableExposureHome, '--expose', 'tailscale', '--start'], {
+  assert.throws(() => run(['--worker', 'offline-exposure', '--port', '18789', '--home', unavailableExposureHome, '--public-url', 'https://offline.example.test', '--start'], {
     platform: 'linux', env: { ...env, MANAGER_READY: '0' }, log() {},
-    preflight: () => ({ dnsName: 'offline.example.test', allowed: [443], occupied: new Map(), warnings: [] }),
-    applyFunnel() { linuxFunnelApplied = true; },
   }), /systemd user manager is unavailable/);
   assert(!fs.existsSync(unavailableExposureHome), 'unavailable manager left no exposure home');
   assert(!fs.existsSync(path.join(unitDir, 'dot-bridge-offline-exposure.service')), 'unavailable manager left no exposure unit');
-  assert(!linuxFunnelApplied && !fs.existsSync(path.join(unavailableExposureHome, 'dot-bridge-offline-exposure.exposure.json')), 'unavailable manager did not change exposure');
+  assert(!fs.existsSync(path.join(unavailableExposureHome, 'dot-bridge-offline-exposure.exposure.json')), 'unavailable manager wrote no route record');
 
   // --start runs the fake systemctl with the right arguments, nothing real.
   fs.writeFileSync(calls,'');
@@ -389,15 +385,11 @@ try {
   // An unavailable launchd user domain refuses --start before home, plist or exposure writes.
   const unavailableMacHome = path.join(root, 'gui-unavailable-home');
   const unavailableMacEnv = { ...menv, MANAGER_READY: '0' };
-  let funnelApplied = false;
-  assert.throws(() => run(['--worker', 'gui', '--port', '18792', '--home', unavailableMacHome, '--expose', 'tailscale', '--start'], {
+  assert.throws(() => run(['--worker', 'gui', '--port', '18792', '--home', unavailableMacHome, '--public-url', 'https://gui.example.test', '--start'], {
     platform: 'darwin', env: unavailableMacEnv, log() {},
-    preflight: () => ({ dnsName: 'gui.example.test', allowed: [443], occupied: new Map(), warnings: [] }),
-    applyFunnel() { funnelApplied = true; },
   }), /launchd user domain is unavailable/);
   assert(!fs.existsSync(unavailableMacHome), 'unavailable user domain left no private home');
   assert(!fs.existsSync(plistOf('gui')), 'unavailable user domain left no plist');
-  assert(!funnelApplied, 'unavailable user domain did not change exposure');
   assert.equal(fs.readFileSync(mlog, 'utf8').trim(), `print user/${uid}`, 'only the read-only launchd domain probe ran');
   fs.rmSync(mlog);
 
@@ -458,12 +450,14 @@ try {
   assert(!msg.includes(envSecret) && !msg.includes(fernUrl), 'output holds no secret');
 
   // A macOS public-check timeout happens after the service exists. Its printed retry validates and reuses that service.
-  const slowHome=path.join(root,'slow-home'),slowUrl='https://slow.tailnet.test:8443',slowArgs=['--worker','slow','--port','18796','--home',slowHome,'--expose','tailscale','--start'];
-  const setupSeams={platform:'darwin',env:menv,log(){},preflight:()=>({dnsName:'slow.tailnet.test',allowed:[8443],occupied:new Map(),warnings:[]}),applyFunnel(){},resolve4:async()=>null};
+  const slowHome=path.join(root,'slow-home'),slowArgs=['--worker','slow','--port','18796','--home',slowHome,'--route','work','--start'];
+  const setupSeams={platform:'darwin',env:menv,log(){},resolve4:async()=>null,gozar:createFakeGozar(),consent:async()=>true};
+  let slowUrl='';
   let publicFailure='';
   await assert.rejects(run(slowArgs,{...setupSeams,verifyPublic:async()=>false}),error=>{
     publicFailure=error.message;
-    return new RegExp(`--retry-public-check --worker slow --public-url ${slowUrl.replaceAll('.','\\.')} --port 18796`).test(error.message);
+    slowUrl=/--retry-public-check --worker slow --public-url (https:\/\/\S+) --port 18796/.exec(error.message)?.[1] ?? '';
+    return slowUrl!=='';
   });
   assert.match(publicFailure,/left in place/);
   assert.match(publicFailure,/--remove --worker slow --home .* --purge-home/);
@@ -471,7 +465,7 @@ try {
   assert(!publicFailure.includes(slowSecret),'failure output never prints the private URL path secret');
   const slowFiles=snapshotTree(slowHome);
   let retried=0;
-  await run(['--retry-public-check','--worker','slow','--public-url',slowUrl,'--port','18796','--home',slowHome],{...setupSeams,verifyPublic:async ({url,dnsName})=>{retried++;assert.equal(url,slowUrl);assert.equal(dnsName,'slow.tailnet.test');return true;}});
+  await run(['--retry-public-check','--worker','slow','--public-url',slowUrl,'--port','18796','--home',slowHome],{...setupSeams,verifyPublic:async ({url,dnsName})=>{retried++;assert.equal(url,slowUrl);assert.equal(dnsName,new URL(slowUrl).hostname);return true;}});
   assert.equal(retried,1);
   assert.deepEqual(snapshotTree(slowHome),slowFiles,'retry preserves Mac profile, resource URL and keys');
   const slowPlist=plistOf('slow'),originalSlowPlist=fs.readFileSync(slowPlist,'utf8');
@@ -524,9 +518,9 @@ try {
     const errs = [];
     const orig = console.error;
     console.error = m => errs.push(String(m));
-    try { run(['--remove', '--worker', 'ghost', '--home', path.join(root, 'ghost-home'), '--port', '18793', '--start', '--expose', 'tailscale'], quiet); }
+    try { run(['--remove', '--worker', 'ghost', '--home', path.join(root, 'ghost-home'), '--port', '18793', '--start', '--public-url', 'https://ghost.example.test'], quiet); }
     finally { console.error = orig; }
-    assert.deepEqual(errs, ['worker-bridge-setup: ignoring install-only flags with --remove: --port --start --expose']);
+    assert.deepEqual(errs, ['worker-bridge-setup: ignoring install-only flags with --remove: --public-url --port --start']);
   }
 
   // Removing the never-started fern agent: bootout reports not loaded, the probe confirms it, the plist and home go.

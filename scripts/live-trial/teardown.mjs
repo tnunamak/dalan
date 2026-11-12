@@ -16,15 +16,11 @@ import {
   runDot,
   waitForManifestProcesses,
 } from './common.mjs';
-import {
-  cancelExposureCutoff,
-  disableAndVerifyFunnel,
-  validateExposure,
-} from './exposure.mjs';
+import { closeAndVerifyRoute, validateExposure } from './exposure.mjs';
 
 const args = parseArgs(process.argv.slice(2), {
   values: ['--home', '--test-operator-home'],
-  flags: ['--token-stdin', '--check-tailscale'],
+  flags: ['--token-stdin'],
 });
 
 function fail(message) { throw new Error(message); }
@@ -122,18 +118,6 @@ function persistenceIsClear(proof) {
   return [...Object.values(proof.trial), ...Object.values(proof.operator)].every(status => status === 'absent');
 }
 
-function tailscaleStatus(check, exposure) {
-  if (!check) return null;
-  const status = command => {
-    const socket = exposure?.mode === 'linux-second-node' ? ['--socket', exposure.tailscale_socket] : [];
-    const result = spawnSync('tailscale', [...socket, ...command], { encoding: 'utf8', timeout: 5_000, maxBuffer: 32 * 1024 });
-    if (result.error) return `${command.join(' ')}: unavailable`;
-    const output = (result.stdout || result.stderr || '').trim();
-    return `${command.join(' ')}: ${result.status === 0 ? output || 'ok' : `exit ${result.status}`}`;
-  };
-  return [status(['serve', 'status']), status(['funnel', 'status'])];
-}
-
 async function stopBridge(manifest) {
   for (const pid of manifest.pids) {
     if (!processCommand(pid)?.includes(manifest.process_title)) continue;
@@ -156,36 +140,26 @@ function formatProof(proof) {
   };
 }
 
-function disableRecordedExposure(manifest) {
+async function closeRecordedRoute(manifest) {
   if (!manifest.exposure) {
     let publicUrl;
     try { publicUrl = new URL(manifest.public_url); }
     catch { fail('trial public URL is invalid; bridge and home retained'); }
     if (publicUrl.protocol === 'https:') {
-      fail(`trial manifest has no exposure record for its HTTPS URL; bridge and home retained at ${manifest.home}. On the node that owns the rule, use its Tailscale CLI (add --socket <second-node-socket> for a separate node) to run: tailscale funnel --bg --https=443 http://127.0.0.1:${manifest.port} off; then run tailscale funnel status --json with the same socket, confirm no AllowFunnel Proxy targets port ${manifest.port}, and rerun teardown.`);
+      fail(`trial manifest has no route record for its HTTPS URL; bridge and home retained at ${manifest.home}. Ask Gozar which route serves ${publicUrl.origin}, have it removed, then rerun teardown.`);
     }
     return null;
   }
-
   let exposure;
   try { exposure = validateExposure(manifest.exposure, manifest.port); }
-  catch (error) {
-    const port = Number.isInteger(manifest.port) ? manifest.port : '<recorded-local-port>';
-    const recorded = manifest.exposure ?? {};
-    const socket = recorded.mode === 'linux-second-node'
-      && typeof recorded.tailscale_socket === 'string'
-      && path.isAbsolute(recorded.tailscale_socket)
-      ? ` --socket '${recorded.tailscale_socket.replaceAll("'", "'\\''")}'`
-      : ' [--socket <second-node-socket>]';
-    fail(`trial exposure metadata cannot identify a safe Funnel rule (${error.message}); bridge and home retained at ${manifest.home}. Inspect the manifest and owning node/socket, then run: tailscale${socket} funnel --bg --https=443 http://127.0.0.1:${port} off; inspect tailscale${socket} funnel status --json, confirm no AllowFunnel Proxy targets port ${port}, and rerun teardown.`);
-  }
-  disableAndVerifyFunnel(exposure, manifest.home);
+  catch (error) { fail(`trial route metadata cannot identify its route (${error.message}); bridge and home retained at ${manifest.home}. Inspect the manifest and Gozar's routes, remove the trial's route there, then rerun teardown.`); }
+  await closeAndVerifyRoute(exposure, manifest.home);
   return exposure;
 }
 
 async function main() {
   if (args._.length || !args['--home']) {
-    fail('usage: teardown.mjs --home DIR [--token-stdin] [--check-tailscale] [--test-operator-home DIR (test only)]');
+    fail('usage: teardown.mjs --home DIR [--token-stdin] [--test-operator-home DIR (test only)]');
   }
   const testOperatorHome = args['--test-operator-home'];
   if (testOperatorHome && process.env.DOT_BRIDGE_LIVE_TRIAL_TESTING !== '1') {
@@ -193,21 +167,8 @@ async function main() {
   }
   const home = path.resolve(args['--home']);
   const manifest = readManifest(home);
-  const exposure = disableRecordedExposure(manifest);
-  if (exposure) {
-    console.log(`exposure_forward=disabled public_port=${exposure.public_port} local_port=${exposure.local_port}`);
-    let cutoffStopped = false;
-    try { cutoffStopped = await cancelExposureCutoff(manifest); }
-    catch (error) {
-      fail(`Funnel is verified off, but its cutoff process could not be cancelled (${error.message}); bridge and home retained at ${home}. Inspect ${exposure.cutoff.log_file}, stop only PID ${exposure.cutoff.pid} if it still runs, then rerun teardown.`);
-    }
-    if (!cutoffStopped) {
-      fail(`Funnel is verified off, but its cutoff process is still running; bridge and home retained at ${home}. Stop only PID ${exposure.cutoff.pid}, then rerun teardown.`);
-    }
-    console.log('exposure_cutoff=cancelled-or-already-finished');
-  } else {
-    console.log('exposure_forward=not-recorded');
-  }
+  const exposure = await closeRecordedRoute(manifest);
+  console.log(exposure ? `route=removed local_port=${exposure.local_port}` : 'route=not-recorded');
   const operatorHome = testOperatorHome ? path.resolve(testOperatorHome) : os.userInfo().homedir;
   const token = args['--token-stdin'] ? await readStdin() : '';
   if (token && !/^[A-Za-z0-9_-]{20,128}$/.test(token)) fail('stdin did not contain one opaque access token');
@@ -281,7 +242,6 @@ async function main() {
   if (canRemoveHome) fs.rmSync(home, { recursive: true, force: true });
   const homeGone = canRemoveHome && !fs.existsSync(home);
   if (!homeGone) failures.push('trial home retained because teardown absence proofs did not pass');
-  const tailscaleAfter = tailscaleStatus(args['--check-tailscale'], exposure);
 
   console.log(`connection=${revoked}`);
   console.log(`pairing_window=${pairingWindow}`);
@@ -291,10 +251,6 @@ async function main() {
   console.log(`persistence_trial=${persistenceOutput.trial}`);
   console.log(`persistence_operator=${persistenceOutput.operator}`);
   console.log(`trial_home=${homeGone ? 'absent' : 'present'}`);
-  if (tailscaleAfter) {
-    console.log('tailscale_after:');
-    for (const line of tailscaleAfter) console.log(`  ${line}`);
-  }
   if (failures.length) fail(failures.join('; '));
   console.log('teardown: all absence proofs passed');
 }

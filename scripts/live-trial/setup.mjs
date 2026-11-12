@@ -6,6 +6,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { buildQuery, gozarHomeFor, resolveGozar, startSessionRoute, targetFor } from '../../src/gozar-routes.mjs';
+import { exposureRecord } from './exposure.mjs';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import {
@@ -23,10 +25,10 @@ import {
 } from './common.mjs';
 
 const args = parseArgs(process.argv.slice(2), {
-  values: ['--worker', '--public-url', '--home', '--port', '--exposure', '--tailscale-socket', '--cutoff-seconds'],
+  values: ['--worker', '--public-url', '--home', '--port', '--route', '--lifetime-seconds'],
 });
 
-const DEFAULT_CUTOFF_SECONDS = 4 * 60 * 60;
+const DEFAULT_LIFETIME_SECONDS = 4 * 60 * 60;
 
 function fail(message) { throw new Error(message); }
 function shellQuote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
@@ -95,18 +97,6 @@ function bridgeEnvironment(home, port, testHttp, runId) {
   };
 }
 
-function cutoffEnvironment() {
-  const env = {
-    HOME: process.env.HOME ?? os.homedir(),
-    PATH: process.env.PATH ?? '',
-  };
-  if (readEnv('DALAN_LIVE_TRIAL_TESTING') === '1') env.DOT_BRIDGE_LIVE_TRIAL_TESTING = '1';
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key.startsWith('FAKE_TAILSCALE_')) env[key] = value;
-  }
-  return env;
-}
-
 async function main() {
   if (args._.length) fail('setup accepts options only');
   const worker = args['--worker'] ?? 'fixture-a';
@@ -118,33 +108,15 @@ async function main() {
   if (port === 0) port = await freePort();
   const publicUrl = validatePublicUrl(args['--public-url'], port);
   const publicOrigin = new URL(publicUrl);
-  const exposureMode = args['--exposure'] ?? null;
-  const socketArg = args['--tailscale-socket'];
-  if (exposureMode && !['mac-funnel', 'linux-second-node'].includes(exposureMode)) {
-    fail('--exposure must be mac-funnel or linux-second-node');
-  }
-  if (publicOrigin.protocol === 'https:' && !exposureMode) {
-    fail('--exposure is required for HTTPS live trials so teardown can identify the public rule');
-  }
-  if (exposureMode && publicOrigin.protocol !== 'https:') {
-    fail('--exposure requires an HTTPS --public-url');
-  }
-  if (exposureMode === 'linux-second-node' && !socketArg) {
-    fail('--tailscale-socket is required with --exposure linux-second-node');
-  }
-  if (exposureMode !== 'linux-second-node' && socketArg) {
-    fail('--tailscale-socket is only valid with --exposure linux-second-node');
-  }
-  if (!exposureMode && args['--cutoff-seconds']) {
-    fail('--cutoff-seconds requires --exposure');
-  }
-  const rawCutoffSeconds = args['--cutoff-seconds'] ?? String(DEFAULT_CUTOFF_SECONDS);
-  if (!/^\d+$/.test(rawCutoffSeconds)) fail('--cutoff-seconds must be an integer from 1 to 86400');
-  const cutoffSeconds = Number(rawCutoffSeconds);
-  if (exposureMode && (!Number.isInteger(cutoffSeconds) || cutoffSeconds < 1 || cutoffSeconds > 86_400)) {
-    fail('--cutoff-seconds must be an integer from 1 to 86400');
-  }
-  const tailscaleSocket = socketArg ? path.resolve(socketArg) : null;
+  const routeName = args['--route'];
+  if (routeName !== undefined && (!routeName || routeName.startsWith('-'))) fail('--route needs the name of a Gozar route');
+  if (publicOrigin.protocol === 'https:' && routeName === undefined) fail('--route is required for HTTPS live trials so teardown can identify the public route');
+  if (routeName !== undefined && publicOrigin.protocol !== 'https:') fail('--route requires an HTTPS --public-url');
+  if (routeName === undefined && args['--lifetime-seconds']) fail('--lifetime-seconds requires --route');
+  const rawLifetime = args['--lifetime-seconds'] ?? String(DEFAULT_LIFETIME_SECONDS);
+  if (!/^\d+$/.test(rawLifetime)) fail('--lifetime-seconds must be an integer from 1 to 86400');
+  const lifetimeSeconds = Number(rawLifetime);
+  if (routeName !== undefined && (lifetimeSeconds < 1 || lifetimeSeconds > 86_400)) fail('--lifetime-seconds must be an integer from 1 to 86400');
   const testHttp = publicUrl.startsWith('http://');
   const home = ensureFreshHome(args['--home'] ?? trialHome(worker));
   const runId = randomUUID();
@@ -153,7 +125,7 @@ async function main() {
   const configDir = defaultPath(home,'.config/dot-bridge');
 
   let child;
-  let cutoffChild;
+  let sessionRoute = null;
   try {
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     fs.chmodSync(configDir, 0o700);
@@ -206,22 +178,13 @@ async function main() {
     fs.writeFileSync(resourceUrlFile, `${resourceUrl}\n`, { mode: 0o600 });
     fs.chmodSync(resourceUrlFile, 0o600);
     let exposure = null;
-    if (exposureMode) {
-      const cutoffLogFile = path.join(home, 'exposure-cutoff.log');
-      fs.writeFileSync(cutoffLogFile, '', { mode: 0o600 });
-      fs.chmodSync(cutoffLogFile, 0o600);
-      exposure = {
-        mode: exposureMode,
-        tailscale_socket: tailscaleSocket,
-        public_port: 443,
-        local_port: port,
-        cutoff: {
-          pid: null,
-          deadline_at: new Date(Date.now() + cutoffSeconds * 1000).toISOString(),
-          log_file: cutoffLogFile,
-          cancelled_at: null,
-        },
-      };
+    if (routeName !== undefined) {
+      // The owner's Gozar route, pinned to the origin this trial was set up for. It lasts for the trial and is closed by teardown.
+      const gozar = await resolveGozar();
+      const consent = async () => readEnv('DALAN_LIVE_TRIAL_APPROVE_ROUTE') === '1' || fail('the route needs approval: rerun with DALAN_LIVE_TRIAL_APPROVE_ROUTE=1 after reading what `dalan setup --route NAME` shows for it');
+      sessionRoute = await startSessionRoute({ gozar, consent, query: buildQuery({ home: gozarHomeFor(), target: targetFor(port), route: routeName, origin: publicOrigin.origin, usage: { kind: 'session', lifetimeMs: lifetimeSeconds * 1000 } }) });
+      if (sessionRoute.origin !== publicOrigin.origin) fail(`Gozar allocated ${sessionRoute.origin}, not ${publicOrigin.origin}; the route was closed`);
+      exposure = exposureRecord({ view: sessionRoute.view, home: gozarHomeFor(), localPort: port, lifetimeMs: lifetimeSeconds * 1000 });
     }
     const manifest = {
       schema_version: 1,
@@ -247,28 +210,9 @@ async function main() {
     manifest.created_files = [...new Set([...fileList(home), MANIFEST_NAME])].sort();
     writeJsonPrivate(MANIFEST_PATH(home), manifest);
 
-    if (exposure) {
-      const cutoffScript = path.join(REPO, 'scripts/live-trial/exposure-cutoff.mjs');
-      cutoffChild = spawn(process.execPath, [cutoffScript, '--home', home, '--run-id', runId], {
-        cwd: REPO,
-        env: cutoffEnvironment(),
-        detached: true,
-        stdio: 'ignore',
-      });
-      cutoffChild.unref();
-      if (!cutoffChild.pid) fail('could not start the independent exposure cutoff process');
-      exposure.cutoff.pid = cutoffChild.pid;
-      writeJsonPrivate(MANIFEST_PATH(home), manifest);
-    }
-
     console.log(`Trial ready: worker=${worker}, listener=127.0.0.1:${port}, pid=${child.pid}`);
     console.log(`Resource URL saved privately (mode 0600): ${resourceUrlFile}`);
-    if (exposure) {
-      console.log(`Exposure recorded only (setup did not run Tailscale): mode=${exposure.mode}, public_port=443, local_port=${port}`);
-      console.log(`Independent Funnel cutoff deadline: ${exposure.cutoff.deadline_at}; log: ${exposure.cutoff.log_file}`);
-      const socket = tailscaleSocket ? ` --socket ${shellQuote(tailscaleSocket)}` : '';
-      console.log(`Enable only this trial rule with: tailscale${socket} funnel --bg --https=443 http://127.0.0.1:${port}`);
-    }
+    if (exposure) console.log(`Route active: ${exposure.origin} -> 127.0.0.1:${port}; Gozar ends it at ${exposure.deadline_at}, and teardown removes it sooner.`);
     console.log('Next operator commands:');
     const ownerHome = `HOME=${shellQuote(home)}`;
     console.log(`  ${ownerHome} node bin/dalan.mjs connect start --worker ${worker}`);
@@ -276,9 +220,7 @@ async function main() {
     console.log(`  ${ownerHome} node scripts/live-trial/verify.mjs --home ${shellQuote(home)}`);
     console.log(`  ${ownerHome} node scripts/live-trial/teardown.mjs --home ${shellQuote(home)}`);
   } catch (error) {
-    if (cutoffChild?.pid) {
-      try { cutoffChild.kill('SIGTERM'); } catch { /* the cutoff may have exited */ }
-    }
+    if (sessionRoute) await sessionRoute.stop().catch(() => {});
     if (child?.pid) {
       try { child.kill('SIGTERM'); } catch { /* the process may have exited */ }
       await new Promise(resolve => setTimeout(resolve, 250));

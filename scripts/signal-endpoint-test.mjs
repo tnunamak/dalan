@@ -124,13 +124,9 @@ try {
     fs.chmodSync(urlFile, 0o644);
     assert.equal(main.cli(['connect', 'signal-token']).code, 0);
     assert.equal(fs.statSync(urlFile).mode & 0o777, 0o600, 'existing permissive file not replaced privately');
-    // Poll interval: 60 s with no exposure record, 300 s when the recorded exposure is ngrok. stdout stays the private file path.
+    // Poll interval: one value, whatever the route. stdout stays the private file path.
     const plain = main.cli(['connect', 'signal-token']);
     assert.match(plain.stderr, /Hook poll interval: 60 s/);
-    const ngrokRecord = path.join(main.home, 'dot-bridge-lark.exposure.json');
-    fs.writeFileSync(ngrokRecord, JSON.stringify({ mode: 'ngrok', worker: 'lark' }), { mode: 0o600 });
-    assert.match(main.cli(['connect', 'signal-token']).stderr, /Hook poll interval: 300 s/);
-    fs.rmSync(ngrokRecord);
   });
   await check('work false with an empty queue; headers and body are exact', async () => {
     const res = await valid(url);

@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { defaultPath } from '../src/paths.mjs';
 import { installService } from '../src/service.mjs';
+import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const scratch = process.env.DOT_BRIDGE_SERVICE_INSTALL_TMP ?? path.join(os.homedir(), '.tmp');
@@ -19,11 +20,19 @@ const xdg = path.join(userHome, '.config');
 const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: '/' };
 const calls = [];
 const route = { origin: 'https://bridge.example.test', target: '192.0.2.10:8787', verification: { status: 'verified', method: 'challenge' } };
-const spawn = (command, args) => {
-  calls.push([command, ...args]);
-  return args.includes('service') && args.includes('add')
-    ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route }), stderr: '' }
-    : { status: 0, stdout: '', stderr: '' };
+const spawn = (command, args) => { calls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; };
+// A contract-faithful Gozar (the unreleased runtime is not needed here). It records the call in the same list as systemctl so order is visible.
+const makeGozar = ({ status = 'verified', mutate = r => r, failWith = null, log = calls, statusOf = () => status } = {}) => {
+  const gozar = createFakeGozar();
+  const add = gozar.addService;
+  gozar.addService = async request => {
+    log.push(['gozar-addService', request.origin, request.target, request.verifyCmd ?? null]);
+    if (failWith) throw failWith;
+    const reply = await add(request);
+    reply.route = mutate({ ...reply.route, verification: { status: statusOf(), method: 'challenge' } });
+    return reply;
+  };
+  return gozar;
 };
 const privateState = home => {
   const config = defaultPath(home, '.config/dot-bridge');
@@ -43,36 +52,29 @@ const privateState = home => {
 };
 
 try {
-  // Bundled dependency must work when no global gozar can be found.
+  // The service installer takes Gozar from the install tree (an injected Gozar here); no executable on PATH is searched.
   const bundledCalls = [];
   const bundledHome = path.join(root, 'bundled-only');
   const bundledResult = await installService({ home: bundledHome, origin: route.origin, port: 8787,
     target: route.target, lanPort: 8787, workers: ['dot'] }, {
     env: { ...env, PATH: '', GOZAR_BIN: '' }, platform: 'linux', node: '/usr/bin/node',
-    repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
-    spawn(command, args) {
-      bundledCalls.push([command, ...args]);
-      if (command === 'gozar') return { error: Object.assign(new Error('gozar not found'), { code: 'ENOENT' }) };
-      return { status: 0, stdout: args.includes('add') ? JSON.stringify({ schemaVersion: 1, route }) : '', stderr: '' };
-    }, waitForSocket: async () => true,
+    repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', gozar: makeGozar({ log: bundledCalls }),
+    spawn(command, args) { bundledCalls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; }, waitForSocket: async () => true,
   });
   assert.equal(bundledResult.started, true);
-  const bundledCall = bundledCalls.find(call => call.includes('add'));
-  assert.equal(bundledCall[0], process.execPath);
-  assert.equal(path.basename(bundledCall[1]), 'gozar.mjs');
-  assert.equal(path.isAbsolute(bundledCall[1]), true);
-  assert.equal(bundledCalls.some(call => call[0] === 'gozar'), false);
+  assert.equal(bundledCalls.filter(call => call[0] === 'gozar-addService').length, 1);
+  assert.equal(bundledCalls.some(call => call[0] === 'gozar'), false, 'no Gozar executable is run');
 
+  // The installed Gozar here predates the route contract: refuse before starting or enabling any unit.
   const missingCalls = [];
   const missingHome = path.join(root, 'missing-gozar');
   await assert.rejects(installService({ home: missingHome, origin: route.origin, port: 8787,
     target: route.target, lanPort: 8787, workers: ['dot'] }, {
     env: { ...env, PATH: '', GOZAR_BIN: '' }, platform: 'linux', node: '/usr/bin/node',
     repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
-    resolveBundled: () => null, which: () => null,
     spawn(command, args) { missingCalls.push([command, ...args]); return { status: 0, stdout: '' }; },
     waitForSocket: async () => true,
-  }), /Gozar.*reinstall/i);
+  }), error => error.code === 'runtime_missing' && /Gozar.*(update|reinstall)/i.test(error.message));
   assert.deepEqual(missingCalls, [], 'missing Gozar refuses before starting or enabling any unit');
   assert.equal(fs.existsSync(missingHome), false);
 
@@ -83,8 +85,8 @@ try {
   const wideCalls = [];
   const wideBridge = path.join(root, 'wide-bridge');
   await assert.rejects(installService({ home: wideBridge, origin: route.origin, port: 8787,
-    target: route.target, lanPort: 8787, workers: ['dot'], gozarBin: 'gozar' }, {
-    env: { ...env, HOME: wideHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: undefined }, platform: 'linux', node: '/usr/bin/node',
+    target: route.target, lanPort: 8787, workers: ['dot'] }, {
+    gozar: makeGozar(), env: { ...env, HOME: wideHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: undefined }, platform: 'linux', node: '/usr/bin/node',
     repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn(command, args) { wideCalls.push([command, ...args]); return { status: 0, stdout: '' }; },
     waitForSocket: async () => true,
@@ -100,8 +102,8 @@ try {
 
   const home = path.join(root, 'bridge');
   const result = await installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn, waitForSocket: async () => true,
   });
   assert.equal(result.started, true);
@@ -119,12 +121,11 @@ try {
   assert.match(serviceUnit, /Environment=DALAN_AUTH_MODE=builtin/);
   assert.match(serviceUnit, /Environment=DALAN_GOZAR_SERVICE=1/);
   assert.match(serviceUnit, /Environment=DALAN_CATALOG_PROFILE=stable/);
-  const callsBeforeGozar = calls.findIndex(call => call.includes('service') && call.includes('add'));
+  const callsBeforeGozar = calls.findIndex(call => call[0] === 'gozar-addService');
   assert(callsBeforeGozar > 0, 'Gozar route is registered after systemd starts the service');
   assert(calls.some(call => call.join(' ').includes('enable --now') && call.join(' ').includes('target.socket')));
-  assert.deepEqual(calls[callsBeforeGozar].slice(calls[callsBeforeGozar].indexOf('service'), -2), ['service', 'add', '--origin', 'https://bridge.example.test', '--target']);
-  assert(calls[callsBeforeGozar].includes('192.0.2.10:8787'));
-  assert.equal(calls[callsBeforeGozar].at(-1), '--json');
+  assert.deepEqual(calls[callsBeforeGozar], ['gozar-addService', 'https://bridge.example.test', '192.0.2.10:8787', null]);
+  assert(calls.findIndex(call => call.join(' ').includes('enable --now')) < callsBeforeGozar, 'the route is registered only after the service is enabled');
 
   const grantedRepo = 'example-owner/fixture';
   const grant = spawnSync(process.execPath, ['bin/dalan.mjs', 'worker', 'allow', 'muse', grantedRepo, '--json'], {
@@ -137,8 +138,8 @@ try {
 
   const installState = privateState(home);
   const retryServiceInstall = () => installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn, waitForSocket: async () => true,
   });
   const createRuntimeFixture = () => spawnSync(process.execPath, ['--input-type=module', '-e', `
@@ -192,8 +193,8 @@ try {
   const unrelatedScratch = path.join(home, '.tmp/other');
   fs.mkdirSync(unrelatedScratch, { mode: 0o700 });
   await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
   }), /contains data outside Dalan runtime scratch/);
   assert.deepEqual(privateState(home), runtimeInstallState, 'unrelated scratch refusal preserves service state');
   fs.rmSync(unrelatedScratch, { recursive: true });
@@ -209,8 +210,8 @@ try {
   fs.renameSync(scratch, scratchBackup);
   fs.symlinkSync(scratchBackup, scratch);
   await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
   }), /symlink/);
   assert.deepEqual(privateState(home), runtimeInstallState, 'scratch symlink refusal preserves service state');
   fs.rmSync(scratch);
@@ -220,8 +221,8 @@ try {
   fs.renameSync(runtimeRoot, runtimeBackup);
   fs.symlinkSync(runtimeBackup, runtimeRoot);
   await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
   }), /symlink/);
   assert.deepEqual(privateState(home), runtimeInstallState, 'runtime symlink refusal preserves service state');
   fs.rmSync(runtimeRoot);
@@ -229,8 +230,8 @@ try {
 
   fs.chmodSync(path.join(runtimeRoot, 'artifacts'), 0o755);
   await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
   }), /must be private/);
   assert.deepEqual(privateState(home), runtimeInstallState, 'non-private container refusal preserves service state');
   fs.chmodSync(path.join(runtimeRoot, 'artifacts'), 0o700);
@@ -240,8 +241,8 @@ try {
   fs.renameSync(unsafeContainer, externalContainer);
   fs.symlinkSync(externalContainer, unsafeContainer);
   await assert.rejects(installService({ home, origin: 'https://bridge.example.test', port: 8787,
-    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
+    target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd', spawn,
   }), /symlink/);
   assert.deepEqual(privateState(home), runtimeInstallState, 'container symlink refusal preserves service state');
   fs.rmSync(unsafeContainer);
@@ -261,7 +262,7 @@ try {
   let dryCalls = 0;
   const dry = await installService({ home: migratedHome, origin: 'https://bridge.example.test', port: 8790,
     target: '127.0.0.1:8790', workers: [], writeUnitsOnly: true }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: null,
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: null,
     spawn: () => { dryCalls++; throw new Error('write-units-only must not call systemctl or Gozar'); },
   });
   assert.equal(dry.started, false);
@@ -321,17 +322,12 @@ try {
   const verifyCmd = 'trusted-check --origin "https://bridge.example.test"';
   const translatedCalls = [];
   const translated = await installService({ home: path.join(root, 'translated'), origin: route.origin, port: 8798,
-    target: '192.0.2.10:8799', lanPort: 8799, verifyCmd, workers: ['dot'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
-    spawn: (command, args) => {
-      translatedCalls.push([command, ...args]);
-      return { status: 0, stdout: args.includes('service') && args.includes('add') ? JSON.stringify({ schemaVersion: 1,
-        route: { ...route, target: '192.0.2.10:8799', verification: { status: 'verified', method: 'host-command' } } }) : '', stderr: '' };
-    }, waitForSocket: async () => true,
+    target: '192.0.2.10:8799', lanPort: 8799, verifyCmd, workers: ['dot'] }, {
+    gozar: makeGozar({ log: translatedCalls, mutate: r => ({ ...r, target: '192.0.2.10:8799' }) }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+    spawn: () => ({ status: 0, stdout: '', stderr: '' }), waitForSocket: async () => true,
   });
   assert.equal(translated.started, true);
-  const translatedGozar = translatedCalls.find(call => call.includes('service') && call.includes('add'));
-  assert.deepEqual(translatedGozar.slice(-3), ['--verify-cmd', verifyCmd, '--json']);
+  assert.deepEqual(translatedCalls.find(call => call[0] === 'gozar-addService'), ['gozar-addService', route.origin, '192.0.2.10:8799', verifyCmd]);
 
   const oldHome = path.join(root, 'existing-bridge-data');
   fs.mkdirSync(path.join(oldHome, '.local/share/dalan'), { recursive: true, mode: 0o700 });
@@ -348,7 +344,7 @@ try {
   fs.mkdirSync(existingWorkerConfig, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(existingWorkerConfig, 'workers.json'), JSON.stringify({ workers: { dot: { connections: [{ issuer: 'https://issuer.example', subject: 'dot' }] } } }) + '\n', { mode: 0o600 });
   await assert.rejects(installService({ home: existingWorkerHome, origin: 'https://bridge.example.test', port: 8792,
-    target: '127.0.0.1:8792', workers: [] }, { env, platform: 'linux', spawn, waitForSocket: async () => true }), /not a built-in OAuth worker profile/);
+    target: '127.0.0.1:8792', workers: [] }, { gozar: makeGozar(), env, platform: 'linux', spawn, waitForSocket: async () => true }), /not a built-in OAuth worker profile/);
   await assert.rejects(installService({ home: migratedHome, origin: 'https://bridge.example.test', port: 8793,
     target: '127.0.0.1:8793', workers: ['other'] }, { env, platform: 'linux' }), /already exists; omit --worker/);
 
@@ -360,18 +356,16 @@ try {
   const noReadyHome = path.join(root, 'not-ready');
   await assert.rejects(installService({ home: noReadyHome, origin: 'https://not-ready.example.test', port: 8795,
     target: '127.0.0.1:8795', workers: ['dot'] }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn, waitForSocket: async () => false,
+    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn, waitForSocket: async () => false,
   }), /did not start on its admin socket/);
 
   const retryHome = path.join(root, 'retry-route');
   let firstGozarCall = true;
   const retryInstall = workers => installService({ home: retryHome, origin: 'https://retry.example.test', port: 8791,
-    target: '127.0.0.1:8791', workers, gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn: (command, args) => args.includes('service') && args.includes('add')
-      ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route: { ...route, origin: 'https://retry.example.test', target: '127.0.0.1:8791', verification: { status: firstGozarCall ? 'failed' : 'verified' } } }), stderr: '' }
-      : { status: 0, stdout: '', stderr: '' }, waitForSocket: async () => true,
+    target: '127.0.0.1:8791', workers }, {
+    gozar: makeGozar({ statusOf: () => (firstGozarCall ? 'failed' : 'verified') }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn, waitForSocket: async () => true,
   });
-  await assert.rejects(retryInstall(['dot']), /did not verify the service route/);
+  await assert.rejects(retryInstall(['dot']), /did not verify the route/);
   const failedRouteState = privateState(retryHome);
   firstGozarCall = false;
   const retried = await retryInstall(['dot']);
@@ -383,21 +377,24 @@ try {
   for (const field of ['origin', 'target']) {
     const mismatchHome = path.join(root, `mismatch-${field}`);
     await assert.rejects(installService({ home: mismatchHome, origin: route.origin, port: 8787,
-      target: route.target, lanPort: 8787, workers: ['dot'], gozarBin: 'gozar' }, {
-      env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
-      spawn: (command, args) => args.includes('service') && args.includes('add')
-        ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route: { ...route, [field]: field === 'origin' ? 'https://wrong.example.test' : '192.0.2.11:8789' } }) }
-        : { status: 0, stdout: '' }, waitForSocket: async () => true,
+      target: route.target, lanPort: 8787, workers: ['dot'] }, {
+      gozar: makeGozar({ mutate: r => ({ ...r, [field]: field === 'origin' ? 'https://wrong.example.test' : '192.0.2.11:8789' }) }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+      spawn, waitForSocket: async () => true,
     }), /does not match/);
   }
 
   const gozarFailureHome = path.join(root, 'gozar-failure');
   await assert.rejects(installService({ home: gozarFailureHome, origin: 'https://gozar-failure.example.test', port: 8796,
-    target: '127.0.0.1:8796', workers: ['dot'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn: (command, args) => args.includes('service') && args.includes('add')
-      ? { status: 1, stdout: '', stderr: 'route verification failed' }
-      : { status: 0, stdout: '', stderr: '' }, waitForSocket: async () => true,
-  }), /service add .*failed/);
+    target: '127.0.0.1:8796', workers: ['dot'] }, {
+    gozar: makeGozar({ failWith: Object.assign(new Error('route verification failed'), { code: 'verification_failed' }) }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn, waitForSocket: async () => true,
+  }), error => error.code === 'verification_failed');
+
+  // --route NAME: Gozar allocates or finds the named route; an unknown name is Gozar's route_not_found and no service route is registered.
+  const named = createFakeGozar();
+  await assert.rejects(installService({ home: path.join(root, 'named-unknown'), origin: 'https://named.example.test', port: 8797, target: '127.0.0.1:8797', workers: ['dot'], route: 'zq-invented-7' }, {
+    gozar: named, env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn, waitForSocket: async () => true, consent: async () => true,
+  }), error => error.code === 'route_not_found');
+  assert.equal(named.fake.state.effects.some(effect => effect.type === 'addService'), false, 'no external service is registered for a named route');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
