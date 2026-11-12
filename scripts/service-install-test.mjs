@@ -25,16 +25,19 @@ const spawn = (command, args) => {
     : { status: 0, stdout: '', stderr: '' };
 };
 const privateState = home => {
-  const paths = [
-    '.config/dot-bridge/workers.json', '.config/dot-bridge/service-install.json',
-    '.config/dot-bridge/as.json', '.config/dot-bridge/as-jwks.json',
-    '.config/dot-bridge/as-cookie-keys.json', '.config/dot-bridge/env', 'resource-url',
-  ];
-  return Object.fromEntries(paths.map(relative => {
-    const file = path.join(home, relative);
-    if (!fs.existsSync(file)) return [relative, null];
+  const config = defaultPath(home, '.config/dot-bridge');
+  const required = ['workers.json', 'service-install.json', 'as.json', 'as-jwks.json', 'as-cookie-keys.json', 'env'];
+  const optional = ['workers-repos.json', 'workers-audit.jsonl', 'workers-audit-checkpoint.sqlite', 'workers-audit-checkpoint.sqlite-wal', 'workers-audit-checkpoint.sqlite-shm'];
+  const paths = [...required.map(name => [name, path.join(config, name), true]),
+    ...optional.map(name => [name, path.join(config, name), false]), ['resource-url', path.join(home, 'resource-url'), true]];
+  return Object.fromEntries(paths.map(([name, file, mustExist]) => {
+    const exists = fs.existsSync(file);
+    if (mustExist) assert.ok(exists, `${file} unexpectedly missing`);
+    if (!exists) return [name, null];
     const stat = fs.lstatSync(file);
-    return [relative, { mode: stat.mode & 0o777, sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex') }];
+    assert.ok(stat.isFile() && !stat.isSymbolicLink(), `${file} must be a regular file`);
+    assert.equal(stat.mode & 0o777, 0o600, `${file} must remain private`);
+    return [name, { mode: stat.mode & 0o777, sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex') }];
   }));
 };
 
@@ -66,6 +69,15 @@ try {
   assert.deepEqual(calls[callsBeforeGozar].slice(0, 6), ['gozar', 'service', 'add', '--origin', 'https://bridge.example.test', '--target']);
   assert(calls[callsBeforeGozar].includes('192.0.2.10:8787'));
   assert.equal(calls[callsBeforeGozar].at(-1), '--json');
+
+  const grantedRepo = 'example-owner/fixture';
+  const grant = spawnSync(process.execPath, ['bin/dalan.mjs', 'worker', 'allow', 'muse', grantedRepo, '--json'], {
+    cwd: repo, env: { ...env, HOME: home, DALAN_HOME: home, XDG_CONFIG_HOME: path.join(home, '.config'), DALAN_WORKERS_FILE: path.join(config, 'workers.json') }, encoding: 'utf8',
+  });
+  assert.equal(grant.status, 0, grant.stderr || grant.stdout);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(config, 'workers.json'), 'utf8')).workers.muse.repos, [grantedRepo]);
+  const grantEvents = fs.readFileSync(path.join(config, 'workers-audit.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(grantEvents.some(event => event.worker === 'muse' && event.after.repos.includes(grantedRepo)), 'the existing repository grant must have an owner audit event');
 
   const installState = privateState(home);
   const exactRetry = await installService({ home, origin: 'https://bridge.example.test', port: 8787,
