@@ -28,7 +28,7 @@ const BRIEF = 'Report the exact phrase: bridge first report. Do not read files, 
 const REPORT = 'bridge first report';
 const MARKER = '.dalan-trial';
 const DEFAULT_CALLBACKS = ['http://127.0.0.1/callback', 'http://localhost/callback'];
-const USAGE = 'usage: dalan try [--local | --public [--client chatgpt|claude] [--route auto|localhost.run|tailscale]] [--home DIR] [--port N] [--callback PATTERN]...';
+const USAGE = 'usage: dalan try [--local | --public [--client chatgpt|claude] [--route auto|gozar|localhost.run|tailscale]] [--home DIR] [--port N] [--callback PATTERN]...';
 const DEMO_REPO = 'dalan-demo/hello';
 const DENIED_REPO = 'dalan-demo/other';
 const DEMO_TITLE = 'Hello from the Dalan demo repository';
@@ -94,7 +94,7 @@ export async function describeTryError(error, context) {
 
 export function parseTryArgs(argv) {
   const out = { home: null, port: null, callbacks: [] };
-  const choices = { '--client': ['chatgpt', 'claude'], '--route': ['auto', 'localhost.run', 'tailscale'] };
+  const choices = { '--client': ['chatgpt', 'claude'], '--route': ['auto', 'gozar', 'localhost.run', 'tailscale'] };
   for (let i = 0; i < argv.length; i++) {
     const [flag, value] = [argv[i], argv[i + 1]];
     if (flag === '--local' || flag === '--public') { out.mode = flag.slice(2); continue; }

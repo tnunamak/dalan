@@ -13,7 +13,7 @@ import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
 import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText } from './try-hosted-clients.mjs';
-import { PUBLIC_READY_MS, createGate, localhostRunProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
+import { PUBLIC_READY_MS, createGate, gozarProvider, localhostRunProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 
@@ -87,7 +87,7 @@ export async function chooseMode({ input, out, signal }) {
 }
 
 export function defaultProviders({ env, say, client, hostedDeps = {} }) {
-  return [localhostRunProvider({ env, ...hostedDeps.localhostRun }), tailscaleProvider({ env, ...hostedDeps.tailscale }), tailscaleNodeProvider({ env, ...hostedDeps.tailscaleNode })];
+  return [gozarProvider({ env, ...hostedDeps.gozar }), localhostRunProvider({ env, ...hostedDeps.localhostRun }), tailscaleProvider({ env, ...hostedDeps.tailscale }), tailscaleNodeProvider({ env, ...hostedDeps.tailscaleNode })];
 }
 
 // The restart command for a trial, with every selection, on one line. Only the computer's own Tailscale keeps its address between
@@ -99,12 +99,14 @@ export const restartCommand = ({ cli, home, shellQuote, client, route, provider 
 export async function runHosted({ options, env, out, input, signal, errorContext, clock = { now: Date.now, sleep }, deps = {}, helpers }) {
   const { prepareHome, portFree, socketAnswers, choosePort, shellQuote, commandLine, parsePending, describeAttempt, MARKER, DIAGNOSE_AFTER_MS, DIAGNOSE_EVERY_MS, DIAGNOSE_LIMIT, POLL_MS, repo } = helpers;
   const client = options.client ?? 'chatgpt';
-  // The trial route is the default and needs no choice. A route saved by `dalan setup` is the real one; an explicit --route wins.
+  const say = line => out.write(`${terminalSafe(line)}\n`);
+  const providers = deps.providers ?? defaultProviders({ env, say, client, hostedDeps: deps });
+  // An explicit route wins; auto prefers installed Gozar, otherwise preserves the saved/default route.
   const saved = options.route === undefined || options.route === 'auto' ? readRouteSetting(env) : null;
-  const routeChoice = options.route && options.route !== 'auto' ? options.route : saved === 'tailscale' ? 'tailscale' : 'localhost.run';
+  const automaticRoute = providers.find(provider => provider.name === 'gozar')?.probe().ok ? 'gozar' : saved === 'tailscale' ? 'tailscale' : 'localhost.run';
+  const routeChoice = options.route && options.route !== 'auto' ? options.route : automaticRoute;
   const realRoute = routeChoice === 'tailscale';
   const spec = CLIENTS[client];
-  const say = line => out.write(`${terminalSafe(line)}\n`);
   const realHome = fs.realpathSync(os.homedir());
   // A real route keeps one home per client, so its address and its sign-in survive a restart; a trial gets a new home every run.
   const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', realRoute ? `dalan-hosted-${client}` : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
@@ -192,7 +194,6 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   let gate = null, route = null, routeStopped = null, cleaned = true;
   let releaseHome;
   try { releaseHome = acquireHomeLock(home); } catch (error) { lines.close(); throw error; }
-  const providers = deps.providers ?? defaultProviders({ env, say, client, hostedDeps: deps });
   try {
     say(realRoute ? REAL_NOTICE(saved === 'tailscale') : TRIAL_NOTICE);
     say('Checking public routes…');
@@ -239,7 +240,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     fs.writeFileSync(urlFile, `${mcpUrl}\n`, { mode: 0o600 });
     fs.chmodSync(urlFile, 0o600);
 
-    gate.open(bindPort);
+    gate.open(bindPort, route.provider.name === 'gozar' ? { gozarOrigin: origin } : {});
     const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS[route.provider.name], say, signal });
     if (!ready.ready) { if (!signal?.aborted) await route.provider.diagnose?.({ home, say, signal }).catch(() => {}); const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
     say("Public HTTPS, OAuth discovery and the authorization server's metadata verified.");

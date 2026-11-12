@@ -595,7 +595,7 @@ test('read calls may omit the hash and key; a wrong hash is still refused; write
 
 test('idempotency: the outcome is stored before the handler runs and a repeat returns it without re-running', async () => {
   let during;
-  const { registry, store, calls } = fixture({ handlers: { watch: { run: async ({ args }) => { during = store.db.prepare('SELECT * FROM tool_idempotency').all(); calls.push(args); return { n: calls.length }; } } } });
+  const { registry, store, calls, time } = fixture({ handlers: { watch: { run: async ({ args }) => { during = store.db.prepare('SELECT * FROM tool_idempotency').all(); calls.push(args); return { n: calls.length }; } } } });
   registry.register(spec({ handler: { kind: 'watch' }, class: 'write' })); registry.grant('echo_tool', 'dot');
   const send = (key, args = { text: 'x' }, worker = 'dot') => registry.callTool({ worker, tool: 'echo_tool', class: 'write', args, schema_hash: hashOf(registry, worker, 'echo_tool'), idempotency_key: key });
   const first = await send('key-a');
@@ -612,7 +612,7 @@ test('idempotency: the outcome is stored before the handler runs and a repeat re
   // a new key runs
   assert.equal((await send('key-b')).result.n, 2);
   // survives a restart of the registry object
-  const reopened = createToolRegistry({ store, handlers: { watch: { run: async () => { throw new Error('must not run'); } } } });
+  const reopened = createToolRegistry({ store, now: () => time.ms, handlers: { watch: { run: async () => { throw new Error('must not run'); } } } });
   assert.equal((await reopened.callTool({ worker: 'dot', tool: 'echo_tool', class: 'write', args: { text: 'x' }, schema_hash: hashOf(reopened, 'dot', 'echo_tool'), idempotency_key: 'key-a' })).replayed, true);
 });
 
