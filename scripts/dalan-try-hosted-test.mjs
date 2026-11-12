@@ -1303,7 +1303,7 @@ test('children of a trial that was killed are ended by the next trial, only when
 function fakeGozar(name, mode = 'success') {
   const dir = path.join(tmp, `fake-gozar-${name}`);
   fs.mkdirSync(dir);
-  const binary = path.join(dir, 'gozar'), log = path.join(dir, 'calls.jsonl'), state = path.join(dir, 'state.json');
+  const binary = path.join(dir, 'gozar'), log = path.join(dir, 'calls.jsonl'), state = path.join(dir, 'state.json'), failedStatus = path.join(dir, 'failed-status');
   fs.writeFileSync(binary, `#!${process.execPath}
 import fs from 'node:fs';
 const args = process.argv.slice(2), state = ${JSON.stringify(state)};
@@ -1311,17 +1311,17 @@ const absent = {phase:'unknown',candidate:null,published:null,limitations:['Cont
 const snapshot = () => fs.existsSync(state) ? JSON.parse(fs.readFileSync(state)) : absent;
 const save = value => fs.writeFileSync(state,JSON.stringify(value));
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
-if (args[0] === 'status') { console.log(JSON.stringify({snapshot:snapshot()})); if(snapshot().phase==='unknown')process.exitCode=1; }
-else if (args[0] === 'stop') { save({sessionId:'own-session',phase:'stopped',published:null,resources:[]}); console.log(JSON.stringify({snapshot:snapshot(),localCleanupFailures:[]})); }
+if (args[0] === 'status') { console.log(JSON.stringify({snapshot:snapshot()})); if(snapshot().phase==='unknown' || fs.existsSync(${JSON.stringify(failedStatus)}))process.exitCode=1; }
+else if (args[0] === 'stop') { save({sessionId:'own-session',phase:'stopped',candidate:null,published:null,resources:[]}); console.log(JSON.stringify({snapshot:snapshot(),localCleanupFailures:[]})); }
 else {
   if (${JSON.stringify(mode)} === 'slow') await new Promise(r=>setTimeout(r,300));
-  if (!fs.existsSync(state)) save({sessionId:'own-session',phase:'published-ready',published:'https://trial.lhr.life'});
+  if (!fs.existsSync(state)) save({sessionId:'own-session',phase:'published-ready',candidate:null,published:'https://trial.lhr.life'});
   if (${JSON.stringify(mode)} === 'error') { save({...snapshot(),phase:'failed',published:null}); console.log(JSON.stringify({error:'trial route unavailable',snapshot:snapshot()})); process.exitCode=1; }
   else if (${JSON.stringify(mode)} === 'candidate') {save({...snapshot(),phase:'starting',candidate:'https://trial.lhr.life',published:null}); console.log(JSON.stringify({snapshot:snapshot()}));}
   else console.log(JSON.stringify({snapshot:snapshot()}));
 }
 `, { mode: 0o700 });
-  return { binary, log, setSnapshot: value => fs.writeFileSync(state, JSON.stringify(value)), calls: () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [], env: { PATH: dir } };
+  return { binary, log, failStatus: () => fs.writeFileSync(failedStatus, ''), clearStatusFailure: () => fs.rmSync(failedStatus, { force: true }), setSnapshot: value => fs.writeFileSync(state, JSON.stringify(value)), calls: () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [], env: { PATH: dir } };
 }
 
 test('Gozar uses PATH before GOZAR_BIN, reads published origin and stops the exact gate port', async () => {
@@ -1340,7 +1340,7 @@ test('Gozar uses PATH before GOZAR_BIN, reads published origin and stops the exa
 test('Gozar refuses a preexisting session without exposing or stopping it', async () => {
   for (const phase of ['published-ready', 'starting', 'cleanup-pending']) {
     const fake = fakeGozar(`existing-${phase}`);
-    fake.setSnapshot({ sessionId: 'someone-else', phase, published: phase === 'published-ready' ? 'https://other.lhr.life' : null });
+    fake.setSnapshot({ sessionId: 'someone-else', phase, candidate: null, published: phase === 'published-ready' ? 'https://other.lhr.life' : null });
     const provider = gozarProvider({ env: fake.env });
     await assert.rejects(startRoute({ route: 'gozar', providers: [provider], gatePort: 45679 }), /port 45679 already has a Gozar route; stop it first: gozar stop --port 45679/);
     assert.deepEqual(fake.calls().map(args => args[0]), ['status']);
@@ -1355,7 +1355,7 @@ test('Gozar watcher detects route loss and replacement; cleanup leaves replaceme
     const route = await provider.start({ gatePort: 45680 });
     try {
       assert.ok(route.exited instanceof Promise);
-      fake.setSnapshot({ stopped: { sessionId: 'own-session', phase: 'stopped', published: null, resources: [] }, replacement: { sessionId: 'replacement', phase: 'published-ready', published: route.origin }, origin: { sessionId: 'own-session', phase: 'published-ready', published: 'https://changed.lhr.life' }, unavailable: { phase: 'unknown', published: null, limitations: ['Controller unavailable: ENOENT'] } }[change]);
+      fake.setSnapshot({ stopped: { sessionId: 'own-session', phase: 'stopped', candidate: null, published: null, resources: [] }, replacement: { sessionId: 'replacement', phase: 'published-ready', candidate: null, published: route.origin }, origin: { sessionId: 'own-session', phase: 'published-ready', candidate: null, published: 'https://changed.lhr.life' }, unavailable: { phase: 'unknown', candidate: null, published: null, limitations: ['Controller unavailable: ENOENT'] } }[change]);
       await Promise.race([route.exited, sleepMs(2000).then(() => { throw new Error('route loss was not observed'); })]);
       assert.deepEqual(await provider.stop(), { removed: true });
       const count = fake.calls().length;
@@ -1371,18 +1371,59 @@ test('Gozar cleanup checks ownership again even before the next watcher poll', a
   const provider = gozarProvider({ env: fake.env });
   provider.probe();
   await provider.start({ gatePort: 45681 });
-  fake.setSnapshot({ sessionId: 'replacement', phase: 'published-ready', published: 'https://other.lhr.life' });
+  fake.setSnapshot({ sessionId: 'replacement', phase: 'published-ready', candidate: null, published: 'https://other.lhr.life' });
   assert.deepEqual(await provider.stop(), { removed: true });
   assert.ok(!fake.calls().some(args => args[0] === 'stop'));
 });
 
 test('Gozar invalid or failed status never acquires cleanup ownership', async () => {
-  for (const output of ['invalid-json', JSON.stringify({ error: 'status unavailable' }), JSON.stringify({ snapshot: { phase: 'unknown', published: null } })]) {
+  const malformed = ['invalid-json', JSON.stringify({ error: 'status unavailable' })];
+  for (const value of [undefined, false, 0, '']) {
+    malformed.push(JSON.stringify({ snapshot: { phase: 'stopped', candidate: null, published: value, resources: [] } }));
+    malformed.push(JSON.stringify({ snapshot: { phase: 'unknown', candidate: value, published: null, limitations: ['Controller unavailable: ENOENT'] } }));
+  }
+  for (const resources of [null, {}, [null], [{ cleanup: false }]]) malformed.push(JSON.stringify({ snapshot: { phase: 'stopped', candidate: null, published: null, resources } }));
+  for (const output of malformed) for (const code of [0, 1]) {
     const calls = [];
-    const provider = gozarProvider({ which: () => 'fake', run: (binary, args, options, callback) => { calls.push(args[0]); callback(Object.assign(new Error('status failed'), { code: 1 }), output); } });
+    const provider = gozarProvider({ which: () => 'fake', run: (binary, args, options, callback) => { calls.push(args[0]); callback(code ? Object.assign(new Error('status failed'), { code }) : null, output); } });
     await assert.rejects(startRoute({ route: 'gozar', providers: [provider], gatePort: 45682 }));
     assert.deepEqual(calls, ['status']);
   }
+});
+
+test('Gozar malformed cleanup status leaves the route untouched and reports unconfirmed cleanup', async () => {
+  const fake = fakeGozar('malformed-cleanup');
+  const provider = gozarProvider({ env: fake.env });
+  provider.probe();
+  await provider.start({ gatePort: 45684 });
+  try {
+    for (const snapshot of [
+      { sessionId: 'own-session', phase: 'stopped' },
+      { sessionId: 'own-session', phase: 'stopped', candidate: null, published: false },
+      { sessionId: 'own-session', phase: 'stopped', candidate: '', published: null },
+      { sessionId: 'own-session', phase: 'unknown', candidate: null, published: null, resources: [null] },
+    ]) {
+      fake.setSnapshot(snapshot);
+      assert.equal((await provider.stop()).removed, false);
+      assert.ok(!fake.calls().some(args => args[0] === 'stop'));
+    }
+  } finally {
+    fake.setSnapshot({ sessionId: 'own-session', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' });
+    assert.deepEqual(await provider.stop(), { removed: true });
+  }
+});
+
+test('Gozar exit-1 ready status withdraws readiness and cannot authorize cleanup', async () => {
+  const fake = fakeGozar('failed-ready-status');
+  const provider = gozarProvider({ env: fake.env, pollMs: 10 });
+  provider.probe();
+  const route = await provider.start({ gatePort: 45683 });
+  try {
+    fake.failStatus();
+    await Promise.race([route.exited, sleepMs(2000).then(() => { throw new Error('failed status kept readiness'); })]);
+    assert.equal((await provider.stop()).removed, false);
+    assert.ok(!fake.calls().some(args => args[0] === 'stop'));
+  } finally { fake.clearStatusFailure(); assert.deepEqual(await provider.stop(), { removed: true }); }
 });
 
 test('Gozar route loss during approval revokes connections and closes bridge and gate', async () => {
@@ -1407,7 +1448,7 @@ test('Gozar route loss during approval revokes connections and closes bridge and
     await run.until(/Connection approved/);
     await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'ChatGPT' });
     for (let i = 0; (run.out.match(/Approve this connection\?/g) ?? []).length < 2; i++) { assert.ok(i < 200); await sleepMs(25); }
-    fake.setSnapshot({ sessionId: 'own-session', phase: 'stopped', published: null, resources: [] });
+    fake.setSnapshot({ sessionId: 'own-session', phase: 'stopped', candidate: null, published: null, resources: [] });
     const result = await Promise.race([run.finished, sleepMs(5000).then(() => { throw new Error('hosted run stayed alive'); })]);
     assert.match(result.error?.message ?? '', /The public route stopped/);
     const { DatabaseSync } = await import('node:sqlite');
@@ -1449,7 +1490,7 @@ test('Gozar stop reports cleanup debt instead of claiming removal', async () => 
   let exposed = false;
   const provider = gozarProvider({ env: fake.env, run: (binary, args, options, callback) => {
     if (args[0] === 'expose') exposed = true;
-    callback(null, JSON.stringify(args[0] === 'stop' ? { snapshot: { sessionId: 'own', phase: 'cleanup-pending', published: null }, localCleanupFailures: ['ssh still running'] } : { snapshot: exposed ? { sessionId: 'own', phase: 'published-ready', published: 'https://trial.lhr.life' } : { phase: 'unknown', published: null, limitations: ['Controller unavailable: ENOENT'] } }));
+    callback(null, JSON.stringify(args[0] === 'stop' ? { snapshot: { sessionId: 'own', phase: 'cleanup-pending', published: null }, localCleanupFailures: ['ssh still running'] } : { snapshot: exposed ? { sessionId: 'own', phase: 'published-ready', candidate: null, published: 'https://trial.lhr.life' } : { phase: 'unknown', candidate: null, published: null, limitations: ['Controller unavailable: ENOENT'] } }));
   } });
   provider.probe();
   await provider.start({ gatePort: 12347 });

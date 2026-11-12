@@ -462,17 +462,26 @@ export function gozarProvider({ env = process.env, which = name => whichOnPath(n
     run(binary, args, { env, encoding: 'utf8', timeout: status ? 15_000 : 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
       let reply;
       try { reply = JSON.parse(stdout); } catch { reject(new Error('Gozar did not return valid JSON')); return; }
+      if (status && !validStatus(reply?.snapshot)) { reject(new Error('Gozar did not return valid status JSON')); return; }
       // Status exits 1 with valid, withdrawn-readiness JSON when no controller is running.
-      if ((error && !(status && error.code === 1 && reply?.snapshot)) || reply?.error) {
+      if ((error && !(status && error.code === 1 && withdrawn(reply?.snapshot))) || reply?.error) {
         reject(Object.assign(new Error(`Gozar: ${safeDiagnostic(reply?.error ?? 'command failed', 240)}`), { gozarReply: reply })); return;
       }
       resolve(reply);
     });
   });
   const status = target => command(['status', '--port', String(target), '--json'], { status: true });
-  const removed = snapshot => snapshot && !snapshot.published && !snapshot.candidate &&
-    !snapshot.resources?.some(resource => resource.cleanup !== 'removed') &&
-    (snapshot.phase === 'stopped' || (snapshot.phase === 'unknown' && snapshot.limitations?.some(line => /^Controller unavailable:/.test(line))));
+  const validResources = snapshot => snapshot.resources === undefined || (Array.isArray(snapshot.resources) &&
+    snapshot.resources.every(resource => resource && typeof resource === 'object' && !Array.isArray(resource) && typeof resource.cleanup === 'string' && resource.cleanup.length > 0));
+  const validStatus = snapshot => snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) &&
+    typeof snapshot.phase === 'string' && snapshot.phase.length > 0 &&
+    (snapshot.published === null || (typeof snapshot.published === 'string' && snapshot.published.length > 0)) &&
+    (snapshot.candidate === null || (typeof snapshot.candidate === 'string' && snapshot.candidate.length > 0)) && validResources(snapshot);
+  const withdrawn = snapshot => validStatus(snapshot) &&
+    snapshot.published === null && snapshot.candidate === null &&
+    ['unknown', 'stopped', 'stopping', 'cleanup-pending'].includes(snapshot.phase);
+  const removed = snapshot => withdrawn(snapshot) && (snapshot.resources ?? []).every(resource => resource.cleanup === 'removed') &&
+    (snapshot.phase === 'stopped' || (snapshot.phase === 'unknown' && Array.isArray(snapshot.limitations) && snapshot.limitations.some(line => typeof line === 'string' && /^Controller unavailable:/.test(line))));
   const stopWatcher = async () => {
     watching = false;
     clearTimeout(timer);
