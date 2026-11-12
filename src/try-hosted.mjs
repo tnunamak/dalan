@@ -8,12 +8,13 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { terminalSafe } from './terminal-safe.mjs';
+import { waitForChildExit } from './child-exit.mjs';
 import { createLineMasker, safeDiagnostic } from './diagnostic.mjs';
 import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
 import { CLIENTS, CONNECTOR_NAME, callbackAllowed, handoffText, hostedPrompt } from './try-hosted-clients.mjs';
-import { PUBLIC_READY_MS, createGate, gozarProvider, localhostRunProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
+import { PUBLIC_READY_MS, createGate, gozarProvider, localhostRunProvider, selectRouteProvider, startRoute, tailscaleNodeProvider, tailscaleProvider, verifyPublicReady } from './try-exposure.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 
@@ -39,9 +40,11 @@ export function acquireHomeLock(home) {
       return () => { try { if (fs.readFileSync(file, 'utf8') === token) fs.rmSync(file, { force: true }); } catch { /* gone */ } };
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      const pid = Number.parseInt(fs.readFileSync(file, 'utf8'), 10);
-      if (!Number.isInteger(pid)) throw busy();
-      try { process.kill(pid, 0); throw busy(); } catch (probe) { if (probe.tryKind || probe.code === 'EPERM') throw busy(); }
+      const raw = fs.readFileSync(file, 'utf8').trim();
+      const match = /^([1-9]\d*)(?:\s+\S+)?$/.exec(raw);
+      const pid = match ? Number(match[1]) : NaN;
+      if (!Number.isSafeInteger(pid)) throw busy();
+      try { process.kill(pid, 0); throw busy(); } catch (probe) { if (probe.tryKind || probe.code !== 'ESRCH') throw busy(); }
       fs.rmSync(file, { force: true }); // its owner is gone
     }
   }
@@ -108,8 +111,13 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const realRoute = routeChoice === 'tailscale';
   const spec = CLIENTS[client];
   const realHome = fs.realpathSync(os.homedir());
-  // A real route keeps one home per client, so its address and its sign-in survive a restart; a trial gets a new home every run.
-  const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', realRoute ? `dalan-hosted-${client}` : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
+  // Only the host's usable Funnel has a stable identity; its ephemeral fallback needs a new home.
+  const routeMessages = [];
+  let selectedProvider, selectionError;
+  try { selectedProvider = selectRouteProvider({ route: routeChoice, providers, say: line => routeMessages.push(line), signal }); }
+  catch (error) { selectionError = error; } // Report startup failures after the home and cleanup context are ready.
+  const stableHome = selectedProvider?.name === 'tailscale';
+  const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', stableHome ? `dalan-hosted-${client}` : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
   errorContext.home = home;
   const cliPath = errorContext.shellCli ?? shellQuote(path.join(repo, 'bin/dalan.mjs'));
   const cli = errorContext.cli ?? `node ${cliPath}`;
@@ -171,9 +179,9 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     server.once('close', forgetServer);
     const child = server;
     const sinks = [child.stdout, child.stderr].map(stream => { const persist = createLineMasker(text => fs.appendFileSync(logFile, text)); stream.setEncoding('utf8').on('data', chunk => persist(chunk)); return persist; });
-    stopped = new Promise(resolve => {
-      child.once('close', () => { for (const flush of sinks) flush('', true); exited = true; resolve(); });
-      child.once('error', error => { fs.appendFileSync(logFile, `spawn failed: ${safeDiagnostic(error.message, 1000)}\n`); exited = true; resolve(); });
+    stopped = waitForChildExit(child, {
+      onClose: () => { for (const flush of sinks) flush('', true); exited = true; },
+      onError: error => { fs.appendFileSync(logFile, `process error: ${safeDiagnostic(error.message, 1000)}\n`); },
     });
   };
   const stopServer = async () => {
@@ -191,7 +199,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     return true;
   };
 
-  let gate = null, route = null, routeStopped = null, cleaned = true;
+  let gate = null, route = null, routeStopped = null, cleaned = true, keepRecoveredNode = false;
   let trialEndsAt = null;
   let releaseHome;
   try { releaseHome = acquireHomeLock(home); } catch (error) { lines.close(); throw error; }
@@ -200,11 +208,25 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     say('Checking public routes…');
     gate = await createGate();
     // A trial that was killed earlier may have left a Tailscale node of its own running; end it before this one starts.
-    for (const provider of providers) { const ended = await provider.recover?.().catch(() => []); if (ended?.length) say(`Ended ${ended.join(', ')} left by an earlier trial.`); }
+    for (const provider of providers) {
+      const recovery = await provider.recover?.().catch(() => ({ retained: [{ home: null, sock: null }] }));
+      const ended = Array.isArray(recovery) ? recovery : recovery?.ended;
+      keepRecoveredNode ||= recovery?.retained?.some(debt => debt.home === home || debt.sock === path.join(home, 'tsnode/tailscaled.sock') || (!debt.home && !debt.sock)) ?? false;
+      if (ended?.length) say(`Ended ${ended.join(', ')} left by an earlier trial.`);
+    }
     signal?.throwIfAborted();
     trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
-    try { route = await startRoute({ route: routeChoice, providers, gatePort: gate.port, home, say, signal, client, ...(trialEndsAt === null ? {} : { lifetimeEndsAt: trialEndsAt }) }); }
+    try {
+      for (const message of routeMessages) say(message);
+      if (selectionError) throw selectionError;
+      route = await startRoute({ selectedProvider, gatePort: gate.port, home, say, signal, ...(trialEndsAt === null ? {} : { lifetimeEndsAt: trialEndsAt }) });
+    }
     catch (error) {
+      routeStopped = error?.routeCleanup ?? routeStopped;
+      if (error?.tryKind === 'node_retained') {
+        keepRecoveredNode = true;
+        error.message += `\nStart a fresh trial with: ${cli} try --public --client ${client} --route ${routeChoice} --home ${shellQuote(path.join(realHome, '.local/share', `dalan-hosted-${randomBytes(3).toString('hex')}`))}`;
+      }
       if (error && typeof error === 'object' && !signal?.aborted) {
         error.tryKind ??= 'route_start';
         // A real route never turns into a trial link without the owner choosing it.
@@ -216,7 +238,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     const origin = route.origin;
     say(`Public route ready (${route.provider.name}).`);
     if (storedOrigin && storedOrigin !== origin) {
-      const error = new Error(`this home was set up for ${storedOrigin}, but the new public address is ${origin}. A new address is a new sign-in identity. Start a fresh trial instead`);
+      const error = new Error(`this home was set up for ${storedOrigin}, but the new public address is ${origin}. A new address is a new sign-in identity. Start a fresh trial instead${route.provider.name === 'tailscale-node' ? ` with: ${cli} try --public --client ${client} --route ${routeChoice} --home ${shellQuote(path.join(realHome, '.local/share', `dalan-hosted-${randomBytes(3).toString('hex')}`))}` : ''}`);
       error.tryKind = 'identity';
       throw error;
     }
@@ -353,11 +375,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     // Close forwarding first, then end the connection while the bridge can still answer, then remove the route and stop the bridge.
     gate?.shut();
     if (errorContext.started && !exited) await dalan(['connect', 'revoke', HOSTED_WORKER], { abortable: false }).catch(() => {});
-    if (route) routeStopped = await route.stop().catch(error => ({ removed: false, detail: error.message }));
+    if (route) routeStopped = await route.stop().catch(error => ({ removed: false, keepNode: true, detail: error.message }));
     await stopServer();
     await gate?.close();
     // The connector URL and the bridge's secrets are no use after the trial and stay on disk for nobody.
-    removeTrialSecrets(home, configDir, { keepConfig: STABLE_ORIGIN_ROUTES.has(route?.provider.name), keepNode: Boolean(routeStopped?.keepNode) });
+    removeTrialSecrets(home, configDir, { keepConfig: STABLE_ORIGIN_ROUTES.has(route?.provider.name), keepNode: keepRecoveredNode || Boolean(routeStopped?.keepNode) });
     releaseHome();
     cleaned = routeStopped ? routeStopped.removed : true;
     if (!cleaned) { process.exitCode = 1; out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n${routeStopped.command ? `Remove it with:\n${commandLine(routeStopped.command)}\n` : ''}`); }
