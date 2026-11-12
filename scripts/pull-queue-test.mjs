@@ -43,6 +43,8 @@ try {
       if(failure==='removed')profile.workers.delete('alpha');
       live.alpha=[];now+=1001;
       assert.ok(store.sweepStaleLeases().includes(original));
+      assert.ok(!store.pullQueue.list('beta',admit).items.some(item=>item.request_id===original),'lease expiry must not reallocate the acquired v1 order');
+      assert.throws(()=>acquire(original,'beta'),/work order already acquired/);
       store.owner(original,owner);store.cancel(original,'Owner replaces unavailable worker');
       assert.throws(()=>store.progress(original,first.claim_id,'Late progress','alpha',false,'alpha',null,null,connections.alpha),/invalid claim/);
       assert.throws(()=>store.finish(original,first.claim_id,'completed','Late','Late','alpha',null,'alpha',null,null,connections.alpha),/invalid claim/);
