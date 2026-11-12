@@ -2,20 +2,18 @@
 
 # Manual setup
 
-`try` runs ordinary `dalan` commands in a private trial home. Use this page to run each piece yourself: to keep the bridge in the foreground, to choose your own worker name, or to set up a client that `try` does not cover. You need a [checkout](../README.md#from-source), two shells and a worker client with OAuth.
+`try` runs ordinary `dalan` commands in a private trial home. Use this page to run each piece yourself: to keep the bridge in the foreground, to choose your own worker name, or to set up a client that `try` does not cover. You need the npm package, two shells and a worker client with OAuth.
 
 <a id="owner-and-requester-setup"></a>
 
 ## Owner and requester setup
 
-1. Clone and install Dalan, and put `dalan` on your PATH.
+1. Install Dalan and put `dalan` on your PATH.
 
    ```sh
-   git clone https://github.com/tnunamak/dalan.git
-   cd dalan
    node --version
-   npm ci
-   npm link
+   npm install -g @tnunamak/dalan
+   dalan --version
    ```
 
    **Check:** Node prints `v24` or higher, and npm finishes without an error. The server in step 3 starts Node with a changed `HOME`, so use a Node executable that works then; a version-manager shim can depend on your usual home directory.
@@ -33,7 +31,7 @@
    ```sh
    export DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin DALAN_PORT=8799
    dalan init --worker local --public-url http://127.0.0.1:8799
-   HOME="$DALAN_HOME" DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin DALAN_PORT=8799 node src/server.mjs
+   HOME="$DALAN_HOME" DALAN_LOOPBACK=1 DALAN_AUTH_MODE=builtin DALAN_PORT=8799 node "$(npm root -g)/@tnunamak/dalan/src/server.mjs"
    ```
 
    **Check:** `init` reports a new worker profile for `local`, and the server prints `MCP listening on 127.0.0.1:8799` and keeps running. Leave this terminal open: closing it stops the bridge. If you plan a repository job, add `DALAN_ENABLE_WORKSPACE=1` to the server command now to save a restart. If the port is taken, choose a free port and replace `8799` in the exported `DALAN_PORT`, the init public URL, and the server command. Use that same port in the worker's MCP URL.
