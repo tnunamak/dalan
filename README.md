@@ -98,11 +98,15 @@ In a second terminal, use the CLI from `npm install -g @tnunamak/dalan`. Set `DA
 3. Validate, then submit the same file if validation succeeds:
 
    ```sh
-   dalan submit --worker hosted --review --execution none --deliver none --file review-job.json --dry-run
-   dalan submit --worker hosted --review --execution none --deliver none --file review-job.json
+   dalan submit --worker hosted --execution none --deliver none --file review-job.json --dry-run
+   dalan submit --worker hosted --execution none --deliver none --file review-job.json
    ```
 
-   Paste the exact prompt printed by `submit` into the connected client's chat. Dalan queues the job; the client still needs your prompt to start it.
+   Replace `REQUEST_ID` with the ID printed by `submit` and send this prompt in the connected client's chat:
+
+   > Request REQUEST_ID is your only job: claim it with Dalan, do what its brief asks, report progress and finish it with the claim_id. Stop if it is missing or cancelled. Claim no other job.
+
+   Dalan queues the job; the client still needs your prompt to start it.
 
 4. Replace `REQUEST_ID` with the printed ID, wait, and read the full report:
 
