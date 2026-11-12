@@ -220,7 +220,8 @@ try {
     let probeId;
     try {
       await bridge.startWindow('lark');
-      for(const redirect of ['http://evil.invalid/oauth/callback',`http://${callbackHost}:49199/wrong-path`]) {
+      // A canonical loopback path is a valid native registration without any owner list; only an invalid redirect is refused here. The wrong-path case is checked at authorize and at the token step below.
+      for(const redirect of ['http://evil.invalid/oauth/callback']) {
         const response=await fetch(bridge.oauth.registration_endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({redirect_uris:[redirect],token_endpoint_auth_method:'none',application_type:'native',grant_types:['authorization_code'],response_types:['code']})});
         assert.equal(response.status,400,'native registration accepted a wrong callback host or path');
       }
@@ -355,23 +356,25 @@ try {
     assert.deepEqual(bridge.clients(),before);
   });
 
-  await check('2', 'unallowlisted static redirect is refused without disk or runtime changes', async () => {
+  await check('2', 'an invalid static redirect is refused without disk or runtime changes; an unseen valid one needs no owner list', async () => {
     const beforeDisk = configSnapshot(bridge.config), beforeClients = bridge.clients(), beforeConnections = bridge.cli(['connect', 'list', '--json']).json().connections;
-    let expectedDisk = beforeDisk;
-    if(!localJourney) {
-      const withoutOptIn=bridge.cli(['connect','add-client','--redirect-uri','http://127.0.0.1/callback']);
-      assert.notEqual(withoutOptIn.code,0,'remote mode accepted an owner-unregistered loopback redirect');
-      assert.deepEqual(configSnapshot(bridge.config),beforeDisk);
-      const local=bridge.cli(['connect','allow-callback','http://127.0.0.1/callback','--json']);
-      assert.equal(local.code,0,local.stderr+local.stdout);
-      expectedDisk = configSnapshot(bridge.config);
-      assert.notEqual(expectedDisk,beforeDisk,'owner callback opt-in was not persisted');
+    for (const redirect of ['http://not-allowed.example/callback', 'https://user:pw@not-allowed.example/callback', 'https://not-allowed.example/callback#frag', 'https://*.not-allowed.example/callback', 'http://127.0.0.2/callback', 'myapp://callback']) {
+      const refused = bridge.cli(['connect', 'add-client', '--redirect-uri', redirect, '--name', 'Refused']);
+      assert.notEqual(refused.code, 0, `add-client accepted ${redirect}`);
     }
-    const refused = bridge.cli(['connect', 'add-client', '--redirect-uri', 'https://not-allowed.example/callback', '--name', 'Refused']);
-    assert.notEqual(refused.code, 0, 'add-client accepted a callback outside the allowlist');
-    assert.equal(configSnapshot(bridge.config), expectedDisk, 'refused add changed AS files');
+    assert.equal(configSnapshot(bridge.config), beforeDisk, 'refused add changed AS files');
     assert.deepEqual(bridge.clients(), beforeClients, 'refused add changed the runtime client list');
     assert.deepEqual(bridge.cli(['connect', 'list', '--json']).json().connections, beforeConnections, 'refused add changed connections');
+    // Without an owner opt-in a plain loopback or HTTPS redirect is valid. Registering it adds a client row and nothing else.
+    const asJson = () => fs.readFileSync(path.join(bridge.config, 'as.json'), 'utf8'), beforeAsJson = asJson();
+    const unseen = bridge.cli(['connect', 'add-client', '--redirect-uri', 'https://not-allowed.example/callback', '--name', 'Unseen', '--json']);
+    assert.equal(unseen.code, 0, unseen.stderr + unseen.stdout);
+    assert.equal(unseen.json().token_endpoint_auth_method, 'none');
+    assert.deepEqual(unseen.json().redirect_uris, ['https://not-allowed.example/callback']);
+    assert.equal(asJson(), beforeAsJson, 'a valid add must not rewrite as.json (no owner list)');
+    assert.deepEqual(bridge.cli(['connect', 'list', '--json']).json().connections, beforeConnections, 'a client row is not a connection');
+    assert.equal(bridge.cli(['connect', 'remove-client', unseen.json().client_id, '--json']).code, 0);
+    assert.deepEqual(bridge.clients(), beforeClients);
   });
 
   await check('3', 'an unapproved static-client request cannot obtain a token', async () => {

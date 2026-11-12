@@ -118,6 +118,8 @@
   "node scripts/auth-cache-test.mjs",
   "node scripts/suite-race-test.mjs",
   "node scripts/builtin-as-e2e.mjs",
+  "node --test scripts/redirect-policy-test.mjs",
+  "node scripts/generic-client-journey-e2e.mjs",
   "node scripts/remote-loopback-callback-test.mjs",
   "node scripts/builtin-as-code-lifetime-test.mjs",
   "node scripts/builtin-as-race-test.mjs",

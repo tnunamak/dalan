@@ -349,10 +349,11 @@ try {
       assert.equal(res.status, 400, `${redirect} -> ${res.status} ${res.headers.get('location')}`);
       assert.equal(res.headers.get('location'), null, `${redirect} redirected`);
     }
-    // Registration of any of them is refused too (callback allowlist), and so is a second URI that is not on the list.
-    for (const redirect of variants.slice(0, 6)) assert.equal((await new Vendor(main, redirect).register()).status, 400, redirect);
-    assert.equal((await vendor.register({ redirect_uris: [CALLBACK, 'https://evil.test/cb'] })).status, 400);
-    assert.equal((await vendor.register({ application_type: 'native', redirect_uris: ['http://127.0.0.1:9999/cb'] })).status, 400);
+    // Registration needs no owner list: a plain HTTPS URI is a valid registration, a remote-http one is not. Neither gives a code without the owner.
+    for (const redirect of variants.slice(0, 6)) assert.equal((await new Vendor(main, redirect).register()).status, redirect.startsWith('http://') ? 400 : 201, redirect);
+    assert.equal((await vendor.register({ redirect_uris: [CALLBACK, 'http://evil.test/cb'] })).status, 400);
+    assert.equal((await vendor.register({ redirect_uris: [CALLBACK, 'http://127.0.0.1:9999/cb'] })).status, 400, 'native and web redirects cannot be mixed');
+    assert.equal((await new Vendor(main).register({ application_type: 'native', redirect_uris: ['http://127.0.0.1:9999/cb'] })).status, 201, 'canonical loopback is a valid native registration'); // a separate client object: `vendor` keeps its own client_id
     assert.equal((await vendor.register({ redirect_uris: [] })).status, 400);
     assert.equal((await vendor.register({ redirect_uris: undefined })).status, 400);
     const none = await hit(vendor.authUrl({ challenge: pkce().challenge, omit: ['redirect_uri'] }), { jar: new Jar() });
@@ -848,9 +849,13 @@ try {
         const rejectedExchange = await native.exchange(changedCallback.code, changedFlow.pkce.verifier, { redirect_uri: changedRedirect });
         assert.equal(rejectedExchange.status, 400, `changed approved redirect ${changedRedirect}`);
       }
-      for (const redirect of ['http://127.0.0.2:43210/callback', 'http://127.0.0.1:43210/other', 'http://[::1]:43210/other']) {
-        const invalid = new Vendor(tls, redirect);
-        assert.equal((await invalid.register()).status, 400, redirect);
+      // Registration no longer needs an owner pattern: a canonical loopback URI on any path is a valid native client. Aliases of loopback stay refused.
+      assert.equal((await new Vendor(tls, 'http://127.0.0.2:43210/callback').register()).status, 400, 'http://127.0.0.2:43210/callback');
+      for (const redirect of ['http://127.0.0.1:43210/other', 'http://[::1]:43210/other']) {
+        const other = new Vendor(tls, redirect);
+        assert.equal((await other.register()).status, 201, redirect);
+        const asked = await hit(other.authUrl({ challenge: pkce().challenge, redirect: 'http://127.0.0.1:43210/callback' }), { jar: new Jar() });
+        assert.equal(asked.status, 400, `${redirect} must not borrow another client's registered redirect`);
       }
       globalThis.fetch = realFetch;
     } finally { await tls.stop(); }
@@ -888,18 +893,20 @@ try {
   });
   await check('12b', 'a foreign callback is refused at registration, at the page, and at approval', async () => {
     main.start_window('lark');
-    assert.equal((await new Vendor(main, 'https://evil.example/cb').register()).status, 400);
-    // A client that was registered earlier (before the allowlist changed, or planted in storage) still cannot get a pairing page.
+    // A foreign HTTPS callback may register (no list), but gets nothing without the owner: G8 in generic-client-journey-e2e covers the approval gate.
+    assert.equal((await new Vendor(main, 'https://evil.example/cb').register()).status, 201);
+    assert.equal((await new Vendor(main, 'http://evil.example/cb').register()).status, 400);
+    // A client whose stored redirect is not valid (planted in storage) still cannot get a pairing page.
     const planted = new Vendor(main); assert.equal((await planted.register()).status, 201);
     const row = main.sql("SELECT payload FROM oidc WHERE model='Client' AND id=?", planted.client_id)[0];
-    const payload = JSON.parse(main.decrypt(row.payload, `oidc:Client:${planted.client_id}`)); payload.redirect_uris = ['https://evil.example/cb'];
+    const payload = JSON.parse(main.decrypt(row.payload, `oidc:Client:${planted.client_id}`)); payload.redirect_uris = ['http://evil.example/cb'];
     main.sql("UPDATE oidc SET payload=? WHERE model='Client' AND id=?", main.encrypt(JSON.stringify(payload), `oidc:Client:${planted.client_id}`), planted.client_id);
-    const res = await hit(planted.authUrl({ challenge: pkce().challenge, redirect: 'https://evil.example/cb' }), { jar: new Jar() });
+    const res = await hit(planted.authUrl({ challenge: pkce().challenge, redirect: 'http://evil.example/cb' }), { jar: new Jar() });
     const jar = new Jar();
-    const r2 = await hit(planted.authUrl({ challenge: pkce().challenge, redirect: 'https://evil.example/cb' }), { jar });
+    const r2 = await hit(planted.authUrl({ challenge: pkce().challenge, redirect: 'http://evil.example/cb' }), { jar });
     if (r2.status === 303) { const page = await hit(main.pub + r2.headers.get('location'), { jar }); assert.equal(page.status, 400); assert.ok(!/class="code"/.test(await page.text())); }
     assert.ok(res.status === 303 || res.status === 400);
-    assert.ok(!main.pending().pending.some(p => p.redirect_uri === 'https://evil.example/cb'));
+    assert.ok(!main.pending().pending.some(p => p.redirect_uri === 'http://evil.example/cb'));
   });
   await check('12c', 'a closed window: authorization, the page and approval all refuse', async () => {
     main.start_window('lark');
@@ -990,7 +997,8 @@ try {
     const evil = '\u001b[31mRED\u001b[0m‮evil\n<script>alert(1)</script>\u0007';
     const v = new Vendor(main); const reg = await v.register({ client_name: evil }); assert.equal(reg.status, 201);
     const flow = await v.begin(); assert.ok(flow.code);
-    assert.ok(!flow.page.includes('<script>') && !flow.page.includes('RED'), 'the page must not show the vendor name');
+    // The page shows the supplied name, sanitized and labelled as not verified. It never carries markup, controls or bidi marks.
+    assert.ok(!flow.page.includes('<script>') && !/[\u001b\u0007‮]/.test(flow.page) && /not verified/i.test(flow.page), 'the page shows only a sanitized, labelled name');
     const text = main.cli(['connect', 'pending']).stdout;
     assert.ok(text.includes(flow.code) && text.includes('untrusted'));
     assert.ok(!/[\u001b\u0007‮]/.test(text), 'control or bidi characters reached the terminal output');
