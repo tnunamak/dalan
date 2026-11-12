@@ -269,15 +269,15 @@ function legacyRepoProfile(file,auditGrants=false) {
 // The audit log is append-only text that a same-user process can delete. Every append therefore also records a checkpoint
 // (byte length and SHA-256 of the log, last event id) in a private SQLite file beside it, and that file doubles as the
 // lock that serializes every writer of the audit. A log that is missing, shorter than its checkpoint, or whose recorded
-// prefix changed fails closed: no grant without a matching event applies. Without a checkpoint (an install that was never
-// audited) the existing list is recorded once. A same-user actor who deletes the checkpoint file and the log together
-// leaves an install that looks never-audited; that actor can equally rewrite workers.json and the queue, so this check
-// detects accidents and one-sided tampering, not a full compromise of the account.
+// prefix changed fails closed: no event from that history can establish grant authority until an owner recovers it.
+// Without a checkpoint (an install that was never audited), the existing list is recorded once. A same-user actor who
+// deletes the checkpoint file and the log together leaves an install that looks never-audited; that actor can equally
+// rewrite workers.json and the queue, so this check detects accidents and one-sided tampering, not a full compromise.
 const auditFileOf=workersFile=>path.join(path.dirname(workersFile),'workers-audit.jsonl');
 const checkpointFileOf=workersFile=>path.join(path.dirname(workersFile),'workers-audit-checkpoint.sqlite');
 const sha256=bytes=>createHash('sha256').update(bytes).digest('hex');
 const CHECKPOINT_SQL='CREATE TABLE IF NOT EXISTS checkpoint(id INTEGER PRIMARY KEY CHECK(id=1),size INTEGER NOT NULL,sha256 TEXT NOT NULL,last_event_id TEXT)';
-export const AUDIT_INTEGRITY_HINT='Grants without a matching audit event are denied. Re-approve each grant you want with dalan worker allow NAME OWNER/REPO; the first allow or deny resets workers.json to the grants the surviving audit proves and records a new baseline.';
+export const AUDIT_INTEGRITY_HINT='The failed checkpoint makes every existing grant untrusted. Re-approve each grant you want with dalan worker allow NAME OWNER/REPO; the first allow or deny drops every current grant before applying that explicit change and establishing a new baseline.';
 // Serializes read, compare and append for every writer of the audit (loaders and the worker allow/deny commands).
 export function withAuditLock(workersFile,fn) {
   if(!fs.existsSync(path.dirname(workersFile))) return fn(null);
@@ -331,13 +331,9 @@ function auditedRepoState(workersFile,db) {
   const history=readWorkerRepoHistory(auditFile,{workersFile,maxBytes:Infinity,keepRaw:true});
   const checkpoint=readCheckpoint(workersFile,db);
   const integrity_error=integrityFailure(history,checkpoint);
-  let events=history.events;
-  if(integrity_error) {
-    // A failed checkpoint cannot vouch for the audit log. Only an unfinished profile seed remains
-    // independent evidence: its validated journal event is the source for the pending publication.
-    try {events=(readRepoMigration(workersFile)?.entries??[]).filter(entry=>entry.kind==='profile'&&!entry.complete).map(entry=>entry.event);}
-    catch {events=[];}
-  }
+  // A pending seed is also in history.events. If its checkpoint fails, an older seed cannot prove that no later
+  // revocation exists in the untrusted log, so discard every event as grant authority until owner recovery.
+  const events=integrity_error?[]:history.events;
   const state=new Map();
   for(const event of events) if(event.after.mode==='exact') state.set(event.worker,event.after.repos);
   return {auditFile,history,state,checkpoint,integrity_error};
@@ -378,7 +374,7 @@ function reconcileGrants(workersFile,readCurrent,{write=true}={}) {
   if(!write||!first.needsWrite) return first;
   try {return withAuditLock(workersFile,db=>evaluateGrants(workersFile,readCurrent(),true,db));}
   catch {
-    // The lock or audit is unusable: fail closed, apply nothing that the audit does not already list.
+    // The lock is unusable: fail closed and apply none of this load's unaudited additions.
     const denied=new Map(first.unaudited.map(item=>[item.worker,item.repos.map(repoKey)]));
     return {...first,applied:new Map([...first.applied].map(([worker,repos])=>[worker,repos.filter(repo=>!(denied.get(worker)??[]).includes(repoKey(repo)))]))};
   }
@@ -506,8 +502,8 @@ function currentGrants(file) {
   const journal=readRepoMigration(file);
   return new Map((journal?.entries??[]).filter(entry=>entry.kind==='legacy').map(entry=>[entry.worker,entry.repos]));
 }
-// After the audit log failed its checkpoint, the first allow or deny is the operator's re-approval. It drops every grant
-// that the surviving audit does not list, then records the log as the new baseline. Dropped grants stay denied until
+// After the audit log failed its checkpoint, no event proves the latest grant state. The first allow or deny drops every
+// current grant, applies only that explicit change, then records a new baseline. Other grants stay denied until
 // the operator allows them again.
 function resetAfterIntegrityFailure(file,db) {
   const {auditFile,state,integrity_error,history}=auditedRepoState(file,db);
@@ -518,7 +514,7 @@ function resetAfterIntegrityFailure(file,db) {
     const raw=JSON.parse(fs.readFileSync(file,'utf8'));
     for(const [worker,setting] of Object.entries(raw.workers??{})) {
       const audited=state.get(worker)??[],listed=Array.isArray(setting.repos)?setting.repos:[];
-      // Only drop: keep what both the configuration and the surviving audit list, never add from the audit.
+      // Integrity failure provides no trusted grant state, so this intersection removes all current grants.
       const kept=listed.filter(repo=>audited.some(k=>repoKey(k)===repoKey(repo)));
       if(kept.length!==listed.length) {dropped.push({worker,repos:listed.filter(repo=>!kept.includes(repo))});setting.repos=kept;}
     }

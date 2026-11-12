@@ -94,7 +94,7 @@ dalan service migrate-workers \
   --workspace-worker WORKER
 ```
 
-Migration reads source files without changing them. It copies effective repository grants backed by surviving audit records. It denies and reports unaudited additions. It preserves supported worker settings, but does not copy OAuth connections, tokens, jobs, results or old destination approvals. The new service defaults execution to `none`. It preserves explicit `workspaceAllowed` settings. Workspace access stays denied by default; pass `--workspace-worker NAME` to grant it to each worker that needs it. Pair every connector again, create new subscriptions with fresh signing keys, and approve each new destination revision. See [service setup](docs/service-setup.md#install-one-bridge-for-several-workers) for details.
+Migration reads source files without changing them. It copies only repository grants backed by validated audit records. If a checkpoint fails, all source grants are denied until the owner re-approves them. It denies and reports unaudited additions. It preserves supported worker settings, but does not copy OAuth connections, tokens, jobs, results or old destination approvals. The new service defaults execution to `none`. It preserves explicit `workspaceAllowed` settings. Workspace access stays denied by default; pass `--workspace-worker NAME` to grant it to each worker that needs it. Pair every connector again, create new subscriptions with fresh signing keys, and approve each new destination revision. See [service setup](docs/service-setup.md#install-one-bridge-for-several-workers) for details.
 
 For a new service home, pass `--worker NAME` once for each worker instead of migrating. See `dalan help service` for the install options.
 

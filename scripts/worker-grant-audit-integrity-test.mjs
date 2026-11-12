@@ -6,7 +6,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { loadWorkers, updateWorkerRepoPolicy, readWorkerRepoHistory, inspectGrantAudit, withAuditLock } from '../src/workers.mjs';
+import { loadWorkers, updateWorkerRepoPolicy, readWorkerRepoHistory, inspectGrantAudit, withAuditLock, parseWorkers, seedWorkerRepos, workerRepoMigrationFile } from '../src/workers.mjs';
+import { Store } from '../src/store.mjs';
 
 // Serialization and tamper detection for the grant audit: concurrent writers write one event per real change, a
 // deleted or truncated audit log fails closed, and an install that was never audited is recorded once.
@@ -112,7 +113,7 @@ try {
     t.load();assert.equal(t.events().length,1,'idempotent');
     assert.equal(inspectGrantAudit(t.file).integrity_error??null,null);
   }
-  // 6. A reset after a failed integrity check drops grants not independently trusted by a pending seed.
+  // 6. A reset after a failed integrity check drops every grant from an untrusted history.
   {
     const t=fresh();dirs.push(t.dir);
     t.save({workers:{acme:{repos:[]}}});
@@ -132,6 +133,48 @@ try {
     assert.equal(afterRecovery.allowsRepo('acme','octo/c'),true);
     assert.equal(afterRecovery.allowsRepo('acme','octo/a'),false,'recovery cannot make a forged earlier event authoritative again');
     assert.equal(afterRecovery.allowsRepo('acme','octo/b'),false);
+  }
+
+  // A pending seed must not overwrite a later audited revocation when the checkpoint becomes untrustworthy.
+  {
+    const t=fresh();dirs.push(t.dir);
+    const initial={workers:{acme:{},beta:{repos:[]}}};t.save(initial);
+    const store=new Store(path.join(t.dir,'seed.db'),{workers:parseWorkers(initial,{builtin:true})});
+    try {
+      store.submit({schema_version:1,request_id:'req_pending_seed_revoke',brief:'Read the fixture repository',inputs:[{github_repo:'octo/a',base_sha:'a'.repeat(40)}],scope_paths:['README.md'],execution_scope:'read-only',expected_output:'one sentence'},
+        {mode:'none'},null,'owner',false,null,'normal',null,undefined,null,'acme','none');
+      seedWorkerRepos(t.file,store.db);
+    } finally {store.db.close();}
+    const journalFile=workerRepoMigrationFile(t.file),journal=JSON.parse(fs.readFileSync(journalFile,'utf8'));
+    journal.entries[0].complete=false;fs.writeFileSync(journalFile,JSON.stringify(journal),{mode:0o600});
+    assert.deepEqual(journal.entries[0].event.after.repos,['octo/a'],'the pending seed records A');
+    updateWorkerRepoPolicy(t.file,'beta','allow','octo/b');
+    updateWorkerRepoPolicy(t.file,'acme','deny','octo/a');
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file,'utf8')).workers.acme.repos,[],'owner deny removes A');
+    assert.equal(t.load().allowsRepo('acme','octo/a'),false,'the recorded revocation denies A');
+    assert.equal(t.load().allowsRepo('beta','octo/b'),true,'the other worker has an independently audited grant');
+    t.save({workers:{acme:{repos:['octo/a']},beta:{repos:['octo/b']}}});
+    const revoked=JSON.parse(fs.readFileSync(t.auditFile,'utf8').trim().split('\n').at(-1));
+    revoked.after.repos=['octo/a'];
+    const lines=fs.readFileSync(t.auditFile,'utf8').trim().split('\n');lines[lines.length-1]=JSON.stringify(revoked);
+    fs.writeFileSync(t.auditFile,lines.join('\n')+'\n',{mode:0o600});
+    assert.equal(t.load().allowsRepo('acme','octo/a'),false,'an older pending seed cannot revive a revoked A');
+    assert.equal(t.load().allowsRepo('beta','octo/b'),false,'checkpoint failure invalidates every worker grant');
+    assert.ok(inspectGrantAudit(t.file).integrity_error,'the changed prefix remains visible to the owner');
+    updateWorkerRepoPolicy(t.file,'acme','allow','octo/c');
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file,'utf8')).workers.acme.repos,['octo/c'],'recovery applies only the unrelated explicit grant');
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file,'utf8')).workers.beta.repos,[],'recovery drops other workers’ untrusted grants too');
+    const restartProfile={workers:{acme:{repos:['octo/c']},beta:{repos:[]}}};
+    const restart=new Store(path.join(t.dir,'recovery.db'),{workers:parseWorkers(restartProfile,{builtin:true})});
+    try {seedWorkerRepos(t.file,restart.db);} finally {restart.db.close();}
+    assert.equal(JSON.parse(fs.readFileSync(journalFile,'utf8')).entries[0].complete,true,'restart completes the pending journal without restoring A');
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file,'utf8')).workers.acme.repos,['octo/c'],'journal retry preserves only the explicit grant');
+    assert.deepEqual(JSON.parse(fs.readFileSync(t.file,'utf8')).workers.beta.repos,[],'journal retry cannot restore another worker grant');
+    const recovered=t.load();
+    assert.equal(recovered.allowsRepo('acme','octo/a'),false,'owner recovery cannot restore the old pending seed');
+    assert.equal(recovered.allowsRepo('beta','octo/b'),false,'owner recovery cannot restore another worker grant');
+    assert.equal(recovered.allowsRepo('acme','octo/c'),true,'the explicit recovery grant applies');
+    assert.equal(inspectGrantAudit(t.file).integrity_error??null,null,'recovery establishes a new checkpoint baseline');
   }
 
   // 7. A hand-added repository gets its own reconcile event before `worker allow` records its own change.

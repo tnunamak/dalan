@@ -47,11 +47,13 @@ try {
     assert.equal(effective.allowsRepo('evidence', 'acme/b'), false, mode + ': raw B must not become an audited destination grant');
     assert.equal(effective.allowsRepo('evidence', 'acme/a'), mode !== 'unaudited' && mode !== 'truncated' && mode !== 'corrupt-checkpoint', mode + ': retain only trusted A');
   }
-  // A pending profile journal carries the original seed, but the current file can still contain a hand-edited addition.
-  // Read-only migration keeps the seed, denies the addition, and never completes or rewrites the source journal.
-  for (const { name, repos, expected } of [
-    { name: 'pending-profile-extra', repos: ['acme/seeded', 'acme/hand-edited'], expected: ['acme/seeded'] },
-    { name: 'pending-profile-removed', repos: [], expected: [] },
+  // An intact pending profile journal backs its original seed, but a corrupt checkpoint invalidates every old event.
+  // Read-only migration never completes or rewrites the source journal in either case.
+  for (const { name, repos, expected, denied, corruptCheckpoint } of [
+    { name: 'pending-profile-extra-valid', repos: ['acme/seeded', 'acme/hand-edited'], expected: ['acme/seeded'], denied: ['acme/hand-edited'], corruptCheckpoint: false },
+    { name: 'pending-profile-removed-valid', repos: [], expected: [], denied: [], corruptCheckpoint: false },
+    { name: 'pending-profile-extra-corrupt', repos: ['acme/seeded', 'acme/hand-edited'], expected: [], denied: ['acme/seeded', 'acme/hand-edited'], corruptCheckpoint: true },
+    { name: 'pending-profile-removed-corrupt', repos: [], expected: [], denied: [], corruptCheckpoint: true },
   ]) {
     const sourceDir = path.join(root, name);
     fs.mkdirSync(sourceDir, { mode: 0o700 });
@@ -60,7 +62,7 @@ try {
     const event = { event_id: randomUUID(), at: new Date().toISOString(), actor: { host_uid: process.getuid() }, worker: 'evidence',
       before: { mode: 'legacy-any', repos: null }, after: { mode: 'exact', repos: ['acme/seeded'] } };
     save(workerRepoMigrationFile(source), { version: 1, entries: [{ worker: 'evidence', kind: 'profile', repos: ['acme/seeded'], complete: false, event }] });
-    save(path.join(sourceDir, 'workers-audit-checkpoint.sqlite'), 'not sqlite');
+    if (corruptCheckpoint) save(path.join(sourceDir, 'workers-audit-checkpoint.sqlite'), 'not sqlite');
     const before = snapshot(sourceDir), originalExec = DatabaseSync.prototype.exec;
     let sourceExclusive = 0, migrated;
     DatabaseSync.prototype.exec = function(sql) {
@@ -72,8 +74,8 @@ try {
     };
     try { migrated = migrateWorkers({ home: path.join(root, name + '-new'), sources: [source] }); }
     finally { DatabaseSync.prototype.exec = originalExec; }
-    assert.deepEqual(migrated.workers[0].repos, expected, name + ': only current grants backed by the seed event survive');
-    assert.equal(migrated.denied_repositories.some(item => item.worker === 'evidence' && item.repos.includes('acme/hand-edited')), name === 'pending-profile-extra', name + ': report the raw addition');
+    assert.deepEqual(migrated.workers[0].repos, expected, name + ': invalid history fails closed; intact pending history retains only its seed');
+    assert.deepEqual(migrated.denied_repositories.filter(item => item.worker === 'evidence').flatMap(item => item.repos), denied, name + ': report every denied raw grant');
     assert.equal(sourceExclusive, 0, name + ': source never takes an exclusive writer lock');
     assert.deepEqual(snapshot(sourceDir), before, name + ': source bytes, modes, mtimes and pending journal stay unchanged');
     const effective = loadWorkers(migrated.workers_file, { builtin: true, auditGrants: true });
