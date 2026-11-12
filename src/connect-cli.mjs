@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { assertPrivateDir, untrusted, writeAtomic } from './as-files.mjs';
 import { normalizeCode, PAIRING_MINUTES } from './as-files.mjs';
-import { pollIntervalSeconds, readExposureRecords, WAKE_POLL_SECONDS_NGROK } from '../scripts/lib/expose-tailscale.mjs';
+const WAKE_POLL_SECONDS = 60;
 
 // `dalan connect ...`: the owner's side of the built-in authorization server. Every call goes through the owner Unix
 // socket with the operator key; none of it exists on the public listener.
@@ -109,15 +109,15 @@ export async function connectCommand(args, { request, operator, option, json }) 
     case 'signal-token': {
       if (positional.length || args.some((arg, i) => arg !== '--json' && arg !== '--rotate' && arg !== '--worker' && args[i - 1] !== '--worker')) throw new Error(USAGE);
       const result = await request('/connect/signal-token', 'POST', { rotate: args.includes('--rotate'), ...(worker ? { worker } : {}) }, headers());
-      // The poll interval comes from the exposure record in this home (ngrok = 300 s, otherwise 60 s). It is set in the hook, not on the bridge.
-      const seconds = pollIntervalSeconds(readExposureRecords(os.homedir()));
+      // The poll interval is advice for the hook owner; it is set in the hook, not on the bridge.
+      const seconds = WAKE_POLL_SECONDS;
       const dir = defaultPath(os.homedir(),'.config/dot-bridge');
       assertPrivateDir(dir);
       const file = path.join(dir, `signal-url.${result.worker}`);
       writeAtomic(file, `${result.url}\n`);
       // stdout contains only the private file path; the hook owner can read it without exposing the URL in logs.
       if (json) return { result: { path: file, worker: result.worker, rotated: result.rotated, poll_interval_seconds: seconds } };
-      process.stderr.write(`Hook poll interval: ${seconds} s or more. ${seconds === WAKE_POLL_SECONDS_NGROK ? 'For this exposure, do not poll faster than 300 s.' : 'Do not poll faster than every 60 s.'}\n`);
+      process.stderr.write(`Hook poll interval: ${seconds} s or more. Do not poll faster than every 60 s.\n`);
       return { result: file, plain: true };
     }
     case 'allow-callback': if (positional.length !== 1) throw new Error(USAGE); return { result: await request('/connect/allow-callback', 'POST', { pattern: positional[0] }, headers()) };
