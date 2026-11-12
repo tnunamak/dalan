@@ -222,7 +222,7 @@ function mayPrepareCheckMetadata(response,worker,subject=null) {
   return response.status==='claimed'&&!response.cancelled_at&&claim?.state==='active'&&claim.worker===target&&
     (subject===null||claim.subject===subject)&&!store.leaseExpired(claim);
 }
-function workerWorkspaceAllowed(worker) { const policy=currentRepoPolicy();return policy.legacy||policy.workers.get(worker)?.workspaceAllowed===true; }
+function workerWorkspaceAllowed(worker,requestId=null) { const policy=repoPolicyFor({request_id:requestId});return policy.legacy||policy.workers.get(worker)?.workspaceAllowed===true; }
 function withAvailableChecks(response,workerSurface=false,worker='dot',subject=null,workspaceAllowed=null) {
   response=withoutT3(response);
   const artifacts=store.sealedUploads(response.request_id,{clientIds:workerSurface});
@@ -232,7 +232,7 @@ function withAvailableChecks(response,workerSurface=false,worker='dot',subject=n
   const checks=store.db.prepare("SELECT j.id check_run_id,j.check_id,CASE WHEN j.status='completed' THEN COALESCE(r.diff_sha256,j.diff_sha256) ELSE j.diff_sha256 END diff_sha256,j.status,j.error,j.output_preview,r.exit_code,r.timed_out,r.output_artifact_id,r.output_sha256,r.duration_ms,r.evidence FROM check_jobs j LEFT JOIN check_runs r ON r.id=j.id WHERE j.request_id=? ORDER BY j.started_at").all(response.request_id).map(withEvidence);
   const blocker=workerSurface?null:queuedRepositoryBlocker(response);
   const enriched={...response,artifacts,checks,...(blocker?{queue_blocker:blocker}:{}),...(checks.some(c=>c.evidence)?{not_identified:NOT_IDENTIFIED}:{})};
-  if(!workspaceEnabled||workerSurface&&!(workspaceAllowed??workerWorkspaceAllowed(worker))||response.assignment?.execution_scope!=='implementation') return enriched;
+  if(!workspaceEnabled||workerSurface&&!(workspaceAllowed??workerWorkspaceAllowed(worker,response.request_id))||response.assignment?.execution_scope!=='implementation') return enriched;
   const target=store.db.prepare('SELECT target_worker FROM assignments WHERE request_id=?').get(response.request_id)?.target_worker??worker;
   if(!mayPrepareCheckMetadata(response,target,subject)) return {...enriched,available_checks:[],available_checks_error:'repository_policy_denied'};
   const execution=response.execution??store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(response.request_id).execution;
@@ -679,7 +679,7 @@ async function tool(name,a,principal,notifyMeta) {
   }
 }
 async function dispatchTool(name,a,principal,notifyMeta) {
-  const workerWorkspaceEnabled=workspaceEnabled&&workerWorkspaceAllowed(principal.worker);
+  const workerWorkspaceEnabled=workspaceEnabled&&workerWorkspaceAllowed(principal.worker,a?.request_id);
   const t3Audit=(t3Tools.has(name)||notifyTools.has(name))?await loadT3Audit():null;
   if(t3Audit) t3Audit.admitT3Audit(store.db,principal.worker,principal.subject);
   store.recordWorkerCall(principal.subject,toolNames.has(name)?name:'unknown',principal.worker);

@@ -41,7 +41,7 @@ class Bridge {
     this.env = fixtureEnv(this.home, { NODE_ENV: 'test', NODE_OPTIONS: `--import=${guard}`, DOT_BRIDGE_AUTH_MODE: 'builtin', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_MIN_FREE_BYTES: '0', DOT_BRIDGE_PORT: String(this.port), DOT_BRIDGE_WORKSPACE_ROOT: path.join(this.home, 'work') });
     delete this.env.DALAN_LEGACY_PROFILE; // these tests exercise the missing-profile refusal; the shared fixture env opts in
     fs.mkdirSync(this.config, { recursive: true });
-    fs.writeFileSync(path.join(this.config, 'workers.json'), JSON.stringify({ workers: { dot: {repos:['test/runtime']}, lark: {repos:['test/runtime']}, duet: {repos:['test/runtime']} } }), { mode: 0o600 });
+    fs.writeFileSync(path.join(this.config, 'workers.json'), JSON.stringify({ workers: { dot: {workspaceAllowed:true,repos:['test/runtime']}, lark: {workspaceAllowed:true,repos:['test/runtime']}, duet: {workspaceAllowed:true,repos:['test/runtime']} } }), { mode: 0o600 });
     must(this.cli(['as-init', '--public-url', this.url]).code === 0, 'as-init failed (output withheld)');
     this.secret = randomBytes(32).toString('hex');
     fs.writeFileSync(path.join(this.config, 'env'), `BRIDGE_PATH_SECRET=${this.secret}\n`, { mode: 0o600 });

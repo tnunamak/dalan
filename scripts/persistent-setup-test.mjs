@@ -108,7 +108,7 @@ try {
   assert.equal(mode(path.join(home,'.config/dalan')),0o700,'copied authorization keys stay inside a private config directory');
   const workersFile = path.join(home, '.config/dalan/workers.json');
   assert.equal(mode(workersFile), 0o600);
-  assert.deepEqual(JSON.parse(fs.readFileSync(workersFile, 'utf8')), { workers: { lark: { repos: [] } }, default_execution: 'none' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(workersFile, 'utf8')), { workers: { lark: { repos: [], workspaceAllowed: true } }, default_execution: 'none' });
   assert(fs.existsSync(path.join(home, '.config/dalan/as.json')), 'init wrote as.json');
   const urlFile = path.join(home, 'resource-url');
   assert.equal(mode(urlFile), 0o600);

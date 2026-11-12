@@ -69,7 +69,7 @@ class Bridge {
       DOT_BRIDGE_WORKSPACE_ROOT: path.join(this.home, 'work'),
     });
     fs.mkdirSync(this.config, { recursive: true });
-    fs.writeFileSync(path.join(this.config, 'workers.json'), JSON.stringify({ workers: { dot: {repos:['test/runtime']}, lark: {repos:['test/runtime']} } }), { mode: 0o600 });
+    fs.writeFileSync(path.join(this.config, 'workers.json'), JSON.stringify({ workers: { dot: {workspaceAllowed:true,repos:['test/runtime']}, lark: {workspaceAllowed:true,repos:['test/runtime']} } }), { mode: 0o600 });
     const initialized = this.cli(['as-init', '--public-url', this.url]);
     must(initialized.code === 0, 'as-init failed');
     const secret = randomBytes(32).toString('hex');

@@ -25,7 +25,7 @@ try {
     const claims=Buffer.from(JSON.stringify({...JSON.parse(Buffer.from(payload,'base64url')),azp:'fixture-client'})).toString('base64url');
     const input=header+'.'+claims;return input+'.'+sign('RSA-SHA256',Buffer.from(input),adapter.privateKey).toString('base64url');
   };
-  fs.writeFileSync(path.join(root,'workers.json'),JSON.stringify({workers:{dot:{connections:[{issuer:`http://127.0.0.1:${adapter.jwksPort}/realms/fake`,subject:'W1',client_id:'fixture-client'}],repos:['example-owner/fixture']}}}),{mode:0o600});
+  fs.writeFileSync(path.join(root,'workers.json'),JSON.stringify({workers:{dot:{workspaceAllowed:true,connections:[{issuer:`http://127.0.0.1:${adapter.jwksPort}/realms/fake`,subject:'W1',client_id:'fixture-client'}],repos:['example-owner/fixture']}}}),{mode:0o600});
   await adapter.reset();
   async function submit(name,{implementation=false,retention=100000}={}) {
     const id=adapter.requestId(name),token=adapter.ownerToken(name);

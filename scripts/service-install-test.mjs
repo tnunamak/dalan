@@ -8,9 +8,9 @@ import { defaultPath } from '../src/paths.mjs';
 import { installService } from '../src/service.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const scratch = path.join(os.homedir(), '.tmp/one-bridge-1111');
+const scratch = path.join(os.homedir(), '.tmp');
 fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-const root = fs.mkdtempSync(path.join(scratch, 'service-install-'));
+const root = fs.mkdtempSync(path.join(scratch, 'dalan-service-install-'));
 const userHome = path.join(root, 'user');
 fs.mkdirSync(userHome, { mode: 0o700 });
 const xdg = path.join(userHome, '.config');
@@ -71,7 +71,7 @@ try {
   const cliHome = path.join(root, 'cli-home');
   const cli = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), 'service', 'install', '--home', cliHome,
     '--public-url', 'https://cli.example.test', '--port', '8798', '--target', '127.0.0.1:8798',
-    '--worker=dot', '--worker', 'muse', '--write-units-only', '--json'], { env, encoding: 'utf8' });
+    '--worker=alpha', '--worker', 'beta', '--write-units-only', '--json'], { env, encoding: 'utf8' });
   assert.equal(cli.status, 0, cli.stderr);
   const cliResult = JSON.parse(cli.stdout);
   assert.equal(cliResult.started, false);
