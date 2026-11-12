@@ -327,19 +327,19 @@ Install the new code while the service is stopped (for a source install, follow 
 
 If the current ACK ledger is missing, restore its compatible backup. If the newer ledger cannot be read by the target code, prefer code that supports it. Restoring an older compatible ledger instead loses later acknowledgments and can repeat already-accepted notices. A consistent backup does not recover ACKs recorded after that backup. Missing receipts or artifact bytes can also make prior results unavailable.
 
-This build refuses startup when `bridge.db` has a SQLite `user_version` above 65. The refusal occurs before schema bootstrap, claim recovery, or listener startup; it reports both versions and makes no schema or row change. SQLite may create, recover or clean up the `-wal` and `-shm` files. Use code that supports the database version, or restore a consistent backup compatible with the code. Never lower `user_version` by hand. Some older builds do not check for a future schema and can modify a database they do not understand. Keep the service stopped during downgrade and restore the full compatible backup before running old code.
+This build refuses startup when `bridge.db` has a SQLite `user_version` above 66. The refusal occurs before schema bootstrap, claim recovery, or listener startup; it reports both versions and makes no schema or row change. SQLite may create, recover or clean up the `-wal` and `-shm` files. Use code that supports the database version, or restore a consistent backup compatible with the code. Never lower `user_version` by hand. Some older builds do not check for a future schema and can modify a database they do not understand. Keep the service stopped during downgrade and restore the full compatible backup before running old code.
 
 ### Restart a service and check its state
 
-Linux (systemd user manager):
+Linux (systemd user manager). For `dalan service install`, replace `UNIT.service` with the exact unit printed by install, such as `dalan-<10 hex>.service`. The legacy `scripts/worker-bridge-setup.mjs` uses `dot-bridge-NAME.service`:
 
 ```sh
-systemctl --user restart dot-bridge-NAME.service
-systemctl --user is-active dot-bridge-NAME.service
-journalctl --user -u dot-bridge-NAME.service -n 20
+systemctl --user restart UNIT.service
+systemctl --user is-active UNIT.service
+journalctl --user -u UNIT.service -n 20
 ```
 
-macOS (launchd). `LABEL` is `org.dalan.dot-bridge-NAME`, or the label of the older release when it generated the service (find the file with `ls ~/Library/LaunchAgents | grep dot-bridge`):
+macOS (launchd; the Linux-only `dalan service install` does not apply). These commands are for the legacy `scripts/worker-bridge-setup.mjs`. `LABEL` is `org.dalan.dot-bridge-NAME`, or the label of the older release when it generated the service (find the file with `ls ~/Library/LaunchAgents | grep dot-bridge`):
 
 ```sh
 launchctl kickstart -k user/$(id -u)/LABEL
@@ -410,6 +410,7 @@ The table comes from a source review of `Store.migrate()` and the helper migrati
 | 61 | Add nullable `claims.connection_id` without inferring or backfilling a connection from the live set. Older grants keep NULL; built-in claim mutations require the recorded live granting connection. |
 | 62 | Add nullable lease boot and monotonic deadline fields on `claims`. Additive. |
 | 65 | Rename `dot_breaks` to `worker_breaks` (with its index) and `assignments.skipped_by_dot_at` to `skipped_at`; the `break_notices` foreign key follows the table. Data is unchanged, but older code looks for the old names, so **roll back only from the backup taken before this upgrade**. Schemas 63 and 64 belong to migrations merged before this one. A database that reached schema 35 under the earlier step keeps `DEFAULT 'dot'` on `assignments.target_worker` and `messages.target_worker` in its stored schema text (SQLite cannot change a default without rebuilding the table); a new database has an empty default, and every insert names the worker. |
+| 66 | Add `policy_work_orders`, its backlog index and immutable-intent trigger for read-only worker pools. Additive; existing assignments are not rewritten. |
 
 **Live claims:** the `v0.2.0 live claim survives upgrade to schema 57` fixture is historical evidence for that upgrade, not a current built-in claim-continuity guarantee. Migration 61 retains older claim records but leaves their connection binding NULL. In built-in mode, those grants cannot mutate or retry as the holding connection (`connection_not_live`); wait for the prior lease deadline and verified host stop before acquiring a successor. The historical fixture does not bypass current connection, destination or lease guards. Two additional lease limits apply:
 
@@ -428,7 +429,7 @@ Upgrade steps:
 
 Short downtime does not keep a built-in claim valid across migration 61. A claim left in flight cannot act after the upgrade; wait for its lease deadline and verified host stop before acquiring a successor.
 
-**Rollback limit:** 0.2.0 refuses a database newer than schema 49 (see the 0.2.0 changelog); this build refuses versions above 65 before schema bootstrap. Do not lower `user_version` or undo encryption by hand. Use compatible code, or a separately reviewed restore of the complete pre-upgrade state. Restoring that snapshot discards later work; preserve compatible newer ACK proof and account for possible duplicate notices if proof is lost.
+**Rollback limit:** 0.2.0 refuses a database newer than schema 49 (see the 0.2.0 changelog); this build refuses versions above 66 before schema bootstrap. Do not lower `user_version` or undo encryption by hand. Use compatible code, or a separately reviewed restore of the complete pre-upgrade state. Restoring that snapshot discards later work; preserve compatible newer ACK proof and account for possible duplicate notices if proof is lost.
 
 The request log rotates before the next append after it exceeds 32 MiB, retaining four older files (`requests.jsonl.1` through `.4`, newest to oldest). Set `DALAN_LOG_MAX_BYTES` and `DALAN_LOG_KEEP` to positive integers to override these defaults. Each line stays whole, so a file can exceed the threshold by one line. Fresh logs use mode 0600, and break-usage backfills read all retained generations, oldest first; older history is discarded when retention fills.
 
@@ -626,7 +627,7 @@ SERVICE_HOME="${DALAN_HOME:?Export DALAN_HOME as the trial home that try printed
 SERVICE_PATH="$PATH"
 ```
 
-For a manual foreground server, use its `DALAN_HOME` and launching `PATH` in the same two assignments. For a generated service, use instead the `HOME` and `PATH` from `dot-bridge-NAME.service` (systemd) or the `EnvironmentVariables` in `<home>/Library/LaunchAgents/org.dalan.dot-bridge-NAME.plist` (launchd; `<home>` is the home of the user who ran setup, not the private bridge home):
+For a manual foreground server, use its `DALAN_HOME` and launching `PATH` in the same two assignments. For a service generated by the legacy `worker-bridge-setup.mjs`, use instead the `HOME` and `PATH` from `dot-bridge-NAME.service` (systemd) or the `EnvironmentVariables` in `<home>/Library/LaunchAgents/org.dalan.dot-bridge-NAME.plist` (launchd; `<home>` is the home of the user who ran setup, not the private bridge home):
 
 ```sh
 SERVICE_HOME='/absolute/bridge/home'
@@ -673,7 +674,7 @@ Importing `src/server.mjs` defines `main()` without starting the service or crea
 
 ## Historical appendix: pre-worker rollback
 
-**Do not run this historical recipe against schema 65 or other current layouts.** It omits newer retained relationships, including `submit_supersedes`. For a current downgrade, stop the service and use matching code or a separately reviewed restore of a complete compatible pre-upgrade backup, preserving compatible newer positive-ACK evidence. Do not alter `user_version` or delete relationship data to force compatibility. The following is retained only as a historical reference for the pre-worker build.
+**Do not run this historical recipe against schema 66 or other current layouts.** It omits newer retained relationships, including `submit_supersedes`. For a current downgrade, stop the service and use matching code or a separately reviewed restore of a complete compatible pre-upgrade backup, preserving compatible newer positive-ACK evidence. Do not alter `user_version` or delete relationship data to force compatibility. The following is retained only as a historical reference for the pre-worker build.
 
 Rollback discards non-default-worker rows from the serving database to prevent even known-ID reads by the old worker. The backup retains them. Run these steps in order; do not expose the old route before the issuer gate passes.
 
