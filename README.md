@@ -1,16 +1,22 @@
 # Dalan
 
-Dalan lets you drive agents you cannot start from a terminal or script. Spawn-based orchestrators and native subagents start agents through a CLI or API; hosted agents inside products such as ChatGPT or Meta AI can instead connect to you over an MCP connector. Dalan turns the direction around: the agent connects in, pulls bounded jobs, and returns reports you accept or reject.
+Give a hosted agent a job from your terminal.
 
-Use that connection for an independent code review, extra capacity or work on another account. A small service on your computer, the *bridge*, holds the queue; your connected agent does the work.
+Dalan connects agents you cannot start from a terminal, such as ChatGPT, to a queue on your computer. You submit a bounded task; the agent pulls it, returns a report, and you accept or reject the result. Unlike an orchestrator that starts agents through a CLI or API, Dalan works when the agent must connect to you.
+
+Use it for a second code review, work on another account, or extra capacity. You still prompt or schedule the agent in its own client.
+
+```sh
+npx -y @tnunamak/dalan try
+```
+
+**Success: the agent’s report appears here for acceptance.** This hosted demo is a text job, not a repository review; it has no workspaces. Check the requirements below before running it.
 
 - **Repository access starts denied.** A new worker can use no repository through Dalan until you grant one. Finishing a job does not accept its result: acceptance is a separate owner decision.
-- **Any MCP client can be the worker.** Claude Code, Codex CLI, ChatGPT, Muse Spark (Meta) or your own agent connect over MCP (Model Context Protocol) with OAuth sign-in. Dalan does not run a model itself. See [Connect any MCP worker](#connect-any-mcp-worker) and [Connect ChatGPT](docs/connect-chatgpt.md). [T3 Code](docs/t3-integration.md#use-dalan-from-t3-code) can delegate to any of them.
+- **Any compatible HTTP MCP client with OAuth can be the worker.** The client must support the bridge's protocol and its account or workspace must permit custom connectors. Dalan does not run a model itself. See [Connect any MCP worker](#connect-any-mcp-worker) after your first result.
 - **The bridge listens only on your computer.** A hosted trial puts a temporary public route in front of it, only after you choose a hosted MCP client, and removes the route when you stop.
 
 **Not for:** Dalan does not run, schedule or start agents for you, and it does not merge code. It queues work and returns reports for you to review.
-
-**Help:** see [Still stuck?](#still-stuck) for the recovery steps and how to open an issue.
 
 <a id="quickstart"></a>
 
@@ -30,13 +36,11 @@ Run:
 npx -y @tnunamak/dalan try
 ```
 
-Press Enter twice to take the default profile, ChatGPT (type `2` for claude.ai). The temporary relay needs no account and there is no route to choose, but your MCP client still needs an eligible account or workspace, and its model use is billed there. Dalan starts a trial link by itself and prints one line first:
-
-> Trial link via localhost.run, a third-party relay that can see this traffic; the address changes within hours. For daily use: dalan setup
+Press Enter twice to take the default profile, ChatGPT (type `2` for claude.ai). The temporary relay needs no account and there is no route to choose, but your MCP client still needs an eligible account or workspace, and its model use is billed there. Public trials use the bundled Gozar route provider, backed by localhost.run. No separate Gozar install is needed. Dalan warns that the third-party relay can see the traffic and that its address changes within hours. For daily use, run `npx -y @tnunamak/dalan setup` and select the stable Tailscale route explicitly as described below.
 
 The relay ends TLS, so it can read the connector URL (which holds a secret) and everything sent through it. Keep private work out of the demo. The trial ends after 3 hours and can fail sooner.
 
-Use `dalan try --public --route gozar` for a client with internet reach. Dalan finds `gozar` on PATH, or uses the executable at `GOZAR_BIN`. Gozar starts a localhost.run trial transport and removes it on Ctrl-C; Dalan keeps its own OAuth sign-in, origin and identity checks. Gozar adds no authentication. `--route auto` prefers installed Gozar; without it, the saved route or default trial link still applies.
+The public default and `--route auto` choose bundled `@tnunamak/gozar ^0.1.0`. To select it explicitly, run `npx -y @tnunamak/dalan try --public --route gozar`. Gozar starts the temporary transport and removes it on Ctrl-C; Dalan still owns OAuth approval and checks the public origin and identity. Bundling does not make the relay private or add authentication to it.
 
 Then:
 
@@ -61,7 +65,7 @@ For other options, see `npx -y @tnunamak/dalan help try`. Skip the question with
 
 Choose a commit your coding agent just finished and ask another connected agent to review it. The hosted demo's isolated bridge does not enable repository workspaces. For this job, first use the [manual bridge setup](docs/manual-setup.md#owner-and-requester-setup) with workspaces enabled and [connect your MCP client](docs/manual-setup.md#worker-setup). A hosted client needs a [stable HTTPS route](#expose-the-bridge-to-other-machines). Keep that bridge running. Git and Python 3.8 or newer must be installed on its computer.
 
-In a second terminal, use the CLI from `npm install -g @tnunamak/dalan`. Set `DALAN_HOME` to that bridge's home and use the worker name you connected (replace `hosted` below with that name; the manual setup uses `local`). For a private repository, sign in to GitHub with `gh auth login` under the bridge's effective home; a login in your ordinary home does not give an isolated bridge access. See [repository setup](#separate-repository-assignment) for fetching from a local clone instead.
+In a second terminal, use the CLI from `npm install -g @tnunamak/dalan`. Set `DALAN_HOME` to that bridge's home and use the worker name you connected (replace `hosted` below with that name; the manual setup uses `local`). For a private repository, install the [GitHub CLI](https://cli.github.com/) first, then run `HOME="$DALAN_HOME" gh auth login` with `DALAN_HOME` set to the bridge home; a login in your ordinary home does not give an isolated bridge access. See [repository setup](#separate-repository-assignment) for fetching from a local clone instead.
 
 1. Grant exactly your repository and check the grant. Replace `OWNER/REPO` with its GitHub name.
 
@@ -126,13 +130,13 @@ In a second terminal, use the CLI from `npm install -g @tnunamak/dalan`. Set `DA
 
 ### Use a stable address
 
-A trial link is for a first look. For continued use you want an address that stays the same. `dalan setup` saves your route choice; it does not install a background service, so keep the `try` terminal open while you use the connector. Run:
+A trial link is for a first look. For continued use you want an address that stays the same. `npx -y @tnunamak/dalan setup` saves your route choice; it does not install a background service, so keep the `try` terminal open while you use the connector. Run:
 
 ```sh
 npx -y @tnunamak/dalan setup
 ```
 
-`dalan setup` looks for [Tailscale](https://tailscale.com/download). If it finds it ready, it asks one question, "Use Tailscale (your-machine) for a stable address? [Y/n]", and saves your answer. If not, it prints a short list: install Tailscale (`tailscale up`, then run `dalan setup` again) or keep using trial links. When Gozar is not installed, later public runs reuse that choice and ask no route question. With Gozar installed, pass `--route tailscale` to keep using the saved stable route. They use your Tailscale address and a home saved at `~/.local/share/dalan-hosted-<client>`, so the address and the sign-in survive a restart and you add the connector once. This holds when your Tailscale can serve Funnel on port 443; if another rule holds that port, the address is a per-run node and changes (see the details below). Tailscale login, client sign-in and your approval can still be asked. The run says "This is not a trial link." If Tailscale fails, Dalan stops and tells you why; it never switches to a trial link on its own.
+For a stable route, install and start [Tailscale](https://tailscale.com/download) using its platform instructions, sign in, then run `npx -y @tnunamak/dalan setup` again. Setup checks whether Tailscale is ready and offers to save that route. Public default and `--route auto` still choose bundled Gozar; use `--route tailscale` explicitly for the saved stable route. That route uses your Tailscale address and a home at `~/.local/share/dalan-hosted-<client>`, so the address and sign-in survive a restart when Funnel port 443 is available. If another rule holds 443, the route uses a temporary per-run node and its address changes (details below). Tailscale login, client sign-in and terminal approval can still be required. If the selected Tailscale route fails, Dalan stops and explains why; it never silently switches to a trial link.
 
 Switching changes your public address, and the address is part of the sign-in identity, so the trial's client registration and sign-in do not carry over. Stop the running `try` with Ctrl-C, then start the stable run: `npx -y @tnunamak/dalan try --public --route tailscale --client chatgpt` (use `--client claude` for claude.ai). Confirm the new URL before you change the connector, and keep that terminal open: `setup` saved a route choice, not a background service. If your client allows two connectors, add and test the new one, then remove the trial one; otherwise remove the trial connector, add the new URL and sign in again. Reports from the trial stay in the trial's Home until you delete it. Dalan never reuses a trial's sign-in under a new address; a home from a different address is refused. `dalan setup` says this in one line.
 
@@ -141,7 +145,7 @@ Switching changes your public address, and the address is part of the sign-in id
 
 **The trial link.** `ssh -R 80:localhost:<port> nokey@localhost.run` forwards a public `https://<id>.lhr.life` address to a small gate on your computer. No account or key is used, and Dalan does not read your SSH config, agent or keys. The first connection trusts the relay's host key (trust on first use), kept in a file in the trial home. The relay ends TLS, so it can see the traffic; the connector URL's secret is part of every request path, which is why the disclaimer is there. Dalan checks the discovery and sign-in pages through the link before it prints the URL.
 
-**The real route.** Used after `dalan setup`, or with `--route tailscale`. It is always on port 443, because some hosted clients (claude.ai, for one) reach nothing else.
+**The explicit Tailscale route.** Selected with `--route tailscale`, after setup. It is always on port 443, because some hosted clients (claude.ai, for one) reach nothing else.
 - It uses your computer's Tailscale Funnel on 443 when no other rule holds that port.
 - If another rule holds 443, that rule is left alone and the trial starts its own temporary Tailscale node (`dalan-trial-<id>`, userspace, in the trial home). A new node asks for a one-time sign-in, whose link Dalan prints (set `DALAN_TS_AUTHKEY` to skip it).
 - The node keeps its daemon state in memory and uses a temporary directory inside the trial home for TLS certificates. Tailscale drops the ephemeral node when it goes offline, even after a crash, and Ctrl-C also logs it out. A later trial ends any daemon a crashed trial left. If a certificate check cannot be confirmed stopped, cleanup keeps its files for the next run instead of deleting them under a live process.
@@ -188,7 +192,7 @@ Connect your worker as an HTTP MCP server with OAuth:
   Keep the URL private.
   How to connect Claude Code, Codex or another client: https://github.com/tnunamak/dalan/blob/v0.6.0/README.md#connect-your-own-worker
   Callbacks: http://127.0.0.1/callback, http://localhost/callback. To add one, restart with:
-  npx @tnunamak/dalan try --home '/home/you/.local/share/dalan-trial' --callback PATTERN
+  npx -y @tnunamak/dalan try --local --home '/home/you/.local/share/dalan-trial' --callback PATTERN
 Job req_01234567… is queued for your worker. When it is connected, send it:
   "Request req_01234567… is your only job: claim it with Dalan, do what its brief asks, report progress and finish it with the claim_id. Stop if it is missing or cancelled. Claim no other job."
 Waiting for your worker. Ctrl-C stops the bridge.
@@ -242,11 +246,11 @@ If a step fails, look for its message here:
 - **The browser shows `Connection attempt invalid or expired`.** Each visit to the sign-in URL starts a new attempt with a new code, and only a live attempt can be approved. Start the sign-in again in the client and approve the new code.
 - **No approval block appears in the `try` terminal.** After a while, `try` prints the `dalan connect pending` and `dalan status` commands to run in another terminal, and it shows each new attempt as it arrives.
 - **`npx @tnunamak/dalan try` fails with an npm error such as `ECONNREFUSED`, `ETIMEDOUT` or `ENOTFOUND`.** npm cannot reach the registry. Check the network or proxy with `npm config get registry` and `npm config get proxy`, then run the command again.
-- **Your client uses a different callback.** `try` allows `http://127.0.0.1/callback` and `http://localhost/callback` on any port. Stop `try` and start it again with `--callback PATTERN` ([pattern rules](docs/setup-reference.md#callback-patterns)).
+- **Your client uses a different callback.** `try` allows `http://127.0.0.1/callback` and `http://localhost/callback` on any port. Stop `try` and restart with `npx -y @tnunamak/dalan try --local --home /path/to/printed-home --callback PATTERN`, replacing the home and pattern ([pattern rules](docs/setup-reference.md#callback-patterns)).
 
 <a id="still-stuck"></a>
 
-**Still stuck?** With `DALAN_HOME` set as in [Next steps](#next-steps), run `dalan status` and `dalan doctor`, and match their messages against the list above. If that does not help, [open an issue](https://github.com/tnunamak/dalan/issues) with the Dalan version, your OS, your worker client and its version, the command that you ran and the error with private values removed. Never include the private MCP URL, tokens or sign-in links. Report a vulnerability through the [security policy](SECURITY.md), not in an issue.
+**Still stuck?** With `DALAN_HOME` set as in [Next steps](#next-steps), run `npx -y @tnunamak/dalan status` and `npx -y @tnunamak/dalan doctor`, and match their messages against the list above. If that does not help, [open an issue](https://github.com/tnunamak/dalan/issues) with the Dalan version, your OS, your worker client and its version, the command that you ran and the error with private values removed. Never include the private MCP URL, tokens or sign-in links. Report a vulnerability through the [security policy](SECURITY.md), not in an issue.
 
 The [worker guide](docs/worker-clients.md) has the full Claude Code and Codex CLI recipes, including running Codex without a screen (`codex exec`).
 
@@ -256,7 +260,7 @@ Each row starts from a working trial.
 
 | To do this | Go to |
 |---|---|
-| Run `dalan` commands against the trial bridge | In a second terminal, install the CLI with `npm install -g @tnunamak/dalan` and set `DALAN_HOME` to the exact **Home** printed by the running trial. Run `dalan status`, then `dalan inbox --all`. A public trial makes a new home each run; do not use the local-trial default for it. |
+| Run `dalan` commands against the trial bridge | In a second terminal, install the CLI with `npm install -g @tnunamak/dalan` and set `DALAN_HOME` to the exact **Home** printed by the running trial. Run `npx -y @tnunamak/dalan status`, then `npx -y @tnunamak/dalan inbox --all`. A public trial makes a new home each run; do not use the local-trial default for it. |
 | Give your worker a task of your own, with no file to write | [Your own first job](#your-own-first-job) |
 | Give your worker a job on a real repository | [Give a worker a repository job](#separate-repository-assignment) |
 | Let a coding agent submit and read jobs as tool calls | [`dalan mcp`](docs/local-agent-mcp.md) |
@@ -264,7 +268,7 @@ Each row starts from a working trial.
 | Connect a worker on another computer, or keep a hosted connection running | [Expose the bridge](#expose-your-bridge), then [Connect any MCP worker](#connect-any-mcp-worker) |
 | Keep a bridge running as a service | [Run Dalan as a service](docs/service-setup.md) |
 | Delegate T3 Code tasks to your worker, or give a worker T3 tools | [T3 and orchestration integration](docs/t3-integration.md#use-dalan-from-t3-code) and [T3 tools](docs/t3-reverse-control.md) |
-| See every command | `dalan help --all` |
+| See every command | `npx -y @tnunamak/dalan help --all` |
 
 <a id="your-own-first-job"></a>
 
@@ -334,7 +338,7 @@ The repository can come from GitHub or from a clone on this computer:
 
    **Check:** the list contains only the repositories that you intend to allow. A new worker can use no repository; a grant for one repository does not grant its owner's other repositories. Grants take effect without a restart.
 
-2. As requester, find the commit to pin. For a GitHub repository, `git ls-remote https://github.com/OWNER/REPO HEAD` prints it in the first column; for a local clone, run `git -C /path/to/my-project rev-parse HEAD`. Make a new request ID with `node -e "console.log(require('node:crypto').randomUUID())"`.
+2. As requester, find the commit to pin. Prefer `git -C /path/to/my-project rev-parse HEAD` from your local clone. Without a clone, `git ls-remote https://github.com/OWNER/REPO HEAD` prints the SHA in its first column, but private repositories need Git HTTPS credentials configured (for example, `gh auth setup-git` after login in the same home); `gh auth login` alone does not guarantee Git authentication. Make a new request ID with `node -e "console.log(require('node:crypto').randomUUID())"`.
 
 3. Save this job as `repository-job.json`, with your repository, commit and request ID. The job reads `README.md`; if the repository has none in its top directory, name another file.
 
@@ -382,10 +386,10 @@ To try a hosted client once, run `npx -y @tnunamak/dalan try` ([above](#quicksta
 
 A worker connects from wherever its MCP client runs. `127.0.0.1` reaches only the bridge computer. A worker on another computer needs a network route to the bridge, and a hosted client such as ChatGPT needs a public HTTPS address.
 
-For this, set up a separate, long-running bridge with a stable HTTPS address. The setup script writes a systemd user service (Linux) or a launchd agent (macOS). The default route is [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), which needs no reverse proxy and no domain of your own:
+For this, set up a separate, long-running bridge with a stable HTTPS address. The setup script writes a systemd user service (Linux) or a launchd agent (macOS). This service recipe explicitly selects [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), which needs no reverse proxy and no domain of your own:
 
 1. Complete the [Tailscale Funnel prerequisites](docs/service-setup.md#with-tailscale-funnel).
-2. Run the setup script from the installed package (`npm install -g @tnunamak/dalan`):
+2. Run the setup script from the installed package (`npm install -g @tnunamak/dalan`). Before copying the command, replace `NAME` with your worker name, `PORT` with a free local listener port such as `8799`, and `HOME_PATH` with an absolute, dedicated bridge-home path:
 
    ```sh
    node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --worker NAME --port PORT --home HOME_PATH --expose tailscale --start
@@ -393,7 +397,7 @@ For this, set up a separate, long-running bridge with a stable HTTPS address. Th
 
    From a checkout, run `node scripts/worker-bridge-setup.mjs` with the same options.
 
-   Setup picks the first free Funnel port (443, 8443 or 10000); add `--funnel-port N` to choose one.
+   Setup picks the first free Funnel port (443, 8443 or 10000); add `--funnel-port N` to choose one. For claude.ai use `--funnel-port 443`; if 443 is occupied, stop and select another supported route, not another port.
 3. Connect the worker: a native client on another computer follows [Native client on a remote HTTPS bridge](docs/worker-clients.md#native-client-on-a-remote-https-bridge); a hosted client follows its recipe in [Connect any MCP worker](#connect-any-mcp-worker).
 
 If you already run an HTTPS reverse proxy, pass `--public-url https://bridge.example.com` instead of `--expose tailscale`; the [service guide](docs/service-setup.md) lists the routes to forward. A successful network check only shows that the address answers: run a first job through the new connection to prove that the worker can work.
@@ -427,12 +431,12 @@ Start each new worker by hand for its first job. Dalan never starts a worker, in
 - **Use a short path on a local disk.** The bridge's admin socket path has a length limit, and network or FUSE file systems are not supported. If a home is too long or not on a local disk, use a new short directory: `npx @tnunamak/dalan try --local --home /short/local/path`. Do not use an existing bridge home.
 - **In local mode a second run reuses the home**, its worker profile, job history and port (a public trial gets a new home; see above, and never point a new address at an old home to get past a refusal). It first replaces the worker's connection with the demo worker, so sign in again in your client and approve it again after the demo.
 - **To start over**, stop `try` and delete the trial home.
-- **For scripts**, run `dalan try < /dev/null`: with standard input closed, `try` runs the self-check and stops.
+- **For scripts**, run `npx -y @tnunamak/dalan try --local < /dev/null`: with standard input closed, `try` runs the self-check and stops.
 
 `try` takes these options:
 
 - `--local`: this computer only (the self-check above). `--public`: a hosted MCP client through a public route. With neither, a terminal is asked; with no terminal, `try` runs the local self-check and never opens a route.
-- `--client chatgpt|claude` and `--route auto|gozar|localhost.run|tailscale`: the hosted client and public route. Each implies `--public`. `auto` uses Gozar when installed; otherwise it uses a trial link (localhost.run) unless `dalan setup` saved Tailscale. A public trial gets a new trial home on every run unless you pass `--home`; its address is part of its sign-in identity, so a home is reused only at the same address.
+- `--client chatgpt|claude` and `--route auto|gozar|localhost.run|tailscale`: the hosted client and public route. Each implies `--public`. The public default and `auto` use bundled Gozar with no extra install. Use `--route tailscale` explicitly for a saved Tailscale route. A public trial gets a new trial home on every run unless you pass `--home`; its address is part of its sign-in identity, so a home is reused only at the same address.
 - `--home DIR`: the trial home.
 - `--port N`: the bridge port on this computer (for a public trial, never the public port). The default is the port that the home used before, otherwise 8799 or the next free port. A home keeps its port; for another port, start a separate trial with `--home NEW_DIR --port N`.
 - `--callback PATTERN`: local mode only: allow one more OAuth callback pattern; repeatable.

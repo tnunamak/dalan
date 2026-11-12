@@ -2,7 +2,9 @@
 
 # Manual setup
 
-`try` runs ordinary `dalan` commands in a private trial home. Use this page to run each piece yourself: to keep the bridge in the foreground, to choose your own worker name, or to set up a client that `try` does not cover. You need the npm package, two shells and a worker client with OAuth.
+`try` runs ordinary `dalan` commands in a private trial home. Use this page to run each piece yourself: to keep the bridge in the foreground, to choose your own worker name, or to set up a client that `try` does not cover. You need the npm package, two shells and a compatible HTTP MCP worker client with OAuth. This page explicitly installs the CLI globally before using bare `dalan` commands; `npx` alone does not put it on your persistent PATH.
+
+For a hosted first result instead, use `npx -y @tnunamak/dalan try` ([hosted trial](../README.md#quickstart)). The public default and `--route auto` use bundled `@tnunamak/gozar ^0.1.0`, with no extra install. Dalan still owns OAuth approval and checks the public origin. The underlying localhost.run relay terminates TLS and can see the secret connector URL and traffic; keep private work out of the demo. Its temporary address can change, the trial lasts at most 3 hours, and it can end sooner. A stable Tailscale route must be selected explicitly with `--route tailscale`; the loopback recipe below creates no public route.
 
 <a id="owner-and-requester-setup"></a>
 
