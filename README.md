@@ -170,6 +170,7 @@ dalan decide REQUEST_ID accepted
 The host's GitHub credential must be able to read the repository. For local clones, manual bridge setup and workspace configuration, see [manual setup](docs/manual-setup.md#owner-and-requester-setup) and the [setup reference](docs/setup-reference.md). Keep private repository credentials out of the job brief.
 
 <a id="support-matrix"></a>
+<a id="connect-your-own-worker"></a>
 
 ## Connect any MCP worker
 
