@@ -30,7 +30,7 @@ On stop, Dalan removes the connector URL file and the bridge's secret file for t
 ### Try without a public route
 
 ```sh
-npx -y @tnunamak/dalan try --local
+dalan try --local
 ```
 
 This runs a self-check with a built-in demo worker and then lets you connect a client on this computer. It does not open a public route. To connect a worker client by hand, see [manual setup](docs/manual-setup.md#worker-setup).

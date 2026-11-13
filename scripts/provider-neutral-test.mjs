@@ -28,7 +28,7 @@ export const ALLOWED = [
   { test: file => file === 'package-lock.json', why: 'transitive package names and integrity metadata only' },
   { test: file => file === 'CHANGELOG.md', why: 'historical sections predating the neutral release only; current instructions cannot name provider flags' },
   { test: file => file === 'scripts/install-inbox-test.mjs', why: 'tests the legacy worker-bridge-setup.mjs, which still calls an external route command; the test fakes that command by name. Legacy, kept for compatibility, not documented' },
-  { test: file => ['README.md', 'docs/service-setup.md', 'docs/codex-to-muse.md', 'docs/connect-chatgpt.md'].includes(file), why: 'the quick-start guides give the concrete `--route tailscale` command and the Funnel prerequisite (release ruling 2026-11-12); code and tests stay neutral' },
+  { test: file => ['README.md', 'docs/service-setup.md', 'docs/codex-to-muse.md', 'docs/connect-chatgpt.md', 'docs/chatgpt-worker-onboarding.md', 'docs/worker-clients.md', 'docs/manual-setup.md'].includes(file), why: 'the quick-start guides give the concrete `--route tailscale` command and the Funnel prerequisite (release ruling 2026-11-12); code and tests stay neutral' },
   { test: file => file === 'src/test-support/gozar-contract.json', why: 'the frozen Gozar route-contract fixture, vendored verbatim and sha256-pinned in scripts/gozar-route-contract-test.mjs; not shipped' },
   { test: file => /^docs\/(history|design|research)\//.test(file), why: 'non-shipped historical or design references only' },
 ];
