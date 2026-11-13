@@ -33,6 +33,8 @@ A trial prints its own home. Set `DALAN_HOME` to that home before you run other 
 
 This example names your hosted worker `assistant`; use that name consistently.
 
+If you plan repository jobs, include `--enable-workspace` in the service install command below.
+
 If you tried the temporary trial first, save any results you want (see [service setup](docs/service-setup.md)), stop it with Ctrl-C, and unset the trial's `DALAN_HOME` before you install:
 
 ```sh
@@ -110,7 +112,9 @@ A local coding agent with a shell (Claude Code, Codex CLI) can be the requester.
 
 ## Give a worker a repository job
 
-The text-only job proves pairing and reporting, not coding access. Before you submit a repository job, complete [workspace setup](docs/manual-setup.md#owner-and-requester-setup). Git and Python 3.8 or newer must be installed on the bridge computer, workspaces must be enabled on both the worker grant and the host, and the host's GitHub credential must be able to read the repository. Then grant only the repository below. A repository grant alone does not enable workspaces.
+The text-only job proves pairing and reporting, not coding access. Keep using the same persistent bridge home and connected worker from the installation above. Before submitting a repository job, install Git and Python 3.8 or newer on the bridge computer, provide a host GitHub credential that can read the repository, and enable workspace access for both the host and worker. Then grant only the repository below. A repository grant alone does not enable workspaces.
+
+The [manual setup guide](docs/manual-setup.md#owner-and-requester-setup) creates a separate loopback bridge in a new home; it is not an upgrade path for your persistent service. If your existing service has no workspace access, stop before submitting a repository job. Reinstalling with `--enable-workspace` is refused because the saved service configuration must match; it cannot enable workspace access in place.
 
 The first repository job below reads one file at a pinned commit. It does not edit files or run checks. The trial has no repository access.
 
@@ -141,12 +145,28 @@ For a read-only repository job, replace the request ID (`req_` plus a new lowerc
 }
 ```
 
-Save it as `repository-job.json`. Replace `WORKER` as above, and `REQUEST_ID` with the ID that `submit` prints. Then submit, wait, read the report and record your decision:
+Save it as `repository-job.json`. Replace `WORKER` as above, then submit:
 
 ```sh
 dalan submit --worker WORKER --execution none --deliver none --file repository-job.json --json
+```
+
+Copy the request ID that `submit` prints. In your connected hosted agent's chat, send this, replacing `REQUEST_ID` with that ID:
+
+> Use Dalan to claim job REQUEST_ID, follow its brief, report progress, and finish with your answer. Do not expand its permissions.
+
+Queuing does not start the agent. After you have prompted it, use the same bridge home and request ID to wait and read the report:
+
+```sh
 dalan wait REQUEST_ID
-dalan get REQUEST_ID
+dalan get REQUEST_ID --json
+```
+
+Inspect `report.result` and `report.outcome`. A missing or null report means there is no report yet; a blocked or failed outcome is not a successful answer. After a nonzero `wait` exit, inspect the job before continuing, as described for the first job above.
+
+Pause here to review the finished report. Only if you find it useful, record acceptance:
+
+```sh
 dalan decide REQUEST_ID accepted
 ```
 

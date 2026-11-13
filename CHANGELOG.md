@@ -12,6 +12,14 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 - Gozar's next step is now shown even when its error code is new to Dalan. The step is shown as sanitized text; Dalan does not act on it.
 
+- Dalan now depends on Gozar `^0.3.0`, the route manager used to publish the bridge's HTTPS address.
+- `dalan service migrate-workers` carries the claim-capacity setting from the source `limits.json` into the new home; conflicting source capacities are refused.
+- Status now warns after 15 minutes without claim progress or tool activity, even while the lease remains live. Set `claim_idle_warning_ms` in `limits.json` to change the warning threshold. This observation does not cancel jobs or change leases.
+- macOS service teardown now distinguishes a loaded agent, an explicitly absent agent and an unknown launchctl result. An unknown result stops teardown before either agent's plist is removed.
+- The repository-job walkthrough now shows when to prompt the hosted worker, inspect its report and record acceptance. It also explains workspace setup limits for an existing service.
+- The service guide now states macOS's loopback-only target restriction and that an update check missed during shutdown or logout does not catch up at login.
+- Automatic-update failures roll back to the previous package on Linux and macOS. Tailscale session routes use port 8443, or 10000 when busy; service routes choose the first free port of 443, 8443 and 10000.
+
 ## 0.7.0
 
 Install, run and update Dalan with three commands on Linux and macOS:
@@ -24,11 +32,11 @@ dalan connect start --worker NAME
 
 - **One command installs a service on macOS and Linux.** `dalan service install --worker NAME --route ROUTE` creates a systemd user service on Linux or a launchd LaunchAgent on macOS, publishes it through [Gozar](https://www.npmjs.com/package/@tnunamak/gozar), and prints the public address, where the private connector URL file is, the next command and a health check. Run it again and nothing changes. It asks for your approval of the route first; `--yes` approves after you have read the disclosure. An address you already serve stays possible with `--public-url`, `--port` and `--target`.
 - **One default home.** Commands find the service home without `DALAN_HOME`. Install records it in a small pointer file (`~/.config/dalan/home`); `DALAN_HOME` still overrides it. `dalan service uninstall` removes the service, its update timer or agent and its route, and moves the home aside to `<home>.removed-<date>` instead of deleting your keys and job history.
-- **Automatic updates on macOS too.** A launchd update agent checks once a day, like the systemd timer on Linux. If an automatic update fails, the updater rolls back to the previous version on both systems. The `dalan` command on your PATH follows the version the updater switched to, so the command and the service do not drift. `DALAN_NO_FOLLOW=1` turns that off.
+- **Automatic updates on macOS too.** A launchd update agent checks once a day, like the systemd timer on Linux. The `dalan` command on your PATH follows the version the updater switched to, so the command and the service do not drift. `DALAN_NO_FOLLOW=1` turns that off.
 - **Updates work on npm 12.** `dalan service update` downloads the release tarball itself, checks it against the registry's sha512 integrity and installs from that local file. npm 12 refuses a remote tarball URL as a dependency (`EALLOWREMOTE`), which would have stopped every automatic update.
 - **Updates adopt older services.** `dalan service update` now adopts a service installed by 0.6.0 or 0.6.1, including a unit that names its package directory with a trailing slash and a server that has no update gate.
 - **Any OAuth MCP client can connect.** Dalan accepts a client it has not seen before when its redirect address is a plain HTTPS address or a native loopback address, and the owner approval code stays mandatory. The consent page and `dalan connect pending` show the client name as untrusted text, the redirect host and the full redirect address. The older callback allow-list still loads and only adds entries.
-- **Routes only through Gozar 0.2.** Dalan no longer starts tunnels or runs Tailscale commands itself. It asks Gozar for the route, shows the disclosure Gozar returns, and never falls back to another route. `--route` takes a name you configured in Gozar or the label of an offered route, such as `tailscale`. Tailscale Funnel never replaces an existing listener on this device. A session route (such as `dalan try`) uses port 8443, or 10000 when 8443 is in use, and never 443. A service route takes the first free port of 443, 8443 and 10000.
+- **Routes only through Gozar 0.2.** Dalan no longer starts tunnels or runs Tailscale commands itself. It asks Gozar for the route, shows the disclosure Gozar returns, and never falls back to another route. `--route` takes a name you configured in Gozar or the label of an offered route, such as `tailscale`. Tailscale Funnel uses an unused port on this device, so an existing listener is never replaced.
 - **`dalan doctor --auth`** runs the OAuth sign-in flow (discovery, registration, PKCE, token, MCP initialize and tool list) against the public address and prints a PASS or FAIL line per step without printing a secret.
 - `dalan submit --wait` prints the request ID and the worker prompt before it waits. The guides now show `claude mcp add --scope user`, how to retry with `--replace`, and that Node 24 or newer is required.
 - Documentation uses only the commands above. `worker-bridge-setup.mjs` remains for older setups and is no longer in the guides.

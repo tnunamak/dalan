@@ -27,11 +27,12 @@ test('CLI output does not contain the identity provider runtime warning',()=>{
 test('dalan version flags print the package version',()=>{
   const pkg=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8'));
   for(const flag of ['--version','-v']) {
-    const run=spawnSync(process.execPath,['bin/dalan.mjs',flag],{encoding:'utf8'});
+    const env={...process.env,DALAN_NO_FOLLOW:'1'};
+    const run=spawnSync(process.execPath,['bin/dalan.mjs',flag],{encoding:'utf8',env});
     assert.equal(run.status,0,run.stderr);
     assert.equal(run.stdout.trim(),pkg.version);
     // The installed command runs from any directory, so the version must not depend on the working directory.
-    const elsewhere=spawnSync(process.execPath,[path.resolve('bin/dalan.mjs'),flag],{cwd:os.tmpdir(),encoding:'utf8'});
+    const elsewhere=spawnSync(process.execPath,[path.resolve('bin/dalan.mjs'),flag],{cwd:os.tmpdir(),encoding:'utf8',env});
     assert.equal(elsewhere.status,0,elsewhere.stderr);
     assert.equal(elsewhere.stdout.trim(),pkg.version);
   }

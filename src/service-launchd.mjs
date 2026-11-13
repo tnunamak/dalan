@@ -86,7 +86,18 @@ export function launchctl(args, { spawn = spawnSync, env = process.env } = {}) {
 }
 const uidOf = seams => (seams.uid ?? process.getuid?.());
 const domainOf = seams => `user/${uidOf(seams)}`;
-export const isLoaded = (label, seams = {}) => launchctl(['print', `${domainOf(seams)}/${label}`], seams).status === 0;
+// Only launchctl's explicit missing-service diagnostic establishes absence.
+export function queryAgent(label, seams = {}) {
+  const result = launchctl(['print', `${domainOf(seams)}/${label}`], seams);
+  const diagnostic = String(result.stderr || result.stdout).trim();
+  const absent = result.status > 0 && diagnostic.includes(`Could not find service "${label}" in domain`);
+  return { ...result, state: result.status === 0 ? 'loaded' : absent ? 'absent' : 'unknown' };
+}
+export function isLoaded(label, seams = {}) {
+  const result = queryAgent(label, seams);
+  if (result.state === 'unknown') fail(`Cannot determine whether launchd service ${label} is loaded; leaving its plist unchanged. launchctl print failed (exit ${result.status}): ${String(result.stderr || result.stdout).trim().slice(0, 500)}`);
+  return result.state === 'loaded';
+}
 const must = (result, what) => { if (result.status !== 0) fail(`${what} failed (exit ${result.status}): ${String(result.stderr || result.stdout).trim().slice(0, 500)}`); };
 
 // Load the agent from its plist, then ask launchd to start it: on macOS 26 a bootstrapped agent can stay loaded and never spawn.
@@ -162,6 +173,8 @@ export function setUpdateAgent({ receipt, home, node, enabled }, seams = {}) {
 
 export function removeAgents({ unit, unit_dir: dir }, seams = {}) {
   const { service, update } = launchdLabels(unit), removed = [];
+  // An unknown job must not allow even the other job's plist to be removed.
+  for (const label of [update, service]) isLoaded(label, seams);
   for (const label of [update, service]) {
     if (unloadAgent({ label }, seams)) removed.push(`unloaded ${label}`);
     const file = path.join(dir, `${label}.plist`);
