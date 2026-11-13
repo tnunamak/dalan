@@ -73,7 +73,7 @@ export async function resolveRouteWord({ gozar, query }) {
   const catalog = await gozar.catalogRoutes(bare);
   const matches = catalog.candidates.filter(c => `${c.display?.label ?? ''}`.toLowerCase().includes(needle));
   const pick = cat => readyCandidates(cat).find(c => matches.some(m => m.name === c.name)) ?? null;
-  if (!matches.length) throw new RouteError('route_not_found', `No route is named or labelled ${JSON.stringify(word)}. Offered: ${catalog.candidates.map(c => c.display?.label).filter(Boolean).join('; ') || 'none'}.`);
+  if (!matches.length) throw new RouteError('route_not_found', `No route named ${JSON.stringify(word)}, and none offered is labelled with it. Offered: ${catalog.candidates.map(c => c.display?.label).filter(Boolean).join('; ') || 'none'}.`);
   return { query: bare, pick };
 }
 export const approvalFor = candidate => ({ candidateToken: candidate.candidateToken, disclosureRevision: candidate.disclosure.revision });

@@ -126,7 +126,7 @@ try {
   const word = seamsFor('word', 'linux');
   const byWord = await installService(options(word, { route: 'public' }), word.seams);
   assert.match(byWord.origin, /^https:\/\//, 'a label word picks the offered route');
-  await assert.rejects(installService(options(seamsFor('badword', 'linux'), { route: 'nonesuch' }), seamsFor('badword', 'linux').seams), /No route is named or labelled "nonesuch"\. Offered: Example public route/);
+  await assert.rejects(installService(options(seamsFor('badword', 'linux'), { route: 'nonesuch' }), seamsFor('badword', 'linux').seams), /No route named "nonesuch", and none offered is labelled with it\. Offered: Example public route/);
   await assert.rejects(installService(options(seamsFor('wrongword', 'linux'), { route: 'temporary' }), seamsFor('wrongword', 'linux').seams), /No route|not usable|route/i);
 
   // ---- explicit external route keeps working; --route alone needs a name, nothing alone is refused ------------------------------------

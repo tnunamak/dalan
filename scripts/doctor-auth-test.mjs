@@ -11,7 +11,9 @@ import { reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 // A short root: the admin socket path must stay under the platform limit.
-const root = fs.mkdtempSync(path.join(process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp', 'd7auth'), 'a-'));
+const scratchBase = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
+fs.mkdirSync(scratchBase, { recursive: true });
+const root = fs.mkdtempSync(path.join(scratchBase, 'a-'));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failures = [];
 async function check(id, name, fn) {
