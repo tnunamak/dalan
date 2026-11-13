@@ -179,7 +179,7 @@ Each native attempt is approved by its own code, and a later attempt cannot take
 
 ### Worked example: Codex CLI on another computer
 
-This example uses a bridge from `dalan service install --worker NAME --route ROUTE` ([service setup](service-setup.md)) and Codex CLI on the worker computer. No reverse proxy and no domain of your own are involved.
+This example uses a bridge from `dalan service install --worker NAME --route tailscale` ([service setup](service-setup.md)) and Codex CLI on the worker computer. No reverse proxy and no domain of your own are involved.
 
 1. On the bridge computer, allow the callback and open a pairing window:
 
