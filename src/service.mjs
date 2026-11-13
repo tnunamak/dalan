@@ -14,7 +14,7 @@ import { parseArgs } from '../scripts/live-trial/common.mjs';
 import { buildQuery, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
-import { launchdLabels, launchAgentsDir, servicePlist, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist } from './service-launchd.mjs';
+import { launchdLabels, launchAgentsDir, servicePlist, updatePlist, preflightAgentFile, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist } from './service-launchd.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/;
@@ -373,7 +373,7 @@ export async function installService(o, seams = {}) {
   assertRealDirectoryPath(path.dirname(o.home), { owner: true });
   assertRealDirectoryPath(o.home, { owner: true });
   // Every check up to the route allocation below only reads. A public route is allocated after the last of them passes, so a
-  // refused install leaves no route behind.
+  // read-only preflight refusal leaves no route behind. Later writes or startup can still fail.
   const adminSocket = path.join(defaultPath(o.home, '.local/share/dot-bridge'), 'admin.sock');
   const socketBytes = Buffer.byteLength(adminSocket), socketLimit = socketPathLimit(platform);
   if (socketBytes > socketLimit) fail(`--home is too long: the bridge's admin socket ${adminSocket} would be ${socketBytes} bytes, and the limit on ${mac ? 'macOS' : 'Linux'} is ${socketLimit} bytes. Use a shorter --home.`);
@@ -416,8 +416,12 @@ export async function installService(o, seams = {}) {
   }
   let replaceLegacyUnit = false;
   // Check every collision before creating the bridge home or the first unit file.
-  for (const [filename, text] of mac ? [] : Object.entries(files)) {
+  if (mac && autoUpdate && !o.writeUnitsOnly) {
+    preflightAgentFile(path.join(unitDir, `${labels.update}.plist`), updatePlist({ unit: name, node, home: o.home }));
+  }
+  for (const [filename, text] of Object.entries(files)) {
     const file = path.join(unitDir, filename);
+    if (mac) { preflightAgentFile(file, text); continue; }
     if (fs.existsSync(file) && (!fs.lstatSync(file).isFile() || fs.readFileSync(file, 'utf8') !== text)) {
       const actual = fs.lstatSync(file).isFile() ? fs.readFileSync(file, 'utf8') : '';
       const oldRepo = actual.match(/^WorkingDirectory=(.+)$/m)?.[1];
