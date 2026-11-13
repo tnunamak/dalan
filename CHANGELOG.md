@@ -2,6 +2,28 @@
 
 This file lists user-visible changes, newest first. Check the section for your target release before you upgrade.
 
+## 0.7.0
+
+Install, run and update Dalan with three commands on Linux and macOS:
+
+```
+npm install -g @tnunamak/dalan
+dalan service install --worker NAME --route tailscale
+dalan connect start --worker NAME
+```
+
+- **One command installs a service on macOS and Linux.** `dalan service install --worker NAME --route ROUTE` creates a systemd user service on Linux or a launchd LaunchAgent on macOS, publishes it through [Gozar](https://www.npmjs.com/package/@tnunamak/gozar), and prints the public address, where the private connector URL file is, the next command and a health check. Run it again and nothing changes. It asks for your approval of the route first; `--yes` approves after you have read the disclosure. An address you already serve stays possible with `--public-url`, `--port` and `--target`.
+- **One default home.** Commands find the service home without `DALAN_HOME`. Install records it in a small pointer file (`~/.config/dalan/home`); `DALAN_HOME` still overrides it. `dalan service uninstall` removes the service, its update timer or agent and its route, and moves the home aside to `<home>.removed-<date>` instead of deleting your keys and job history.
+- **Automatic updates on macOS too.** A launchd update agent checks once a day, like the systemd timer on Linux. The `dalan` command on your PATH follows the version the updater switched to, so the command and the service do not drift. `DALAN_NO_FOLLOW=1` turns that off.
+- **Updates adopt older services.** `dalan service update` now adopts a service installed by 0.6.0 or 0.6.1, including a unit that names its package directory with a trailing slash and a server that has no update gate.
+- **Any OAuth MCP client can connect.** Dalan accepts a client it has not seen before when its redirect address is a plain HTTPS address or a native loopback address, and the owner approval code stays mandatory. The consent page and `dalan connect pending` show the client name as untrusted text, the redirect host and the full redirect address. The older callback allow-list still loads and only adds entries.
+- **Routes only through Gozar 0.2.** Dalan no longer starts tunnels or runs Tailscale commands itself. It asks Gozar for the route, shows the disclosure Gozar returns, and never falls back to another route. `--route` takes a name you configured in Gozar or the label of an offered route, such as `tailscale`. Tailscale Funnel uses an unused port on this device, so an existing listener is never replaced.
+- **`dalan doctor --auth`** runs the OAuth sign-in flow (discovery, registration, PKCE, token, MCP initialize and tool list) against the public address and prints a PASS or FAIL line per step without printing a secret.
+- `dalan submit --wait` prints the request ID and the worker prompt before it waits. The guides now show `claude mcp add --scope user`, how to retry with `--replace`, and that Node 24 or newer is required.
+- Documentation uses only the commands above. `worker-bridge-setup.mjs` remains for older setups and is no longer in the guides.
+
+Upgrade note: `@tnunamak/gozar` 0.2.0 is now a dependency (`^0.2.0`). A service that a release before 0.7.0 generated keeps working; move it with a fresh `dalan service install`.
+
 ## 0.6.2
 
 - Add `dalan service update`, `--check`, automatic-update on/off and update status for Linux systemd services. New installs enable daily checks with jitter. Releases install side by side with npm integrity checks, local self-checks and a complete tool-catalog comparison for each configured worker. Changed descriptors stage until an explicit `--yes`; refresh hosted connectors after that switch. Failed switches attempt to restore the previous package and saved persistent state, and report rollback failures. See [service updates](docs/service-setup.md#service-updates) for limits and enrollment of older services.
