@@ -2,9 +2,9 @@
 
 Give your AI agent a coding job from your Mac or Linux computer, even when the agent can only connect through MCP. Dalan queues the job and brings its report back for you to review. It does not run a model or start your agent for you.
 
-Before you begin, install [Node.js](https://nodejs.org) 24 or newer and [Tailscale](https://tailscale.com/download) with Funnel enabled. Your agent's account must allow custom MCP connectors.
+Before you begin, install [Node.js](https://nodejs.org) 24 or newer and complete the setup that your chosen Gozar route needs (`dalan routes` shows it). Your agent's account must allow custom MCP connectors.
 
-**Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
+**Route prerequisite.** Dalan publishes through one Gozar route. Run `dalan routes` to see the routes Gozar offers on this computer, what each one needs, and whether it is usable now. Pick one by its id with `--route <id>`; the current list is in [docs/routes.md](docs/routes.md). If a route needs a setup step, Dalan stops before it publishes anything and says which step is missing. An unknown id is refused with the ids Gozar offers.
 
 <a id="quickstart"></a>
 
@@ -12,7 +12,8 @@ Before you begin, install [Node.js](https://nodejs.org) 24 or newer and [Tailsca
 
 ```sh
 npm install -g @tnunamak/dalan
-dalan try --public --route tailscale
+dalan routes
+dalan try --public --route <id>
 ```
 
 Follow the terminal instructions to add the connector and approve only the matching sign-in code. Paste the supplied prompt into your agent's chat. Success is a report returned to your terminal.
@@ -35,7 +36,8 @@ This example names your worker `assistant`; use that name consistently.
 
 ```sh
 npm install -g @tnunamak/dalan
-dalan service install --worker assistant --route tailscale
+dalan routes
+dalan service install --worker assistant --route <id>
 dalan connect start --worker assistant
 ```
 

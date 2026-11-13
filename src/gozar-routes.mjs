@@ -1,7 +1,7 @@
 // The one place where Dalan reaches the network. Dalan asks Gozar for a route through its frozen consumer exports and branches only on
 // the shapes and the 21 error codes of that contract (tnunamak/gozar, contract/route-contract-c0 @ 91b41a1; the pinned fixture is
-// src/test-support/gozar-contract.json). Dalan never names a provider, never validates or translates a route name, and never builds a
-// command for a provider: a name from `--route` goes to Gozar as written.
+// src/test-support/gozar-contract.json). Dalan never names a provider, never validates or translates a route id, and never builds a
+// command for a provider: the id from `--route` goes to Gozar as `query.providerId`, exactly as written.
 //
 // Every function takes the Gozar module as `gozar`, so tests inject a fake that is checked against the same fixture.
 import { createRequire } from 'node:module';
@@ -48,11 +48,12 @@ export const gozarHomeFor = (env = process.env) => path.resolve(env.GOZAR_HOME ?
 // ---- requests --------------------------------------------------------------------------------------------------------------------------
 export const dalanRequirements = ({ address = 'any' } = {}) => ({ reach: 'internet', transport: 'https', payloadAccess: 'allow-provider', address, setup: 'allow', protocols: ['sse', 'streamable-http', 'oauth-dcr'] });
 
-// `route` is the owner's name for a Gozar route, passed through exactly. An empty or non-string value is refused only because it is no name at all.
+// `route` is the id the owner typed after `--route`. It becomes `query.providerId`, exactly as written; Gozar judges it and answers an unknown id with
+// its own `route_not_found`. An empty or non-string value is refused only because it is no id at all.
 export function buildQuery({ home, target, usage, route, origin, intent, migrationRef, address = 'any', requirements }) {
-  if (route !== undefined && (typeof route !== 'string' || route.length === 0)) throw new RouteError('invalid_input', '--route needs a name');
+  if (route !== undefined && (typeof route !== 'string' || route.length === 0)) throw new RouteError('invalid_input', '--route needs an id');
   const query = { schemaVersion: SCHEMA_VERSION, owner: OWNER, target, usage, requirements: requirements ?? dalanRequirements({ address }), home };
-  if (route !== undefined) query.route = route;
+  if (route !== undefined) query.providerId = route;
   if (origin !== undefined) query.origin = origin;
   if (intent !== undefined) query.intent = intent;
   if (migrationRef !== undefined) query.migrationRef = migrationRef;
@@ -63,19 +64,6 @@ export const targetFor = port => `127.0.0.1:${port}`;
 // ---- choosing and showing candidates (data only) ---------------------------------------------------------------------------------------
 export const readyCandidates = catalog => [...catalog.candidates].filter(c => c.eligible && c.setup.state === 'ready' && typeof c.candidateToken === 'string').sort((a, b) => a.rank - b.rank);
 export const pickCandidate = catalog => readyCandidates(catalog)[0] ?? null;
-// `--route WORD` is Gozar's own name for a route when Gozar has one. Otherwise it is a word in the label of a route Gozar offers, so an owner can
-// type what the label says. The word is matched only against labels Gozar returned; no provider is named here. Returns the query to send and how to
-// pick the candidate: an unnamed query lets Gozar offer every route, and `pick` chooses the matching one.
-export async function resolveRouteWord({ gozar, query }) {
-  if (query.route === undefined) return { query, pick: pickCandidate };
-  try { await gozar.catalogRoutes(query); return { query, pick: pickCandidate }; } catch (error) { if (error?.code !== 'route_not_found') throw error; }
-  const { route: word, ...bare } = query, needle = String(word).toLowerCase();
-  const catalog = await gozar.catalogRoutes(bare);
-  const matches = catalog.candidates.filter(c => `${c.display?.label ?? ''}`.toLowerCase().includes(needle));
-  const pick = cat => readyCandidates(cat).find(c => matches.some(m => m.name === c.name)) ?? null;
-  if (!matches.length) throw new RouteError('route_not_found', `No route named ${JSON.stringify(word)}, and none offered is labelled with it. Offered: ${catalog.candidates.map(c => c.display?.label).filter(Boolean).join('; ') || 'none'}.`);
-  return { query: bare, pick };
-}
 export const approvalFor = candidate => ({ candidateToken: candidate.candidateToken, disclosureRevision: candidate.disclosure.revision });
 
 const yesNo = value => value === true ? 'yes' : value === false ? 'no' : 'unknown';
@@ -83,7 +71,10 @@ const yesNo = value => value === true ? 'yes' : value === false ? 'no' : 'unknow
 export function describeCandidate(candidate, index) {
   const p = candidate.properties;
   const readers = p.traffic.readers.length ? p.traffic.readers.join(', ') : 'none listed';
-  const lines = [`${index === undefined ? '' : `${index + 1}. `}${candidate.display.label}${candidate.eligible ? '' : ' (not usable for this)'}`, `   ${candidate.display.description}`,
+  const ports = p.address.ports === null ? 'assigned by the provider' : p.address.ports.join(', ');
+  const proof = `checked from ${p.proof.vantage}${p.proof.checks.length ? `; checks: ${p.proof.checks.join(', ')}` : '; no checks'}`;
+  const lines = [`${index === undefined ? '' : `${index + 1}. `}${candidate.display.label}${candidate.eligible ? '' : ' (not usable for this)'}`, `   id: ${candidate.providerId}`, `   ${candidate.display.description}`,
+    `   needs: ${candidate.display.needs}`, `   ports: ${ports}; proof: ${proof}`,
     `   reach: ${p.reach}; address: ${p.address.stability} (${p.address.scope}${p.address.conditions.length ? `; ${p.address.conditions.join('; ')}` : ''})`,
     `   traffic readers: ${readers}; provider can read payload: ${yesNo(p.traffic.providerCanReadPayload)}; ends TLS at: ${p.traffic.tlsTermination}`,
     `   cost: ${p.cost.summary}; account needed: ${yesNo(p.needsAccount)}; lifetimes: ${p.lifetimes.join(', ')}`];
@@ -102,7 +93,7 @@ const EXPLAIN = {
   invalid_input: 'Dalan sent Gozar a request it refused as invalid.', requirements_unsatisfied: 'No route satisfies what Dalan needs (an HTTPS address reachable from the internet).',
   setup_required: 'A route needs one setup step first.', consent_required: 'This route needs your approval first.', consent_unknown: 'The approval was already used or is unknown. Ask for the choices again.',
   consent_expired: 'The approval expired. Ask for the choices again.', consent_mismatch: 'The approval was for a different request. Ask for the choices again.', candidate_stale: 'The route choice changed while you decided. Ask again.',
-  preference_conflict: 'Your route preferences changed meanwhile. Try again.', route_not_found: 'Gozar has no route with that name.', route_conflict: 'Another owner or a newer route replaced this one; it was left untouched.',
+  preference_conflict: 'Your route preferences changed meanwhile. Try again.', route_not_found: 'Gozar has no route with that id.', route_conflict: 'Another owner or a newer route replaced this one; it was left untouched.',
   address_changed: 'The public address changed.', stopped_by_user: 'This route was stopped by you; approve it again to start it.', handing_back: 'The route is being handed back to its previous owner.',
   verification_failed: 'The route did not pass Gozar\'s check.', provider_unavailable: 'The route provider is unavailable right now.', cleanup_debt: 'A route could not be fully removed.',
   unsupported: 'This computer or request is not supported by any route.', ambiguous_route: 'Gozar cannot tell which existing route this is, so it changed nothing.',
@@ -110,6 +101,8 @@ const EXPLAIN = {
 };
 export function explainRouteError(error) {
   const code = typeof error?.code === 'string' && (FROZEN_CODES.includes(error.code) || error.code === 'runtime_missing') ? error.code : null;
+  // Gozar's own message for an unknown id lists the ids it offers. It is printed as Gozar wrote it, with no second list here.
+  if (code === 'route_not_found' && typeof error.message === 'string' && error.message) return { code, line: error.message, fix: null };
   if (!code) return { code: null, line: safeDiagnostic(String(error?.message ?? error), 240), fix: null };
   const action = error.nextAction ?? null;
   const fix = action ? [action.label, action.instructions, action.href].filter(Boolean).join(' - ') : null;

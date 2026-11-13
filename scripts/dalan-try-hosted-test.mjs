@@ -578,13 +578,25 @@ test('unknown-origin bootstrap: a session route is allocated first, the gate ans
   } finally { await run.close(); }
 });
 
-test('--route NAME is passed to Gozar exactly as typed; an invented unknown name is Gozar\'s route_not_found and nothing is exposed', async () => {
+test('--route ID is passed to Gozar as providerId exactly as typed; an unknown id prints Gozar\'s own message with the offered ids and nothing is exposed', async () => {
   const run = await hostedRun('invented', { argv: ['--route', 'zq-invented-7'] });
   const done = await run.finished;
-  assert.match(done.error?.message ?? '', /no route named|route_not_found|not found/i);
+  assert.equal(done.error?.code, 'route_not_found');
+  assert.match(tryInternals.formatTryError(done.error, run.errorContext), /Unknown route id "zq-invented-7"\. Offered: fake-stable, fake-ephemeral, fake-setup/);
   assert.equal(done.error.tryKind, 'route_start');
   assert.equal(run.gozar.fake.state.effects.length, 0);
   assert.match(tryInternals.formatTryError(done.error, run.errorContext), /--route/);
+});
+
+test('--route ID with an exact id reaches ready: the catalog and the expose both carry providerId and only that route is used', async () => {
+  const gozar = createFakeGozar(); const queries = [];
+  const catalog = gozar.catalogRoutes; gozar.catalogRoutes = async query => { queries.push(query); return catalog(query); };
+  const run = await hostedRun('exact-id', { argv: ['--route', 'fake-ephemeral'], gozar });
+  try {
+    await run.until(/Public route ready\./);
+    assert.ok(queries.length > 0 && queries.every(query => query.providerId === 'fake-ephemeral' && query.route === undefined));
+    assert.equal(gozar.fake.state.calls.filter(name => name === 'expose').length, 1);
+  } finally { await run.close(); }
 });
 
 test('a session stop closes exactly its handle; a saved durable route is left in place by the same stop', async () => {

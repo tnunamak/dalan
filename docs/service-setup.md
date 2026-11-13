@@ -2,9 +2,9 @@
 
 Install Dalan once to keep your MCP agent connected to your Mac or Linux computer. You do not need to run the trial first.
 
-Before you begin, install Node.js 24 or newer and Tailscale with Funnel enabled. Your agent's account must allow custom MCP connectors. The commands below are the same on macOS and Linux.
+Before you begin, install Node.js 24 or newer and complete the setup that your chosen Gozar route needs (`dalan routes` shows it). Your agent's account must allow custom MCP connectors. The commands below are the same on macOS and Linux.
 
-**Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
+**Route prerequisite.** Dalan publishes through one Gozar route. Run `dalan routes` to see the routes Gozar offers on this computer, what each one needs, and whether it is usable now. Pick one by its id with `--route <id>`; the current list is in [routes.md](routes.md). If a route needs a setup step, Dalan stops before it publishes anything and says which step is missing. An unknown id is refused with the ids Gozar offers.
 
 <a id="owner-setup"></a>
 
@@ -14,7 +14,8 @@ This example names your worker `assistant`. Choose another lowercase name if you
 
 ```sh
 npm install -g @tnunamak/dalan
-dalan service install --worker assistant --route tailscale
+dalan routes
+dalan service install --worker assistant --route <id>
 dalan connect start --worker assistant
 ```
 
@@ -46,7 +47,7 @@ The authentication check tests the public route and sign-in flow, not whether an
 
 ### More workers and advanced setup
 
-To configure several workers, repeat the flag in the install command, for example `dalan service install --worker assistant --worker reviewer --route tailscale`, and pair each separately. A worker name starts with a lowercase letter, uses lowercase letters, digits, hyphens or underscores, and is at most 32 characters; `pool` and `unknown` are reserved.
+To configure several workers, repeat the flag in the install command, for example `dalan service install --worker assistant --worker reviewer --route <id>`, and pair each separately. A worker name starts with a lowercase letter, uses lowercase letters, digits, hyphens or underscores, and is at most 32 characters; `pool` and `unknown` are reserved.
 
 ### Pairing details
 

@@ -450,7 +450,7 @@ try {
   assert(!msg.includes(envSecret) && !msg.includes(fernUrl), 'output holds no secret');
 
   // A macOS public-check timeout happens after the service exists. Its printed retry validates and reuses that service.
-  const slowHome=path.join(root,'slow-home'),slowArgs=['--worker','slow','--port','18796','--home',slowHome,'--route','work','--start'];
+  const slowHome=path.join(root,'slow-home'),slowArgs=['--worker','slow','--port','18796','--home',slowHome,'--route','fake-stable','--start'];
   const setupSeams={platform:'darwin',env:menv,log(){},resolve4:async()=>null,gozar:createFakeGozar(),consent:async()=>true};
   let slowUrl='';
   let publicFailure='';

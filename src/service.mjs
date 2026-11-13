@@ -10,7 +10,7 @@ import { defaultPath } from './paths.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
-import { buildQuery, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
+import { buildQuery, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, registerExternalService, resolveGozar } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
 import { launchdLabels, launchAgentsDir, servicePlist, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist } from './service-launchd.mjs';
@@ -59,9 +59,9 @@ function parseOptions(argv, env) {
   if (parsed['--auto-update'] && parsed['--no-auto-update']) fail('choose --auto-update or --no-auto-update');
   const home = path.resolve(parsed['--home'] ?? serviceHomeFor(env));
   if (!SAFE_PATH.test(home)) fail('--home contains characters that cannot be written safely in a service definition');
-  // `--route NAME` alone is the one-command install: Gozar supplies the public address and Dalan picks a loopback port.
+  // `--route <id>` alone is the one-command install: Gozar supplies the public address and Dalan picks a loopback port.
   const auto = parsed['--public-url'] === undefined && parsed['--port'] === undefined && parsed['--target'] === undefined;
-  if (auto && parsed['--route'] === undefined) fail('pass --route NAME to publish through Gozar, or --public-url, --port and --target for a proxy you already run');
+  // No route and no address of your own: serviceMain lists Gozar's routes and stops. parseOptions only reports it.
   if (auto && (parsed['--lan-port'] !== undefined || parsed['--verify-cmd'] !== undefined)) fail('--lan-port and --verify-cmd belong with an explicit --public-url, --port and --target');
   const origin = auto ? null : parseOrigin(parsed['--public-url']);
   const port = auto ? null : Number(parsed['--port']);
@@ -379,9 +379,8 @@ export async function installService(o, seams = {}) {
     else {
       const port = await (seams.freePort ?? firstFreePort)(8789);
       gozar = seams.gozar ?? await resolveGozar();
-      const wanted = buildQuery({ home: gozarHomeFor(env), target: `127.0.0.1:${port}`, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, address: 'stable' });
-      const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
-      const view = await ensureDurableRoute({ gozar, query, pick, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
+      const query = buildQuery({ home: gozarHomeFor(env), target: `127.0.0.1:${port}`, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, address: 'stable' });
+      const view = await ensureDurableRoute({ gozar, query, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route <id>` first, then retry.')) });
       o = { ...o, origin: parseOrigin(view.origin), port, target: parseTarget(`127.0.0.1:${port}`) };
     }
   }
@@ -466,10 +465,9 @@ export async function installService(o, seams = {}) {
   const gozarHome = gozarHomeFor(env);
   let routeReply;
   if (o.route !== undefined) {
-    // A named Gozar route: Gozar allocates or adopts it and pins the origin; nothing here interprets the name.
-    const wanted = buildQuery({ home: gozarHome, target: o.target.value, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, origin: o.origin, address: 'stable' });
-    const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
-    const view = await ensureDurableRoute({ gozar, query, pick, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
+    // A Gozar route chosen by id: Gozar allocates or adopts it and pins the origin; nothing here interprets the id.
+    const query = buildQuery({ home: gozarHome, target: o.target.value, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, origin: o.origin, address: 'stable' });
+    const view = await ensureDurableRoute({ gozar, query, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route <id>` first, then retry.')) });
     if (view.origin !== o.origin) fail(`Gozar pinned ${view.origin}, not the requested ${o.origin}; the bridge is running but its route needs repair`);
     routeReply = view;
   } else {
@@ -560,7 +558,7 @@ export async function serviceMain(argv, seams = {}) {
     return result;
   }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --worker NAME --route NAME [--yes] [--home DIR] [--enable-workspace] [--enable-t3] [--auto-update|--no-auto-update]\n       dalan service install --public-url https://HOST --port N --target HOST:PORT [--home DIR] [--lan-port N] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]   (an address you already serve)\n       dalan service uninstall [--home DIR]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Runs under systemd on Linux and launchd on macOS.');
+    (seams.out ?? console.log)('Usage: dalan service install --worker NAME --route <id> [--yes] [--home DIR] [--enable-workspace] [--enable-t3] [--auto-update|--no-auto-update]\n       dalan service install --public-url https://HOST --port N --target HOST:PORT [--home DIR] [--lan-port N] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]   (an address you already serve)\n       dalan service uninstall [--home DIR]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Runs under systemd on Linux and launchd on macOS.');
     return null;
   }
   if (action === 'uninstall') {
@@ -576,6 +574,13 @@ export async function serviceMain(argv, seams = {}) {
   const o = parseOptions(args, seams.env ?? process.env);
   if (o.help) return serviceMain(['help'], seams);
   const out0 = seams.out ?? console.log;
+  if (o.auto && o.route === undefined) { // nothing to install without a route: show what Gozar offers and stop
+    const { describeRoutes, loadCatalog, RERUN_LINE } = await import('./routes.mjs');
+    let catalog;
+    try { catalog = await loadCatalog({ gozar: seams.gozar, env: seams.env ?? process.env }); } catch (error) { fail(`${explainRouteError(error).line}. Nothing was installed. Rerun with --route <id>.`); }
+    describeRoutes(catalog).forEach(line => out0(line));
+    fail(`no route chosen, so nothing was installed. ${RERUN_LINE}`);
+  }
   // Gozar describes the route it would open; the owner approves it once (the answer is kept with the route). `--yes` approves what was printed.
   const consent = seams.consent ?? (async candidate => {
     out0(describeCandidate(candidate).join('\n')); out0(describeDisclosure(candidate).join('\n'));

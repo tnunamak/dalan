@@ -8,7 +8,7 @@ A client you have not listed here follows the same flow: give it the complete MC
 
 ## Owner setup
 
-1. Follow the [service setup](service-setup.md): `dalan service install --worker NAME --route tailscale` creates the public HTTPS address. Use the service's worker name wherever this guide says `NAME`.
+1. Follow the [service setup](service-setup.md): `dalan service install --worker NAME --route <id>` (pick the id from `dalan routes`) creates the public HTTPS address. Use the service's worker name wherever this guide says `NAME`.
 
    ```sh
    dalan status

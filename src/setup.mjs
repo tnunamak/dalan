@@ -14,8 +14,8 @@ export function parseSetupArgs(argv) {
   const out = { route: undefined };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--route') { out.route = argv[++i]; if (out.route === undefined) throw new Error('--route needs a name'); } else if (arg.startsWith('--route=')) out.route = arg.slice(8);
-    else throw new Error(`unknown option ${arg}; usage: dalan setup [--route NAME]`);
+    if (arg === '--route') { out.route = argv[++i]; if (out.route === undefined) throw new Error('--route needs an id'); } else if (arg.startsWith('--route=')) out.route = arg.slice(8);
+    else throw new Error(`unknown option ${arg}; usage: dalan setup [--route <id>]`);
   }
   return out;
 }

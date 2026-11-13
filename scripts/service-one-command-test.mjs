@@ -47,7 +47,7 @@ const seamsFor = (name, platform, extra = {}) => {
   return { ...box, launchctl, gozar, closed, seams };
 };
 const options = (box, extra = {}) => ({ home: path.join(box.userHome, '.local/share/dalan-service'), auto: true, origin: null, port: null, target: null, lanPort: null,
-  enableWorkspace: false, enableT3: false, workers: ['muse'], verifyCmd: null, route: 'work', autoUpdate: undefined, writeUnitsOnly: false, json: false, ...extra });
+  enableWorkspace: false, enableT3: false, workers: ['muse'], verifyCmd: null, route: 'fake-stable', autoUpdate: undefined, writeUnitsOnly: false, json: false, ...extra });
 
 try {
   // ---- plists are well formed and keep the rules of the launchd design ---------------------------------------------------------------
@@ -76,13 +76,13 @@ try {
   assert.equal(serviceHomeFor(mac.env), first.home);
   assert.equal(serviceHomeFor({ ...mac.env, DALAN_HOME: '/elsewhere/h' }), '/elsewhere/h', 'DALAN_HOME still overrides');
   const receipt = JSON.parse(fs.readFileSync(path.join(defaultPath(first.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
-  assert.equal(receipt.platform, 'darwin'); assert.equal(receipt.auto_update, true); assert.equal(receipt.route, 'work'); assert.ok(receipt.route_handle?.id);
+  assert.equal(receipt.platform, 'darwin'); assert.equal(receipt.auto_update, true); assert.equal(receipt.route, 'fake-stable'); assert.ok(receipt.route_handle?.id);
   const before = mac.launchctl.log.length, stat = fs.statSync(path.join(mac.userHome, 'Library/LaunchAgents', `${labels.service}.plist`)).mtimeMs;
   const second = await installService(options(mac), mac.seams);
   assert.equal(second.already_installed, true); assert.equal(second.origin, first.origin, 'the same address on the second run');
   assert.equal(fs.statSync(path.join(mac.userHome, 'Library/LaunchAgents', `${labels.service}.plist`)).mtimeMs, stat, 'the second run leaves the plist alone');
   assert.ok(!mac.launchctl.log.slice(before).some(line => line.startsWith('bootout')), 'the second run does not unload a running agent');
-  const lines = []; await serviceMain(['install', '--worker', 'muse', '--route', 'work'], { ...mac.seams, out: line => lines.push(line) });
+  const lines = []; await serviceMain(['install', '--worker', 'muse', '--route', 'fake-stable'], { ...mac.seams, out: line => lines.push(line) });
   const text = lines.join('\n');
   assert.match(text, /Connector URL \(keep private\): in .*resource-url/); assert.match(text, /Next: dalan connect start --worker muse/); assert.match(text, /Check: dalan doctor --auth/);
   assert.ok(!text.includes(fs.readFileSync(first.resource_url_file, 'utf8').trim()), 'the secret URL is never printed');
@@ -138,15 +138,26 @@ try {
   assert.deepEqual(fs.readdirSync(path.join(linux.userHome, '.config/systemd/user')), [], 'no unit file is left');
   assert.ok(systemctlCalls.some(call => call.includes('disable') && call.includes(`${linuxReceipt.unit}.service`)));
 
-  // ---- --route WORD: a word in the label of a route Gozar offers (nothing here knows a provider) -----------------------------------------
-  const word = seamsFor('word', 'linux');
-  const byWord = await installService(options(word, { route: 'public' }), word.seams);
-  assert.match(byWord.origin, /^https:\/\//, 'a label word picks the offered route');
-  await assert.rejects(installService(options(seamsFor('badword', 'linux'), { route: 'nonesuch' }), seamsFor('badword', 'linux').seams), /No route named "nonesuch", and none offered is labelled with it\. Offered: Example public route/);
-  await assert.rejects(installService(options(seamsFor('wrongword', 'linux'), { route: 'temporary' }), seamsFor('wrongword', 'linux').seams), /No route|not usable|route/i);
+  // ---- --route ID: the exact id of a route Gozar offers; nothing here knows a provider ----------------------------------------------------
+  const exact = seamsFor('exact', 'linux');
+  const byId = await installService(options(exact, { route: 'fake-stable' }), exact.seams);
+  assert.match(byId.origin, /^https:\/\//, 'an exact id picks the offered route');
+  const substr = seamsFor('substr', 'linux');
+  await assert.rejects(installService(options(substr, { route: 'stable' }), substr.seams), /Unknown route id "stable"\. Offered: fake-stable, fake-ephemeral, fake-setup/, 'a part of an id selects nothing');
+  assert.equal(substr.gozar.fake.state.effects.length, 0);
+  const unknownId = seamsFor('badid', 'linux');
+  await assert.rejects(installService(options(unknownId, { route: 'nonesuch' }), unknownId.seams), error => error.code === 'route_not_found' && error.message === 'Unknown route id "nonesuch". Offered: fake-stable, fake-ephemeral, fake-setup');
+  const shortLived = seamsFor('shortlived', 'linux');
+  await assert.rejects(installService(options(shortLived, { route: 'fake-ephemeral' }), shortLived.seams), /No route satisfies/);
 
-  // ---- explicit external route keeps working; --route alone needs a name, nothing alone is refused ------------------------------------
-  await assert.rejects(serviceMain(['install', '--worker', 'muse'], seamsFor('refuse', 'linux').seams), /pass --route NAME/);
+  // ---- explicit external route keeps working; nothing alone lists Gozar's routes and installs nothing -----------------------------------
+  const refuse = seamsFor('refuse', 'linux'), listed = [];
+  await assert.rejects(serviceMain(['install', '--worker', 'muse'], { ...refuse.seams, out: line => listed.push(line) }), /Rerun with --route <id>/);
+  const printed = listed.join('\n');
+  for (const id of ['fake-stable', 'fake-ephemeral', 'fake-setup']) assert.match(printed, new RegExp(`id: ${id}`));
+  assert.equal(refuse.gozar.fake.state.effects.length, 0, 'no route was created');
+  assert.deepEqual(refuse.gozar.fake.state.calls.filter(call => call !== 'catalogRoutes'), [], 'Gozar was only asked for the catalog');
+  assert.equal(fs.existsSync(path.join(refuse.userHome, '.config/systemd/user')) ? fs.readdirSync(path.join(refuse.userHome, '.config/systemd/user')).length : 0, 0, 'no unit file was written');
 
   // ---- the default home pointer -------------------------------------------------------------------------------------------------------
   const pointer = sandbox('pointer');

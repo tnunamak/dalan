@@ -27,8 +27,8 @@ const yes = async () => true;
 const INVENTED = 'zq-invented-7';
 
 // ---- the pin -------------------------------------------------------------------------------------------------------------------------
-test('the contract fixture is the frozen C0 file, byte for byte', () => {
-  assert.equal(createHash('sha256').update(fs.readFileSync(FIXTURE)).digest('hex'), 'a72c1b8db6a1e6ef35c2ae35193627c5c6e03ec3782a1b743771fb04d60e1488');
+test('the contract fixture is the frozen C0 file (provenance file names made provider-neutral), pinned by hash', () => {
+  assert.equal(createHash('sha256').update(fs.readFileSync(FIXTURE)).digest('hex'), '36703bd62579359a9e852990580e333591401ab527240b56801ba650cb0c2d51');
 });
 
 test('Dalan knows the same 21 error codes the contract freezes, and no others', () => {
@@ -58,7 +58,8 @@ test('the fake returns the fixture shapes: same keys for a catalog, a candidate 
   const catalog = await gozar.catalogRoutes(buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1000 } }));
   const sample = fixture.valid.find(v => v.shape === 'Catalog').value;
   assert.deepEqual(Object.keys(catalog).sort(), Object.keys(sample).sort());
-  assert.deepEqual(Object.keys(catalog.candidates[0]).sort(), Object.keys(sample.candidates[0]).sort());
+  // The pinned 0.2 fixture predates Gozar 0.3; the fake adds exactly providerId to a candidate.
+  assert.deepEqual(Object.keys(catalog.candidates[0]).sort(), [...Object.keys(sample.candidates[0]), 'providerId'].sort());
   const view = await gozar.expose({ ...buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1000 } }), approval: approvalFor(pickCandidate(catalog)), wait: 'verified' });
   assert.deepEqual(Object.keys(view).sort(), Object.keys(fixture.valid.find(v => v.shape === 'RouteView').value).sort());
 });
@@ -73,7 +74,7 @@ test('what Dalan sends always passes the fake\'s request checks (a session, a du
 });
 
 // ---- exact --route pass-through --------------------------------------------------------------------------------------------------------
-test('`dalan try --route NAME` keeps NAME exactly, for a name no list knows; there is no client or route enum', () => {
+test('`dalan try --route ID` keeps ID exactly, for an id no list knows; there is no client or route enum', () => {
   for (const name of [INVENTED, 'work', 'Work.Office', 'a_b-c.9']) assert.equal(parseTryArgs(['--public', '--route', name]).route, name);
   assert.equal(parseTryArgs(['--route', INVENTED]).mode, 'public');
   assert.equal(parseTryArgs(['--public']).route, undefined, 'no route means no name is sent');
@@ -81,32 +82,33 @@ test('`dalan try --route NAME` keeps NAME exactly, for a name no list knows; the
   assert.throws(() => parseTryArgs(['--local', '--route', INVENTED]), /--local cannot be combined with --route/);
 });
 
-test('the name reaches Gozar unchanged and an unknown name is Gozar\'s route_not_found, not a local refusal', async () => {
+test('the id reaches Gozar as providerId unchanged and an unknown id is Gozar\'s route_not_found, not a local refusal', async () => {
   const gozar = createFakeGozar();
   const query = buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1000 }, route: INVENTED });
-  assert.equal(query.route, INVENTED);
+  assert.equal(query.providerId, INVENTED);
+  assert.equal(query.route, undefined);
   await assert.rejects(() => startSessionRoute({ gozar, query, consent: yes }), error => error.code === 'route_not_found');
   assert.equal(gozar.fake.state.effects.length, 0, 'an unknown name exposes nothing');
-  const known = buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1000 }, route: 'work' });
-  const route = await startSessionRoute({ gozar: createFakeGozar({ routeNames: { work: 'cand_ephemeral' } }), query: known, consent: yes }).catch(error => error);
+  const known = buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1000 }, route: 'fake-ephemeral' });
+  const route = await startSessionRoute({ gozar: createFakeGozar(), query: known, consent: yes }).catch(error => error);
   assert.ok(route instanceof RouteError || route.origin, 'a known name is accepted by the same code path');
-  assert.throws(() => buildQuery({ home: HOME, target: 't', usage: { kind: 'attached' }, route: '' }), /needs a name/);
+  assert.throws(() => buildQuery({ home: HOME, target: 't', usage: { kind: 'attached' }, route: '' }), /needs an id/);
 });
 
-test('`dalan setup --route NAME` sends NAME to Gozar and saves it as an opaque name', async () => {
+test('`dalan setup --route ID` sends ID to Gozar and saves it as typed', async () => {
   const gozar = createFakeGozar();
   const env = { XDG_CONFIG_HOME: path.join(tmp, 'cfg-setup'), HOME: path.join(tmp, 'h1') };
   const out = []; const input = new PassThrough();
-  await runSetup({ argv: ['--route', 'work'], env, out: { write: text => out.push(text) }, input, interactive: true, gozar, gozarHome: HOME, answers: ['y'] });
+  await runSetup({ argv: ['--route', 'fake-stable'], env, out: { write: text => out.push(text) }, input, interactive: true, gozar, gozarHome: HOME, answers: ['y'] });
   const seen = gozar.fake.state.calls;
   assert.ok(seen.includes('catalogRoutes'));
   const saved = JSON.parse(fs.readFileSync(path.join(env.XDG_CONFIG_HOME, 'dalan', 'route.json'), 'utf8'));
   assert.equal(saved.version, 2);
-  assert.equal(saved.routeName, 'work');
+  assert.equal(saved.routeName, 'fake-stable');
   assert.deepEqual(Object.keys(saved).sort(), ['bridgeHome', 'gozarHome', 'origin', 'requirements', 'routeId', 'routeName', 'version']);
 });
 
-test('`dalan service install --route NAME` forwards NAME to a durable ensure; without it the origin is an external service', async () => {
+test('`dalan service install --route ID` forwards ID to a durable ensure; without it the origin is an external service', async () => {
   const seam = gozar => ({ gozar, platform: 'linux', env: { HOME: path.join(tmp, 'h2'), XDG_CONFIG_HOME: path.join(tmp, 'x2'), GOZAR_HOME: HOME }, spawn: () => ({ status: 0, stdout: '' }), waitForSocket: async () => true, consent: yes, proxy: null });
   fs.mkdirSync(path.join(tmp, 'x2', 'systemd', 'user'), { recursive: true, mode: 0o700 });
   const base = { origin: 'https://own.example', port: 8789, target: '127.0.0.1:8789', workers: ['dot'] };

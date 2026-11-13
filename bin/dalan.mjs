@@ -13,7 +13,7 @@ import { resolveHelp } from '../src/cli-help.mjs';
 const followed = followTarget({ ownBin: fileURLToPath(import.meta.url) });
 if (followed) handOver(followed);
 else {
-if (!process.env.DALAN_HOME && !['try', 'service', 'setup'].includes(process.argv[2])) { const recorded = readDefaultHome(); if (recorded) process.env.DALAN_HOME = recorded; }
+if (!process.env.DALAN_HOME && !['try', 'service', 'setup', 'routes'].includes(process.argv[2])) { const recorded = readDefaultHome(); if (recorded) process.env.DALAN_HOME = recorded; }
 if (['--version', '-v'].includes(process.argv[2])) {
   const { version } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   process.stdout.write(`${version}\n`);
@@ -32,6 +32,8 @@ if (help) {
   await (await import('../src/mcp-stdio.mjs')).main();
 } else if (process.argv[2] === 'setup') {
   await (await import('../src/setup.mjs')).main();
+} else if (process.argv[2] === 'routes') {
+  await (await import('../src/routes.mjs')).main();
 } else if (process.argv[2] === 'service') {
   try { await (await import('../src/service.mjs')).serviceMain(process.argv.slice(3)); }
   catch (error) { process.stderr.write(`dalan: service: ${error.message}\n`); process.exitCode = 1; }

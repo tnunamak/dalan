@@ -29,7 +29,7 @@ const BRIEF = 'Report the exact phrase: bridge first report. Do not read files, 
 const REPORT = 'bridge first report';
 const MARKER = '.dalan-trial';
 const DEFAULT_CALLBACKS = ['http://127.0.0.1/callback', 'http://localhost/callback'];
-const USAGE = 'usage: dalan try [--local | --public [--route NAME]] [--home DIR] [--port N] [--callback PATTERN]...';
+const USAGE = 'usage: dalan try [--local | --public [--route <id>]] [--home DIR] [--port N] [--callback PATTERN]...';
 const DEMO_REPO = 'dalan-demo/hello';
 const DENIED_REPO = 'dalan-demo/other';
 const DEMO_TITLE = 'Hello from the Dalan demo repository';
@@ -108,7 +108,7 @@ export function parseTryArgs(argv) {
     i++;
     if (flag === '--home') out.home = value;
     else if (flag === '--callback') out.callbacks.push(value);
-    else if (flag === '--route') out.route = value; // the owner's Gozar route name, passed through exactly
+    else if (flag === '--route') out.route = value; // the Gozar route id, passed through exactly
     else if (/^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536) out.port = Number(value);
     else throw new Error('--port requires a number from 1 to 65535');
   }

@@ -39,14 +39,15 @@ export function checkUsage(u) {
   else fail('invalid_input', 'usage.kind is invalid');
 }
 const checkApproval = a => { if (!isRecord(a) || typeof a.candidateToken !== 'string' || typeof a.disclosureRevision !== 'string') fail('invalid_input', 'approval binds a token and a disclosure revision'); only(a, ['candidateToken', 'disclosureRevision'], 'approval'); };
-const QUERY_KEYS = ['schemaVersion', 'owner', 'target', 'usage', 'requirements', 'home', 'route', 'origin', 'intent', 'migrationRef'];
+const QUERY_KEYS = ['schemaVersion', 'owner', 'target', 'usage', 'requirements', 'home', 'route', 'providerId', 'origin', 'intent', 'migrationRef'];
 export function checkQuery(q, extraKeys = []) {
   if (!isRecord(q)) fail('invalid_input', 'a request is an object');
   if (q.schemaVersion !== 1) fail('invalid_input', 'schemaVersion must be the constant 1');
   only(q, [...QUERY_KEYS, ...extraKeys], 'request');
   for (const key of ['owner', 'target', 'home']) if (typeof q[key] !== 'string' || !q[key]) fail('invalid_input', `${key} is required`);
   if (q.intent !== undefined && !['create', 'adopt'].includes(q.intent)) fail('invalid_input', 'intent is an enum');
-  for (const key of ['route', 'origin', 'migrationRef']) if (q[key] !== undefined && typeof q[key] !== 'string') fail('invalid_input', `${key} must be a string`);
+  for (const key of ['route', 'providerId', 'origin', 'migrationRef']) if (q[key] !== undefined && typeof q[key] !== 'string') fail('invalid_input', `${key} must be a string`);
+  if (q.route !== undefined && q.providerId !== undefined) fail('invalid_input', 'providerId and route cannot be combined');
   checkUsage(q.usage); checkRequirements(q.requirements);
 }
 function checkEnsure(r) { checkQuery(r, ['approval', 'reconsent']); if (r.usage.kind !== 'durable') fail('invalid_input', 'ensureRoute requires usage.kind durable'); if (r.intent === 'adopt') fail('invalid_input', 'ensureRoute intent can only be create'); if (r.approval !== undefined) checkApproval(r.approval); if (r.reconsent !== undefined && typeof r.reconsent !== 'boolean') fail('invalid_input', 'reconsent is a boolean'); }
@@ -71,8 +72,15 @@ const checkRef = ref => { if (!isRecord(ref) || typeof ref.home !== 'string' || 
 export const requestChecks = { query: checkQuery, ensure: checkEnsure, adopt: checkAdopt, expose: checkExpose };
 
 // ---- the fake -------------------------------------------------------------------------------------------------------------------------
-// options.routeNames: names the fake knows (any other name: route_not_found). A name picks that candidate; no name leaves all.
-export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand_stable', home: 'cand_stable' }, legacy = null, now = () => Date.parse('2026-11-12T12:00:00.000Z'), verifyTarget = async () => {} } = {}) {
+// The fields Gozar 0.3 adds to a candidate (CONTRACT-0.3). The pinned 0.2 fixture does not carry them, so the fake adds them here.
+const EXTRA = {
+  cand_stable: { needs: 'A synthetic stable provider that needs nothing on this computer.', ports: [443], proof: { vantage: 'public', checks: ['tls', 'nonce'] } },
+  cand_ephemeral: { needs: 'A synthetic temporary provider that needs nothing on this computer.', ports: null, proof: { vantage: 'this-device', checks: ['tls'] } },
+  cand_setup: { needs: 'A synthetic provider that needs one setup step.', ports: [443, 8443], proof: { vantage: 'none', checks: [] } },
+};
+// options.providers: provider id -> candidate name. A query's providerId picks that candidate; an id not listed is route_not_found with the offered ids
+// in the message, as Gozar words it. No providerId leaves every candidate.
+export function createFakeGozar({ platform = 'linux', providers = { 'fake-stable': 'cand_stable', 'fake-ephemeral': 'cand_ephemeral', 'fake-setup': 'cand_setup' }, legacy = null, now = () => Date.parse('2026-11-12T12:00:00.000Z'), verifyTarget = async () => {} } = {}) {
   const state = {
     calls: [], effects: [], tokens: new Map(), sessions: new Map(), pins: new Map(), externals: new Map(), tombstones: new Set(),
     legacy: legacy && { ...legacy, owner: 'legacy', reachable: true }, nextToken: 1, nextRoute: 1, waiters: new Map(), provider: { writes: 0 },
@@ -93,13 +101,20 @@ export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand
       { ...ephemeral, name: 'cand_ephemeral', preferenceRef: 'pref_ephemeral' },
       { ...setup, name: 'cand_setup', preferenceRef: 'pref_setup' },
     ];
-    return query.route === undefined ? out : out.filter(x => x.name === routeNames[query.route]);
+    const idOf = name => Object.keys(providers).find(id => providers[id] === name) ?? name;
+    for (const cand of out) {
+      const extra = EXTRA[cand.name];
+      cand.providerId = idOf(cand.name);
+      cand.display = { ...cand.display, needs: extra.needs };
+      cand.properties = { ...cand.properties, address: { ...cand.properties.address, ports: extra.ports }, proof: structuredClone(extra.proof) };
+    }
+    return query.providerId === undefined ? out : out.filter(x => x.providerId === query.providerId);
   };
   const disclosureRevision = 'disc-fake-1';
-  const bind = q => JSON.stringify([q.owner, q.home, q.target, q.usage, q.intent ?? 'create', q.requirements, q.route ?? null, q.origin ?? null, q.migrationRef ?? null, disclosureRevision]);
+  const bind = q => JSON.stringify([q.owner, q.home, q.target, q.usage, q.intent ?? 'create', q.requirements, q.route ?? null, q.providerId ?? null, q.origin ?? null, q.migrationRef ?? null, disclosureRevision]);
   async function catalog(q) {
     calls('catalogRoutes'); checkQuery(q);
-    if (q.route !== undefined && !(q.route in routeNames)) fail('route_not_found', `no route named ${JSON.stringify(q.route)}`);
+    if (q.providerId !== undefined && !(q.providerId in providers)) fail('route_not_found', `Unknown route id "${q.providerId}". Offered: ${Object.keys(providers).join(', ')}`);
     const list = candidates(q).map((cand, index) => {
       const unmet = [];
       if (platform !== 'linux') unmet.push({ requirement: 'platform', actual: platform, reasonCode: 'unsupported_platform' });

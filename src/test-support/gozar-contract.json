@@ -6259,7 +6259,7 @@
   "errorNormalization": {
     "invalid_input": {
       "target": "invalid_input",
-      "source": "consent-token.mjs, durable-route.mjs, tailscale-localapi.mjs"
+      "source": "consent-token.mjs, durable-route.mjs, provider-localapi.mjs"
     },
     "consent_unknown": {
       "target": "consent_unknown",
@@ -6279,36 +6279,36 @@
     },
     "provider_unavailable": {
       "target": "provider_unavailable",
-      "source": "tailscale-localapi.mjs"
+      "source": "provider-localapi.mjs"
     },
     "provider_denied": {
       "target": "setup_required",
-      "source": "tailscale-localapi.mjs",
+      "source": "provider-localapi.mjs",
       "rule": "revision 3 (f): operator action, Gozar setup action"
     },
     "provider_unsupported": {
       "target": "unsupported",
-      "source": "tailscale-localapi.mjs",
+      "source": "provider-localapi.mjs",
       "rule": "revision 3 (f)"
     },
     "provider_conflict": {
       "target": "provider_unavailable",
-      "source": "tailscale-localapi.mjs",
+      "source": "provider-localapi.mjs",
       "rule": "revision 3 (f)"
     },
     "provider_failed": {
       "target": "provider_unavailable",
-      "source": "tailscale-localapi.mjs",
+      "source": "provider-localapi.mjs",
       "rule": "revision 3 (f)"
     },
     "provider_not_running": {
       "target": "setup_required",
-      "source": "tailscale-localapi.mjs",
+      "source": "provider-localapi.mjs",
       "rule": "owner decision"
     },
     "ETIMEDOUT": {
       "target": "provider_unavailable",
-      "source": "tailscale-localapi.mjs",
+      "source": "provider-localapi.mjs",
       "rule": "owner decision"
     },
     "provider_create_failed": {

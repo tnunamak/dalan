@@ -188,7 +188,7 @@ await asyncCheck('printed public retries retain no-repo-tools on both platform s
       const home=path.join(root,platform),ownerHome=path.join(root,platform+'-owner');fs.mkdirSync(ownerHome);
       const env={...process.env,HOME:ownerHome,XDG_CONFIG_HOME:path.join(root,platform+'-xdg'),PATH:`${bin}:${process.env.PATH}`};
       let message='';
-      try {await run(['--worker','plain','--home',home,'--port','18790','--route','work','--start','--no-repo-tools'],{platform,env,log:()=>{},gozar:createFakeGozar(),consent:async()=>true,resolve4:async()=>null,verifyPublic:async()=>false});} catch(error) {message=error.message;}
+      try {await run(['--worker','plain','--home',home,'--port','18790','--route','fake-stable','--start','--no-repo-tools'],{platform,env,log:()=>{},gozar:createFakeGozar(),consent:async()=>true,resolve4:async()=>null,verifyPublic:async()=>false});} catch(error) {message=error.message;}
       const command=message.match(/Retry the check with: (.+?)\. To remove this install:/)?.[1];assert(command,message);
       const args=command.split(' ').slice(2);assert(args.includes('--no-repo-tools'),`${platform}: retry omitted the installed setting`);
       let probes=0;

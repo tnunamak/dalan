@@ -1,7 +1,7 @@
 // The owner's saved public-route choice, written by `dalan setup`. One small file in the user's config directory, outside every
 // trial home, so a deleted trial never loses it and a trial never writes it.
 //
-// Version 2 stores only what Dalan owns: the requirements it asked for, the Gozar state home, the Gozar route name (an opaque
+// Version 2 stores only what Dalan owns: the requirements it asked for, the Gozar state home, the Gozar route id (an opaque
 // string that Dalan never interprets), the durable route id, the pinned origin and the bridge home. Everything about how a route is
 // provided belongs to Gozar. A file of any other version fails closed: it is reported, never guessed at or rewritten.
 import fs from 'node:fs';

@@ -74,7 +74,7 @@ test('per-command help prints usage and does not run the command', () => {
 
 test('every command the CLI dispatches has a help entry', () => {
   const source = fs.readFileSync('bin/dot-worker.mjs', 'utf8');
-  const dispatched = new Set(['try', 'setup', 'mcp', 'service']); // bin/dalan.mjs dispatches these before the CLI loads
+  const dispatched = new Set(['try', 'setup', 'mcp', 'service', 'routes']); // bin/dalan.mjs dispatches these before the CLI loads
   for (const line of source.match(/^ {4}case '[a-z-]+'(?:: case '[a-z-]+')*/gm)) for (const m of line.matchAll(/'([a-z-]+)'/g)) dispatched.add(m[1]);
   const documented = new Set(COMMANDS.map(c => c.name));
   for (const name of dispatched) assert.ok(documented.has(name), `${name} has no entry in src/cli-help.mjs`);

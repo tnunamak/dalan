@@ -14,7 +14,7 @@ import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
 import { createGate, verifyPublicReady, watchPublicIdentity } from './try-exposure.mjs';
-import { RouteError, resolveRouteWord, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
+import { RouteError, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 
@@ -100,7 +100,7 @@ export const restartCommand = ({ cli, home, freshHome, shellQuote, route, stable
 export async function runHosted({ options, env, out, input, signal, errorContext, clock = { now: Date.now, sleep }, deps = {}, helpers }) {
   const { prepareHome, portFree, socketAnswers, choosePort, shellQuote, commandLine, parsePending, describeAttempt, MARKER, DIAGNOSE_AFTER_MS, DIAGNOSE_EVERY_MS, DIAGNOSE_LIMIT, POLL_MS, repo } = helpers;
   const say = line => out.write(`${terminalSafe(line)}\n`);
-  // With no --route, a route saved by `dalan setup` is used as a durable route; an explicit --route name is a session route for this trial.
+  // With no --route, a route saved by `dalan setup` is used as a durable route; an explicit --route id is a session route for this trial.
   const saved = options.route === undefined ? readRouteSetting(env) : null;
   const durable = saved !== null && saved.origin !== null;
   const realHome = fs.realpathSync(os.homedir());
@@ -220,13 +220,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     };
     try {
       const gozar = deps.gozar ?? await resolveGozar();
-      const wanted = buildQuery({ home: saved?.gozarHome ?? gozarHomeFor(env), target: `127.0.0.1:${gate.port}`, route: options.route ?? saved?.routeName ?? undefined,
+      const query = buildQuery({ home: saved?.gozarHome ?? gozarHomeFor(env), target: `127.0.0.1:${gate.port}`, route: options.route ?? saved?.routeName ?? undefined,
         usage: durable ? { kind: 'durable', routeId: saved.routeId } : { kind: 'session', lifetimeMs: trialMs }, ...(durable ? { origin: saved.origin, address: 'stable' } : {}) });
-      const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
       if (durable) {
-        const view = await ensureDurableRoute({ gozar, query, consent, pick });
+        const view = await ensureDurableRoute({ gozar, query, consent });
         route = { origin: view.origin, exited: null, endedBecause: () => null, stop: async () => ({ removed: true }) }; // an app exit never closes a durable route
-      } else route = await startSessionRoute({ gozar, query, consent, signal, wait: 'allocated', pick });
+      } else route = await startSessionRoute({ gozar, query, consent, signal, wait: 'allocated' });
       if (!durable) stableAddress = route.view?.properties?.address?.stability === 'stable';
     }
     catch (error) {
@@ -236,7 +235,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
           if (known.code && !(error instanceof RouteError && error.tryKind)) error.message = `${known.line}${known.fix ? `\nNext: ${known.fix}` : ''}`;
         }
         error.tryKind ??= 'route_start';
-        if (durable && error instanceof Error) error.message += '\nA saved route never falls back to a temporary link on its own. Fix it and run again, or run with --route NAME.';
+        if (durable && error instanceof Error) error.message += '\nA saved route never falls back to a temporary link on its own. Fix it and run again, or run with --route <id> (see `dalan routes`).';
       }
       throw error;
     }

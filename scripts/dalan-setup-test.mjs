@@ -40,7 +40,7 @@ test('one question; yes saves a version-2 setting with only the pinned origin an
   assert.ok(s.out.includes(SWITCH_NOTE));
 });
 
-test('--route NAME is passed to Gozar verbatim: an unknown invented name is Gozar\'s route_not_found and nothing is saved', async () => {
+test('--route ID is passed to Gozar verbatim: an unknown invented id is Gozar\'s route_not_found and nothing is saved', async () => {
   const s = session({ answers: ['y'], argv: ['--route', 'zq-invented-7'] });
   await assert.rejects(s.run(), error => error.code === 'route_not_found');
   assert.equal(readRouteSetting(s.env), null);
