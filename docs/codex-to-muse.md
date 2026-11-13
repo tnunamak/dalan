@@ -8,42 +8,26 @@ Codex CLI submits a job through a local `dalan mcp` process. Muse (muse.ai), a h
 - Node.js 24 or newer and npm.
 - Codex CLI installed and signed in on the bridge computer.
 - A Muse account with remote MCP connections and tool calls available.
-- A public HTTPS address that Muse can reach. Tailscale is optional: either a Tailscale route or the Gozar relay can provide public HTTPS.
-- A free local port, here `8799`, and a new, short bridge-home path on local disk.
+- A public HTTPS address that Muse can reach. A Gozar route provides it.
 
-Both routes make the bridge reachable from the public internet. With `--route tailscale`, Tailscale cannot read the traffic; its HTTPS certificate publishes the machine and tailnet DNS names in a public certificate ledger. The Gozar relay terminates TLS and can read the connector URL and traffic. Keep the full MCP URL private: its path contains a secret. Your Codex and Muse accounts retain their own usage limits and charges.
+A route makes the bridge reachable from the public internet. Some routes are run by a third party that terminates TLS and can read the connector URL and traffic; others do not. `dalan setup` shows what each route offers. Keep the full MCP URL private: its path contains a secret. Your Codex and Muse accounts retain their own usage limits and charges.
 
 This first job uses no repository and runs no checks. Use a dedicated worker named `muse`. Do not reuse another worker's connection.
 
 ## 1. Start and expose the bridge
 
-Choose your public HTTPS route first. The README describes [`--route tailscale`](../README.md#use-a-tailscale-route) and the [Gozar relay with `--route gozar`](../README.md#choose-another-relay) for public trials, including relay consent and temporary-link limits. Those are trial options, not flags for the service setup command below. For an existing public HTTPS bridge, use its actual bridge home as `DALAN_HOME` and its private `resource-url`, with a dedicated worker named `muse`, then continue at step 2. Do not reuse another worker's connection.
-
-### Tailscale service option
-
-The following existing service recipe is one option, not a requirement for Muse. Install Tailscale, sign in, and enable MagicDNS, HTTPS certificates and Funnel for the machine first. On macOS, use the open-source `tailscaled`; the App Store and Standalone apps do not support Funnel.
-
-On the bridge computer, install Dalan:
+Install Dalan, then install the service with a dedicated worker named `muse`. `ROUTE` is the name of a Gozar route; `dalan setup` lists what Gozar can offer on this computer.
 
 ```sh
 npm install -g @tnunamak/dalan
+dalan service install --worker muse --route ROUTE
+dalan status
+dalan doctor --auth
 ```
 
-Create and start the service. The example home must not already exist. If the port is occupied, choose another free port.
+Install keeps the bridge's state in `~/.local/share/dalan-service`, which `dalan` remembers; no `DALAN_HOME` is needed. A new worker has no repository grants, and host checks stay off. Open the private connector URL file that install printed and use its entire URL in step 2. Do not substitute the public hostname alone or a loopback URL. For an existing HTTPS reverse proxy, see the [service guide](service-setup.md#an-existing-reverse-proxy).
 
-```sh
-node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" \
-  --worker muse --port 8799 --home "$HOME/.local/share/dalan-muse" \
-  --expose tailscale --no-repo-tools --start
-export DALAN_HOME="$HOME/.local/share/dalan-muse"
-dalan status --json
-```
-
-Use the same `DALAN_HOME` in every owner shell below. The setup writes a service and a private `resource-url` file in that home. It disables repository workspace tools for this example. A new worker has no repository grants.
-
-Open `$DALAN_HOME/resource-url` privately and use its entire URL in step 2. Do not substitute the public hostname alone or a loopback URL. If you already have an HTTPS reverse proxy, use the [service guide](service-setup.md) instead of setting up a second exposure.
-
-**Check:** setup prints `Resource URL file (private, mode 0600):` followed by the file path, and `PASS public HTTPS: GET /admin returned 404 from the bridge`. The status command returns a JSON status record. The public check proves reachability, not that Muse has finished a job.
+**Check:** install prints the path of the private connector URL file, and `dalan doctor --auth` passes. `dalan status` returns the queue state. The public check proves reachability and sign-in, not that Muse has finished a job.
 
 ## 2. Connect Muse as the worker
 
@@ -96,8 +80,9 @@ Add this entry to `~/.codex/config.toml`. Replace both paths with absolute paths
 [mcp_servers.dalan]
 command = "/absolute/path/to/dalan"
 args = ["mcp"]
-env = { DALAN_HOME = "/absolute/path/to/.local/share/dalan-muse" }
 ```
+
+`dalan mcp` finds the remembered service home. Add `env = { DALAN_HOME = "/absolute/path/to/home" }` only to select a different home.
 
 Start a new Codex CLI session on this computer so it loads the entry. Ask it to call `dalan_status`. To call these tools from `codex exec`, which has no screen to approve them, set per-tool approval for the `dalan` server as the `codex exec` paragraph of [Worker clients](worker-clients.md#native-cli-worker-codex-cli) describes.
 
@@ -136,7 +121,7 @@ A wait can stop for a question, blocker or cancellation as well as a result. Rea
 
 ## 5. Accept or reject the result
 
-The local MCP server has no decision tool. In your owner shell, with the same `DALAN_HOME`, replace `REQUEST_ID` and choose one command.
+The local MCP server has no decision tool. In your owner shell, replace `REQUEST_ID` and choose one command.
 
 Accept a satisfactory answer:
 
@@ -156,10 +141,10 @@ Do not use `rejected`: it is not a supported decision word. This records your re
 
 ## Troubleshooting
 
-- **Public DNS or HTTPS check fails.** Setup prints `FAIL public DNS:` or `FAIL public HTTPS:`. Read its suggested next step. The service and home remain in place; use the printed retry-check command after fixing the issue, rather than rerunning setup against the same home.
+- **The public check fails.** Run `dalan doctor --auth` and read its failing step. Running `dalan service install` again with the same options is safe; it changes nothing that already works.
 - **The sign-in page says `Not accepting connections` or `Connection attempt invalid or expired`.** Open a new pairing window with `dalan connect start --worker muse`, restart sign-in in Muse, and compare the new code with `dalan connect pending`.
 - **Registration is refused.** The bridge refuses a redirect that is not a valid HTTPS URL, or that carries credentials or a fragment. Read the reason, compare the redirect with what Muse's connection flow shows, then restart sign-in. Do not approve a connection whose redirect you cannot match to the client you started.
-- **Codex cannot reach the bridge.** A CLI error beginning `cannot reach the bridge:` means the selected home's bridge is not running. Check the absolute `DALAN_HOME` in the Codex entry, then run `dalan status --json` in an owner shell with that same home and inspect the service. Do not register the public URL as Codex's requester endpoint.
+- **Codex cannot reach the bridge.** A CLI error beginning `cannot reach the bridge:` means the selected home's bridge is not running. Run `dalan status --json` and `dalan service status` in an owner shell. If the Codex entry sets `DALAN_HOME`, check that it is the absolute path of the running bridge's home. Do not register the public URL as Codex's requester endpoint.
 - **Approval says the worker already has an active connection.** Inspect `dalan connect list`. Continue with the existing intended Muse connection, or deliberately revoke it before pairing again. Do not approve a different client just because it calls itself Muse.
 
 ## Removal
@@ -173,11 +158,10 @@ dalan connect stop
 
 Remove the remote MCP server from Muse. Remove only the `mcp_servers.dalan` entry you added to Codex's configuration and start a new Codex session.
 
-If you used the Tailscale service option, remove this dedicated service and its recorded Funnel exposure:
+Remove this dedicated service and its public route:
 
 ```sh
-node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" \
-  --remove --worker muse --home "$HOME/.local/share/dalan-muse"
+dalan service uninstall
 ```
 
-This command retains the bridge home, including its keys and job history. Follow [service removal](service-setup.md#remove-a-generated-service) if you also want to delete that data.
+This command retains the bridge home, including its keys and job history. Add `--purge-home` if you also want to delete that data; see [service removal](service-setup.md#remove-the-service).

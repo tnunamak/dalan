@@ -20,9 +20,13 @@ Start Dalan in an interactive terminal:
 npx -y @tnunamak/dalan try
 ```
 
-Choose ChatGPT or Claude on the web. In `auto` mode, a saved Gozar choice or an older saved localhost.run choice selects Gozar. Otherwise Dalan uses Tailscale when a route is usable, and Gozar when Tailscale is not usable.
+Choose ChatGPT or Claude on the web. Dalan asks Gozar for a public HTTPS route and shows what it chose before it opens anything. Routes come from Gozar; Dalan does not interpret the route name. `dalan setup` lists what Gozar can offer on this computer and saves your choice. To pick a route for one trial, pass its name:
 
-When Dalan selects Gozar, it names tunnl.gg, links its [terms](https://tunnl.gg/terms) and [privacy notice](https://tunnl.gg/privacy), and asks for consent before exposure. After you consent, Gozar creates a key for this installation and opens a route through its key-bound `tunnl-gg` relay. Dalan does not use or pass your SSH keys. The relay terminates TLS and can see the connector URL and traffic. Keep private code and secrets out of the demo.
+```sh
+dalan try --public --route ROUTE
+```
+
+Some routes are temporary and some are stable. Some are run by a third party that terminates TLS and can read the connector URL and your traffic. Dalan prints the properties of the chosen route and asks for consent before it exposes anything. Keep private code and secrets out of the demo.
 
 A temporary demo link can change or stop without warning, including within minutes. Dalan checks the original address and ends the trial when it detects a route change or loss. The trial ends after three hours at most; that is a limit on the trial, not a promise about the link. If the address changes or the route stops, start a fresh trial and replace the connector URL.
 
@@ -39,7 +43,7 @@ Ctrl-C stops the trial. It also cancels a route that is still starting. Dalan cl
 
 If Gozar returns a cleanup-pending status for this trial, Dalan provides a recovery command that stops by port. Gozar does not bind that command to a session ID, so the route can change before the command runs. Inspect the current route before using it.
 
-On stop, Dalan removes the connector URL file. It also removes the bridge's secret file for temporary routes. It keeps the bridge configuration when a Tailscale route reuses the same home.
+On stop, Dalan removes the connector URL file and the bridge's secret file for temporary routes. A trial prints its own home. If you run other `dalan` commands against a trial, set `DALAN_HOME` to that printed home first.
 
 ### Try without a public route
 
@@ -49,60 +53,46 @@ npx -y @tnunamak/dalan try --local
 
 This runs a self-check with a built-in demo worker and then lets you connect a client on this computer. It does not open a public route. To connect a worker client by hand, see [manual setup](docs/manual-setup.md#worker-setup).
 
-## Use a Tailscale route
-
-`npx -y @tnunamak/dalan setup` saves a route choice for public trials. If Tailscale is ready for Funnel, setup asks whether to save Tailscale or Gozar for temporary links. If Tailscale is not ready, setup prints Tailscale installation instructions or lets you save Gozar. It does not install a background service or move a connector to a new address.
-
-Use Tailscale explicitly:
-
-```sh
-npx -y @tnunamak/dalan setup
-npx -y @tnunamak/dalan try --public --route tailscale --client chatgpt
-```
-
-Use `--client claude` for claude.ai. Tailscale login, client sign-in and approval may still be required. An explicit `--route tailscale` does not fall back to a trial link: if the route cannot start, Dalan stops and explains why.
-
-An explicit `--route tailscale` trial uses HTTPS port 443. When the port is available, Dalan opens its own Funnel rule for the trial and attempts to remove only that rule when it stops. If another rule already holds port 443, Dalan can start an isolated, temporary Tailscale node instead. It does not reuse or change the other rule. That node uses a new address and may need a one-time sign-in. A new address needs a new client sign-in.
-
-If the public address does not answer, the trial prints `TLS certificate: ok` or `TLS certificate: error (...)`. The trial keeps a masked copy of the temporary node's log as `tailscaled.log` in the trial home.
-
-### Choose another relay
-
-`--route gozar` explicitly selects the Gozar relay. Dalan still asks for consent before it exposes the route.
-
-`--route localhost.run` remains available as an explicit option. It uses OpenSSH and a temporary third-party relay. The relay terminates TLS and can inspect the connector URL and forwarded traffic. Dalan prints this notice before it starts the route. The address can change or stop without warning. Dalan attempts to close the route and reports cleanup it cannot confirm.
-
-In `auto` mode, a saved Gozar choice or an older saved localhost.run choice selects Gozar. Otherwise, auto uses a usable Tailscale route and selects Gozar when Tailscale is unavailable.
-
 <a id="expose-your-bridge"></a>
 
 ## Install a long-running bridge
 
-Install the CLI:
+Install the CLI, then install the background service:
 
 ```sh
 npm install -g @tnunamak/dalan
+dalan service install --worker NAME --route ROUTE
 ```
 
-For a bridge that runs in the background on Linux, follow [Run Dalan as a service](docs/service-setup.md). `dalan service install` installs a systemd user service and registers an existing HTTPS origin with Gozar. It does not configure your reverse proxy. One bridge can serve several workers with built-in sign-in and a stable tool catalog.
+Linux runs the service as a systemd user service. macOS runs it as a launchd LaunchAgent. The commands are the same on both. `ROUTE` is the name of a Gozar route; `dalan setup` lists the routes Gozar can offer on this computer. The install creates the public HTTPS address through Gozar, picks a free port, and keeps its state in `~/.local/share/dalan-service`. Dalan remembers that home, so no other command needs `DALAN_HOME`. Repeat `--worker NAME` for each worker. Running the same install again changes nothing.
 
-New service installs enable daily update checks with up to one hour of jitter. `dalan service update --check --home DIR` reports the newest npm release without installing it. An update installs a separate version, checks every worker's tool catalog, restarts the bridge, and checks its health. A failed switch attempts to restore the previous version and saved state; a failed rollback is reported. Restarts interrupt client connections; these checks do not prove that every change in tool behavior is compatible.
-
-If any tool descriptor changes, Dalan stages the release and records `connector_refresh_required` without switching. Run `dalan service update --yes --home DIR` to authorize that switch, then refresh the Dalan connector in each hosted client. The daily timer never passes `--yes`. Use `dalan service status --home DIR` for the last result, or `dalan service auto-update off --home DIR` to disable future scheduled checks. Pass `--no-auto-update` during installation to opt out. Existing service preferences are preserved. See [update and recovery details](docs/service-setup.md#service-updates). These commands support Linux systemd services; they do not add launchd support.
-
-For an existing bridge, migrate worker settings into a new home before you install the service. Repeat `--source` for each old workers file. Use `--workspace-worker` for each worker that needs workspace access:
+Install prints where the private connector URL file is, the next command to run, and a health check. Run these two checks:
 
 ```sh
-dalan service migrate-workers \
-  --home "$HOME/.local/share/dalan-service" \
-  --source "$HOME/OLD_BRIDGE/.config/dot-bridge/workers.json" \
-  --source-db "$HOME/OLD_BRIDGE/.local/share/dot-bridge/bridge.db" \
-  --workspace-worker WORKER
+dalan status
+dalan doctor --auth
 ```
 
-Migration reads source files without changing them. It copies only repository grants backed by validated audit records. If a checkpoint fails, all source grants are denied until the owner re-approves them. It denies and reports unaudited additions. It preserves supported worker settings, but does not copy OAuth connections, tokens, jobs, results or old destination approvals. The new service defaults execution to `none`. It preserves explicit `workspaceAllowed` settings. Workspace access stays denied by default; pass `--workspace-worker NAME` to grant it to each worker that needs it. Pair every connector again, create new subscriptions with fresh signing keys, and approve each new destination revision. See [service setup](docs/service-setup.md#install-one-bridge-for-several-workers) for details.
+`dalan doctor --auth` runs an OAuth self-check against the public URL: dynamic registration, PKCE, `initialize` and `tools/list`. It prints no secrets. On macOS, host checks are unavailable and jobs run with `--execution none`.
 
-For a new service home, pass `--worker NAME` once for each worker instead of migrating. See `dalan help service` for the install options.
+Pair a worker, then approve it with the code the client shows. Compare that code with the one in your client before you approve:
+
+```sh
+dalan connect start --worker NAME
+dalan connect pending
+dalan connect approve CODE --worker NAME
+```
+
+Automatic updates are on by default: a daily check with up to one hour of random delay (a systemd timer on Linux, a launchd agent on macOS). The `dalan` on your PATH follows the service's current version. If any tool descriptor changes, Dalan stages the release and records `connector_refresh_required` without switching. Run `dalan service update --yes` to authorize that switch, then refresh the Dalan connector in each hosted client. The daily check never passes `--yes`.
+
+```sh
+dalan service status
+dalan service update --check
+dalan service auto-update off
+dalan service uninstall
+```
+
+An update installs a separate version, checks every worker's tool catalog, restarts the bridge, and checks its health. A failed switch attempts to restore the previous version and saved state; a failed rollback is reported. Restarts interrupt client connections; these checks do not prove that every change in tool behavior is compatible. See [Run Dalan as a service](docs/service-setup.md) for options, an existing reverse proxy, worker migration and [update and recovery details](docs/service-setup.md#service-updates).
 
 ## Give your connected agent a job
 

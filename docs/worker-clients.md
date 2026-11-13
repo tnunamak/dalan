@@ -179,16 +179,16 @@ Each native attempt is approved by its own code, and a later attempt cannot take
 
 ### Worked example: Codex CLI on another computer
 
-This example uses a bridge from the [Tailscale Funnel setup](service-setup.md#with-tailscale-funnel), a worker named `NAME` and Codex CLI on the worker computer. No reverse proxy and no domain of your own are involved.
+This example uses a bridge from `dalan service install --worker NAME --route ROUTE` ([service setup](service-setup.md)) and Codex CLI on the worker computer. No reverse proxy and no domain of your own are involved.
 
-1. On the bridge computer, with `DALAN_HOME` set to the bridge home, allow the callback and open a pairing window:
+1. On the bridge computer, allow the callback and open a pairing window:
 
    ```sh
    dalan connect allow-callback 'http://127.0.0.1/callback'
    dalan connect start --worker NAME
    ```
 
-2. Copy the private file `$DALAN_HOME/resource-url` to the worker computer over a trusted channel such as `scp`, and keep it at mode 0600, because it holds the bridge's secret path.
+2. Copy the private connector URL file that install printed (`resource-url` in the service home, `~/.local/share/dalan-service/resource-url` by default) to the worker computer over a trusted channel such as `scp`, and keep it at mode 0600, because it holds the bridge's secret path.
 3. On the worker computer, add the server. The command prints an authorization URL and waits:
 
    ```sh
@@ -199,7 +199,7 @@ This example uses a bridge from the [Tailscale Funnel setup](service-setup.md#wi
 5. On the bridge computer, run `dalan connect pending`. Compare the code and the redirect with the page, then run `dalan connect approve CODE --worker NAME --confirm-redirect REDIRECT`.
 6. **Check:** `codex mcp add` ends with `Successfully logged in.` Add the five tool approvals from the [Codex CLI section](#native-cli-worker-codex-cli) to the worker computer's `config.toml`. Submit the README's first job with `--worker NAME`, run `codex exec` on the worker computer, then use `dalan wait`, `get` and `decide` on the bridge computer.
 
-To undo it, run `codex mcp remove NAME` on the worker computer, and `node "$(npm root -g)/@tnunamak/dalan/scripts/worker-bridge-setup.mjs" --remove --worker NAME --home HOME_PATH` on the bridge computer (from a checkout, `node scripts/worker-bridge-setup.mjs` with the same options); that also turns off the Funnel rule that setup created.
+To undo it, run `codex mcp remove NAME` on the worker computer, and `dalan service uninstall` on the bridge computer; that removes the service and its public route.
 
 ## Worker names and more than one worker
 

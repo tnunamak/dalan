@@ -123,7 +123,7 @@ JS
 
 The [first-job walkthrough](../README.md#quickstart) starts with `inputs: []`, `execution_scope: "read-only"`, and explicit `--worker NAME --execution none --deliver none`. It works without a repository grant or host checks. Follow it with receipt-based recovery before a separate repository assignment: `dalan worker allow NAME OWNER/REPO`, then `dalan worker list NAME --json` to verify exact authority. Basic macOS delegation stays on `none`; Linux host checks are an optional, separately admitted branch with the prerequisites below.
 
-Generated setup cleanup is not an exposure-only toggle: `worker-bridge-setup.mjs --worker NAME --home HOME_PATH --remove` (the worker and home used at install; the recorded exposure is looked up in that home) stops/removes its generated services and recorded exposure. It retains the private home unless `--purge-home` is explicitly requested. For ngrok, the separately installed ngrok service still needs the printed stop/uninstall commands; do not infer that those commands ran.
+`dalan service uninstall` stops and removes the service and its update timer; it retains the private home unless `--purge-home` is explicitly requested. See [Remove an installation](#remove-an-installation).
 
 See the [requester reference](usage.md) for the assignment sequence and [T3 and orchestration integration](t3-integration.md) for the owner thread. The local requester CLI uses a mode 0600 Unix socket at `<home>/.local/share/dalan/admin.sock`. It writes a mode 0600 receipt with a per-request owner capability before submit; the server stores only its hash. Retry the same `request_id`, payload and destination after a lost response. `get` and `cancel` require that receipt. Pause, resume, reconcile and adoption require the separate mode 0600 operator key at `<config>/dalan/operator.key`. Same-UID processes can still read these files; they are not distinct human identities.
 
@@ -331,7 +331,7 @@ This build refuses startup when `bridge.db` has a SQLite `user_version` above 66
 
 ### Restart a service and check its state
 
-Linux (systemd user manager). For `dalan service install`, replace `UNIT.service` with the exact unit printed by install, such as `dalan-<10 hex>.service`. The legacy `scripts/worker-bridge-setup.mjs` uses `dot-bridge-NAME.service`:
+`dalan service status` shows the state of the service that `dalan service install` made, on Linux and macOS. For the service manager itself, use the commands below. On Linux (systemd user manager), replace `UNIT.service` with the exact unit printed by install, such as `dalan-<10 hex>.service`. A service from an earlier release's setup script uses `dot-bridge-NAME.service`:
 
 ```sh
 systemctl --user restart UNIT.service
@@ -339,7 +339,7 @@ systemctl --user is-active UNIT.service
 journalctl --user -u UNIT.service -n 20
 ```
 
-macOS (launchd; the Linux-only `dalan service install` does not apply). These commands are for the legacy `scripts/worker-bridge-setup.mjs`. `LABEL` is `org.dalan.dot-bridge-NAME`, or the label of the older release when it generated the service (find the file with `ls ~/Library/LaunchAgents | grep dot-bridge`):
+macOS (launchd). `LABEL` is the label that install printed. For a service from an earlier release's setup script it is `org.dalan.dot-bridge-NAME`, or the label of the older release when it generated the service (find the file with `ls ~/Library/LaunchAgents | grep dot-bridge`):
 
 ```sh
 launchctl kickstart -k user/$(id -u)/LABEL
@@ -357,15 +357,15 @@ launchctl kickstart -k user/$(id -u)/LABEL
 
 The generated agent has `KeepAlive`, so launchd starts the bridge again after it exits or is killed. launchd waits about 10 seconds between starts of one agent.
 
-Setup loads the agent into the `user/UID` launchd domain. Earlier releases loaded it into `gui/UID`, and a `gui/UID` domain whose desktop session is idle or locked can be in on-demand-only mode: launchd then neither starts the agent at load nor restarts it after `kill -9`, and `launchctl print` shows `pended nondemand spawn = inefficient`. If your service was set up by an older release, run `worker-bridge-setup.mjs --repoint --worker NAME` (it adds the session types the user domain needs), stop the old agent with `launchctl bootout gui/$(id -u) PLIST`, and load it with the two commands above. `launchctl bootout` takes `gui/$(id -u)` instead of `user/$(id -u)` for an agent that is still loaded in the GUI domain.
+Setup loads the agent into the `user/UID` launchd domain. Earlier releases loaded it into `gui/UID`, and a `gui/UID` domain whose desktop session is idle or locked can be in on-demand-only mode: launchd then neither starts the agent at load nor restarts it after `kill -9`, and `launchctl print` shows `pended nondemand spawn = inefficient`. If your service was set up by an older release, follow the repoint step in the [upgrade guide](dalan-upgrade.md) (it adds the session types the user domain needs), stop the old agent with `launchctl bootout gui/$(id -u) PLIST`, and load it with the two commands above. `launchctl bootout` takes `gui/$(id -u)` instead of `user/$(id -u)` for an agent that is still loaded in the GUI domain.
 
 ### Smoke check an installed service
 
-`dalan doctor` is a local check; it does not prove that a worker can finish a job. After setup, a restart or an upgrade, run these with `DALAN_HOME` set to the service's home:
+`dalan doctor` is a local check; it does not prove that a worker can finish a job. After setup, a restart or an upgrade, run these:
 
-1. `dalan status --json` exits 0 and shows the queue and worker state.
+1. `dalan status --json` exits 0 and shows the queue and worker state. `dalan doctor --auth` passes the OAuth self-check against the public URL.
 2. Confirm that the log shows `MCP listening` on the bind address and port configured for this service. Generated built-in-auth services use `127.0.0.1:PORT`; an external-OAuth service behind an HTTPS reverse proxy may use its explicitly configured non-loopback address.
-3. Connect the worker's client as in [worker pairing](manual-setup.md#worker-setup), using the service's HTTPS URL from `$DALAN_HOME/resource-url`. The `try` command does not run against an existing service, and a plain loopback URL is not accepted outside loopback mode.
+3. Connect the worker's client as in [worker pairing](manual-setup.md#worker-setup), using the service's HTTPS URL from the private `resource-url` file in the service home. The `try` command does not run against an existing service, and a plain loopback URL is not accepted outside loopback mode.
 4. Submit the repository-free job from [the manual setup](manual-setup.md#submit-finish-and-read-the-result) with `dalan submit --worker NAME --execution none --deliver none --file first-job.json --json`, prompt the worker, then run `dalan wait REQUEST_ID` and `dalan decide REQUEST_ID accepted`. The job must reach `finished`.
 
 Restart the service once more and run `dalan get REQUEST_ID`: the job must still be `finished`.
@@ -376,13 +376,12 @@ Remove only what you created. An install can leave these behind:
 
 | What | How to remove |
 |---|---|
-| Generated service (systemd unit or launchd plist, and any recorded exposure) | `node scripts/worker-bridge-setup.mjs --remove --worker NAME --home HOME_PATH`. It finds only a service generated under the current names. Stop an agent of a release before 0.4.0 and delete its plist by hand first (`ls ~/Library/LaunchAgents | grep dot-bridge`). |
-| Bridge home: database, keys, receipts, artifacts | Add `--purge-home` to the command above, or delete `HOME_PATH` yourself. This destroys private keys and job history. `--purge-home` refuses, and names what it found, while another unit file in the user's unit directory (`~/.config/systemd/user` or `~/Library/LaunchAgents`) names `HOME_PATH`, or while a process holds the home's `bridge.db` open; stop that service first. |
+| Service (systemd unit or launchd agent, update timer and public route) | `dalan service uninstall`. For a service from an earlier release's setup script, see the [upgrade guide](dalan-upgrade.md); an agent of a release before 0.4.0 needs its plist deleted by hand first (`ls ~/Library/LaunchAgents | grep dot-bridge`). |
+| Bridge home: database, keys, receipts, artifacts | Run `dalan service uninstall --purge-home`, or delete the home yourself (`~/.local/share/dalan-service` by default). This destroys private keys and job history. `--purge-home` refuses, and names what it found, while another unit file in the user's unit directory (`~/.config/systemd/user` or `~/Library/LaunchAgents`) names that home, or while a process holds the home's `bridge.db` open; stop that service first. |
 | Trial home (`dalan try` keeps it) | Delete `<HOME>/.local/share/dalan-trial` (or the directory given to `try --home`). |
 | Worker-client registration | `codex mcp remove NAME` or `claude mcp remove --scope user NAME`, with the name you registered (`local` for `try`). Then open the Codex `config.toml` (`$CODEX_HOME/config.toml` if `CODEX_HOME` is set, otherwise `~/.codex/config.toml`) and remove any `[mcp_servers.NAME.tools.*]` tables you added. `codex mcp remove` may already have removed them. |
 | The `dalan` command | Installed with `npm install -g @tnunamak/dalan`: run `npm uninstall -g @tnunamak/dalan`. Linked from a checkout with `npm link`: run `npm unlink -g @tnunamak/dalan`, then delete the checkout. Started with `npx @tnunamak/dalan try`: npx leaves a copy in its cache. To find only Dalan's entry, run `grep -l '"@tnunamak/dalan"' ~/.npm/_npx/*/package.json`; delete the directory that holds each file it lists, after you check its contents. Do not delete all of `~/.npm/_npx` or run `npm cache clean --force` unless you accept losing the cached copies of other packages too; both are optional. |
 | Upgrade staging install | The [npm upgrade](dalan-upgrade.md#upgrade-an-npm-install) installs a second copy of Dalan and its dependencies in `$HOME/dalan-new` (or the directory you gave to `npm install --prefix`) for the drain. First check that no service runs code from it. Linux: `grep -Rl dalan-new ~/.config/systemd/user`. macOS: `grep -RSl dalan-new ~/Library/LaunchAgents`. `grep` exits 1 and prints nothing when it finds none; any other exit status, or any error message, means the check failed, so do not delete anything until you fix it. Then delete that one directory, `rm -rf "$HOME/dalan-new"`. It holds no bridge home. Do not delete other npm installs. |
-| ngrok service (only with `--expose ngrok`) | If you installed ngrok's system service with the commands setup printed, run `ngrok service stop`, then `ngrok service uninstall`. `--remove` does not run them. |
 | Setup lock file | `/tmp/dot-bridge-setup-locks-UID/install.lock` is an empty file that setup creates and never deletes. It holds no data; delete it if you want nothing left. |
 | Older installs | Directories named `dot-bridge` under `~/.config`, `~/.local/share` and `~/.local/state`, if the install predates the rename. |
 
@@ -616,7 +615,7 @@ The bridge fetches repositories for workspace tools with the GitHub credential o
 
 ### Service GitHub access
 
-The shell login used to clone this repository does not authenticate the generated service. The service runs with its own `HOME` and `PATH`; Git askpass calls `gh auth token` inside that environment. Give the service a separate GitHub CLI login in the private home selected by `worker-bridge-setup`. The setup script does not copy a caller's token.
+The shell login used to clone this repository does not authenticate the generated service. The service runs with its own `HOME` and `PATH`; Git askpass calls `gh auth token` inside that environment. Give the service a separate GitHub CLI login in the private home selected by the install (the service home). Install does not copy a caller's token.
 
 Run the following as the same Unix user who runs the bridge.
 
