@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { defaultPath } from '../src/paths.mjs';
 import { installService, serviceMain, uninstallService } from '../src/service.mjs';
 import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
@@ -167,5 +169,25 @@ try {
   assert.equal(followTarget({ ownBin: path.join(pkg, 'dalan.mjs'), env: follow.env }), null, 'no handover when already that version');
   assert.equal(followTarget({ ownBin: own, env: { ...follow.env, DALAN_NO_FOLLOW: '1' } }), null);
   assert.equal(followTarget({ ownBin: own, env: { ...follow.env, DALAN_FOLLOWED: '1' } }), null, 'one handover at most');
+  // An explicit --home names another home, so the default home's version is not the one to run. DALAN_HOME still selects its own.
+  for (const argv of [['service', 'status', '--home', '/different/home'], ['service', 'status', '--home=/different/home']]) {
+    assert.equal(followTarget({ ownBin: own, env: follow.env, argv }), null, `an explicit home does not follow the default home: ${argv.join(' ')}`);
+  }
+  assert.equal(followTarget({ ownBin: own, env: follow.env, argv: ['service', 'status'] }), fs.realpathSync(path.join(pkg, 'dalan.mjs')));
+  assert.equal(followTarget({ ownBin: own, env: { ...follow.env, DALAN_HOME: fhome }, argv: [] }), fs.realpathSync(path.join(pkg, 'dalan.mjs')), 'DALAN_HOME still selects its own package');
+  {
+    // The real entry point passes its arguments: with --home it stays in this package; without, it hands over.
+    const real = sandbox('follow-bin'), rhome = path.join(real.userHome, 'svc'), rpkg = path.join(rhome, 'versions/9.9.9/bin');
+    fs.mkdirSync(path.join(rhome, '.config'), { recursive: true }); fs.mkdirSync(rpkg, { recursive: true });
+    fs.writeFileSync(path.join(rpkg, 'dalan.mjs'), "process.stdout.write('followed\\n');\n");
+    fs.symlinkSync(path.join(rhome, 'versions/9.9.9'), path.join(rhome, 'current'));
+    recordDefaultHome(rhome, real.env);
+    const bin = fileURLToPath(new URL('../bin/dalan.mjs', import.meta.url));
+    const run = args => spawnSync(process.execPath, [bin, ...args], { env: real.env, encoding: 'utf8' });
+    const ownVersion = `${JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version}\n`;
+    assert.equal(run(['--version']).stdout, 'followed\n', 'without --home the CLI hands over to the default home');
+    assert.equal(run(['--version', '--home', path.join(real.userHome, 'other')]).stdout, ownVersion, 'an explicit --home stays in this package');
+    assert.equal(run(['--version', `--home=${path.join(real.userHome, 'other')}`]).stdout, ownVersion, 'an explicit --home= stays in this package');
+  }
   console.log('service-one-command-test: ok');
 } finally { if (!process.env.KEEP) fs.rmSync(root, { recursive: true, force: true }); }
