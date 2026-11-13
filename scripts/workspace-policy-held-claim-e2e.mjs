@@ -24,8 +24,18 @@ const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048}),jwk
 const jwks=http.createServer((_req,res)=>res.end(JSON.stringify({keys:[jwk]})));await new Promise(resolve=>jwks.listen(jwksPort,'127.0.0.1',resolve));
 const env={...process.env,HOME:home,DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_AUTH_MODE:'oauth',DOT_BRIDGE_TEST_OAUTH:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'1',DOT_BRIDGE_WORKSPACE_ROOT:path.join(home,'work'),DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE:repo};
 const cwd=path.resolve(new URL('..',import.meta.url).pathname),fetch=fetchForPublicHost('dot-bridge.example.test');
+// This test owns claim expiry and abandonment. Remove the maintenance timer so its
+// sweep cannot revoke the deliberately expired grant before finish checks it.
+const withoutMaintenance = 'data:text/javascript,' + encodeURIComponent(`
+  const interval = globalThis.setInterval;
+  globalThis.setInterval = (callback, ...args) => {
+    const timer = interval(callback, ...args);
+    if (callback.name === 'maintain') clearInterval(timer);
+    return timer;
+  };
+`);
 let service,ready=false;
-function launch(enableWorkspace){ready=false;service=spawn(process.execPath,['src/server.mjs'],{cwd,env:{...env,DOT_BRIDGE_ENABLE_WORKSPACE:enableWorkspace?'1':'0'},stdio:['ignore','pipe','pipe']});service.stdout.on('data',chunk=>{if(String(chunk).includes('MCP listening'))ready=true;});service.stderr.on('data',chunk=>process.stderr.write(chunk));return service;}
+function launch(enableWorkspace){ready=false;service=spawn(process.execPath,['--import',withoutMaintenance,'src/server.mjs'],{cwd,env:{...env,DOT_BRIDGE_ENABLE_WORKSPACE:enableWorkspace?'1':'0'},stdio:['ignore','pipe','pipe']});service.stdout.on('data',chunk=>{if(String(chunk).includes('MCP listening'))ready=true;});service.stderr.on('data',chunk=>process.stderr.write(chunk));return service;}
 async function waitReady(){for(let i=0;i<100&&!ready;i++){if(service.exitCode!==null)throw new Error(`server exited ${service.exitCode}`);await new Promise(resolve=>setTimeout(resolve,50));}assert.ok(ready,'server ready');}
 function token(){const header=Buffer.from(JSON.stringify({alg:'RS256',kid:'test'})).toString('base64url'),payload=Buffer.from(JSON.stringify({iss:issuer,aud,exp:Math.floor(Date.now()/1000)+300,sub:'dot',client_id:'test-client',scope:'dot-bridge.read dot-bridge.work'})).toString('base64url'),input=`${header}.${payload}`;return `${input}.${sign('RSA-SHA256',Buffer.from(input),privateKey).toString('base64url')}`;}
 const auth=token();
@@ -118,7 +128,7 @@ try {
   assert.equal(cancelledFinish.isError,true,'cancelled claim cannot use the broken-policy fallback');assert.match(cancelledFinish.content[0].text,/assignment_cancelled/);
   assert.equal(stateOf(cancelledRequest).report,null);assert.equal(stateOf(cancelledRequest).lateEvidence,1,'cancelled finish remains audit-only');
 
-  writeWorkers(false);const expiredRequest=submit('implementation'),expiredClaim=await tool('claim',{request_id:expiredRequest,claimant:'expired',lease_ms:1000});
+  writeWorkers(false);const expiredRequest=submit('implementation'),expiredClaim=await tool('claim',{request_id:expiredRequest,claimant:'expired'});
   withStore(store=>store.db.prepare('UPDATE claims SET lease_deadline_at=?,lease_deadline_monotonic_ms=0 WHERE request_id=?').run(new Date(0).toISOString(),expiredRequest));
   fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
   const expiredFinish=await rawTool('finish',{request_id:expiredRequest,claim_id:expiredClaim.claim_id,outcome:'completed',summary:'expired claim',result:'must be refused'});
