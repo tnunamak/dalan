@@ -20,7 +20,7 @@ const tarball = fs.readFileSync(path.join(tmp, 'tnunamak-dalan-0.7.0.tgz'));
 const integrity = 'sha512-' + createHash('sha512').update(tarball).digest('base64');
 let release;
 const server = http.createServer((req, res) => {
-  if (req.url === '/dalan-0.7.0.tgz') { res.setHeader('content-type', 'application/octet-stream'); return res.end(tarball); }
+  if (req.url === '/dalan-0.7.0.tgz' || req.url === '/@tnunamak/dalan/-/dalan-0.7.0.tgz') { res.setHeader('content-type', 'application/octet-stream'); return res.end(tarball); }
   release = { name: '@tnunamak/dalan', version: '0.7.0', dist: { tarball: new URL(`file://${path.join(tmp, 'tnunamak-dalan-0.7.0.tgz')}`).href, integrity } };
   res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(release));
 });
@@ -52,6 +52,17 @@ try {
   const realInstalled = await installRelease(realHome, release, { registry, timeout: 60_000 });
   assert.equal(JSON.parse(fs.readFileSync(path.join(realInstalled, 'package.json'), 'utf8')).version, '0.7.0');
   assert.equal(JSON.parse(fs.readFileSync(path.join(realHome, 'versions', '0.7.0', '.dalan-release.json'), 'utf8')).integrity, integrity);
+  // npm 12 refuses a remote tarball as a dependency (allow-remote defaults to none). The updater downloads the tarball itself,
+  // checks it against the registry's integrity and installs from the local file; the registry's URL here is plain http on loopback.
+  const remoteRelease = { ...release, dist: { ...release.dist, tarball: `${registry}/@tnunamak/dalan/-/dalan-0.7.0.tgz` } };
+  const remoteHome = path.join(tmp, 'remote-home'); fs.mkdirSync(remoteHome);
+  const remoteInstalled = await installRelease(remoteHome, remoteRelease, { registry, timeout: 60_000 });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(remoteInstalled, 'package.json'), 'utf8')).version, '0.7.0');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(remoteHome, 'versions', '0.7.0', '.dalan-release.json'), 'utf8')).integrity, integrity);
+  const remoteBad = path.join(tmp, 'remote-bad'); fs.mkdirSync(remoteBad);
+  await assert.rejects(installRelease(remoteBad, { ...remoteRelease, dist: { ...remoteRelease.dist, integrity: 'sha512-' + Buffer.alloc(64, 5).toString('base64') } }, { registry, timeout: 60_000 }), /integrity/);
+  assert.deepEqual(fs.readdirSync(path.join(remoteBad, 'versions')), [], 'a tarball that fails its integrity check leaves no staging directory');
+
   const corrupt = { ...release, dist: { ...release.dist, integrity: 'sha512-' + Buffer.alloc(64, 3).toString('base64') } };
   const badHome = path.join(tmp, 'bad-home');
   await assert.rejects(installRelease(badHome, corrupt, { registry, timeout: 60_000 }), /integrity/);

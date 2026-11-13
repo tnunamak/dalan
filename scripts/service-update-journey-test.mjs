@@ -78,10 +78,10 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
       brief: 'Keep this queued job across an update.', inputs: [], expected_output: 'one report', execution_scope: 'read-only' }));
     cli(['submit', '--execution', 'worker', '--worker', 'fern', '--file', assignment]);
     assert.equal(cli(['get', requestId]).status, 'queued');
-    const candidate = packageFixture('0.7.0', true);
+    const candidate = packageFixture('0.9.0', true);
     const release = version => ({ name: '@tnunamak/dalan', version, dist: { integrity: 'sha512-Zml4dHVyZQ==', tarball: 'https://registry.npmjs.org/fixture.tgz' } });
     const seams = {
-      latestRelease: async () => release('0.7.0'), installRelease: async () => candidate,
+      latestRelease: async () => release('0.9.0'), installRelease: async () => candidate,
       probeCandidate: async (...args) => {
         let diagnostic = '';
         try { return await probeCandidate(...args, { spawn: (command, argv, options) => {
@@ -94,7 +94,7 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
         if (action === 'daemon-reload') return;
         if (action === 'stop') return stop();
         assert.equal(action, 'restart');
-        if (failRestart && fs.realpathSync(path.join(home, 'current')).includes('/0.8.0/')) {
+        if (failRestart && fs.realpathSync(path.join(home, 'current')).includes('/0.9.1/')) {
           fs.writeFileSync(path.join(defaultPath(home, '.local/share/dot-bridge'), 'migration-sentinel'), 'corrupted');
           throw new Error('injected restart failure after state mutation');
         }
@@ -107,17 +107,17 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
     assert.equal((await probeService(home, receipt)).version, originalVersion);
     const applied = await updateService({ home, yes: true }, seams);
     assert.equal(applied.outcome, 'updated');
-    assert.equal((await probeService(home, { ...receipt, repo: candidate })).version, '0.7.0');
-    assert.equal(serviceStatus({ home }).version, '0.7.0');
+    assert.equal((await probeService(home, { ...receipt, repo: candidate })).version, '0.9.0');
+    assert.equal(serviceStatus({ home }).version, '0.9.0');
     assert.equal(cli(['get', requestId]).status, 'queued', 'the update retains queued work and its owner receipt');
-    const next = packageFixture('0.8.0', true);
+    const next = packageFixture('0.9.1', true);
     const sentinel = path.join(defaultPath(home, '.local/share/dot-bridge'), 'migration-sentinel');
     fs.writeFileSync(sentinel, 'saved'); failRestart = true;
-    await assert.rejects(updateService({ home }, { ...seams, latestRelease: async () => release('0.8.0'), installRelease: async () => next }), /injected restart failure/);
+    await assert.rejects(updateService({ home }, { ...seams, latestRelease: async () => release('0.9.1'), installRelease: async () => next }), /injected restart failure/);
     assert.equal(fs.readFileSync(sentinel, 'utf8'), 'saved');
     assert.equal(fs.realpathSync(path.join(home, 'current')), candidate);
-    assert.equal((await probeService(home, { ...receipt, repo: candidate })).version, '0.7.0');
-    assert.equal(serviceStatus({ home }).version, '0.7.0');
+    assert.equal((await probeService(home, { ...receipt, repo: candidate })).version, '0.9.0');
+    assert.equal(serviceStatus({ home }).version, '0.9.0');
     assert.equal(cli(['get', requestId]).status, 'queued', 'rollback retains queued work and its owner receipt');
   } finally { await stop(); fs.rmSync(root, { recursive: true, force: true }); }
 });

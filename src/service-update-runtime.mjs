@@ -6,7 +6,7 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { defaultPath } from './paths.mjs';
 import { initAsFiles } from './as-files.mjs';
@@ -16,6 +16,24 @@ const PUBLIC_REGISTRY = 'https://registry.npmjs.org';
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const TIMEOUT = 30_000;
 const fail = message => { throw new Error(message); };
+const MAX_TARBALL_BYTES = 200 * 1024 * 1024;
+
+// npm 12 refuses a remote tarball URL as a dependency (allow-remote defaults to none), so the updater fetches the tarball itself,
+// checks every byte against the registry's sha512 integrity, and hands npm only a local file. Works the same on npm 10, 11 and 12.
+async function fetchTarball(url, integrity, { timeout = 120_000, fetchImpl = fetch } = {}) {
+  let bytes;
+  if (/^file:\/\//.test(url)) bytes = fs.readFileSync(fileURLToPath(url));
+  else {
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeout) });
+    if (!response.ok) fail(`release tarball download failed (${response.status})`);
+    const length = Number(response.headers.get('content-length'));
+    if (Number.isFinite(length) && length > MAX_TARBALL_BYTES) fail('release tarball is too large');
+    bytes = Buffer.from(await response.arrayBuffer());
+  }
+  if (bytes.length > MAX_TARBALL_BYTES) fail('release tarball is too large');
+  if (`sha512-${createHash('sha512').update(bytes).digest('base64')}` !== integrity) fail('release tarball integrity does not match registry metadata');
+  return bytes;
+}
 
 function validRelease(value, { allowLocalTarball = false } = {}) {
   const localTarball = typeof value?.dist?.tarball === 'string' && (/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?\//.test(value.dist.tarball) || /^file:\/\//.test(value.dist.tarball));
@@ -100,7 +118,9 @@ export async function installRelease(home, input, options = {}) {
   const registry = options.registry ?? PUBLIC_REGISTRY;
   if (!/^https:\/\//.test(registry) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(registry)) fail('npm registry must use HTTPS');
   try {
-    const pkg = { private: true, name: 'dalan-release-stage', version: '1.0.0', dependencies: { [PACKAGE]: release.dist.tarball } };
+    const tarballName = `dalan-${release.version}.tgz`;
+    fs.writeFileSync(path.join(staging, tarballName), await fetchTarball(release.dist.tarball, release.dist.integrity, { timeout: options.timeout, fetchImpl: options.fetch }), { mode: 0o600 });
+    const pkg = { private: true, name: 'dalan-release-stage', version: '1.0.0', dependencies: { [PACKAGE]: `file:./${tarballName}` } };
     fs.writeFileSync(path.join(staging, 'package.json'), JSON.stringify(pkg), { mode: 0o600 });
     const env = installEnv(staging), npm = options.npm ?? 'npm';
     const base = ['--ignore-scripts', '--no-audit', '--no-fund', '--registry', registry];
@@ -113,6 +133,7 @@ export async function installRelease(home, input, options = {}) {
     fs.writeFileSync(path.join(staging, '.dalan-release.json'), JSON.stringify({ name: PACKAGE, version: release.version, integrity: release.dist.integrity }), { mode: 0o600 });
     fs.rmSync(path.join(staging, '.cache'), { recursive: true, force: true });
     fs.rmSync(path.join(staging, '.npmrc'), { force: true });
+    fs.rmSync(path.join(staging, tarballName), { force: true });
     fs.renameSync(staging, path.join(versions, release.version));
     return destination;
   } catch (error) { fs.rmSync(staging, { recursive: true, force: true }); throw error; }
