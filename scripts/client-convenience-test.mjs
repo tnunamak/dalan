@@ -382,3 +382,16 @@ test('bundled helper resolves real origins and not lookalikes', () => {
   assert.equal(convenience.displayFor('http://claude.ai/api/mcp/auth_callback'), null);
   assert.equal(convenience.displayFor('http://127.0.0.1:5555/callback'), null);
 });
+
+test('the approval view shows a curated label only for an exact validated origin, and the label never changes the facts', async () => {
+  const { describeClient, approvalFacts } = await import('../src/client-approval.mjs');
+  const view = redirectUri => describeClient({ name: 'Claude', clientId: 'c', redirectUri, worker: 'w', issuer: 'i', resource: 'r', scopes: ['a'], code: '1' });
+  const known = view('https://claude.ai/api/mcp/auth_callback');
+  assert.equal(known.known_client, 'Claude');
+  assert.ok(approvalFacts(known).some(([label]) => label.startsWith('Known client')));
+  for (const uri of ['https://claude.ai.evil.test/api/mcp/auth_callback', 'https://selfcheck.example/oauth/callback', 'http://127.0.0.1:5555/cb']) {
+    const other = view(uri);
+    assert.equal(other.known_client, null, uri);
+    assert.ok(!approvalFacts(other).some(([label]) => label.startsWith('Known client')), uri);
+  }
+});

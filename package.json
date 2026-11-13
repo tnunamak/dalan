@@ -24,7 +24,6 @@
     "scripts/monitor-targets.mjs",
     "scripts/worker-bridge-setup.mjs",
     "scripts/upgrade-drain.mjs",
-    "scripts/lib/expose-tailscale.mjs",
     "scripts/live-trial/common.mjs",
     "docs/",
     "CONTRIBUTING.md",

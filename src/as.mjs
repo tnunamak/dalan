@@ -396,7 +396,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     return {
       code: showCode(pairing.code), worker: pairing.worker, client_id: pairing.client_id, client_name: untrusted(pairing.client_name), client_name_untrusted: true,
       native: isLoopbackCallback(new URL(pairing.redirect_uri)),
-      redirect_uri: pairing.redirect_uri, redirect_host: shown.redirect_host, redirect_origin: shown.redirect_origin, redirect_punycode: shown.redirect_punycode,
+      redirect_uri: pairing.redirect_uri, redirect_host: shown.redirect_host, redirect_origin: shown.redirect_origin, redirect_punycode: shown.redirect_punycode, known_client: shown.known_client,
       resource: shownResource(pairing.resource), scopes: pairing.scopes.split(' '), age_seconds: Math.max(0, Math.round((now() - pairing.created_at) / 1000)),
       expires_in_seconds: Math.max(0, Math.round((pairing.expires_at - now()) / 1000)),
     };

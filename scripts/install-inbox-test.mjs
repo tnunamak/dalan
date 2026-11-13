@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -187,7 +188,7 @@ await asyncCheck('printed public retries retain no-repo-tools on both platform s
       const home=path.join(root,platform),ownerHome=path.join(root,platform+'-owner');fs.mkdirSync(ownerHome);
       const env={...process.env,HOME:ownerHome,XDG_CONFIG_HOME:path.join(root,platform+'-xdg'),PATH:`${bin}:${process.env.PATH}`};
       let message='';
-      try {await run(['--worker','plain','--home',home,'--port','18790','--expose','tailscale','--start','--no-repo-tools'],{platform,env,log:()=>{},preflight:()=>({dnsName:'plain.example.test',allowed:[443],occupied:new Map(),warnings:[]}),applyFunnel:()=>{},verifyPublic:async()=>false});} catch(error) {message=error.message;}
+      try {await run(['--worker','plain','--home',home,'--port','18790','--route','work','--start','--no-repo-tools'],{platform,env,log:()=>{},gozar:createFakeGozar(),consent:async()=>true,resolve4:async()=>null,verifyPublic:async()=>false});} catch(error) {message=error.message;}
       const command=message.match(/Retry the check with: (.+?)\. To remove this install:/)?.[1];assert(command,message);
       const args=command.split(' ').slice(2);assert(args.includes('--no-repo-tools'),`${platform}: retry omitted the installed setting`);
       let probes=0;
