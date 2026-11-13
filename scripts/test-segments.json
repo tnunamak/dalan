@@ -30,6 +30,7 @@
   "node scripts/service-verifier-test.mjs",
   "node scripts/service-install-test.mjs",
   "node scripts/service-one-command-test.mjs",
+  "node scripts/service-legacy-probe-test.mjs",
   "node --test scripts/service-auto-update-test.mjs",
   "node --test scripts/service-update-test.mjs",
   "node --test scripts/service-update-runtime-test.mjs",

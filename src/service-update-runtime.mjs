@@ -47,7 +47,7 @@ function requestJson(url, { timeout = TIMEOUT, socketPath, headers = {}, allowHt
       res.on('aborted', () => finish(reject, new Error('response ended before completion')));
       res.on('error', error => finish(reject, error));
       res.on('end', () => {
-        if (res.statusCode !== 200) return finish(reject, new Error(`request failed (${res.statusCode})`));
+        if (res.statusCode !== 200) return finish(reject, Object.assign(new Error(`request failed (${res.statusCode})`), { statusCode: res.statusCode }));
         try { finish(resolve, JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { finish(reject, new Error('invalid JSON response')); }
       });
     });
@@ -148,7 +148,18 @@ export async function probeService(home, _receipt, options = {}) {
   const timeout = options.timeout ?? TIMEOUT;
   if (!Number.isFinite(timeout) || timeout <= 0) fail('service probe timeout must be positive');
   const deadline = performance.now() + timeout;
-  const value = validateProbe(await requestJson('http://localhost/service-check', { socketPath, headers: { 'x-operator-key': operator }, timeout }), expectedProbe(home, _receipt));
+  const expected = expectedProbe(home, _receipt);
+  let value;
+  try { value = validateProbe(await requestJson('http://localhost/service-check', { socketPath, headers: { 'x-operator-key': operator }, timeout }), expected); }
+  catch (error) {
+    // A 0.6.0 or 0.6.1 server answers on its admin socket but has no /service-check. That is a running legacy server with no update gate:
+    // the updater stops it, switches the package and starts it again. Its catalogs are unknown, so none are compared.
+    if (error.statusCode !== 404 || !_receipt?.port) throw error;
+    const left = deadline - performance.now();
+    if (left <= 0) fail('service probe timed out');
+    await checkLoopback(_receipt.port, left);
+    return { legacy: true, version: expected.expectedVersion, update_protocol: 0, port: _receipt.port, self_check: false, catalogs: null };
+  }
   const remaining = deadline - performance.now();
   if (remaining <= 0) fail('service probe timed out');
   await checkLoopback(value.port, remaining);

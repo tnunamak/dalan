@@ -51,6 +51,8 @@ function completeCatalogs(a, b, workers) {
 function catalogsEqual(a, b, workers) {
   return completeCatalogs(a, b, workers) && canonicalCatalogs(a.catalogs) === canonicalCatalogs(b.catalogs);
 }
+// A 0.6.0 or 0.6.1 server has no /service-check, so its catalogs are unknown (stored as {}); nothing can be compared against them.
+const hasCatalogs = catalogs => !!catalogs && Object.keys(catalogs).length > 0;
 function releaseVersion(r, current) {
   if (!r || r.name !== PACKAGE || typeof r.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(r.version) || typeof r.dist?.integrity !== 'string' || !r.dist.integrity.startsWith('sha512-')) fail('registry returned invalid stable release metadata');
   const parts = s => s.split('.').map(Number), a = parts(r.version), b = parts(current);
@@ -231,13 +233,13 @@ async function recover(home, control, probe, healthTimeoutMs) {
   if (tx.phase === 'prepared') {
     await control(oldReceipt, 'restart');
     const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo }, healthTimeoutMs);
-    if (live.version !== tx.oldVersion || tx.oldCatalogs && !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs))) fail('interrupted update recovery could not verify old service');
+    if (live.version !== tx.oldVersion || hasCatalogs(tx.oldCatalogs) && !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs))) fail('interrupted update recovery could not verify old service');
   } else {
     validateSnapshot(tx);
     await control(oldReceipt, 'stop'); restoreFiles(home, tx);
     await control(oldReceipt, 'daemon-reload'); await control(oldReceipt, 'restart');
     const live = await probeReady(probe, home, { ...oldReceipt, repo: tx.oldRepo }, healthTimeoutMs);
-    if (tx.oldCatalogs && (live.version !== tx.oldVersion || !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs)))) fail('interrupted update recovery restored selection but old service health failed');
+    if (tx.oldCatalogs && (live.version !== tx.oldVersion || hasCatalogs(tx.oldCatalogs) && !catalogsEqual({ catalogs: tx.oldCatalogs }, live, Object.keys(tx.oldCatalogs)))) fail('interrupted update recovery restored selection but old service health failed');
   }
   discardJournal(home, tx);
 }
@@ -292,13 +294,13 @@ export async function updateService({ home, check = false, yes = false, retry = 
     if (candidate !== path.join(versions, r.version, 'node_modules', '@tnunamak', 'dalan') || !candidate.startsWith(`${versions}${path.sep}`) || fs.realpathSync(candidate) !== candidate) fail('candidate repository does not match exact package version path');
     const packageInfo = JSON.parse(fs.readFileSync(path.join(candidate, 'package.json'), 'utf8'));
     if (packageInfo.name !== PACKAGE || packageInfo.version !== r.version) fail('installed candidate package identity does not match registry release');
-    const base = await probe(home, receipt);
+    const base = await probe(home, receipt), legacy = base.legacy === true;
     const configBeforeCandidate = configurationDigest(home, receipt);
     const tested = await candidateProbe(home, receipt, candidate);
     if (configurationDigest(home, receipt) !== configBeforeCandidate) fail('service configuration changed during candidate self-check; retry update');
     if (base.version !== oldVersion || tested.version !== r.version) fail('service probe returned an unexpected package version');
-    if (!completeCatalogs(base, tested, workers)) fail('candidate self-check failed or worker catalogs are incomplete');
-    const changedCatalog = !catalogsEqual(base, tested, workers);
+    if (!completeCatalogs(legacy ? tested : base, tested, workers)) fail('candidate self-check failed or worker catalogs are incomplete');
+    const changedCatalog = !legacy && !catalogsEqual(base, tested, workers);
     if (changedCatalog && !yes) {
       result = { outcome: 'connector_refresh_required', current_version: oldVersion, candidate_version: r.version, connector_refresh_required: true, message: 'Worker tool catalogs changed. Run dalan service update --yes with the same --home to switch, then refresh hosted connectors.' };
       prune(home, oldVersion, r.version);
@@ -307,12 +309,12 @@ export async function updateService({ home, check = false, yes = false, retry = 
     // A catalog difference requires explicit consent; exact parity may proceed without it.
     const digestBeforeRecheck = configurationDigest(home, receipt);
     const liveAgain = await probe(home, receipt);
-    if (liveAgain.version !== oldVersion || !catalogsEqual(base, liveAgain, workers)) fail('live worker catalog changed during update; retry after connector refresh');
+    if (liveAgain.version !== oldVersion || !legacy && !catalogsEqual(base, liveAgain, workers)) fail('live worker catalog changed during update; retry after connector refresh');
     if (configurationDigest(home, receipt) !== digestBeforeRecheck || digestBeforeRecheck !== configBeforeCandidate) fail('service configuration changed during update; retry after connector refresh');
     // A macOS agent runs the package through the home's `current` link, so a switch needs no plist rewrite.
     const unitFile = receipt.unit && receipt.platform !== 'darwin' ? unitPath(receipt, home) : null;
     const txDir = path.join(home, 'update-backup'); privateDir(txDir);
-    const tx = { home, oldRepo, candidate, snapshot: path.join(txDir, 'snapshot'), unitFile, oldUnit: unitFile && fs.existsSync(unitFile) ? fs.readFileSync(unitFile, 'utf8') : null, oldCatalogs: base.catalogs, oldVersion, oldReceipt: { ...receipt }, phase: 'prepared' };
+    const tx = { home, oldRepo, candidate, snapshot: path.join(txDir, 'snapshot'), unitFile, oldUnit: unitFile && fs.existsSync(unitFile) ? fs.readFileSync(unitFile, 'utf8') : null, oldCatalogs: base.catalogs ?? {}, oldVersion, oldReceipt: { ...receipt }, phase: 'prepared' };
     if (unitFile && tx.oldUnit == null) fail(`service unit is missing: ${unitFile}`);
     atomic(path.join(home, 'update-transaction.json'), JSON.stringify(tx));
     try {
@@ -346,7 +348,7 @@ export async function updateService({ home, check = false, yes = false, retry = 
         throw error;
       }
       tx.phase = 'committed';
-      result = { outcome: 'updated', previous_version: oldVersion, version: r.version };
+      result = { outcome: 'updated', previous_version: oldVersion, version: r.version, ...(legacy ? { adopted_legacy_server: true } : {}) };
       try { fs.rmSync(failedFile(home), { force: true }); } catch { /* stale record only skips the same release */ }
       const cleanupWarnings = [];
       try { fs.rmSync(path.join(home, 'update-transaction.json'), { force: true }); } catch (error) { cleanupWarnings.push(`transaction marker cleanup failed: ${error.message}`); }
@@ -366,7 +368,7 @@ export async function updateService({ home, check = false, yes = false, retry = 
         if (tx.phase === 'switched') for (const item of ['.config', '.local']) replaceTree(path.join(txDir, 'snapshot', item), path.join(home, item));
         await control(receipt, 'daemon-reload'); await control(receipt, 'restart');
         const restored = await probeReady(probe, home, { ...receipt, repo: oldRepo }, healthTimeoutMs);
-        if (restored.version !== oldVersion || !catalogsEqual(base, restored, workers)) fail('old service health verification failed');
+        if (restored.version !== oldVersion || !legacy && !catalogsEqual(base, restored, workers)) fail('old service health verification failed');
         fs.rmSync(path.join(home, 'update-transaction.json'), { force: true }); fs.rmSync(txDir, { recursive: true, force: true });
       } catch (e) { rollbackError = e; }
       if (rollbackError) { const e = new Error(`update failed: ${error.message}; rollback failed: ${rollbackError.message}`); e.updateOutcome = 'rollback_failed'; throw e; }
