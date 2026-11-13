@@ -63,7 +63,7 @@ The rest of this guide covers advanced routes, migration, updates and removal. N
 
 ### An existing reverse proxy
 
-If you already serve a stable HTTPS address through your own reverse proxy, register that address with Gozar, the tool Dalan uses to publish its public route, instead of asking Gozar for a new route. This command is a template. Replace `PUBLIC_HOST` with your proxy's public hostname, `PORT` with a free local port number for Dalan to listen on, and `TARGET_IP:TARGET_PORT` with the address your proxy forwards to:
+If you already serve a stable HTTPS address through your own reverse proxy, register that address with Gozar, the tool Dalan uses to publish its public route, instead of asking Gozar for a new route. This command is a template. Replace `PUBLIC_HOST` with your proxy's public hostname, `PORT` with a free local port number for Dalan to listen on, and `TARGET_IP:TARGET_PORT` with the IPv4 address and port your proxy forwards to, such as `127.0.0.1:8787` (a hostname is refused):
 
 ```sh
 dalan service install --worker assistant --public-url https://PUBLIC_HOST --port PORT --target TARGET_IP:TARGET_PORT
