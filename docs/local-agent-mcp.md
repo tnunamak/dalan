@@ -22,8 +22,20 @@ The server has the access of the user who starts it: it reaches the bridge throu
 This example uses the home of a local `dalan try`. For a public trial, replace it with the Home line your running bridge printed, and replace `/path/to/dalan` as described below.
 
 ```sh
-claude mcp add dalan --env DALAN_HOME="$HOME/.local/share/dalan-trial" -- /path/to/dalan mcp
+claude mcp add --scope user dalan --env DALAN_HOME="$HOME/.local/share/dalan-trial" -- "$(command -v dalan)" mcp
 ```
+
+Keep `--scope user`. Without it, Claude Code registers the server for the current project only, and a session in another directory does not see it. `dalan mcp` needs Node 24 or newer (`node --version`).
+
+## After a pairing that stopped part way
+
+If a client stopped during pairing (a crash, a closed window), the worker name already has an active connection, and approving the retry fails with "already has an active connection". Approve the new code with `--replace`:
+
+```sh
+dalan connect approve CODE --worker W --replace
+```
+
+`--replace` ends the old connection for worker `W`. The new connection receives every queued and future job for `W`, including briefs you approved before the switch. Use it only for a code you started yourself.
 
 ## Codex
 
