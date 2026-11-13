@@ -161,7 +161,7 @@ A service installed by 0.6.0 or 0.6.1 is adopted by its first `dalan service upd
 dalan service uninstall
 ```
 
-This stops and removes the service and its update timer, and keeps the private home, keys and state. Add `--purge-home` only when you intend to delete those too. A modified service definition may need inspection instead of automatic removal. The full list of things an uninstall must remove (homes, trial home, client entries) is in [operations](operations.md#remove-an-installation).
+This stops and removes the service, its update timer or agent and its public route. It never deletes data: the private home, keys and state move to `<home>.removed-<date>`, and the command prints that path. Delete that directory yourself when you want the data gone. A modified service definition may need inspection instead of automatic removal. The full list of things an uninstall must remove (homes, trial home, client entries) is in [operations](operations.md#remove-an-installation).
 
 ## Legacy
 

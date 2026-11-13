@@ -164,4 +164,4 @@ Remove this dedicated service and its public route:
 dalan service uninstall
 ```
 
-This command retains the bridge home, including its keys and job history. Add `--purge-home` if you also want to delete that data; see [service removal](service-setup.md#remove-the-service).
+This command moves the bridge home, including its keys and job history, aside and does not delete it; delete the moved directory when you want the data gone. See [service removal](service-setup.md#remove-the-service).
