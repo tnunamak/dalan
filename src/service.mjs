@@ -14,7 +14,7 @@ import { parseArgs } from '../scripts/live-trial/common.mjs';
 import { buildQuery, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
-import { launchdLabels, launchAgentsDir, servicePlist, updatePlist, preflightAgentFile, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist } from './service-launchd.mjs';
+import { launchdLabels, launchAgentsDir, servicePlist, updatePlist, preflightAgentFile, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist, isLoaded } from './service-launchd.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/;
@@ -474,7 +474,8 @@ export async function installService(o, seams = {}) {
     const changed = writeAgentFile(plistFile, files[`${labels.service}.plist`]);
     if (lintPlist(plistFile, seams) === false) fail(`${plistFile} is not a valid property list`);
     if (changed) unloadAgent({ label: labels.service }, seams.launchd);
-    loadAgent({ label: labels.service, plistFile }, seams.launchd);
+    const { kicked, detail } = loadAgent({ label: labels.service, plistFile }, seams.launchd);
+    if (!kicked) fail(`launchctl kickstart ${labels.service} failed: ${detail}`);
   } else {
     writeUnits(unitDir, files);
     runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn });
@@ -520,7 +521,9 @@ export async function uninstallService({ home }, seams = {}) {
   const removed = [];
   const unitDir = receipt.unit_dir;
   if (!unitDir || !path.isAbsolute(unitDir)) fail('the service receipt names no unit directory');
-  if (receipt.auto_update) { try { await setAutoUpdate({ home, enabled: false }, { ...seams, env, platform }); removed.push('automatic updates off'); } catch (error) { removed.push(`update job not removed: ${error.message}`); } }
+  // Verify both jobs before removing either plist or disabling automatic updates.
+  if (mac) for (const label of Object.values(launchdLabels(receipt.unit))) isLoaded(label, seams.launchd);
+  if (receipt.auto_update) { try { await setAutoUpdate({ home, enabled: false }, { ...seams, env, platform }); removed.push('automatic updates off'); } catch (error) { if (mac) throw error; removed.push(`update job not removed: ${error.message}`); } }
   if (mac) removed.push(...removeAgents({ unit: receipt.unit, unit_dir: unitDir }, seams.launchd));
   else {
     const spawn = seams.spawn ?? spawnSync, name = receipt.unit;

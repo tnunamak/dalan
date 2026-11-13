@@ -369,5 +369,7 @@
   "node --test scripts/test-segments-test.mjs",
   "node scripts/pull-queue-test.mjs",
   "node scripts/pull-queue-destination-test.mjs",
-  "node scripts/pull-catalog-hash-test.mjs"
+  "node scripts/pull-catalog-hash-test.mjs",
+  "node --test src/store-stale-claims.test.mjs",
+  "node --test scripts/service-launchd-test.mjs"
 ]

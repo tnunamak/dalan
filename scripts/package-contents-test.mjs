@@ -104,7 +104,7 @@ test('the scripts that the installed-package setup, upgrade and removal document
 });
 
 test('no tests, fixtures, local state or build leftovers ship', () => {
-  const leaks = [...files].filter(file => /(^|\/)(test|tests|test-fixtures|test-support|fixtures|__pycache__|node_modules|\.git[^/]*|\.env[^/]*|\.config|\.local)(\/|$)|-test\.mjs$|-e2e\.mjs$|\.pyc$|\.log$|\.sock$|\.tgz$/.test(file));
+  const leaks = [...files].filter(file => /(^|\/)(test|tests|test-fixtures|test-support|fixtures|__pycache__|node_modules|\.git[^/]*|\.env[^/]*|\.config|\.local)(\/|$)|(?:-test|\.test)\.mjs$|-e2e\.mjs$|\.pyc$|\.log$|\.sock$|\.tgz$/.test(file));
   assert.deepEqual(leaks, []);
 });
 
