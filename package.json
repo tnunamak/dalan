@@ -1,6 +1,6 @@
 {
   "name": "@tnunamak/dalan",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "An MCP job bridge for bounded agent work, durable progress, results, and owner review.",
   "repository": {
     "type": "git",
