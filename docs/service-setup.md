@@ -132,7 +132,7 @@ A schedule or hook in the worker's vendor tool is outside Dalan's supported path
 
 ## Service updates
 
-New installs enable a daily update check with up to one hour of random delay: a systemd user timer on Linux and a launchd agent on macOS. A missed run can run after the user manager or login session next starts. Installation with `--no-auto-update` disables the timer; `--auto-update` explicitly enables it. Reinstalling preserves the saved choice unless you pass one of those flags. The timer needs your systemd user manager to run; it does not configure login lingering.
+New installs enable a daily update check with up to one hour of random delay: a systemd user timer on Linux (daily, up to one hour of random delay) and a launchd agent on macOS (every day at a fixed minute between 03:00 and 03:59 that depends on the home). A missed run can run after the user manager or login session next starts. Installation with `--no-auto-update` disables the timer; `--auto-update` explicitly enables it. Reinstalling preserves the saved choice unless you pass one of those flags. The timer needs your systemd user manager to run; it does not configure login lingering.
 
 ```sh
 dalan service update --check
@@ -159,6 +159,29 @@ Refresh the Dalan connector in each hosted client after that switch. `--yes` all
 While a switch is in progress, the restarted candidate refuses every worker call, OAuth request and owner command with a retryable 503 (`service_updating`, with `Retry-After`) and starts no background writer, until the update commits or rolls back. A rollback restores the saved state, so no change that Dalan acknowledged can be lost. Hosted clients retry after the window. For a switch, Dalan stops the bridge, saves its persistent configuration and data, selects the candidate, restarts the unit and checks local health and catalogs. On failure it attempts to stop the candidate, restore the previous selection and saved state, then restart and check the old version. A failed rollback is reported separately. An interrupted switch leaves a transaction record for recovery. Recovery runs when the service starts (an `ExecStartPre` step, `dalan service recover`) and again on the next update attempt; it does nothing while another update is running. Retention keeps three staged versions, including the active and previous versions. This is update recovery, not a replacement for your own backups.
 
 A service installed by 0.6.0 or 0.6.1 is adopted by its first `dalan service update` with no other step: Dalan reads the package path and node binary from the service unit, keeps that node binary, and leaves the original package in place until a later update succeeds. To turn on the daily timer for such a service, run `dalan service auto-update on`, or enroll it the long way: install the current Dalan package, then repeat its original `dalan service install` command with the same home, origin, port and target. Enrollment preserves keys and worker grants, changes the unit's package path and restarts it. Its timer stays off unless you pass `--auto-update` or run `service auto-update on`. A modified unit is refused for inspection. These update commands cover the service made by `dalan service install`; services from the older setup script are not enrolled automatically.
+
+### Living with updates
+
+**What a daily run does.** It looks up the latest stable release. With none newer, it changes nothing. With a newer one whose tool list matches, it installs, checks and switches by itself, and restarts the service. With a changed tool list, it stages the release and stops: the running version keeps serving jobs, and nothing switches until you run `dalan service update --yes`. Each later daily run repeats the check and leaves it staged, until you approve or a newer release replaces it.
+
+**Find out that an update waits.** Dalan sends no notice. Run:
+
+```sh
+dalan service status --json
+```
+
+In `last_result`, `outcome` is `connector_refresh_required` for a staged release (`candidate_version` names it), `rolled_back`, `rollback_failed` or `failed` after a failed switch, `skipped_failed_release` when the timer passes over a rolled-back release, and `up_to_date` when none is waiting. A top-level `failed_release` names a release that Dalan will not retry on its own.
+
+**Approve and refresh.** Run `dalan service update --yes`, then refresh the connector in each hosted client before you send new jobs. Until you do, the client may still offer the old tool list.
+
+- ChatGPT: open the Dalan connector and select **Refresh**, then test in a new conversation.
+- Claude Code, Codex CLI and other clients: restart the client session so that it lists the tools again. If the new tools still do not appear, remove and re-add the connector as in [worker clients](worker-clients.md).
+
+**Pause or check.** `dalan service auto-update off` stops the daily run; `dalan service auto-update on` restores it. `dalan service update --check` reports whether a release exists and changes nothing. Inspect the schedule with `systemctl --user list-timers` on Linux, or `launchctl list | grep -- -update` on macOS (the label is `org.dalan.<service>-update`).
+
+**Roll back by hand.** Dalan has no command that returns to an earlier version after a successful update. Only a failed switch rolls back, and it does so by itself. `dalan service update --retry` retries a release that was rolled back; it does not restore an older one. To go back after a bad update, run `dalan service auto-update off` so the timer does not switch again, then follow [upgrade and rollback](operations.md#upgrade-and-rollback): stop the service, restore compatible state, and run the older code. Do not edit `HOME/current` by hand.
+
+The `dalan` command on your PATH runs the version the service uses. Set `DALAN_NO_FOLLOW=1` to use the installed copy instead.
 
 ## Remove the service
 

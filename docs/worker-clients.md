@@ -2,6 +2,8 @@
 
 A worker is any MCP client that signs in to a Dalan bridge with OAuth, claims a job, reports progress and finishes it. This guide has the exact steps for Claude Code, Codex CLI and opencode, and the requirements for any other client.
 
+If your local agent only sends jobs to a hosted worker, skip this guide: see [Send jobs from a local coding agent](local-agent-requester.md).
+
 Start from the section that matches your bridge:
 
 | Your bridge | Your client | Go to |
