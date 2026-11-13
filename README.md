@@ -82,11 +82,19 @@ dalan decide REQUEST_ID accepted
 
 A finished job and an accepted result are separate steps. Acceptance records your review; it does not change your files.
 
+To have a local coding agent send jobs for you, see [Send jobs from your local agent](#send-jobs-from-your-local-agent).
+
 The text-only job above returns no patch to apply. A later [repository job](#separate-repository-assignment) can return one. Inspect it first, then replace `REQUEST_ID` with that job's ID and `PATH` with your local repository directory:
 
 ```sh
 dalan apply REQUEST_ID --dir PATH
 ```
+
+<a id="send-jobs-from-your-local-agent"></a>
+
+## Send jobs from your local agent
+
+A local coding agent with a shell (Claude Code, Codex CLI) can be the requester. It runs `dalan submit`, `wait`, `get` and `decide`. The hosted agent, such as Muse, stays the worker: it connects over MCP and claims the job. The requester needs no MCP connection. Copy the [instruction block](docs/local-agent-requester.md#instructions-to-paste) into your agent's instructions.
 
 <a id="separate-repository-assignment"></a>
 
