@@ -170,14 +170,14 @@ A service installed by 0.6.0 or 0.6.1 is adopted by its first `dalan service upd
 dalan service status --json
 ```
 
-In `last_result`, `outcome` is `connector_refresh_required` for a staged release (`candidate_version` names it), `rolled_back`, `rollback_failed` or `failed` after a failed switch, `skipped_failed_release` when the timer passes over a rolled-back release, and `up_to_date` when none is waiting. A top-level `failed_release` names a release that Dalan will not retry on its own.
+In `last_result`, `outcome` is `connector_refresh_required` for a staged release (`candidate_version` names it), `rolled_back` or `rollback_failed` after a failed switch, `failed` when an update stops before or during the switch, `update_available` after a check finds a newer release, `skipped_failed_release` when the timer passes over a rolled-back release, and `up_to_date` when none is waiting. A top-level `failed_release` names a release that Dalan will not retry on its own.
 
 **Approve and refresh.** Run `dalan service update --yes`, then refresh the connector in each hosted client before you send new jobs. Until you do, the client may still offer the old tool list.
 
 - ChatGPT: open the Dalan connector and select **Refresh**, then test in a new conversation.
 - Claude Code, Codex CLI and other clients: restart the client session so that it lists the tools again. If the new tools still do not appear, remove and re-add the connector as in [worker clients](worker-clients.md).
 
-**Pause or check.** `dalan service auto-update off` stops the daily run; `dalan service auto-update on` restores it. `dalan service update --check` reports whether a release exists and changes nothing. Inspect the schedule with `systemctl --user list-timers` on Linux, or `launchctl list | grep -- -update` on macOS (the label is `org.dalan.<service>-update`).
+**Pause or check.** `dalan service auto-update off` stops the daily run; `dalan service auto-update on` restores it. `dalan service update --check` reports whether a newer release exists and records the answer in `last_result`; it installs nothing. Inspect the schedule with `systemctl --user list-timers` on Linux, or `launchctl list | grep -- -update` on macOS (the label is `org.dalan.<service>-update`).
 
 **Roll back by hand.** Dalan has no command that returns to an earlier version after a successful update. Only a failed switch rolls back, and it does so by itself. `dalan service update --retry` retries a release that was rolled back; it does not restore an older one. To go back after a bad update, run `dalan service auto-update off` so the timer does not switch again, then follow [upgrade and rollback](operations.md#upgrade-and-rollback): stop the service, restore compatible state, and run the older code. Do not edit `HOME/current` by hand.
 
