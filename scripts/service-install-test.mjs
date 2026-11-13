@@ -16,17 +16,20 @@ fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
 const root = fs.mkdtempSync(path.join(scratch, 'dalan-service-install-'));
 const userHome = path.join(root, 'user');
 fs.mkdirSync(userHome, { mode: 0o700 });
+const gozarHome = path.join(root, 'gozar-state');
+fs.mkdirSync(gozarHome, { mode: 0o700 });
 const xdg = path.join(userHome, '.config');
-// Gozar's state-path rule inspects every ancestor, so keep the host's directory modes out of these tests.
-const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: '/' };
+const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: gozarHome };
+const assertPrivateGozarHome = value => assert.ok(typeof value === 'string' && (path.resolve(value) === root || path.resolve(value).startsWith(`${root}${path.sep}`)), `Gozar home must be inside test root: ${value}`);
 const calls = [];
 const route = { origin: 'https://bridge.example.test', target: '192.0.2.10:8787', verification: { status: 'verified', method: 'challenge' } };
-const spawn = (command, args) => { calls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; };
+const spawn = (command, args, options = {}) => { assertPrivateGozarHome(options.env?.GOZAR_HOME); calls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; };
 // A contract-faithful Gozar (the unreleased runtime is not needed here). It records the call in the same list as systemctl so order is visible.
 const makeGozar = ({ status = 'verified', mutate = r => r, failWith = null, log = calls, statusOf = () => status } = {}) => {
   const gozar = createFakeGozar();
   const add = gozar.addService;
   gozar.addService = async request => {
+    assertPrivateGozarHome(request.home);
     log.push(['gozar-addService', request.origin, request.target, request.verifyCmd ?? null]);
     if (failWith) throw failWith;
     const reply = await add(request);
