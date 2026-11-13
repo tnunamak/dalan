@@ -1,7 +1,8 @@
 // The bridge's admin socket lives in the bridge home. A Unix socket path has a fixed size limit (108 bytes on Linux and
 // 104 on macOS, including the terminating NUL), so a long bridge home cannot hold it. The server and every client check
 // the path first and say so, in place of the system's bare EINVAL.
-export const SOCKET_PATH_LIMIT = process.platform === 'darwin' ? 103 : 107; // usable bytes, excluding the terminating NUL
+export const socketPathLimit = platform => platform === 'darwin' ? 103 : 107; // usable bytes, excluding the terminating NUL
+export const SOCKET_PATH_LIMIT = socketPathLimit(process.platform);
 
 // Null when the path fits; otherwise the error to report.
 export function adminSocketPathError(socket) {
