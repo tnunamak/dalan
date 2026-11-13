@@ -19,18 +19,10 @@ const tmp = fs.mkdtempSync(path.join(tempRoot, 'route-conformance-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 const fakeId = () => `fake-${randomBytes(4).toString('hex')}`;
-// Dalan requires the oauth-dcr protocol (its OAuth server registers clients dynamically). fakeRegistry in the packed 0.3 tarball writes oauthDcr: false,
-// so the fake is ineligible for Dalan as written. `usable` flips that one flag in the fake's definition file; `dalan routes` needs no flip.
-async function withFake(kinds, body, { usable = false } = {}) {
+async function withFake(kinds, body) {
   const id = fakeId();
   const registry = await fakeRegistry({ id, kinds, reach: 'internet' });
   try {
-    if (usable) {
-      const file = path.join(registry.root, 'providers', id, 'definition.json');
-      const definition = JSON.parse(fs.readFileSync(file, 'utf8'));
-      definition.adapter.capabilities.protocols.oauthDcr = true;
-      fs.writeFileSync(file, JSON.stringify(definition, null, 2));
-    }
     const home = fs.mkdtempSync(path.join(tmp, 'gozar-'));
     const gozar = createRouteApi({ manifest: registry.manifest, root: registry.root, readContext: fakeReadContext({ home }) });
     return await body({ id, gozar, home });
@@ -76,26 +68,32 @@ test('`dalan try --public --route <fake id>` reaches a ready route through the f
         assert.match(done.error.message, new RegExp(`Unknown route id "${route}"\\. Offered: .*${id}`));
       }
     }
-  }, { usable: true });
+  });
 });
 
-// Durable install with a fake id needs Gozar's durable facet. fakeRegistry refuses `durable` until that facet is merged; the case runs the day it does.
-test('`dalan service install --route <fake id>` with a durable fake', async t => {
+// Durable install with a fake id: Dalan's real installService and uninstallService, Gozar's real durable engine, the fake provider's rule store.
+// Only the OS service manager is replaced (spawn answers ok, units are written to a scratch dir); the route is created and verified for real.
+test('`dalan service install --route <fake id>` makes a usable, verified durable route, and uninstall leaves no rule in the store', async () => {
   const id = fakeId();
-  let registry;
-  try { registry = await fakeRegistry({ id, kinds: ['durable'], reach: 'internet' }); } catch (error) {
-    assert.equal(error.code, 'unsupported');
-    t.skip(`fakeRegistry throws unsupported for durable (${error.message}); this case waits for Gozar's durable facet`);
-    return;
-  }
+  const registry = await fakeRegistry({ id, kinds: ['durable'], reach: 'internet' });
   try {
-    const { installService } = await import('../src/service.mjs');
-    const home = fs.mkdtempSync(path.join(tmp, 'gozar-durable-'));
-    const gozar = createRouteApi({ manifest: registry.manifest, root: registry.root, readContext: fakeReadContext({ home }) });
+    const { installService, uninstallService } = await import('../src/service.mjs');
+    const gozarHome = fs.mkdtempSync(path.join(tmp, 'gozar-durable-'));
+    const gozar = createRouteApi({ manifest: registry.manifest, root: registry.root, readContext: fakeReadContext({ home: gozarHome, verified: true }) });
     const box = fs.mkdtempSync(path.join(tmp, 'svc-'));
     fs.mkdirSync(path.join(box, '.config', 'systemd', 'user'), { recursive: true, mode: 0o700 });
-    const result = await installService({ home: path.join(box, 'bridge'), auto: true, route: id, workers: ['muse'], yes: true, writeUnitsOnly: true },
-      { gozar, platform: 'linux', env: { HOME: box, XDG_CONFIG_HOME: path.join(box, '.config'), GOZAR_HOME: home }, freePort: async () => 8789, consent: async () => true, spawn: () => ({ status: 0, stdout: '' }), waitForSocket: async () => true });
+    const seams = { gozar, platform: 'linux', env: { HOME: box, XDG_CONFIG_HOME: path.join(box, '.config'), GOZAR_HOME: gozarHome }, freePort: async () => 8789,
+      consent: async () => true, spawn: () => ({ status: 0, stdout: '' }), waitForSocket: async () => true };
+    const bridgeHome = path.join(box, 'bridge');
+    const result = await installService({ home: bridgeHome, auto: true, route: id, workers: ['muse'], yes: true }, seams);
     assert.match(result.origin ?? '', /^https:\/\//);
+    const store = JSON.parse(fs.readFileSync(path.join(registry.root, 'providers', id, 'store.json'), 'utf8'));
+    assert.ok(Object.values(store.entries).some(entry => entry.rule), 'the fake provider holds a rule after install');
+    const view = await gozar.routeStatus({ home: gozarHome, handle: result.route.handle });
+    assert.equal(view.state, 'usable');
+    assert.equal(view.verification.status, 'verified');
+    await uninstallService({ home: bridgeHome }, seams);
+    const after = JSON.parse(fs.readFileSync(path.join(registry.root, 'providers', id, 'store.json'), 'utf8'));
+    assert.deepEqual(Object.values(after.entries).filter(entry => entry.rule), [], 'no rule is left in the store');
   } finally { await registry.cleanup(); }
 });
