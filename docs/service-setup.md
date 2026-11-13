@@ -66,10 +66,10 @@ The rest of this guide covers advanced routes, migration, updates and removal. N
 If you already serve a stable HTTPS address through your own reverse proxy, register that address with Gozar instead of asking Gozar for a new route:
 
 ```sh
-dalan service install --worker assistant --public-url https://PUBLIC_HOST --port PORT --target TARGET_HOST:TARGET_PORT
+dalan service install --worker assistant --public-url https://PUBLIC_HOST --port PORT --target TARGET_IP:TARGET_PORT
 ```
 
-Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. Prepare the proxy first so the public origin forwards to the address in `--target`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. TLS ends at the proxy. Keep the secret path out of proxy logs.
+Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. Prepare the proxy first so the public origin forwards to the address in `--target`, an IPv4 address and port such as `192.168.1.20:8792`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. TLS ends at the proxy. Keep the secret path out of proxy logs.
 
 The proxy must forward these routes without removing their prefixes, methods, query strings, authorization headers or cookies:
 
