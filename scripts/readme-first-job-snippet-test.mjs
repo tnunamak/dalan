@@ -45,6 +45,6 @@ for (const shell of ['bash', 'zsh']) {
   test(`${shell}: the published first-job command preserves the CLI arguments`, { skip: !hasShell(shell) && `${shell} not installed` }, () => {
     const { result, argv } = runSnippet(shell);
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(argv, ['submit', '--worker', 'WORKER', '--execution', 'none', '--deliver', 'none', '--brief', brief]);
+    assert.deepEqual(argv, ['submit', '--worker', 'assistant', '--execution', 'none', '--deliver', 'none', '--brief', brief]);
   });
 }
