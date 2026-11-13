@@ -1,53 +1,54 @@
 # Run Dalan as a service
 
-Use this guide after a first job works with `dalan try`, when you want a bridge that keeps running or a worker on another computer. Built-in OAuth binds the bridge to `127.0.0.1`; a public HTTPS route forwards worker traffic to that listener. The owner CLI uses a private Unix socket, which must never be exposed through the route.
+Install Dalan once to keep your MCP agent connected to your Mac or Linux computer. You do not need to run the trial first.
 
-The commands are the same on Linux and macOS. Linux runs the service as a systemd user service. macOS runs it as a launchd LaunchAgent. Node.js 24 or newer is required.
-
-<a id="owner-setup"></a>
-
-## Install one bridge for several workers
-
-```sh
-npm install -g @tnunamak/dalan
-dalan service install --worker NAME --route tailscale
-```
+Before you begin, install Node.js 24 or newer and Tailscale with Funnel enabled. Your agent's account must allow custom MCP connectors. The commands below are the same on macOS and Linux.
 
 **Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
 
-Choose a worker name of up to 32 characters, starting with a lowercase letter and continuing with lowercase letters, digits, `-` or `_`. `pool` and `unknown` are reserved. Repeat `--worker` for each worker. All workers share one bridge, one private home and one job queue. Each worker pairs and approves separately.
+<a id="owner-setup"></a>
 
-`tailscale` is the name of a Gozar route (Tailscale Funnel). Dalan does not interpret the name, so any other Gozar route name works the same way. Run `dalan setup` to list what Gozar can offer on this computer and to save a choice. Routes differ in properties that matter to you: whether the address is stable or temporary, and whether the route operator terminates TLS and so can read the connector URL and traffic. Gozar creates the public HTTPS address; Dalan registers it as a Gozar service route.
+## Install and connect your agent
 
-Install does these things:
+This example names your worker `assistant`. Choose another lowercase name if you prefer, and use it in every command.
 
-- It keeps the bridge's state in `~/.local/share/dalan-service` and remembers that home. Every `dalan` command finds it without `DALAN_HOME`. Set `DALAN_HOME` only to override the remembered home.
-- It chooses a free port.
-- It starts the service and the daily update timer (systemd on Linux, launchd on macOS).
-- It prints where the private connector URL file is, the next command to run, and a health check.
+```sh
+npm install -g @tnunamak/dalan
+dalan service install --worker assistant --route tailscale
+dalan connect start --worker assistant
+```
 
-Running the same install again is a no-op.
+Dalan installs a background service, chooses a free port and remembers its settings. No environment variables or manual server process are needed.
 
-After install, check the service and the public route:
+Add the private connector URL shown by Dalan to the agent's MCP settings. Start sign-in in that client, then check the pending request:
+```sh
+dalan connect pending
+```
 
+Compare the pending code with the code in your client. If they match, replace `CODE` with that code:
+```sh
+dalan connect approve CODE --worker assistant
+```
+
+Do not approve a code you did not request, and do not share the connector URL or codes.
+
+Next, [send your first job](../README.md#give-your-connected-agent-a-job), using `assistant` as the worker name. Dalan queues jobs; you must ask your agent to claim them. A new installation has no repository grants or permission to run host checks.
+
+### Optional checks
+
+After pairing, use these if you need to diagnose the service:
 ```sh
 dalan status
 dalan doctor --auth
 ```
 
-`dalan doctor --auth` runs an OAuth self-check against the public URL: dynamic registration, PKCE, `initialize` and `tools/list`. It prints no secrets. A pass proves the public route and sign-in path work; it does not prove that a worker can finish a job.
+The authentication check tests the public route and sign-in flow, not whether an agent can complete a job.
 
-The private MCP URL is in the mode-0600 file `resource-url` in the service home. Open it privately and use the whole URL only in the intended worker's connector settings. Do not print it into a shared log. The bridge starts with `default_execution: none`, no repository grants and no host capabilities. Add `--enable-workspace` or `--enable-t3` to enable those host capabilities; each worker must also have its own workspace or T3 grant.
+### More workers and advanced setup
 
-### Pair a worker
+Repeat `--worker NAME` in the install command to configure several workers, and pair each separately. A worker name starts with a lowercase letter, uses lowercase letters, digits, hyphens or underscores, and is at most 32 characters; `pool` and `unknown` are reserved.
 
-Pair each worker separately. Start a pairing window, add the connection in the client, then approve the code the client shows. Approve only when the code matches the code on the client's sign-in page.
-
-```sh
-dalan connect start --worker NAME
-dalan connect pending
-dalan connect approve CODE --worker NAME
-```
+### Pairing details
 
 A client on this computer with a loopback callback needs `--confirm-redirect` with the exact redirect that `pending` shows; see [worker pairing](manual-setup.md#worker-setup). A worker on another computer follows [Native client on a remote HTTPS bridge](worker-clients.md#native-client-on-a-remote-https-bridge). Then run [submit, finish and read the result](manual-setup.md#submit-finish-and-read-the-result) with `--worker NAME`.
 
@@ -57,6 +58,8 @@ Where the README and manual setup use the trial worker `local`, use your service
 - Repository grants: `dalan worker allow NAME OWNER/REPO` and `dalan worker list NAME --json`.
 
 `wait`, `get` and `decide` select the job by request ID and take no worker flag.
+
+The rest of this guide covers advanced routes, migration, updates and removal. None is required for the first connection.
 
 ### An existing reverse proxy
 
@@ -123,7 +126,7 @@ For the built-in public-client flow, a client that loses a refresh response can 
 The bridge and the worker come back by separate rules:
 
 - **Bridge.** Linux starts it with the systemd user manager (see lingering above). macOS starts it at your login. Check with `dalan service status` and `dalan status`.
-- **Worker, both systems.** Dalan has no worker scheduler, and nothing wakes the worker when the bridge returns. Jobs wait in the queue until a worker run claims them. The supported way is manual, and it takes three steps. First wait until `dalan status` answers. Then prompt the worker in its own client, for example: "Use Dalan to list pending work. Claim the oldest job you may claim, read it, report progress and finish it exactly as instructed. Stop when nothing is pending." In Codex, `codex exec "PROMPT" < /dev/null` runs that without a screen (see [worker clients](worker-clients.md)). Last, check that the job moved: `dalan wait REQUEST_ID` returns `finished`, or `dalan get REQUEST_ID --json` shows the report.
+- **Your agent.** Dalan does not start or schedule the agent. Once `dalan status` answers, open the client where you connected the agent and ask it: “Use Dalan to list pending jobs, claim the oldest job within your permissions, follow its brief, report progress and finish it. Stop when no jobs remain.” Check the result with `dalan wait REQUEST_ID` or `dalan get REQUEST_ID --json`, replacing `REQUEST_ID` with your job's ID.
 
 A schedule or hook in the worker's vendor tool is outside Dalan's supported path; [pull workers](pull-workers.md#ways-to-start-a-run) lists the patterns and what they cost. A queued job still expires under the [preparation-expiry rule](pull-workers.md#jobs-the-worker-never-takes) if no worker claims it in time.
 

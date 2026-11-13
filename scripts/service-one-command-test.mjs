@@ -94,6 +94,22 @@ try {
   controlLaunchd(receipt, 'restart', mac.seams.launchd); assert.ok(mac.launchctl.log.at(-1).startsWith(`kickstart -k user/501/${labels.service}`));
   controlLaunchd(receipt, 'stop', mac.seams.launchd); assert.ok(!mac.launchctl.loaded.has(labels.service));
   controlLaunchd(receipt, 'restart', mac.seams.launchd); assert.ok(mac.launchctl.loaded.has(labels.service), 'a stopped agent is bootstrapped again by restart');
+  // macOS 26: a bootstrapped job stays loaded and never spawns until kickstart. Update and rollback both run stop, daemon-reload, restart.
+  for (const path of ['update', 'rollback']) {
+    const spawned = new Set(), loadedNow = new Set(), calls = [];
+    const fake = (cmd, args) => {
+      calls.push(args.join(' ')); const [verb, target, file] = args, label = String(target).split('/').pop();
+      if (verb === 'print') return { status: loadedNow.has(label) ? 0 : 113, stdout: '', stderr: '' };
+      if (verb === 'bootstrap') { loadedNow.add(/<key>Label<\/key>\s*<string>([^<]+)/.exec(fs.readFileSync(file, 'utf8'))[1]); return { status: 0, stdout: '', stderr: '' }; }
+      if (verb === 'bootout') { loadedNow.delete(label); spawned.delete(label); return { status: 0, stdout: '', stderr: '' }; }
+      if (verb === 'kickstart') { if (!loadedNow.has(label)) return { status: 113, stdout: '', stderr: 'not loaded' }; spawned.add(label); return { status: 0, stdout: '', stderr: '' }; }
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    const seams = { spawn: fake, uid: 501, env: mac.env };
+    loadedNow.add(labels.service); spawned.add(labels.service);
+    controlLaunchd(receipt, 'stop', seams); controlLaunchd(receipt, 'daemon-reload', seams); controlLaunchd(receipt, 'restart', seams);
+    assert.ok(spawned.has(labels.service), `${path}: the agent is spawned, not just loaded`);
+  }
 
   // a plist someone else wrote is never overwritten
   fs.writeFileSync(path.join(mac.userHome, 'Library/LaunchAgents', `${labels.service}.plist`), '<plist>hand made</plist>');

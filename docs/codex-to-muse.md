@@ -16,7 +16,7 @@ This first job uses no repository and runs no checks. Use a dedicated worker nam
 
 ## 1. Start and expose the bridge
 
-Install Dalan, then install the service with a dedicated worker named `muse`. `tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (see [service setup](service-setup.md#install-one-bridge-for-several-workers)); `dalan setup` lists the other routes.
+Install Dalan, then install the service with a dedicated worker named `muse`. `tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (see [service setup](service-setup.md#install-and-connect-your-agent)); `dalan setup` lists the other routes.
 
 ```sh
 npm install -g @tnunamak/dalan

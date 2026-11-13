@@ -110,7 +110,10 @@ export function controlLaunchd(receipt, action, seams = {}) {
   if (action === 'stop') { unloadAgent({ label: service }, seams); return; }
   if (action === 'restart') {
     if (isLoaded(service, seams)) must(launchctl(['kickstart', '-k', `${domainOf(seams)}/${service}`], seams), `launchctl kickstart -k ${service}`);
-    else must(launchctl(['bootstrap', domainOf(seams), plistFile], seams), `launchctl bootstrap ${plistFile}`);
+    else {
+      const { kicked, detail } = loadAgent({ label: service, plistFile }, seams);
+      if (!kicked) fail(`launchctl kickstart ${service} failed: ${detail}`);
+    }
     return;
   }
   fail('unsupported service action');
