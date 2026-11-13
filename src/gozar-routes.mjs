@@ -153,6 +153,9 @@ function sessionRoute({ gozar, home, view, candidate }) {
     try {
       for await (const event of gozar.watchRoutes({ home, handle, signal: watch.signal })) {
         const route = event.route;
+        // A route Gozar has not verified yet (the bridge was still starting when it looked) is pending, not lost. Dalan's own public
+        // identity check covers a route that never works; only a lost or moved route ends the trial here.
+        if (route.state === 'unverified' && !route.published) continue;
         if (event.type === 'snapshot' && route.state === 'usable' && route.published === origin) continue;
         if (route.state === 'usable' && route.published === origin) continue;
         if (route.state === 'address_changed' || (route.published && route.published !== origin)) end('rotated');

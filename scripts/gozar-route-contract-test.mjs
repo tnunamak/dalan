@@ -176,6 +176,22 @@ test('the route watch reports a changed address as rotated and a lost route as l
   }
 });
 
+test('a route Gozar has not verified yet is pending, not lost; a later loss still ends the wait', async () => {
+  const gozar = createFakeGozar();
+  const original = gozar.watchRoutes;
+  gozar.watchRoutes = async function* (args) {
+    for await (const event of original(args)) {
+      yield event.type === 'snapshot' ? { ...event, route: { ...event.route, state: 'unverified', published: null, verification: { status: 'unverified', checkedAt: null } } } : event;
+    }
+  };
+  const route = await startSessionRoute({ gozar, query: buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 5000 } }), consent: yes });
+  const early = await Promise.race([route.exited, new Promise(resolve => setTimeout(() => resolve('pending'), 300))]);
+  assert.equal(early, 'pending', 'an unverified first snapshot does not end the trial');
+  gozar.fake.change(route.handle.id, { state: 'lost', published: null });
+  assert.equal(await route.exited, 'lost');
+  await route.stop();
+});
+
 test('stop reports cleanup debt and a replaced route honestly, and offers no provider command', async () => {
   const gozar = createFakeGozar();
   gozar.fake.setCleanupDebt('relay entry remains');
