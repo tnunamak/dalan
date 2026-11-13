@@ -10,7 +10,7 @@ import { followTarget, handOver } from '../src/follow-current.mjs';
 import { readDefaultHome } from '../src/default-home.mjs';
 import { resolveHelp } from '../src/cli-help.mjs';
 // Follow the version the service runs, so the CLI and the service never drift. Then find the recorded home without DALAN_HOME.
-const followed = followTarget({ ownBin: fileURLToPath(import.meta.url) });
+const followed = followTarget({ ownBin: fileURLToPath(import.meta.url), argv: process.argv.slice(2) });
 if (followed) handOver(followed);
 else {
 if (!process.env.DALAN_HOME && !['try', 'service', 'setup'].includes(process.argv[2])) { const recorded = readDefaultHome(); if (recorded) process.env.DALAN_HOME = recorded; }

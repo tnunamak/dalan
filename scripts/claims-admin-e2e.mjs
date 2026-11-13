@@ -69,7 +69,7 @@ try {
   assert.ok(listed.length===0||listed[0].expired===true,'an expired claim is either reported as expired or has already been swept');
   const staleCount=side.status().stale_claims.count;
   assert.ok(staleCount===0||staleCount===1,'the lease sweep may already have requeued the expired claim');
-  // A claim idle since before the bridge started is held from the sweep (and from the stale count) for its lease after the start; it is still expired for a new claimant.
+  // A claim idle since before the bridge started is held from the sweep for its lease after the start; the idle warning is independent; it is still expired for a new claimant.
   if(listed.length===0)assert.equal(side.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id).status,'queued');
   const taken=await tool('claim',{request_id:id,claimant:'second-process'});
   assert.equal(taken.epoch,2);assert.notEqual(taken.claim_id,c1.claim_id);

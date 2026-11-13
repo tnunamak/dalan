@@ -1,6 +1,6 @@
 # Dalan
 
-Give your AI agent a coding job from your Mac or Linux computer, even when the agent can only connect through MCP. Dalan queues the job and brings its report back for you to review. It does not run a model or start your agent for you.
+Put your MCP-only agent to work on coding jobs from your Mac or Linux computer. The hosted agent is the worker: it connects to your local Dalan bridge over MCP and claims jobs you queue. With explicit repository grants and workspace setup, it can return findings or a patch for you to review. You decide whether to apply changes. Dalan does not run a model or start the agent.
 
 Before you begin, install [Node.js](https://nodejs.org) 24 or newer and [Tailscale](https://tailscale.com/download) with Funnel enabled. Your agent's account must allow custom MCP connectors.
 
@@ -31,7 +31,17 @@ A trial prints its own home. Set `DALAN_HOME` to that home before you run other 
 
 ## Install a persistent connection
 
-This example names your worker `assistant`; use that name consistently.
+This example names your hosted worker `assistant`; use that name consistently.
+
+If you plan repository jobs, include `--enable-workspace` in the service install command below.
+
+If you tried the temporary trial first, save any results you want (see [service setup](docs/service-setup.md)), stop it with Ctrl-C, and unset the trial's `DALAN_HOME` before you install:
+
+```sh
+unset DALAN_HOME
+```
+
+The persistent service uses a fresh home and needs a new sign-in. Do not reuse the trial home.
 
 ```sh
 npm install -g @tnunamak/dalan
@@ -63,16 +73,22 @@ In another terminal, send a text-only job to the worker you just connected. If y
 dalan submit --worker assistant --execution none --deliver none --brief "Explain what a database index does. Do not read files, run commands or call external services."
 ```
 
-The job needs no repository and produces a report, not a patch. Send the agent the request ID that Dalan prints. Ask it to claim that job, follow its brief and return a report. Queuing a job does not start the agent.
+This first job needs no repository and returns a report, not a patch. Copy the request ID that Dalan prints. In the connected agent's chat, send this, replacing `REQUEST_ID` with that ID:
 
-Replace `REQUEST_ID` with that ID, then wait and read the result:
+> Use Dalan to claim job REQUEST_ID, follow its brief, report progress, and finish with your answer. Do not expand its permissions.
+
+Queuing a job does not start the agent. After you have prompted it, replace `REQUEST_ID` with the same ID, then wait and read the result:
 
 ```sh
 dalan wait REQUEST_ID
 dalan get REQUEST_ID --json
 ```
 
-Read the report before recording your decision:
+Read the answer in `report.result` and its outcome in `report.outcome`. A missing or null report means there is no report yet. A blocked or failed outcome is not a successful answer.
+
+`wait` defaults to 300 seconds. Exit 0 means finished, 3 a question or blocker, 4 cancelled, 5 the worker is on a usage break, and 124 timed out with the job still open. After a nonzero exit, inspect the job with `dalan get` before you continue. Do not submit again only because the wait timed out.
+
+Only after you read a finished answer and find it useful, record your decision:
 
 ```sh
 dalan decide REQUEST_ID accepted
@@ -96,7 +112,11 @@ A local coding agent with a shell (Claude Code, Codex CLI) can be the requester.
 
 ## Give a worker a repository job
 
-The first job needs no repository. Repository jobs need Git and Python 3.8 or newer on the bridge computer, workspaces enabled, and an exact repository grant for the worker. The hosted demo does not enable repository work.
+The text-only job proves pairing and reporting, not coding access. Keep using the same persistent bridge home and connected worker from the installation above. Before submitting a repository job, install Git and Python 3.8 or newer on the bridge computer, provide a host GitHub credential that can read the repository, and enable workspace access for both the host and worker. Then grant only the repository below. A repository grant alone does not enable workspaces.
+
+The [manual setup guide](docs/manual-setup.md#owner-and-requester-setup) creates a separate loopback bridge in a new home; it is not an upgrade path for your persistent service. If your existing service has no workspace access, stop before submitting a repository job. Reinstalling with `--enable-workspace` is refused because the saved service configuration must match; it cannot enable workspace access in place.
+
+The first repository job below reads one file at a pinned commit. It does not edit files or run checks. The trial has no repository access.
 
 Replace `WORKER` with your worker's name (`assistant` above) and `OWNER/REPO` with the repository:
 
@@ -125,12 +145,28 @@ For a read-only repository job, replace the request ID (`req_` plus a new lowerc
 }
 ```
 
-Save it as `repository-job.json`. Replace `WORKER` as above, and `REQUEST_ID` with the ID that `submit` prints. Then submit, wait, read the report and record your decision:
+Save it as `repository-job.json`. Replace `WORKER` as above, then submit:
 
 ```sh
 dalan submit --worker WORKER --execution none --deliver none --file repository-job.json --json
+```
+
+Copy the request ID that `submit` prints. In your connected hosted agent's chat, send this, replacing `REQUEST_ID` with that ID:
+
+> Use Dalan to claim job REQUEST_ID, follow its brief, report progress, and finish with your answer. Do not expand its permissions.
+
+Queuing does not start the agent. After you have prompted it, use the same bridge home and request ID to wait and read the report:
+
+```sh
 dalan wait REQUEST_ID
-dalan get REQUEST_ID
+dalan get REQUEST_ID --json
+```
+
+Inspect `report.result` and `report.outcome`. A missing or null report means there is no report yet; a blocked or failed outcome is not a successful answer. After a nonzero `wait` exit, inspect the job before continuing, as described for the first job above.
+
+Pause here to review the finished report. Only if you find it useful, record acceptance:
+
+```sh
 dalan decide REQUEST_ID accepted
 ```
 

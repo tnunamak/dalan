@@ -108,7 +108,7 @@ const storedMeta=(meta,legacy)=>({...meta,objective_key:storedObjectiveKey(meta.
 function submitIntentDigest(identity,delivery,environmentId,review,priority,meta,targetWorker,execution,requiredCapabilities,destinationRevision=null,legacyFixNames=true) {
   return hash(JSON.stringify(canonical({payload:identity,delivery,environmentId:environmentId??'',review:!!review,priority,meta:storedMeta(normalizeMeta(meta),legacyFixNames),targetWorker,execution,requiredCapabilities,...(destinationRevision===null?{}:{destination_revision:destinationRevision})})));
 }
-const defaultRedeliveryLimits={intervalMs:600000,maxCount:3,silenceMs:1200000,leaseMs:3600000,laneCapacity:6,rewakeMs:90000,rewakeWindowMs:7200000,rewakeStaleMs:1200000,breakSilenceMs:1200000,breakProbeMs:1800000,maxClaimsPerHour:90,maxToolCallsPerHour:1000,maxToolCallsPer24h:10000,maxResponseBytesPerHour:8000000,maxResponseBytesPer24h:100000000};
+const defaultRedeliveryLimits={intervalMs:600000,maxCount:3,silenceMs:1200000,claimIdleWarningMs:900000,leaseMs:3600000,laneCapacity:6,rewakeMs:90000,rewakeWindowMs:7200000,rewakeStaleMs:1200000,breakSilenceMs:1200000,breakProbeMs:1800000,maxClaimsPerHour:90,maxToolCallsPerHour:1000,maxToolCallsPer24h:10000,maxResponseBytesPerHour:8000000,maxResponseBytesPer24h:100000000};
 const HOUR=3600000, iso=ms=>new Date(ms).toISOString();
 export const QUEUE_WINDOW=Object.freeze({minSamples:5,factor:3,minMs:15*60000,maxMs:12*HOUR});
 const queueKindSql=canonicalKindSql("COALESCE(a.task_kind,json_extract(a.payload,'$.task_kind'),CASE WHEN a.review=1 THEN 'review' ELSE json_extract(a.payload,'$.execution_scope') END,'unknown')");
@@ -155,6 +155,9 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(!Number.isInteger(intervalMs)||intervalMs<60000||intervalMs>86400000) throw new Error('invalid assignment_reannounce_interval_ms');
   if(!Number.isInteger(maxCount)||maxCount<0||maxCount>10) throw new Error('invalid assignment_reannounce_max_count');
   const silenceMs=value.pause_suspected_silence_ms??defaultRedeliveryLimits.silenceMs;
+  // Observational warning only: independent of lease expiry, takeover and cancellation.
+  const claimIdleWarningMs=value.claim_idle_warning_ms??defaultRedeliveryLimits.claimIdleWarningMs;
+  if(!Number.isInteger(claimIdleWarningMs)||claimIdleWarningMs<60000||claimIdleWarningMs>604800000) throw new Error('invalid claim_idle_warning_ms');
   // A claim lease expires at last claim activity + leaseMs. stale_claim_ms is the legacy name, read only when claim_lease_ms is absent.
   const leaseKey=value.claim_lease_ms!=null?'claim_lease_ms':value.stale_claim_ms!=null?'stale_claim_ms':null;
   const leaseMs=leaseKey?value[leaseKey]:defaultRedeliveryLimits.leaseMs;
@@ -191,7 +194,7 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(!Number.isInteger(maxResponseBytesPerHour)||maxResponseBytesPerHour<100000||maxResponseBytesPerHour>1000000000) throw new Error('invalid max_response_bytes_per_hour');
   const maxResponseBytesPer24h=value.max_response_bytes_per_24h??defaultRedeliveryLimits.maxResponseBytesPer24h;
   if(!Number.isInteger(maxResponseBytesPer24h)||maxResponseBytesPer24h<1000000||maxResponseBytesPer24h>10000000000) throw new Error('invalid max_response_bytes_per_24h');
-  return {intervalMs,maxCount,silenceMs,leaseMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
+  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
 }
 
 // Gates that cap one rolling hour. They hold background work before agent-requested work (see rollingUsage).
@@ -1555,8 +1558,16 @@ export class Store {
     const calls=this.db.prepare('SELECT max(last_call_at) call, max(last_list_pending_at) list FROM worker_activity WHERE worker=?').get(worker);
     const lastCall=calls.call??null, lastList=calls.list??null;
     const silence=lastCall?age(lastCall):Infinity;
-    const claims=this.db.prepare("SELECT c.subject,c.worker,c.lane_key,c.lane_scope,c.lease_ms,c.lease_deadline_at,c.lease_boot_id,c.lease_deadline_monotonic_ms,c.claimed_at,c.last_claim_activity_at,c.last_progress_at,COALESCE(c.last_claim_activity_at,c.claimed_at) activity FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND c.state='active' AND c.worker=?").all(worker);
-    const staleClaims=claims.filter(c=>this.leaseExpired(c)&&!this.heldAfterStart(c));
+    const claims=this.db.prepare("SELECT c.request_id,c.subject,c.worker,c.lane_key,c.lane_scope,c.lease_ms,c.lease_deadline_at,c.lease_boot_id,c.lease_deadline_monotonic_ms,c.claimed_at,c.last_claim_activity_at,c.last_progress_at,c.last_tool_at,COALESCE(c.last_claim_activity_at,c.claimed_at) activity FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND c.state='active' AND c.worker=?").all(worker);
+    // Activity warnings are not lease expiry. Renewals and post-start holds must
+    // not hide a silent claim; only progress or assignment-specific tool activity
+    // refreshes this observation. claimed_at is the fallback for a new grant.
+    const idleThresholdMs=limits.claimIdleWarningMs??defaultRedeliveryLimits.claimIdleWarningMs;
+    const staleClaims=claims.map(c=>{
+      const times=[c.claimed_at,c.last_progress_at,c.last_tool_at].map(t=>Date.parse(t)).filter(Number.isFinite);
+      const last=times.length?Math.max(...times):now;
+      return {request_id:c.request_id,idle_ms:Math.max(0,now-last),last_progress_at:c.last_progress_at??null,last_tool_at:c.last_tool_at??null};
+    }).filter(c=>c.idle_ms>=idleThresholdMs).sort((a,b)=>b.idle_ms-a.idle_ms||a.request_id.localeCompare(b.request_id));
     const liveSubs=this.activeSubscriptions().filter(sub=>sub.worker===worker);
     const liveClaims=liveSubs.flatMap(sub=>this.activeClaims(sub.principal,sub.worker));
     const hasLiveClaim=liveClaims.some(c=>now-Date.parse(c.last_claim_activity_at??c.claimed_at)<this.claimLeaseMs(c));
@@ -1583,7 +1594,7 @@ export class Store {
       oldest_claim_progress_age_ms:claims.length?Math.max(...claims.map(c=>age(c.last_progress_at??c.claimed_at))):null,
       last_worker_call_at:lastCall,last_list_pending_at:lastList,
       oldest_unclaimed_event_2xx_age_ms:ages.length?Math.max(...ages):null,
-      queue_classes:queueClasses,stale_claims:{count:staleClaims.length,max_idle_ms:staleClaims.length?Math.max(...staleClaims.map(c=>age(c.activity))):null},
+      queue_classes:queueClasses,stale_claims:{count:staleClaims.length,max_idle_ms:staleClaims[0]?.idle_ms??null,threshold_ms:idleThresholdMs,items:staleClaims.slice(0,20)},
       worker_silence_ms:Number.isFinite(silence)?silence:null,unclaimed_after_reannounce:this.unclaimedAfterReannounce(limits,worker),items
     };
   }

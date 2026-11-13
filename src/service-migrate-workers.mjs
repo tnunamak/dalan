@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { loadCapacity } from './projects.mjs';
 import { loadEffectiveOwnerWorkers, parseWorkers, updateWorkerRepoPolicy, workerRepoMigrationFile } from './workers.mjs';
 
 function reenrollmentIntent(files, workers) {
@@ -45,9 +46,16 @@ export function migrateWorkers({ home, sources, sourceDbs = [], workspaceWorkers
   const workers = {};
   const grants = new Map();
   const deniedRepositories = [];
+  let limits = null;
   for (const source of sources) {
     const file = path.resolve(source);
     if (!fs.existsSync(file) && !fs.existsSync(workerRepoMigrationFile(file))) throw new Error(`no worker policy at ${file}`);
+    const sourceLimits = path.join(path.dirname(file), 'limits.json');
+    if (fs.existsSync(sourceLimits)) {
+      const capacity = loadCapacity(sourceLimits);
+      if (limits && limits.max_claimed_outer_assignments !== capacity) throw new Error('conflicting capacity limits in sources');
+      limits = { max_claimed_outer_assignments: capacity };
+    }
     const profile = loadEffectiveOwnerWorkers(file);
     deniedRepositories.push(...profile.deniedRepoGrants.map(item => ({ source: file, ...item })));
     for (const [name, worker] of profile.workers) {
@@ -80,8 +88,10 @@ export function migrateWorkers({ home, sources, sourceDbs = [], workspaceWorkers
   const config = path.join(home, '.config/dalan');
   const workersFile = path.join(config, 'workers.json');
   const manifestFile = path.join(config, 'service-migration.json');
+  const limitsFile = limits ? path.join(config, 'limits.json') : null;
   try {
     fs.mkdirSync(config, { recursive: true, mode: 0o700 });
+    if (limits) fs.writeFileSync(limitsFile, JSON.stringify(limits, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     fs.writeFileSync(workersFile, JSON.stringify(value, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     for (const [name, repos] of grants) for (const repo of repos) updateWorkerRepoPolicy(workersFile, name, 'allow', repo);
     fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
@@ -89,7 +99,7 @@ export function migrateWorkers({ home, sources, sourceDbs = [], workspaceWorkers
     fs.rmSync(home, { recursive: true, force: true });
     throw error;
   }
-  return { home, workers_file: workersFile, migration_manifest: manifestFile,
+  return { home, workers_file: workersFile, migration_manifest: manifestFile, limits, limits_file: limitsFile,
     workers: [...grants].map(([worker, repos]) => ({ worker, repos, workspaceAllowed: workers[worker].workspaceAllowed })),
     default_execution: 'none', reenrollment_required: true, denied_repositories: deniedRepositories };
 }
@@ -108,6 +118,6 @@ export function migrationMain(args = process.argv.slice(4)) {
     else workspaceWorkers.push(args[i]);
   }
   const result = migrateWorkers({ home, sources, sourceDbs, workspaceWorkers });
-  process.stdout.write(json ? JSON.stringify(result) + '\n' : `Created ${result.workers.length} workers in ${result.home}; execution defaults to none. Re-enrol connectors, subscriptions and destination approvals using ${result.migration_manifest}. No sign-ins or jobs were copied.${result.denied_repositories.length ? ` Denied unaudited additions: ${result.denied_repositories.map(item => `${item.worker}: ${item.repos.join(', ')}`).join('; ')}.` : ''}\n`);
+  process.stdout.write(json ? JSON.stringify(result) + '\n' : `Created ${result.workers.length} workers in ${result.home}; execution defaults to none. Capacity limits: ${result.limits ? result.limits.max_claimed_outer_assignments : 'default (1; no limits file)'}. Re-enrol connectors, subscriptions and destination approvals using ${result.migration_manifest}. No sign-ins or jobs were copied.${result.denied_repositories.length ? ` Denied unaudited additions: ${result.denied_repositories.map(item => `${item.worker}: ${item.repos.join(', ')}`).join('; ')}.` : ''}\n`);
   return result;
 }

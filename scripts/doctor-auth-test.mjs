@@ -8,6 +8,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { Vendor } from './live-trial/fake-vendor.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
+import { runAuthCheck } from '../src/auth-check.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 // A short root: the admin socket path must stay under the platform limit.
@@ -108,6 +109,39 @@ try {
     assert.equal(pair.cli(['doctor', '--auth', '--worker', 'nope']).code, 1);
     assert.equal(pair.connections().connections.length, 0);
   });
+
+  // An open pairing window is never taken over, not even this worker's own. Before A5, which gives lark a connection.
+  for (const [id, windowWorker, expected] of [
+    ['A7same', 'lark', 'your own pairing window is already open (worker lark); doctor cannot check sign-in while it is open. Finish pairing the client, then run doctor again; or run dalan connect stop, then run doctor again'],
+    ['A7other', 'duet', 'a pairing window is already open (worker duet); finish it or run dalan connect stop, then retry']
+  ]) {
+    await check(id, 'an open pairing window: the exact diagnostic, and the window and connections are unchanged', () => {
+      assert.equal(pair.cli(['connect', 'start', '--worker', windowWorker]).code, 0);
+      try {
+        const before = pair.connections();
+        const r = pair.cli(['doctor', '--auth', '--worker', 'lark']);
+        assert.equal(r.code, 1, r.all);
+        assert.ok(r.stdout.includes(`FAIL input: ${expected}\n`), r.stdout);
+        assert.match(r.stdout, /RESULT FAIL/);
+        const after = pair.connections();
+        assert.deepEqual(after.window, before.window);
+        assert.deepEqual(after.connections, before.connections);
+        assertClean(pair, r.all);
+      } finally { assert.equal(pair.cli(['connect', 'stop']).code, 0); }
+    });
+    await check(`${id}calls`, 'an open pairing window: only the connection listing is requested; no start, stop, approve, revoke or OAuth call', async () => {
+      const calls = [], output = [];
+      const result = await runAuthCheck({
+        home: pair.home, workers: pair.workers, worker: 'lark', operator: () => 'test-operator',
+        request: async (route, method, value) => { calls.push([route, method, value]); return { window: { worker: windowWorker }, connections: [] }; },
+        fetchImpl: async () => { throw new Error('an open window must not start the OAuth walk'); },
+        say: line => output.push(line)
+      });
+      assert.deepEqual(calls, [['/connect/list', 'GET', null]]);
+      assert.deepEqual(result, { ok: false, results: [{ name: 'input', status: 'FAIL', detail: expected }] });
+      assert.deepEqual(output, [`FAIL input: ${expected}`, 'RESULT FAIL']);
+    });
+  }
 
   await check('A5', 'a worker that already has a connection: SKIP, nothing approved or revoked, the other steps ran', async () => {
     const vendor = new Vendor(pair, 'https://existing.example/cb');

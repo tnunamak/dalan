@@ -138,7 +138,7 @@ try {
     assert.throws(()=>s.claim('req_take','rival','subject_b',1),/^Error: already claimed by another claimant$/);
     assert.equal(row(s,'req_take').claim_id,c1.claim_id);assert.equal(row(s,'req_take').epoch,1);
     assert.equal(s.claims()[0].expired,false);
-    assert.equal(s.status().stale_claims.count,0);
+    assert.equal(s.status().stale_claims.count,1,'idle warning precedes lease expiry without enabling takeover');
     now+=1;
     assert.equal(s.claims()[0].expired,true);assert.equal(s.status().stale_claims.count,1);
     assert.equal(status(s,'req_take'),'claimed','lease expiry alone changed the assignment');

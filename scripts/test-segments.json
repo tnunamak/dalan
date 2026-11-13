@@ -266,6 +266,7 @@
   "node --test scripts/purge-home-guard-test.mjs",
   "node --test scripts/try-cli-name-test.mjs",
   "node --test scripts/readme-first-job-snippet-test.mjs",
+  "node --test scripts/requester-guide-brief-test.mjs",
   "node --test scripts/backup-recipe-test.mjs",
   "node scripts/generic-profile-test.mjs",
   "node scripts/legacy-init-start-test.mjs",
@@ -368,5 +369,7 @@
   "node --test scripts/test-segments-test.mjs",
   "node scripts/pull-queue-test.mjs",
   "node scripts/pull-queue-destination-test.mjs",
-  "node scripts/pull-catalog-hash-test.mjs"
+  "node scripts/pull-catalog-hash-test.mjs",
+  "node --test src/store-stale-claims.test.mjs",
+  "node --test scripts/service-launchd-test.mjs"
 ]

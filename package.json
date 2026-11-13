@@ -1,6 +1,6 @@
 {
   "name": "@tnunamak/dalan",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "An MCP job bridge for bounded agent work, durable progress, results, and owner review.",
   "repository": {
     "type": "git",
@@ -14,6 +14,7 @@
   "files": [
     "bin/*.mjs",
     "src/",
+    "!src/**/*.test.mjs",
     "!src/test-support/",
     "!**/__pycache__/",
     "packages/job-core/",
@@ -53,7 +54,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.8.0",
-    "@tnunamak/gozar": "^0.2.1",
+    "@tnunamak/gozar": "^0.3.0",
     "oidc-provider": "9.13.0"
   },
   "devDependencies": {
