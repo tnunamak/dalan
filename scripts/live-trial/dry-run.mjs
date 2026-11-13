@@ -134,10 +134,10 @@ async function main() {
     && readme.includes('callback host belongs to the connector provider')
     && readme.includes('cannot prove which vendor account started the flow'),
   'README requires browser-code, refused-callback and trusted-host checks and states the residual limit');
-  const trialStepOrder = ['Enable the trial forward', 'Verify from outside the tailnet', 'Pair fixture-a', 'Submit and verify one job', 'Disable and verify the forward', 'Teardown']
+  const trialStepOrder = ['Set up the trial', 'Check the route', 'Verify from outside your network', 'Pair fixture-a', 'Submit and verify one job', 'Close the route', 'Teardown']
     .map(step => readme.indexOf(step));
   pass(trialStepOrder.every((position, index) => position >= 0 && (!index || position > trialStepOrder[index - 1])),
-    'README follows the enable, outside-check, pair, job, disable, teardown order');
+    'README follows the set-up, route-check, outside-check, pair, job, close, teardown order');
 
   const worker = 'fixture-a';
   const port = await freeLoopbackPort();

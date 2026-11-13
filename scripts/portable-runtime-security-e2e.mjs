@@ -155,8 +155,9 @@ try {
   must(await a.register() === 201 && await b.register() === 201, 'allowlisted registration failed');
   let A, B;
   await check('oauth_redirect_allowlist_and_pkce_s256', async () => {
-    for (const redirect of ['https://evil.example/callback', `${callback}/`, 'http://runtime-vendor.example/callback', 'https://runtime-vendor.example.evil/callback', `${callback}?extra=1`, 'https://runtime-vendor.example:444/callback']) must(await new Vendor(bridge, redirect).register() === 400, 'unallowlisted callback accepted');
-    must(await new Vendor(bridge).register([callback, 'https://evil.example/callback']) === 400, 'mixed redirect list accepted');
+    // Redirects are judged by their own properties (src/redirect-policy.mjs), not by an owner callback list.
+    for (const redirect of ['http://runtime-vendor.example/callback', 'https://user:pass@runtime-vendor.example/callback', `${callback}#fragment`, 'https://RUNTIME-VENDOR.example/callback']) must(await new Vendor(bridge, redirect).register() === 400, 'unsafe or non-canonical callback accepted');
+    must(await new Vendor(bridge).register([callback, 'http://runtime-vendor.example/callback']) === 400, 'mixed redirect list accepted');
     must(bridge.cli(['connect', 'start', '--worker', 'dot', '--json']).code === 0, 'window failed');
     for (const extra of [{ code_challenge: null, code_challenge_method: null }, { code_challenge_method: 'plain' }, { redirect_uri: `${callback}/` }]) {
       const denied = await a.begin(extra); must(!denied.pairing, 'invalid PKCE or redirect reached owner pairing');

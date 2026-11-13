@@ -24,7 +24,7 @@ export function validateRedirectUri(uri) {
   let url;
   try { url = new URL(uri); } catch { return refuse('redirect URI is not a valid URL'); }
   // The registered string is the one the client will send back. It must already be in canonical form: the parser may not
-  // rewrite case, default ports, dot segments, escapes or numeric host spellings behind our back.
+  // rewrite case, default ports, "." and ".." segments, escapes or numeric host spellings behind our back.
   if (url.href !== uri) return refuse('redirect URI is not in canonical spelling');
   if (url.username || url.password) return refuse('redirect URI must not carry credentials');
   if (url.protocol === 'https:') {

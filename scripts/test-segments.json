@@ -45,7 +45,7 @@
   "node --test scripts/tool-registry-test.mjs",
   "node --test scripts/tool-registry-admission-test.mjs",
   "timeout --kill-after=5s 360s nice -n 10 node --test scripts/dalan-try-test.mjs",
-  "timeout --kill-after=5s 360s nice -n 10 node --test scripts/dalan-try-hosted-test.mjs",
+  "timeout --kill-after=5s 360s nice -n 10 node --test --test-force-exit scripts/dalan-try-hosted-test.mjs",
   "node --test scripts/trial-public-watch-test.mjs",
   "node scripts/mcp-sse-idle-test.mjs",
   "node --test scripts/gozar-recovery-cwd-test.mjs",

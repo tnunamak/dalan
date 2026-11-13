@@ -51,7 +51,7 @@ globalThis.fetch = (input, init = {}) => {
 
 function fakeRoute({ legacyOnExpose } = {}) {
   const gozar = createFakeGozar();
-  const record = { gatePort: null, origin: null, servers: [], get started() { return gozar.fake.state.effects.filter(e => e.type === 'expose' || e.type === 'ensure').length; },
+  const record = { gatePort: null, origin: null, servers: [], hosts: [], get started() { return gozar.fake.state.effects.filter(e => e.type === 'expose' || e.type === 'ensure').length; },
     get stopped() { return gozar.fake.state.effects.filter(e => e.type === 'close').length; }, id: null, die() { gozar.fake.change(record.id, { state: 'lost', published: null }); } };
   const relayFor = async (origin, target) => {
     const gatePort = Number(target.split(':').pop());
@@ -63,7 +63,7 @@ function fakeRoute({ legacyOnExpose } = {}) {
     });
     await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve));
     record.servers.push(relay);
-    relays.set(new URL(origin).host, relay.address().port);
+    relays.set(new URL(origin).host, relay.address().port); record.hosts.push(new URL(origin).host);
   };
   for (const name of ['expose', 'ensureRoute']) {
     const original = gozar[name];
@@ -74,7 +74,7 @@ function fakeRoute({ legacyOnExpose } = {}) {
       return view;
     };
   }
-  const closeAll = async () => { for (const server of record.servers) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
+  const closeAll = async () => { for (const host of record.hosts) relays.delete(host); for (const server of record.servers) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
   return { gozar, record, closeAll };
 }
 
@@ -514,7 +514,7 @@ test('a trial states its local shutdown limit and attempts route cleanup when th
   assert.match(run.out, /Local shutdown limit: \d+ (h \d+ )?min\./, 'reminders show the local shutdown limit');
   assert.equal(run.route.stopped, 1, 'cleanup closes the session route exactly once');
   const real = await hostedRun('real-no-timer', { route: savedSetting('real-no-timer'), clock: virtualClock(), fetchImpl: async () => { throw new Error('fetch failed'); } });
-  await real.finished;
+  await real.finished; await real.close();
   assert.doesNotMatch(real.out, /shutdown limit|Temporary trial/);
 });
 
