@@ -23,7 +23,7 @@ dalan connect start --worker NAME
 - `dalan submit --wait` prints the request ID and the worker prompt before it waits. The guides now show `claude mcp add --scope user`, how to retry with `--replace`, and that Node 24 or newer is required.
 - Documentation uses only the commands above. `worker-bridge-setup.mjs` remains for older setups and is no longer in the guides.
 
-Upgrade note: `@tnunamak/gozar` 0.2.0 is now a dependency (`^0.2.0`). A service that a release before 0.7.0 generated keeps working; move it with a fresh `dalan service install`.
+Upgrade note: `@tnunamak/gozar` 0.2.1 is now a dependency (`^0.2.1`). A service that a release before 0.7.0 generated keeps working; move it with a fresh `dalan service install`.
 
 ## 0.6.2
 
