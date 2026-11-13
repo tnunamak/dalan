@@ -121,6 +121,13 @@ try {
   assert.deepEqual(fs.readdirSync(path.join(linux.userHome, '.config/systemd/user')), [], 'no unit file is left');
   assert.ok(systemctlCalls.some(call => call.includes('disable') && call.includes(`${linuxReceipt.unit}.service`)));
 
+  // ---- --route WORD: a word in the label of a route Gozar offers (nothing here knows a provider) -----------------------------------------
+  const word = seamsFor('word', 'linux');
+  const byWord = await installService(options(word, { route: 'public' }), word.seams);
+  assert.match(byWord.origin, /^https:\/\//, 'a label word picks the offered route');
+  await assert.rejects(installService(options(seamsFor('badword', 'linux'), { route: 'nonesuch' }), seamsFor('badword', 'linux').seams), /No route is named or labelled "nonesuch"\. Offered: Example public route/);
+  await assert.rejects(installService(options(seamsFor('wrongword', 'linux'), { route: 'temporary' }), seamsFor('wrongword', 'linux').seams), /No route|not usable|route/i);
+
   // ---- explicit external route keeps working; --route alone needs a name, nothing alone is refused ------------------------------------
   await assert.rejects(serviceMain(['install', '--worker', 'muse'], seamsFor('refuse', 'linux').seams), /pass --route NAME/);
 

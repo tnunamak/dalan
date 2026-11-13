@@ -14,7 +14,7 @@ import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES } from './as-files.mjs';
 import { createGate, verifyPublicReady, watchPublicIdentity } from './try-exposure.mjs';
-import { RouteError, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
+import { RouteError, resolveRouteWord, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 
@@ -220,12 +220,13 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     };
     try {
       const gozar = deps.gozar ?? await resolveGozar();
-      const query = buildQuery({ home: saved?.gozarHome ?? gozarHomeFor(env), target: `127.0.0.1:${gate.port}`, route: options.route ?? saved?.routeName ?? undefined,
+      const wanted = buildQuery({ home: saved?.gozarHome ?? gozarHomeFor(env), target: `127.0.0.1:${gate.port}`, route: options.route ?? saved?.routeName ?? undefined,
         usage: durable ? { kind: 'durable', routeId: saved.routeId } : { kind: 'session', lifetimeMs: trialMs }, ...(durable ? { origin: saved.origin, address: 'stable' } : {}) });
+      const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
       if (durable) {
-        const view = await ensureDurableRoute({ gozar, query, consent });
+        const view = await ensureDurableRoute({ gozar, query, consent, pick });
         route = { origin: view.origin, exited: null, endedBecause: () => null, stop: async () => ({ removed: true }) }; // an app exit never closes a durable route
-      } else route = await startSessionRoute({ gozar, query, consent, signal, wait: 'allocated' });
+      } else route = await startSessionRoute({ gozar, query, consent, signal, wait: 'allocated', pick });
       if (!durable) stableAddress = route.view?.properties?.address?.stability === 'stable';
     }
     catch (error) {

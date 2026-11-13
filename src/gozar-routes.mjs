@@ -63,6 +63,19 @@ export const targetFor = port => `127.0.0.1:${port}`;
 // ---- choosing and showing candidates (data only) ---------------------------------------------------------------------------------------
 export const readyCandidates = catalog => [...catalog.candidates].filter(c => c.eligible && c.setup.state === 'ready' && typeof c.candidateToken === 'string').sort((a, b) => a.rank - b.rank);
 export const pickCandidate = catalog => readyCandidates(catalog)[0] ?? null;
+// `--route WORD` is Gozar's own name for a route when Gozar has one. Otherwise it is a word in the label of a route Gozar offers, so an owner can
+// type what the label says. The word is matched only against labels Gozar returned; no provider is named here. Returns the query to send and how to
+// pick the candidate: an unnamed query lets Gozar offer every route, and `pick` chooses the matching one.
+export async function resolveRouteWord({ gozar, query }) {
+  if (query.route === undefined) return { query, pick: pickCandidate };
+  try { await gozar.catalogRoutes(query); return { query, pick: pickCandidate }; } catch (error) { if (error?.code !== 'route_not_found') throw error; }
+  const { route: word, ...bare } = query, needle = String(word).toLowerCase();
+  const catalog = await gozar.catalogRoutes(bare);
+  const matches = catalog.candidates.filter(c => `${c.display?.label ?? ''}`.toLowerCase().includes(needle));
+  const pick = cat => readyCandidates(cat).find(c => matches.some(m => m.name === c.name)) ?? null;
+  if (!matches.length) throw new RouteError('route_not_found', `No route is named or labelled ${JSON.stringify(word)}. Offered: ${catalog.candidates.map(c => c.display?.label).filter(Boolean).join('; ') || 'none'}.`);
+  return { query: bare, pick };
+}
 export const approvalFor = candidate => ({ candidateToken: candidate.candidateToken, disclosureRevision: candidate.disclosure.revision });
 
 const yesNo = value => value === true ? 'yes' : value === false ? 'no' : 'unknown';
@@ -109,11 +122,11 @@ export function explainRouteError(error) {
 const abortError = signal => signal.reason ?? Object.assign(new Error('stopped'), { name: 'AbortError', code: 'ABORT_ERR' });
 
 // `wait: 'allocated'` is for a trial whose bridge needs the address before it can answer Gozar's check: Dalan then runs its own readiness check.
-export async function startSessionRoute({ gozar, query, consent, signal, wait = 'verified' }) {
+export async function startSessionRoute({ gozar, query, consent, signal, wait = 'verified', pick = pickCandidate }) {
   signal?.throwIfAborted();
   const catalog = await gozar.catalogRoutes(query);
   signal?.throwIfAborted();
-  const candidate = pickCandidate(catalog);
+  const candidate = pick(catalog);
   if (!candidate) throw noCandidateError(catalog);
   if (!await consent(candidate, catalog)) throw Object.assign(new RouteError('consent_required', 'No public route was started because consent was not given.'), { tryKind: 'consent' });
   let view;
@@ -179,11 +192,11 @@ function noCandidateError(catalog) {
 
 // ---- durable routes and external services ----------------------------------------------------------------------------------------------
 // A durable route is never closed by an app exit. The first allocation asks once (the pin keeps the consent); a later call reuses it.
-export async function ensureDurableRoute({ gozar, query, consent, reconsent = false }) {
+export async function ensureDurableRoute({ gozar, query, consent, reconsent = false, pick = pickCandidate }) {
   try { return await gozar.ensureRoute({ ...query, ...(reconsent ? { reconsent: true } : {}) }); }
   catch (error) { if (error?.code !== 'consent_required') throw error; }
   const catalog = await gozar.catalogRoutes(query);
-  const candidate = pickCandidate(catalog);
+  const candidate = pick(catalog);
   if (!candidate) throw noCandidateError(catalog);
   if (!await consent(candidate, catalog)) throw Object.assign(new RouteError('consent_required', 'The route was not started because consent was not given.'), { tryKind: 'consent' });
   return gozar.ensureRoute({ ...query, approval: approvalFor(candidate), ...(reconsent ? { reconsent: true } : {}) });

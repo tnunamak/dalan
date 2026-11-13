@@ -10,7 +10,7 @@ import { defaultPath } from './paths.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
-import { buildQuery, ensureDurableRoute, explainRouteError, gozarHomeFor, registerExternalService, resolveGozar } from './gozar-routes.mjs';
+import { buildQuery, ensureDurableRoute, explainRouteError, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
 import { launchdLabels, launchAgentsDir, servicePlist, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist } from './service-launchd.mjs';
@@ -379,8 +379,9 @@ export async function installService(o, seams = {}) {
     else {
       const port = await (seams.freePort ?? firstFreePort)(8789);
       gozar = seams.gozar ?? await resolveGozar();
-      const query = buildQuery({ home: gozarHomeFor(env), target: `127.0.0.1:${port}`, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, address: 'stable' });
-      const view = await ensureDurableRoute({ gozar, query, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
+      const wanted = buildQuery({ home: gozarHomeFor(env), target: `127.0.0.1:${port}`, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, address: 'stable' });
+      const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
+      const view = await ensureDurableRoute({ gozar, query, pick, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
       o = { ...o, origin: parseOrigin(view.origin), port, target: parseTarget(`127.0.0.1:${port}`) };
     }
   }
