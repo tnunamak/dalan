@@ -10,8 +10,10 @@ import { defaultPath } from './paths.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
-import { buildQuery, ensureDurableRoute, gozarHomeFor, registerExternalService, resolveGozar } from './gozar-routes.mjs';
+import { buildQuery, ensureDurableRoute, explainRouteError, gozarHomeFor, registerExternalService, resolveGozar } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
+import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
+import { launchdLabels, launchAgentsDir, servicePlist, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist } from './service-launchd.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/;
@@ -55,14 +57,18 @@ function parseOptions(argv, env) {
   if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
   if (parsed['--help']) return { help: true };
   if (parsed['--auto-update'] && parsed['--no-auto-update']) fail('choose --auto-update or --no-auto-update');
-  const home = path.resolve(parsed['--home'] ?? path.join(os.homedir(), '.local/share/dalan-service'));
-  if (!SAFE_PATH.test(home)) fail('--home contains characters that cannot be written safely in a systemd unit');
-  const origin = parseOrigin(parsed['--public-url']);
-  const port = Number(parsed['--port']);
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('--port must be a fixed port from 1024 through 65535');
-  const target = parseTarget(parsed['--target']);
+  const home = path.resolve(parsed['--home'] ?? serviceHomeFor(env));
+  if (!SAFE_PATH.test(home)) fail('--home contains characters that cannot be written safely in a service definition');
+  // `--route NAME` alone is the one-command install: Gozar supplies the public address and Dalan picks a loopback port.
+  const auto = parsed['--public-url'] === undefined && parsed['--port'] === undefined && parsed['--target'] === undefined;
+  if (auto && parsed['--route'] === undefined) fail('pass --route NAME to publish through Gozar, or --public-url, --port and --target for a proxy you already run');
+  if (auto && (parsed['--lan-port'] !== undefined || parsed['--verify-cmd'] !== undefined)) fail('--lan-port and --verify-cmd belong with an explicit --public-url, --port and --target');
+  const origin = auto ? null : parseOrigin(parsed['--public-url']);
+  const port = auto ? null : Number(parsed['--port']);
+  if (!auto && (!Number.isInteger(port) || port < 1024 || port > 65535)) fail('--port must be a fixed port from 1024 through 65535');
+  const target = auto ? null : parseTarget(parsed['--target']);
   const lanPort = parsed['--lan-port'] === undefined ? null : Number(parsed['--lan-port']);
-  validateTopology({ port, target, lanPort, verifyCmd: parsed['--verify-cmd'] });
+  if (!auto) validateTopology({ port, target, lanPort, verifyCmd: parsed['--verify-cmd'] });
   const workers = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--worker') workers.push(argv[++i]);
@@ -75,7 +81,7 @@ function parseOptions(argv, env) {
   if (parsed['--verify-cmd']?.length > 4096) fail('--verify-cmd is too long');
   const route = parsed['--route'];
   if (route !== undefined && (!route || route.startsWith('-'))) fail('--route must name a Gozar route');
-  return { home, origin, port, target, lanPort, enableWorkspace: parsed['--enable-workspace'] === true, enableT3: parsed['--enable-t3'] === true, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
+  return { home, auto, homeExplicit: parsed['--home'] !== undefined, origin, port, target, lanPort, enableWorkspace: parsed['--enable-workspace'] === true, enableT3: parsed['--enable-t3'] === true, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
     route, autoUpdate: parsed['--auto-update'] ? true : parsed['--no-auto-update'] ? false : undefined,
     writeUnitsOnly: parsed['--write-units-only'] === true, json: parsed['--json'] === true };
 }
@@ -104,6 +110,23 @@ function nodePath(execPath) {
     try { if (fs.realpathSync(candidate) === real) return candidate; } catch { /* candidate is not installed */ }
   }
   return execPath;
+}
+
+function readReceipt(home) {
+  const file = path.join(defaultPath(home, '.config/dot-bridge'), 'service-install.json');
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+function firstFreePort(start) {
+  return new Promise((resolve, reject) => {
+    const attempt = port => {
+      if (port > 65535) return reject(new Error('no free port from 8789 upward'));
+      const probe = net.createServer();
+      probe.once('error', () => attempt(port + 1));
+      probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(port)));
+    };
+    attempt(start);
+  });
 }
 
 function unitName(home) { return `dalan-${createHash('sha256').update(home).digest('hex').slice(0, 10)}`; }
@@ -208,7 +231,7 @@ function checkHomeScope(home, configDir, o, workers) {
   if (!fs.existsSync(home)) return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
   const rootEntries = fs.readdirSync(home);
   if (!rootEntries.length) return { receiptFile: path.join(configDir, 'service-install.json'), hasReceipt: false };
-  const rootAllowed = ['.config', '.local', '.tmp', 'resource-url', 'current', 'versions', 'update-result.json', 'update-failed.json', 'update-transaction.json', 'update-backup', 'update-lock.sqlite', 'update-lock.sqlite-journal'];
+  const rootAllowed = ['.config', '.local', '.tmp', 'resource-url', 'logs', 'current', 'versions', 'update-result.json', 'update-failed.json', 'update-transaction.json', 'update-backup', 'update-lock.sqlite', 'update-lock.sqlite-journal'];
   if (rootEntries.some(name => !rootAllowed.includes(name))) fail(`${home} contains unrelated data; use a fresh home or one created by dalan service migrate-workers`);
   if (!rootEntries.includes('.config')) fail(`${home} has no Dalan config directory; refusing to adopt it`);
   const configRoot = path.join(home, '.config');
@@ -225,7 +248,7 @@ function checkHomeScope(home, configDir, o, workers) {
   const receiptFile = path.join(configDir, 'service-install.json');
   const entries = fs.readdirSync(configDir);
   const hasReceipt = entries.includes('service-install.json');
-  if (!hasReceipt && rootEntries.some(name => !['.config', '.local', '.tmp', 'resource-url'].includes(name))) fail(`${home} contains update data without a service receipt`);
+  if (!hasReceipt && rootEntries.some(name => !['.config', '.local', '.tmp', 'resource-url', 'logs'].includes(name))) fail(`${home} contains update data without a service receipt`);
   if (hasReceipt) {
     const info = fs.lstatSync(receiptFile);
     if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) fail(`${receiptFile} must be a private regular file`);
@@ -342,19 +365,35 @@ function assertGozarStatePath(env) {
 
 export async function installService(o, seams = {}) {
   const env = seams.env ?? process.env;
-  if ((seams.platform ?? process.platform) !== 'linux') fail('dalan service install currently requires Linux with a systemd user manager');
-  if (!path.isAbsolute(o.home) || !SAFE_PATH.test(o.home)) fail('--home must be an absolute systemd-safe path');
+  const platform = seams.platform ?? process.platform;
+  if (!['linux', 'darwin'].includes(platform)) fail('dalan service install needs Linux with a systemd user manager or macOS with launchd');
+  const mac = platform === 'darwin';
+  if (!path.isAbsolute(o.home) || !SAFE_PATH.test(o.home)) fail('--home must be an absolute service-safe path');
+  assertRealDirectoryPath(path.dirname(o.home), { owner: true });
+  assertRealDirectoryPath(o.home, { owner: true });
+  let gozar = null;
+  if (o.auto) {
+    // The one-command install: reuse the port and address a previous run recorded, or pick a free port and ask Gozar for the address.
+    const prior = readReceipt(o.home);
+    if (prior?.origin && prior.port) o = { ...o, origin: prior.origin, port: prior.port, target: parseTarget(prior.target) };
+    else {
+      const port = await (seams.freePort ?? firstFreePort)(8789);
+      gozar = seams.gozar ?? await resolveGozar();
+      const query = buildQuery({ home: gozarHomeFor(env), target: `127.0.0.1:${port}`, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, address: 'stable' });
+      const view = await ensureDurableRoute({ gozar, query, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
+      o = { ...o, origin: parseOrigin(view.origin), port, target: parseTarget(`127.0.0.1:${port}`) };
+    }
+  }
   const target = parseTarget(typeof o.target === 'string' ? o.target : `${o.target?.host}:${o.target?.port}`);
   o = { ...o, target };
   validateTopology(o);
-  assertRealDirectoryPath(path.dirname(o.home), { owner: true });
-  assertRealDirectoryPath(o.home, { owner: true });
   const profile = profileFor(o.home, o.workers ?? []);
   assertRealDirectoryPath(path.dirname(profile.file));
-  const unitDir = path.join(env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.join(os.homedir(), '.config'), 'systemd/user');
+  const unitDir = mac ? launchAgentsDir(env) : path.join(env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.join(os.homedir(), '.config'), 'systemd/user');
   assertRealDirectoryPath(unitDir, { owner: true });
   const configDir = path.dirname(profile.file);
   const homeScope = checkHomeScope(o.home, configDir, o, profile.workers);
+  if (mac && !(o.target.host === '127.0.0.1' && o.target.port === o.port)) fail('on macOS the target must be 127.0.0.1:<port> (the same as --port)');
   const proxy = o.target.host === '127.0.0.1' && o.target.port === o.port ? null : (seams.proxy ?? findProxy());
   const repo = seams.repo ?? REPO, node = seams.node ?? nodePath(process.execPath);
   const receiptFile = homeScope.receiptFile;
@@ -363,12 +402,16 @@ export async function installService(o, seams = {}) {
   const current = path.join(o.home, 'current');
   const hasCurrent = fs.existsSync(current) || (() => { try { fs.lstatSync(current); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } })();
   if (hasCurrent && !fs.lstatSync(current).isSymbolicLink()) fail(`${current} must be the service package symlink`);
-  const { files, enable, name } = unitFiles(o, { home: o.home, repo: current, node, proxy });
-  const updateUnits = autoUpdateUnits({ home: o.home, unit: name, node });
-  Object.assign(files, updateUnits.files);
+  const name = unitName(o.home), labels = launchdLabels(name);
+  let files, enable = [];
+  if (mac) files = { [`${labels.service}.plist`]: servicePlist({ unit: name, node, home: o.home, port: o.port, enableWorkspace: o.enableWorkspace, enableT3: o.enableT3 }) };
+  else {
+    ({ files, enable } = unitFiles(o, { home: o.home, repo: current, node, proxy }));
+    Object.assign(files, autoUpdateUnits({ home: o.home, unit: name, node }).files);
+  }
   let replaceLegacyUnit = false;
   // Check every collision before creating the bridge home or the first unit file.
-  for (const [filename, text] of Object.entries(files)) {
+  for (const [filename, text] of mac ? [] : Object.entries(files)) {
     const file = path.join(unitDir, filename);
     if (fs.existsSync(file) && (!fs.lstatSync(file).isFile() || fs.readFileSync(file, 'utf8') !== text)) {
       const actual = fs.lstatSync(file).isFile() ? fs.readFileSync(file, 'utf8') : '';
@@ -383,16 +426,16 @@ export async function installService(o, seams = {}) {
   }
   if (o.writeUnitsOnly) {
     if (replaceLegacyUnit) fail('rerun without --write-units-only to enroll an existing service for updates');
-    writeUnits(unitDir, files);
-    return { schema_version: 1, home: o.home, unit: `${name}.service`, units: Object.keys(files), target: o.target.value, started: false, route: null };
+    if (mac) for (const [filename, text] of Object.entries(files)) writeAgentFile(path.join(unitDir, filename), text); else writeUnits(unitDir, files);
+    return { schema_version: 1, home: o.home, unit: mac ? labels.service : `${name}.service`, units: Object.keys(files), target: o.target.value, started: false, route: null };
   }
-  const gozar = seams.gozar ?? await resolveGozar();
+  gozar ??= seams.gozar ?? await resolveGozar();
   assertGozarStatePath(env);
   const needsEnrollmentRestart = replaceLegacyUnit || !!previous && (!previous.repo || previous.enrollment_pending === true);
   const spawn = seams.spawn ?? spawnSync;
-  runCommand('systemctl', ['--user', 'show-environment'], { env, spawn });
+  if (!mac) runCommand('systemctl', ['--user', 'show-environment'], { env, spawn });
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  if (!homeScope.hasReceipt) writePrivate(receiptFile, `${JSON.stringify({ ...installReceipt(o.home, configDir, o, profile.workers), repo, node, unit_dir: unitDir, auto_update: autoUpdate }, null, 2)}\n`);
+  if (!homeScope.hasReceipt) writePrivate(receiptFile, `${JSON.stringify({ ...installReceipt(o.home, configDir, o, profile.workers), repo, node, unit_dir: unitDir, auto_update: autoUpdate, platform, route: o.route ?? null }, null, 2)}\n`);
   if (!hasCurrent) fs.symlinkSync(repo, current);
   const homeFiles = prepareHome(o, profile);
   if (needsEnrollmentRestart) {
@@ -403,13 +446,22 @@ export async function installService(o, seams = {}) {
     writeAtomic(file, files[`${name}.service`]);
     fs.chmodSync(file, mode);
   }
-  writeUnits(unitDir, files);
-  runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn });
-  runCommand('systemctl', ['--user', 'enable', '--now', ...enable], { env, spawn });
-  if (needsEnrollmentRestart) runCommand('systemctl', ['--user', 'restart', `${name}.service`], { env, spawn });
+  if (mac) {
+    fs.mkdirSync(path.join(o.home, 'logs'), { recursive: true, mode: 0o700 });
+    const plistFile = path.join(unitDir, `${labels.service}.plist`);
+    const changed = writeAgentFile(plistFile, files[`${labels.service}.plist`]);
+    if (lintPlist(plistFile, seams) === false) fail(`${plistFile} is not a valid property list`);
+    if (changed) unloadAgent({ label: labels.service }, seams.launchd);
+    loadAgent({ label: labels.service, plistFile }, seams.launchd);
+  } else {
+    writeUnits(unitDir, files);
+    runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn });
+    runCommand('systemctl', ['--user', 'enable', '--now', ...enable], { env, spawn });
+    if (needsEnrollmentRestart) runCommand('systemctl', ['--user', 'restart', `${name}.service`], { env, spawn });
+  }
   const dataDir = defaultPath(o.home, '.local/share/dot-bridge');
   const ready = await (seams.waitForSocket ?? socketIsReady)(path.join(dataDir, 'admin.sock'), seams.socketTimeoutMs ?? 30000);
-  if (!ready) fail(`Dalan did not start on its admin socket; the unit and home remain for inspection: systemctl --user status ${name}.service`);
+  if (!ready) fail(`Dalan did not start on its admin socket; the service and home remain for inspection: ${mac ? `tail ${path.join(o.home, 'logs', 'bridge.err.log')}` : `systemctl --user status ${name}.service`}`);
   const gozarHome = gozarHomeFor(env);
   let routeReply;
   if (o.route !== undefined) {
@@ -422,15 +474,47 @@ export async function installService(o, seams = {}) {
     routeReply = (await registerExternalService({ gozar, home: gozarHome, origin: o.origin, target: o.target.value, ...(o.verifyCmd ? { verifyCmd: o.verifyCmd } : {}) })).route;
   }
   if (routeReply.verification?.status !== 'verified') fail(`Gozar did not verify the route; the bridge is running and the route needs repair: ${JSON.stringify(routeReply).slice(0, 1500)}`);
-  await setAutoUpdate({ home: o.home, enabled: autoUpdate }, { ...seams, env, spawn });
+  { const done = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); if (routeReply.handle && JSON.stringify(done.route_handle) !== JSON.stringify(routeReply.handle)) writeAtomic(receiptFile, `${JSON.stringify({ ...done, route_handle: routeReply.handle }, null, 2)}\n`); }
+  await setAutoUpdate({ home: o.home, enabled: autoUpdate }, { ...seams, env, spawn, platform });
+  if (!env.DALAN_HOME) recordDefaultHome(o.home, env);
   if (needsEnrollmentRestart) {
     const enrolled = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     delete enrolled.enrollment_pending;
     writeAtomic(receiptFile, `${JSON.stringify(enrolled, null, 2)}\n`);
   }
-  return { schema_version: 1, home: o.home, unit: `${name}.service`, units: Object.keys(files), port: o.port,
+  return { schema_version: 1, origin: o.origin, home: o.home, unit: mac ? labels.service : `${name}.service`, already_installed: homeScope.hasReceipt && !needsEnrollmentRestart, units: Object.keys(files), port: o.port,
     workers: profile.workers, public_url: `${o.origin}/<secret>/mcp`, resource_url_file: homeFiles.resourceFile,
     target: o.target.value, started: true, route: routeReply, auto_update: autoUpdate };
+}
+
+// Stop the service and its update job, delete the generated definitions and the public route, and forget the default home.
+// The home itself (secrets, grants, data) stays; delete it by hand if you also want that gone.
+export async function uninstallService({ home }, seams = {}) {
+  const env = seams.env ?? process.env, platform = seams.platform ?? process.platform, mac = platform === 'darwin';
+  home = path.resolve(home);
+  const receipt = readReceipt(home);
+  if (!receipt?.unit || receipt.home !== home) fail(`no Dalan service is installed for ${home}`);
+  const removed = [];
+  const unitDir = receipt.unit_dir;
+  if (!unitDir || !path.isAbsolute(unitDir)) fail('the service receipt names no unit directory');
+  if (receipt.auto_update) { try { await setAutoUpdate({ home, enabled: false }, { ...seams, env, platform }); removed.push('automatic updates off'); } catch (error) { removed.push(`update job not removed: ${error.message}`); } }
+  if (mac) removed.push(...removeAgents({ unit: receipt.unit, unit_dir: unitDir }, seams.launchd));
+  else {
+    const spawn = seams.spawn ?? spawnSync, name = receipt.unit;
+    const units = [`${name}.service`, `${name}-target.socket`, `${name}-target.service`, `${name}-update.service`, `${name}-update.timer`].filter(unit => fs.existsSync(path.join(unitDir, unit)));
+    if (units.length) { spawn('systemctl', ['--user', 'disable', '--now', ...units], { encoding: 'utf8', env }); }
+    for (const unit of units) { fs.rmSync(path.join(unitDir, unit)); removed.push(`removed ${path.join(unitDir, unit)}`); }
+    spawn('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8', env });
+  }
+  if (receipt.route_handle) {
+    try {
+      const gozar = seams.gozar ?? await resolveGozar();
+      const closed = await gozar.closeRoute({ home: gozarHomeFor(env), handle: receipt.route_handle, mode: 'remove' });
+      removed.push(`public route ${closed.state}`);
+    } catch (error) { removed.push(`public route not removed: ${explainRouteError(error).line}`); }
+  }
+  forgetDefaultHome(home, env);
+  return { home, removed, kept: `${home} (secrets and data; delete it yourself to remove them)` };
 }
 
 export async function serviceMain(argv, seams = {}) {
@@ -443,7 +527,7 @@ export async function serviceMain(argv, seams = {}) {
     const parsed = parseArgs(args, { values: ['--home'], flags: ['--quiet', '--help'] });
     if (parsed['--help']) return serviceMain(['help'], seams);
     if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
-    const home = path.resolve(parsed['--home'] ?? path.join(os.homedir(), '.local/share/dalan-service'));
+    const home = path.resolve(parsed['--home'] ?? serviceHomeFor(seams.env ?? process.env));
     const { recoverService } = await import('./service-update.mjs');
     const result = recoverService({ home });
     if (!parsed['--quiet']) (seams.out ?? console.log)(JSON.stringify(result));
@@ -452,7 +536,7 @@ export async function serviceMain(argv, seams = {}) {
   if (['update', 'status', 'auto-update'].includes(action)) {
     const parsed = parseArgs(args, { values: ['--home'], flags: ['--check', '--yes', '--retry', '--json', '--help'] });
     if (parsed['--help']) return serviceMain(['help'], seams);
-    const home = path.resolve(parsed['--home'] ?? path.join(os.homedir(), '.local/share/dalan-service'));
+    const home = path.resolve(parsed['--home'] ?? serviceHomeFor(seams.env ?? process.env));
     let result;
     if (action === 'auto-update') {
       if (parsed._.length !== 1 || !['on', 'off'].includes(parsed._[0]) || parsed['--check'] || parsed['--yes'] || parsed['--retry']) fail('use dalan service auto-update on|off [--home DIR]');
@@ -469,21 +553,36 @@ export async function serviceMain(argv, seams = {}) {
     return result;
   }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --home DIR --public-url https://HOST --port N --target HOST:PORT [--lan-port N] [--enable-workspace] [--enable-t3] [--worker NAME ...] [--route NAME] [--verify-cmd COMMAND] [--auto-update|--no-auto-update] [--write-units-only]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Linux systemd only.');
+    (seams.out ?? console.log)('Usage: dalan service install --worker NAME --route NAME [--home DIR] [--enable-workspace] [--enable-t3] [--auto-update|--no-auto-update]\n       dalan service install --public-url https://HOST --port N --target HOST:PORT [--home DIR] [--lan-port N] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]   (an address you already serve)\n       dalan service uninstall [--home DIR]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Runs under systemd on Linux and launchd on macOS.');
     return null;
   }
-  if (action !== 'install') fail('use dalan service install, update, auto-update, status, recover or migrate-workers');
+  if (action === 'uninstall') {
+    const parsed = parseArgs(args, { values: ['--home'], flags: ['--json', '--help'] });
+    if (parsed['--help']) return serviceMain(['help'], seams);
+    if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
+    const result = await uninstallService({ home: parsed['--home'] ?? serviceHomeFor(seams.env ?? process.env) }, seams);
+    const out = seams.out ?? console.log;
+    if (parsed['--json']) out(JSON.stringify(result)); else { for (const line of result.removed) out(line); out(`Kept: ${result.kept}`); }
+    return result;
+  }
+  if (action !== 'install') fail('use dalan service install, uninstall, update, auto-update, status, recover or migrate-workers');
   const o = parseOptions(args, seams.env ?? process.env);
   if (o.help) return serviceMain(['help'], seams);
   const result = await installService(o, seams);
   if (o.json) (seams.out ?? console.log)(JSON.stringify(result));
   else {
-    (seams.out ?? console.log)(`Service: ${result.unit} (${result.started ? 'active' : 'unit files written'})`);
-    (seams.out ?? console.log)(`Home: ${result.home}`);
-    (seams.out ?? console.log)(`Public MCP URL: ${result.public_url ?? `${o.origin}/<secret>/mcp`}`);
-    (seams.out ?? console.log)(`Private URL file: ${result.resource_url_file ?? path.join(result.home, 'resource-url')}`);
-    (seams.out ?? console.log)(`Gozar target: ${result.target}`);
-    if (result.route) (seams.out ?? console.log)(`Gozar route: ${result.route.verification.status}`);
+    const out = seams.out ?? console.log;
+    out(`Service: ${result.unit} (${result.started ? (result.already_installed ? 'already installed, running' : 'running') : 'files written'})`);
+    out(`Home: ${result.home}`);
+    out(`Public address: ${result.origin ?? o.origin ?? result.public_url}`);
+    out(`Connector URL (keep private): in ${result.resource_url_file ?? path.join(result.home, 'resource-url')}`);
+    if (result.route) out(`Route: ${result.route.verification?.status ?? 'unknown'}`);
+    if (result.started) {
+      out(`Updates: ${result.auto_update ? 'automatic, once a day' : 'off; run dalan service update'}`);
+      const worker = result.workers?.[0] ?? 'WORKER';
+      out(`Next: dalan connect start --worker ${worker}`);
+      out('Check: dalan doctor --auth');
+    }
   }
   return result;
 }

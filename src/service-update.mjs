@@ -185,7 +185,7 @@ function readJournal(home) {
   const oldReceipt = tx?.oldReceipt;
   if (tx.home !== home || !oldReceipt || oldReceipt.home !== home || oldReceipt.schema_version !== 1 || !oldReceipt.unit ||
       !tx.oldRepo || !tx.oldVersion || !tx.snapshot || !['prepared', 'switched', 'committed'].includes(tx.phase)) fail('invalid interrupted update transaction');
-  if (tx.unitFile !== (oldReceipt.unit ? unitPath(oldReceipt, home) : null) || !tx.oldCatalogs || typeof tx.oldCatalogs !== 'object') fail('update transaction control data is invalid');
+  if (tx.unitFile !== (oldReceipt.unit && oldReceipt.platform !== 'darwin' ? unitPath(oldReceipt, home) : null) || !tx.oldCatalogs || typeof tx.oldCatalogs !== 'object') fail('update transaction control data is invalid');
   if (path.resolve(tx.snapshot) !== path.join(home, 'update-backup', 'snapshot')) fail('update transaction snapshot path is invalid');
   return { file, tx };
 }
@@ -309,7 +309,8 @@ export async function updateService({ home, check = false, yes = false, retry = 
     const liveAgain = await probe(home, receipt);
     if (liveAgain.version !== oldVersion || !catalogsEqual(base, liveAgain, workers)) fail('live worker catalog changed during update; retry after connector refresh');
     if (configurationDigest(home, receipt) !== digestBeforeRecheck || digestBeforeRecheck !== configBeforeCandidate) fail('service configuration changed during update; retry after connector refresh');
-    const unitFile = receipt.unit ? unitPath(receipt, home) : null;
+    // A macOS agent runs the package through the home's `current` link, so a switch needs no plist rewrite.
+    const unitFile = receipt.unit && receipt.platform !== 'darwin' ? unitPath(receipt, home) : null;
     const txDir = path.join(home, 'update-backup'); privateDir(txDir);
     const tx = { home, oldRepo, candidate, snapshot: path.join(txDir, 'snapshot'), unitFile, oldUnit: unitFile && fs.existsSync(unitFile) ? fs.readFileSync(unitFile, 'utf8') : null, oldCatalogs: base.catalogs, oldVersion, oldReceipt: { ...receipt }, phase: 'prepared' };
     if (unitFile && tx.oldUnit == null) fail(`service unit is missing: ${unitFile}`);

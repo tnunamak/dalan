@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { controlLaunchd } from './service-launchd.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -250,7 +251,8 @@ export async function probeCandidate(home, receipt, repo, options = {}) {
 export async function controlService(receipt, action, options = {}) {
   if (!['stop', 'restart', 'daemon-reload'].includes(action)) fail('unsupported service action');
   const unit = String(receipt.unit ?? '');
-  if (!/^[A-Za-z0-9_.@-]+$/.test(unit)) fail('invalid systemd unit name');
+  if (!/^[A-Za-z0-9_.@-]+$/.test(unit)) fail('invalid service unit name');
+  if (receipt.platform === 'darwin') { (options.launchd ?? controlLaunchd)(receipt, action, options.launchdSeams); return; }
   const name = unit.endsWith('.service') ? unit : `${unit}.service`;
   await (options.run ?? run)('systemctl', ['--user', action, ...(action === 'daemon-reload' ? [] : [name])], { timeout: TIMEOUT });
 }

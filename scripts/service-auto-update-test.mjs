@@ -119,6 +119,6 @@ test('CLI rejects conflicting consent/options and unsupported platform', async (
   await assert.rejects(serviceMain(['update', '--check', '--yes']), /--check.*--yes|--yes.*--check/);
   const f = fixture();
   try {
-    await assert.rejects(setAutoUpdate({ home: f.home, enabled: true }, { platform: 'darwin' }), /Linux/);
+    await assert.rejects(setAutoUpdate({ home: f.home, enabled: true }, { platform: 'win32' }), /Linux/);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });

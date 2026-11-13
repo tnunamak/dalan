@@ -4,8 +4,16 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { unsupportedRuntime } from '../src/runtime-check.mjs';
+import { followTarget, handOver } from '../src/follow-current.mjs';
+import { readDefaultHome } from '../src/default-home.mjs';
 import { resolveHelp } from '../src/cli-help.mjs';
+// Follow the version the service runs, so the CLI and the service never drift. Then find the recorded home without DALAN_HOME.
+const followed = followTarget({ ownBin: fileURLToPath(import.meta.url) });
+if (followed) handOver(followed);
+else {
+if (!process.env.DALAN_HOME && !['try', 'service', 'setup'].includes(process.argv[2])) { const recorded = readDefaultHome(); if (recorded) process.env.DALAN_HOME = recorded; }
 if (['--version', '-v'].includes(process.argv[2])) {
   const { version } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   process.stdout.write(`${version}\n`);
@@ -40,4 +48,5 @@ if (help) {
   }
   if (process.env.DALAN_HOME) process.env.HOME = path.resolve(process.env.DALAN_HOME);
   await import('./dot-worker.mjs');
+}
 }

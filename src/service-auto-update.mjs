@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { defaultPath } from './paths.mjs';
 import { acquireUpdateLock } from './service-update-lock.mjs';
 import { writeAtomic } from './as-files.mjs';
+import { setUpdateAgent } from './service-launchd.mjs';
 
 const safePath = /^[A-Za-z0-9_@+=:,./-]+$/;
 
@@ -28,7 +29,8 @@ export function autoUpdateUnits({ home, unit, node }) {
 }
 
 export async function setAutoUpdate({ home, enabled }, seams = {}) {
-  if ((seams.platform ?? process.platform) !== 'linux') throw new Error('automatic service updates currently require Linux with a systemd user manager');
+  const platform = seams.platform ?? process.platform;
+  if (!['linux', 'darwin'].includes(platform)) throw new Error('automatic service updates need Linux with a systemd user manager or macOS with launchd');
   if (typeof enabled !== 'boolean') throw new Error('auto-update requires on or off');
   home = path.resolve(home);
   if (fs.realpathSync(home) !== home) throw new Error('service home must not use a symlink');
@@ -41,6 +43,11 @@ export async function setAutoUpdate({ home, enabled }, seams = {}) {
     const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     if (receipt.home !== home || !receipt.unit_dir || !receipt.node) throw new Error('reinstall this service with the current Dalan release before enabling automatic updates');
     if (!safePath.test(receipt.unit_dir) || !path.isAbsolute(receipt.unit_dir) || fs.realpathSync(receipt.unit_dir) !== receipt.unit_dir) throw new Error('service unit directory must be a real absolute directory');
+    if (platform === 'darwin') {
+      const agent = setUpdateAgent({ receipt, home, node: receipt.node, enabled }, seams.launchd ?? {});
+      writeAtomic(receiptFile, `${JSON.stringify({ ...receipt, auto_update: enabled }, null, 2)}\n`);
+      return { home, auto_update: enabled, timer: agent.timer };
+    }
     const spawn = seams.spawn ?? spawnSync;
     const run = args => {
       const result = spawn('systemctl', ['--user', ...args], { encoding: 'utf8', env: seams.env ?? process.env, timeout: 30000, maxBuffer: 1024 * 1024 });
