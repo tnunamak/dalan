@@ -10,7 +10,7 @@ import { defaultPath } from './paths.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
-import { buildQuery, ensureDurableRoute, explainRouteError, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
+import { buildQuery, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
 import { launchdLabels, launchAgentsDir, servicePlist, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist } from './service-launchd.mjs';
@@ -52,7 +52,7 @@ function validateTopology({ port, target, lanPort = null, verifyCmd }) {
 function parseOptions(argv, env) {
   const parsed = parseArgs(argv, {
     values: ['--home', '--public-url', '--port', '--target', '--worker', '--verify-cmd', '--route', '--lan-port'],
-    flags: ['--write-units-only', '--enable-workspace', '--enable-t3', '--auto-update', '--no-auto-update', '--json', '--help'],
+    flags: ['--write-units-only', '--enable-workspace', '--enable-t3', '--auto-update', '--no-auto-update', '--yes', '--json', '--help'],
   });
   if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
   if (parsed['--help']) return { help: true };
@@ -82,7 +82,7 @@ function parseOptions(argv, env) {
   const route = parsed['--route'];
   if (route !== undefined && (!route || route.startsWith('-'))) fail('--route must name a Gozar route');
   return { home, auto, homeExplicit: parsed['--home'] !== undefined, origin, port, target, lanPort, enableWorkspace: parsed['--enable-workspace'] === true, enableT3: parsed['--enable-t3'] === true, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
-    route, autoUpdate: parsed['--auto-update'] ? true : parsed['--no-auto-update'] ? false : undefined,
+    route, yes: parsed['--yes'] === true, autoUpdate: parsed['--auto-update'] ? true : parsed['--no-auto-update'] ? false : undefined,
     writeUnitsOnly: parsed['--write-units-only'] === true, json: parsed['--json'] === true };
 }
 
@@ -467,8 +467,9 @@ export async function installService(o, seams = {}) {
   let routeReply;
   if (o.route !== undefined) {
     // A named Gozar route: Gozar allocates or adopts it and pins the origin; nothing here interprets the name.
-    const query = buildQuery({ home: gozarHome, target: o.target.value, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, origin: o.origin, address: 'stable' });
-    const view = await ensureDurableRoute({ gozar, query, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
+    const wanted = buildQuery({ home: gozarHome, target: o.target.value, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, origin: o.origin, address: 'stable' });
+    const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
+    const view = await ensureDurableRoute({ gozar, query, pick, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
     if (view.origin !== o.origin) fail(`Gozar pinned ${view.origin}, not the requested ${o.origin}; the bridge is running but its route needs repair`);
     routeReply = view;
   } else {
@@ -515,7 +516,12 @@ export async function uninstallService({ home }, seams = {}) {
     } catch (error) { removed.push(`public route not removed: ${explainRouteError(error).line}`); }
   }
   forgetDefaultHome(home, env);
-  return { home, removed, kept: `${home} (secrets and data; delete it yourself to remove them)` };
+  // The home holds secrets, grants and data, so it is moved aside, never deleted. A new install then starts from a fresh home at the same path.
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+  let aside = `${home}.removed-${stamp}`;
+  for (let n = 2; fs.existsSync(aside); n++) aside = `${home}.removed-${stamp}-${n}`;
+  fs.renameSync(home, aside);
+  return { home, removed, kept: `${aside} (secrets and data, moved aside; delete it yourself to remove them)`, moved_to: aside };
 }
 
 export async function serviceMain(argv, seams = {}) {
@@ -554,7 +560,7 @@ export async function serviceMain(argv, seams = {}) {
     return result;
   }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --worker NAME --route NAME [--home DIR] [--enable-workspace] [--enable-t3] [--auto-update|--no-auto-update]\n       dalan service install --public-url https://HOST --port N --target HOST:PORT [--home DIR] [--lan-port N] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]   (an address you already serve)\n       dalan service uninstall [--home DIR]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Runs under systemd on Linux and launchd on macOS.');
+    (seams.out ?? console.log)('Usage: dalan service install --worker NAME --route NAME [--yes] [--home DIR] [--enable-workspace] [--enable-t3] [--auto-update|--no-auto-update]\n       dalan service install --public-url https://HOST --port N --target HOST:PORT [--home DIR] [--lan-port N] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]   (an address you already serve)\n       dalan service uninstall [--home DIR]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Runs under systemd on Linux and launchd on macOS.');
     return null;
   }
   if (action === 'uninstall') {
@@ -569,7 +575,16 @@ export async function serviceMain(argv, seams = {}) {
   if (action !== 'install') fail('use dalan service install, uninstall, update, auto-update, status, recover or migrate-workers');
   const o = parseOptions(args, seams.env ?? process.env);
   if (o.help) return serviceMain(['help'], seams);
-  const result = await installService(o, seams);
+  const out0 = seams.out ?? console.log;
+  // Gozar describes the route it would open; the owner approves it once (the answer is kept with the route). `--yes` approves what was printed.
+  const consent = seams.consent ?? (async candidate => {
+    out0(describeCandidate(candidate).join('\n')); out0(describeDisclosure(candidate).join('\n'));
+    if (o.yes) return true;
+    if (!process.stdin.isTTY) { out0('Run this in a terminal to approve the route, or add --yes after reading the description above.'); return false; }
+    const rl = (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout });
+    try { return /^y(es)?$/i.test((await rl.question('Use this route? [y/N] ')).trim()); } finally { rl.close(); }
+  });
+  const result = await installService(o, { ...seams, consent });
   if (o.json) (seams.out ?? console.log)(JSON.stringify(result));
   else {
     const out = seams.out ?? console.log;

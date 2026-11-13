@@ -106,7 +106,8 @@ try {
   assert.equal(fs.readdirSync(path.join(mac.userHome, 'Library/LaunchAgents')).length, 0, 'no agent file is left');
   assert.equal(mac.launchctl.loaded.size, 0, 'nothing stays loaded');
   assert.equal(mac.closed.length, 1, 'the durable route is released'); assert.equal(fs.existsSync(homePointerPath(mac.env)), false);
-  assert.ok(fs.existsSync(first.home), 'the home is kept');
+  assert.ok(!fs.existsSync(first.home) && fs.existsSync(gone.moved_to), 'the home is moved aside, not deleted');
+  assert.ok(fs.existsSync(path.join(gone.moved_to, 'resource-url')));
 
   // ---- Linux: the same one command, through systemd ----------------------------------------------------------------------------------
   const linux = seamsFor('linux', 'linux');
