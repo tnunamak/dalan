@@ -14,6 +14,8 @@ npx -y @tnunamak/dalan try
 
 You need Node.js 24 or newer, Linux or macOS (or WSL), and a hosted client account or workspace that permits custom MCP connectors.
 
+**Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
+
 Start Dalan in an interactive terminal:
 
 ```sh
@@ -23,7 +25,7 @@ npx -y @tnunamak/dalan try
 Choose ChatGPT or Claude on the web. Dalan asks Gozar for a public HTTPS route and shows what it chose before it opens anything. Routes come from Gozar; Dalan does not interpret the route name. `dalan setup` lists what Gozar can offer on this computer and saves your choice. To pick a route for one trial, pass its name:
 
 ```sh
-dalan try --public --route ROUTE
+dalan try --public --route tailscale
 ```
 
 Some routes are temporary and some are stable. Some are run by a third party that terminates TLS and can read the connector URL and your traffic. Dalan prints the properties of the chosen route and asks for consent before it exposes anything. Keep private code and secrets out of the demo.
@@ -61,10 +63,10 @@ Install the CLI, then install the background service:
 
 ```sh
 npm install -g @tnunamak/dalan
-dalan service install --worker NAME --route ROUTE
+dalan service install --worker NAME --route tailscale
 ```
 
-Linux runs the service as a systemd user service. macOS runs it as a launchd LaunchAgent. The commands are the same on both. `ROUTE` is the name of a Gozar route; `dalan setup` lists the routes Gozar can offer on this computer. The install creates the public HTTPS address through Gozar, picks a free port, and keeps its state in `~/.local/share/dalan-service`. Dalan remembers that home, so no other command needs `DALAN_HOME`. Repeat `--worker NAME` for each worker. Running the same install again changes nothing.
+Linux runs the service as a systemd user service. macOS runs it as a launchd LaunchAgent. The commands are the same on both. `tailscale` publishes through Tailscale Funnel; any other Gozar route name works the same way, and `dalan setup` lists the routes Gozar can offer on this computer. The install creates the public HTTPS address through Gozar, picks a free port, and keeps its state in `~/.local/share/dalan-service`. Dalan remembers that home, so no other command needs `DALAN_HOME`. Repeat `--worker NAME` for each worker. Running the same install again changes nothing.
 
 Install prints where the private connector URL file is, the next command to run, and a health check. Run these two checks:
 

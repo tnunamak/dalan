@@ -10,12 +10,14 @@ The commands are the same on Linux and macOS. Linux runs the service as a system
 
 ```sh
 npm install -g @tnunamak/dalan
-dalan service install --worker NAME --route ROUTE
+dalan service install --worker NAME --route tailscale
 ```
+
+**Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
 
 Choose a worker name of up to 32 characters, starting with a lowercase letter and continuing with lowercase letters, digits, `-` or `_`. `pool` and `unknown` are reserved. Repeat `--worker` for each worker. All workers share one bridge, one private home and one job queue. Each worker pairs and approves separately.
 
-`ROUTE` is the name of a Gozar route. Dalan does not interpret it. Run `dalan setup` to list what Gozar can offer on this computer and to save a choice. Routes differ in properties that matter to you: whether the address is stable or temporary, and whether the route operator terminates TLS and so can read the connector URL and traffic. Gozar creates the public HTTPS address; Dalan registers it as a Gozar service route.
+`tailscale` is the name of a Gozar route (Tailscale Funnel). Dalan does not interpret the name, so any other Gozar route name works the same way. Run `dalan setup` to list what Gozar can offer on this computer and to save a choice. Routes differ in properties that matter to you: whether the address is stable or temporary, and whether the route operator terminates TLS and so can read the connector URL and traffic. Gozar creates the public HTTPS address; Dalan registers it as a Gozar service route.
 
 Install does these things:
 
