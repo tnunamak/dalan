@@ -12,9 +12,9 @@ function fixture(t) {
   t.after(()=>store.db.close());
   const at=new Date(now).toISOString();
   // Persist real rows so the liveness SELECT must include last_tool_at.
-  store.db.prepare("INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,target_worker) VALUES(?,?,?,?,?,'claimed',?,'acme')")
+  store.db.prepare("INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,target_worker) VALUES(?,?,?,?,?,'claimed',?,'dot')")
     .run('idle-test','{}','fixture','','',at);
-  store.db.prepare("INSERT INTO claims(request_id,claimant,claim_id,claimed_at,subject,worker,state,last_claim_activity_at,lease_ms,lease_deadline_at) VALUES(?,?,?,?,?,'acme','active',?,?,?)")
+  store.db.prepare("INSERT INTO claims(request_id,claimant,claim_id,claimed_at,subject,worker,state,last_claim_activity_at,lease_ms,lease_deadline_at) VALUES(?,?,?,?,?,'dot','active',?,?,?)")
     .run('idle-test','test-worker','test-claim',at,'local-principal',at,60*minute,new Date(now+60*minute).toISOString());
   const row=()=>store.db.prepare('SELECT * FROM claims WHERE request_id=?').get('idle-test');
   return {store,row,advance:n=>{now+=n;},stamp:()=>new Date(now).toISOString()};
@@ -33,7 +33,7 @@ test('status reports a 20-minute idle claim despite a live lease, without mutati
   assert.deepEqual(status.stale_claims.items,[{
     request_id:'idle-test',idle_ms:20*minute,last_progress_at:null,last_tool_at:null,
   }]);
-  assert.deepEqual(status.by_worker.acme.stale_claims,status.stale_claims);
+  assert.deepEqual(status.by_worker.dot.stale_claims,status.stale_claims);
   assert.deepEqual(f.row(),before);
   assert.deepEqual({...f.store.db.prepare('SELECT status,cancelled_at FROM assignments WHERE request_id=?').get('idle-test')},{status:'claimed',cancelled_at:null});
 });
