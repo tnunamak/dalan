@@ -4,11 +4,13 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## 0.7.1
 
-- **A refused `dalan service install` leaves no public route.** Install now runs every check that only reads (the worker profile, the home, the service package link, unit file names, Gozar's state path and the user systemd manager) before it asks Gozar for a route. Before, a failed check could leave a public route that nothing recorded. `--write-units-only` no longer asks Gozar for a route. If install fails after the route exists, the route stays and is recorded in the service receipt, so `dalan service uninstall` removes it.
+- **Install checks setup before requesting a public route.** `dalan service install` now runs every check that only reads (the worker profile, the home, the service package link, service and automatic-update unit collisions, Gozar's state path and, on Linux, the user systemd manager) before it asks Gozar for a route. This includes macOS LaunchAgent plists. `--write-units-only` no longer asks Gozar for a route. A later file-write or startup failure can still leave a route. Install never closes a route on failure because it may have reused one; once the service receipt is written, `dalan service uninstall` can use its recorded handle to remove it.
 - **Install names two common setup problems.** A `--home` whose admin socket path is too long for the system (107 bytes on Linux, 103 on macOS) is refused first, with the length, the limit and the fix: a shorter `--home`. A user systemd manager that cannot be reached is named, with `systemctl --user status` to see why and the note that a login session or `loginctl enable-linger` may be needed.
 - **`dalan doctor --auth` explains your own pairing window.** When a pairing window for the same worker is already open, the check still fails and leaves the window alone, and now says it is your own window: finish pairing the client, or run `dalan connect stop`, then run doctor again.
 - **A command with `--home` no longer runs the default home's version.** `dalan` hands each command to the version that the default home's service runs. With `--home DIR` (or `--home=DIR`) you name another home, so the installed `dalan` now runs the command itself. `DALAN_HOME` works as before.
 - The [local-agent requester guide](docs/local-agent-requester.md) now passes the brief in single quotes, so the shell cannot run `$(...)` or backticks from it, and shows how to write a single quote inside the brief. It also no longer says that `report.summary` is always one line.
+
+- Gozar's next step is now shown even when its error code is new to Dalan. The step is shown as sanitized text; Dalan does not act on it.
 
 ## 0.7.0
 
