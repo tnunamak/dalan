@@ -15,9 +15,11 @@ import { homePointerPath, readDefaultHome, recordDefaultHome, serviceHomeFor } f
 import { followTarget } from '../src/follow-current.mjs';
 import { controlService } from '../src/service-update-runtime.mjs';
 
-const scratch = process.env.TMPDIR ?? path.join(os.homedir(), '.tmp');
-fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
 // A short root: each test home must leave its admin socket path under the platform limit (103 bytes on macOS), which install checks.
+// The deepest one is <root>/mac/.local/share/dalan-service/.local/share/dalan/admin.sock, so a long TMPDIR falls back to /tmp.
+const preferred = process.env.TMPDIR ?? path.join(os.homedir(), '.tmp');
+const scratch = preferred.length <= 30 ? preferred : fs.realpathSync('/tmp');
+fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
 const root = fs.mkdtempSync(path.join(scratch, 'd1-'));
 const sandbox = name => {
   const userHome = path.join(root, name);
