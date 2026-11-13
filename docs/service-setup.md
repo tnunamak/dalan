@@ -52,7 +52,7 @@ To configure several workers, repeat the flag in the install command, for exampl
 
 A client on this computer with a loopback callback needs `--confirm-redirect` with the exact redirect that `pending` shows; see [worker pairing](manual-setup.md#worker-setup). A worker on another computer follows [Native client on a remote HTTPS bridge](worker-clients.md#native-client-on-a-remote-https-bridge). Then run [submit, finish and read the result](manual-setup.md#submit-finish-and-read-the-result) with `--worker` set to your worker's name.
 
-Where the README and manual setup use the trial worker `local`, use your service's `NAME`:
+Where the README and manual setup use the trial worker `local`, use your service's worker name as `NAME`:
 
 - Submission: pass `--worker NAME` to `dalan submit` for the first job and for every repository job.
 - Repository grants: `dalan worker allow NAME OWNER/REPO` and `dalan worker list NAME --json`.
@@ -63,7 +63,7 @@ The rest of this guide covers advanced routes, migration, updates and removal. N
 
 ### An existing reverse proxy
 
-If you already serve a stable HTTPS address through your own reverse proxy, register that address with Gozar instead of asking Gozar for a new route:
+If you already serve a stable HTTPS address through your own reverse proxy, register that address with Gozar, the tool Dalan uses to publish its public route, instead of asking Gozar for a new route. This command is a template. Replace `PUBLIC_HOST` with your proxy's public hostname, `PORT` with a free local port number for Dalan to listen on, and `TARGET_IP:TARGET_PORT` with the IPv4 address and port your proxy forwards to, such as `127.0.0.1:8787` (a hostname is refused):
 
 ```sh
 dalan service install --worker assistant --public-url https://PUBLIC_HOST --port PORT --target TARGET_IP:TARGET_PORT
@@ -87,15 +87,15 @@ An unauthenticated request to `/admin` on the public origin must return 404. The
 
 ### Migrate an older bridge
 
-For existing installations, create the new home and copy each worker's repository allowlist. Replace the example paths with the old bridge homes on this computer:
+For existing installations, create the new home and copy each worker's repository allowlist. Change the `--source` path if your old bridge keeps `workers.json` elsewhere:
 
 ```sh
 dalan service migrate-workers \
   --home "$HOME/.local/share/dalan-service" \
-  --source "$HOME/.config/dot-bridge/workers.json" \
-  --source "$HOME/OLD_BRIDGE_TWO/.config/dot-bridge/workers.json" \
-  --source "$HOME/OLD_BRIDGE_THREE/.config/dot-bridge/workers.json"
+  --source "$HOME/.config/dot-bridge/workers.json"
 ```
+
+Add one `--source PATH` per further old bridge home, replacing `PATH` with that home's `workers.json`.
 
 The helper reads the source files without changing them. If an older home has no `workers.json`, it can read the adjacent `workers-repos.json` migration journal. It preserves worker names and repository allowlists, and copies supported worker capabilities and guidance. It does not copy OAuth registrations, tokens, jobs or results. The new bridge starts with `default_execution: none`. Workspace access defaults to denied; add `--workspace-worker NAME` for each worker that needs an explicit workspace grant. This option records the owner's grant; it does not require an earlier audit record. Existing explicit `workspaceAllowed` and T3 capability settings are retained. Destination declarations are copied, but old destination approvals bind old jobs and connections, so each new job requires a fresh approval.
 
@@ -103,11 +103,11 @@ Optionally pass `--source-db PATH` for each old job database. The helper opens i
 
 ### Move from a trial to a service
 
-A service needs a fresh home; do not point it at a trial home. To keep trial results, save them first while `dalan try` still runs: with `DALAN_HOME` set to the trial home that `try` printed, run `dalan inbox --all --json` to list request IDs, then `dalan get REQUEST_ID --json > result-REQUEST_ID.json` for each result you want. Then stop the trial with Ctrl-C, install the service, and pair the worker again. Pairing replaces the worker client's old connection; remove the old entry first with `codex mcp remove NAME` or `claude mcp remove --scope user NAME`.
+A service needs a fresh home; do not point it at a trial home. To keep trial results, save them first while `dalan try` still runs: with `DALAN_HOME` set to the trial home that `try` printed, run `dalan inbox --all --json` to list request IDs, then `dalan get REQUEST_ID --json > result-REQUEST_ID.json` for each result you want, replacing `REQUEST_ID` with each ID. Then stop the trial with Ctrl-C, install the service, and pair the worker again. Pairing replaces the worker client's old connection; remove the old entry first with `codex mcp remove NAME` or `claude mcp remove --scope user NAME`, where `NAME` is the connector name you gave the client.
 
 ### Keep the service running
 
-On Linux the service starts when the systemd user manager starts. Without lingering, that may be your first login after a reboot. If the bridge must start before login, ask an administrator to run `loginctl enable-linger USER` for the account that owns the bridge; install does not check or warn about it. On macOS the LaunchAgent starts when you log in and stops when you log out, so it does not run unattended after a reboot until someone logs in.
+On Linux the service starts when the systemd user manager starts. Without lingering, that may be your first login after a reboot. If the bridge must start before login, ask an administrator to run `loginctl enable-linger USER`, replacing `USER` with the account that owns the bridge; install does not check or warn about it. On macOS the LaunchAgent starts when you log in and stops when you log out, so it does not run unattended after a reboot until someone logs in.
 
 `--write-units-only` writes the service files without initializing the bridge home, starting the service or calling Gozar. It is for offline inspection; run the normal install to finish setup.
 

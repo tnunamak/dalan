@@ -2,7 +2,7 @@
 
 Give your AI agent a coding job from your Mac or Linux computer, even when the agent can only connect through MCP. Dalan queues the job and brings its report back for you to review. It does not run a model or start your agent for you.
 
-Before you begin, install Node.js 24 or newer and Tailscale with Funnel enabled. Your agent's account must allow custom MCP connectors.
+Before you begin, install [Node.js](https://nodejs.org) 24 or newer and [Tailscale](https://tailscale.com/download) with Funnel enabled. Your agent's account must allow custom MCP connectors.
 
 **Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
 
@@ -17,7 +17,7 @@ dalan try --public --route tailscale
 
 Follow the terminal instructions to add the connector and approve only the matching sign-in code. Paste the supplied prompt into your agent's chat. Success is a report returned to your terminal.
 
-The trial has no repository access. Keep private code and secrets out of it. Ctrl-C stops it, and it ends after three hours at most. Its public link can change or stop without warning. For a local-only trial that opens no public route, run `dalan try --local`; to connect a worker client by hand, see [manual setup](docs/manual-setup.md#worker-setup). For a persistent connection, use the installation steps below.
+The trial has no repository access. Keep private code and secrets out of it. It ends after three hours at most. Its public link can change or stop without warning. For a local-only trial that opens no public route, run `dalan try --local`; to connect a worker client by hand, see [manual setup](docs/manual-setup.md#worker-setup). For a persistent connection, use the installation steps below.
 
 ### Stop a trial
 
@@ -31,7 +31,7 @@ A trial prints its own home. Set `DALAN_HOME` to that home before you run other 
 
 ## Install a persistent connection
 
-The same commands work on macOS and Linux. This example names your worker `assistant`; use that name consistently.
+This example names your worker `assistant`; use that name consistently.
 
 ```sh
 npm install -g @tnunamak/dalan
@@ -51,21 +51,19 @@ dalan connect approve CODE --worker assistant
 
 Keep the connector URL and pairing codes private. You are ready to send a job when the client finishes sign-in.
 
-Dalan runs in the background as a user service. On macOS it starts at login and stops at logout. On Linux it follows the systemd user manager; starting before login needs administrator setup. Installing a service does not start your AI agent. On macOS, host checks are unavailable and jobs run with `--execution none`.
+Dalan runs as a user service. On macOS it starts at login and stops at logout. On Linux it follows the systemd user manager; starting before login needs administrator setup. Installing a service does not start your AI agent. On macOS, jobs run with `--execution none`.
 
 Automatic updates are enabled by default. Updates that change the tools exposed to your agent require approval and a connector refresh. See [service setup](docs/service-setup.md) for diagnostics, update controls, other routes and recovery.
 
 ## Give your connected agent a job
 
-In another terminal, send a text-only job to the worker you just connected. If you chose a name other than `assistant`, use it instead:
+In another terminal, send a text-only job to the worker you just connected. If you chose a name other than `assistant`, use it instead. `--execution none` lets the job run no commands on your computer; `--deliver none` sends the result nowhere except back to Dalan, where you read it:
 
 ```sh
 dalan submit --worker assistant --execution none --deliver none --brief "Explain what a database index does. Do not read files, run commands or call external services."
 ```
 
-This job needs no repository access and produces a report, not a patch.
-
-Send the agent the request ID that Dalan prints. Ask it to claim that job, follow its brief and return a report. Queuing a job does not start the agent.
+The job needs no repository and produces a report, not a patch. Send the agent the request ID that Dalan prints. Ask it to claim that job, follow its brief and return a report. Queuing a job does not start the agent.
 
 Replace `REQUEST_ID` with that ID, then wait and read the result:
 
@@ -81,8 +79,6 @@ dalan decide REQUEST_ID accepted
 ```
 
 A finished job and an accepted result are separate steps. Acceptance records your review; it does not change your files.
-
-To have a local coding agent send jobs for you, see [Send jobs from your local agent](#send-jobs-from-your-local-agent).
 
 The text-only job above returns no patch to apply. A later [repository job](#separate-repository-assignment) can return one. Inspect it first, then replace `REQUEST_ID` with that job's ID and `PATH` with your local repository directory:
 
@@ -100,7 +96,9 @@ A local coding agent with a shell (Claude Code, Codex CLI) can be the requester.
 
 ## Give a worker a repository job
 
-The first job needs no repository. Repository jobs need Git and Python 3.8 or newer on the bridge computer, workspaces enabled, and an exact repository grant for the worker. The hosted demo does not enable repository work. A repository grant and a job's read/write scope are separate limits; host checks are another capability.
+The first job needs no repository. Repository jobs need Git and Python 3.8 or newer on the bridge computer, workspaces enabled, and an exact repository grant for the worker. The hosted demo does not enable repository work.
+
+Replace `WORKER` with your worker's name (`assistant` above) and `OWNER/REPO` with the repository:
 
 ```sh
 dalan worker allow WORKER OWNER/REPO
@@ -113,7 +111,7 @@ Revoke access when the worker no longer needs it:
 dalan worker deny WORKER OWNER/REPO
 ```
 
-For a read-only repository job, replace the request ID, repository and full commit SHA below. Choose a file that exists at that commit:
+For a read-only repository job, replace the request ID (`req_` plus a new lowercase UUID), repository and full commit SHA below. Choose a file that exists at that commit:
 
 ```json
 {
@@ -127,7 +125,7 @@ For a read-only repository job, replace the request ID, repository and full comm
 }
 ```
 
-Save it as `repository-job.json`, then submit, wait, read the report and record your decision:
+Save it as `repository-job.json`. Replace `WORKER` as above, and `REQUEST_ID` with the ID that `submit` prints. Then submit, wait, read the report and record your decision:
 
 ```sh
 dalan submit --worker WORKER --execution none --deliver none --file repository-job.json --json
@@ -143,7 +141,7 @@ The host's GitHub credential must be able to read the repository. For local clon
 
 ## Connect any MCP worker
 
-Any client that speaks HTTP MCP and completes the bridge's OAuth sign-in can be a worker. Start with the [worker guide](docs/worker-clients.md); client recipes add registration details, while job tools and grant rules stay the same.
+Any client that speaks HTTP MCP and completes the bridge's OAuth sign-in can be a worker. Start with the [worker guide](docs/worker-clients.md).
 
 | Client | Guide |
 |---|---|
@@ -161,6 +159,8 @@ For an installed service, follow [service updates](docs/service-setup.md#service
 For an older or manually managed installation, follow the [upgrade guide](docs/dalan-upgrade.md). Before upgrading or restoring, use the [backup and rollback instructions](docs/operations.md#upgrade-and-rollback). Do not copy keys alone or mix files from different backups.
 
 ## Reference
+
+Replace `REQUEST_ID` with a job's ID.
 
 | Need | Command or guide |
 | --- | --- |
