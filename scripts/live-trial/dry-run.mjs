@@ -235,9 +235,9 @@ async function main() {
     if (window.code !== 0) throw new Error('fake pairing window failed');
     pass(true, 'pairing window opens before vendor registration');
 
-    const refusedVendor = new Vendor(bridge, 'https://fixture-a.example/oauth/callback');
+    const refusedVendor = new Vendor(bridge, 'http://fixture-a.example/oauth/callback');
     const refusedRegistration = await refusedVendor.register();
-    pass(refusedRegistration.status === 400, 'unlisted vendor callback registration is refused');
+    pass(refusedRegistration.status === 400, 'a redirect the policy rejects (remote http) is refused at registration');
     const requestLog = path.join(home, '.local/state/dalan/requests.jsonl');
     const logText = fs.readFileSync(requestLog, 'utf8');
     const refusalLine = logText.split('\n').findLast(line => line.includes('"kind":"as_registration_refused"'));
@@ -248,14 +248,13 @@ async function main() {
       && !/(?:client_secret|access_token|refresh_token)\s*[:=]/i.test(logText),
     'refused callback log omits redirect details and credentials');
 
-    const allow = bridge.cli(['connect', 'allow-callback', refusedVendor.redirect, '--json']);
-    if (allow.code !== 0) console.error(`allowlist_status=${allow.code} error=${allow.stderr.trim().slice(0, 300)}`);
-    if (allow.code !== 0) throw new Error('fake callback allowlist failed');
-    const registration = await refusedVendor.register();
-    pass(registration.status === 201, 'callback is allowlisted and the vendor retry succeeds within the same pairing window');
+    // No allow-list step: any HTTPS redirect that passes the policy registers; the owner approves the pairing code.
+    const vendorClient = new Vendor(bridge, 'https://fixture-a.example/oauth/callback');
+    const registration = await vendorClient.register();
+    pass(registration.status === 201, 'a valid HTTPS redirect registers within the same pairing window');
 
     phase = 'DCR';
-    const vendor = refusedVendor;
+    const vendor = vendorClient;
 
     phase = 'pairing and token';
     const connected = await vendor.connect(worker, { replace: false, windowOpen: true });

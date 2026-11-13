@@ -327,7 +327,8 @@ try {
     assert.equal(r.outcome, 'updated', label); assert.ok(f.events.includes('install'), label);
     assert.equal(serviceStatus({ home: f.home }).failed_release, null, label);
   }
-  {
+  // 0.6.0 and 0.6.1 wrote WorkingDirectory from a path that ended in a slash, and ExecStart from the same path through path.join (no double slash).
+  for (const slash of ['', '/']) {
     // A 0.6.0/0.6.1 service has no `current` link, no receipt.repo/node/unit_dir, and its package lives outside the updater tree.
     // The first update must adopt it from the unit itself, keep the unit's node binary, and need no hand step.
     const f = fixture();
@@ -341,7 +342,7 @@ try {
     const xdg = path.join(tmp, 'xdg'), unitDir = path.join(xdg, 'systemd', 'user'); fs.mkdirSync(unitDir, { recursive: true });
     const misoNode = '/opt/mise/installs/node/24.22.1/bin/node';
     const unitFile = path.join(unitDir, 'dalan-unit.service');
-    fs.writeFileSync(unitFile, `[Service]\nWorkingDirectory=${legacyRepo}\nExecStart=${misoNode} ${legacyRepo}/src/server.mjs\n`, { mode: 0o600 });
+    fs.writeFileSync(unitFile, `[Service]\nWorkingDirectory=${legacyRepo}${slash}\nExecStart=${misoNode} ${path.join(legacyRepo, 'src/server.mjs')}\n`, { mode: 0o600 });
     let probedWith; const previousXdg = process.env.XDG_CONFIG_HOME; process.env.XDG_CONFIG_HOME = xdg;
     try {
       f.seams.probeService = async home => ({ version: fs.existsSync(path.join(home, 'current')) && fs.realpathSync(path.join(home, 'current')).includes('0.7.0') ? '0.7.0' : '0.6.0', catalogs: { codex: [{ name: 'ping', inputSchema: { type: 'object' } }] } });

@@ -12,7 +12,7 @@ import { initAsFiles } from './as-files.mjs';
 
 const PACKAGE = '@tnunamak/dalan';
 const PUBLIC_REGISTRY = 'https://registry.npmjs.org';
-const REPO = fileURLToPath(new URL('..', import.meta.url));
+const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const TIMEOUT = 30_000;
 const fail = message => { throw new Error(message); };
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,7 +18,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 test('isolated two-worker bridge stages, switches with consent, and restores data on restart failure', { timeout: 90000 }, async () => {
   const root = fs.mkdtempSync(path.join(scratch, 'uj-')), home = path.join(root, 'h');
   let child, errors = '', failRestart = false;
-  const installOptions = { home, origin: 'https://update.example.test', port: 18791, target: '127.0.0.1:18791', workers: ['fern', 'muse'], gozarBin: 'gozar', enableWorkspace: true, enableT3: true, autoUpdate: false };
+  const installOptions = { home, origin: 'https://update.example.test', port: 18791, target: '127.0.0.1:18791', workers: ['fern', 'muse'], enableWorkspace: true, enableT3: true, autoUpdate: false };
   const env = { ...process.env, XDG_CONFIG_HOME: path.join(root, 'xdg') };
   const cli = args => {
     const result = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args, '--json'], {
@@ -67,7 +68,7 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
     return candidate;
   }
   try {
-    await installService(installOptions, { env, platform: 'linux', repo, spawn: (command) => ({ status: 0, stdout: command === 'gozar' ? JSON.stringify({ schemaVersion: 1, route: { origin: installOptions.origin, target: installOptions.target, verification: { status: 'verified' } } }) : '' }), waitForSocket: async () => true });
+    await installService(installOptions, { env, platform: 'linux', repo, gozar: createFakeGozar(), spawn: (command) => ({ status: 0, stdout: command === 'gozar' ? JSON.stringify({ schemaVersion: 1, route: { origin: installOptions.origin, target: installOptions.target, verification: { status: 'verified' } } }) : '' }), waitForSocket: async () => true });
     await start();
     const receipt = JSON.parse(fs.readFileSync(path.join(defaultPath(home, '.config/dot-bridge'), 'service-install.json')));
     const originalVersion = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'))).version;

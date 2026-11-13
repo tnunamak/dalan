@@ -13,7 +13,7 @@ import { parseArgs } from '../scripts/live-trial/common.mjs';
 import { buildQuery, ensureDurableRoute, gozarHomeFor, registerExternalService, resolveGozar } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 
-const REPO = fileURLToPath(new URL('..', import.meta.url));
+const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/;
 const fail = message => { throw new Error(message); };
 

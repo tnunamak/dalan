@@ -126,8 +126,10 @@ function adoptInstall(receipt, home) {
   let text;
   try { const st = fs.lstatSync(file); if (!st.isFile() || st.isSymbolicLink()) fail('not a regular file'); text = fs.readFileSync(file, 'utf8'); }
   catch { fail(`cannot read the service unit to adopt this install: ${file}`); }
-  const repo = text.match(/^WorkingDirectory=(.+)$/m)?.[1], exec = text.match(/^ExecStart=(\S+) (\S+)$/m);
-  if (!repo || !exec || exec[2] !== `${repo}/src/server.mjs` || !path.isAbsolute(repo) || !path.isAbsolute(exec[1])) fail(`service unit does not contain a supported Dalan command: ${file}`);
+  // 0.6.0 and 0.6.1 wrote WorkingDirectory with a trailing slash; compare normalized paths and record the normalized repo.
+  const written = text.match(/^WorkingDirectory=(.+)$/m)?.[1], exec = text.match(/^ExecStart=(\S+) (\S+)$/m);
+  const repo = written && path.isAbsolute(written) ? path.resolve(written) : null;
+  if (!repo || !exec || !path.isAbsolute(exec[2]) || path.resolve(exec[2]) !== path.join(repo, 'src/server.mjs') || !path.isAbsolute(exec[1])) fail(`service unit does not contain a supported Dalan command: ${file}`);
   return { ...receipt, repo: receipt.repo ?? repo, node: receipt.node ?? exec[1], unit_dir: receipt.unit_dir ?? path.dirname(file) };
 }
 function rewriteUnit(file, current, home) {
@@ -135,7 +137,8 @@ function rewriteUnit(file, current, home) {
   const st = fs.lstatSync(file);
   if (!st.isFile() || st.isSymbolicLink()) fail(`service unit must be a regular file: ${file}`);
   const before = fs.readFileSync(file, 'utf8');
-  const oldRepo = before.match(/^WorkingDirectory=(.+)$/m)?.[1];
+  const oldRepoWritten = before.match(/^WorkingDirectory=(.+)$/m)?.[1];
+  const oldRepo = oldRepoWritten && path.isAbsolute(oldRepoWritten) ? path.resolve(oldRepoWritten) : oldRepoWritten;
   const exec = before.match(/^ExecStart=(.+)$/m)?.[1];
   if (!oldRepo || !exec || !exec.endsWith('/src/server.mjs')) fail(`service unit does not contain a supported Dalan command: ${file}`);
   const after = before.split('\n').map(line => /^WorkingDirectory=/.test(line) ? `WorkingDirectory=${current}` : /^ExecStart=/.test(line) ? line.replace(/\/src\/server\.mjs(?:\s.*)?$/, `${path.sep}src${path.sep}server.mjs`) : line).join('\n');

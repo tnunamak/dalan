@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -72,8 +73,8 @@ test('new installs default on, retries preserve opt-out, explicit opt-in works',
   fs.rmSync(f.home, { recursive: true });
   const calls = [];
   const env = { ...process.env, XDG_CONFIG_HOME: path.join(f.root, 'xdg') };
-  const options = { home: f.home, origin: 'https://bridge.example.test', port: 18789, target: '127.0.0.1:18789', workers: ['fern'], gozarBin: 'gozar' };
-  const seams = { env, platform: 'linux', spawn: (cmd, args) => {
+  const options = { home: f.home, origin: 'https://bridge.example.test', port: 18789, target: '127.0.0.1:18789', workers: ['fern'] };
+  const seams = { env, platform: 'linux', gozar: createFakeGozar(), spawn: (cmd, args) => {
     calls.push([cmd, ...args]);
     return { status: 0, stdout: cmd === 'gozar' ? JSON.stringify({ schemaVersion: 1, route: { origin: options.origin, target: options.target, verification: { status: 'verified' } } }) : '' };
   }, waitForSocket: async () => true };

@@ -18,7 +18,7 @@ import * as tryHostedInternals from '../src/try-hosted.mjs';
 import { acquireHomeLock, handoffText, hostedPrompt } from '../src/try-hosted.mjs';
 import { uaToken } from '../src/mcp-outcome.mjs';
 import { mcpResponseText } from '../src/mcp-sse.mjs';
-import { runSelfCheck } from '../src/try-selfcheck.mjs';
+import { runSelfCheck, SELFCHECK_REDIRECT } from '../src/try-selfcheck.mjs';
 import { createGate, authorizationServerMetadataUrl, verifyPublicReady, watchPublicIdentity } from '../src/try-exposure.mjs';
 import { registerChild, sweepChildren } from '../src/child-registry.mjs';
 import { writeRouteSetting } from '../src/route-setting.mjs';
@@ -149,7 +149,7 @@ async function liveSelfCheck(wrapFetch) {
   try {
     const lines = [], sent = [];
     const fetchImpl = wrapFetch((u, init) => { sent.push({ url: String(u), init }); return fetch(u, init); });
-    const checking = runSelfCheck({ url: run.url, client: 'claude', fetchImpl, approveWaitMs: 30_000, say: l => lines.push(l) });
+    const checking = runSelfCheck({ url: run.url, fetchImpl, approveWaitMs: 30_000, say: l => lines.push(l) });
     for (let i = 0; i < 400 && !/Approve this connection\? \[y\/N\] /.test(run.state.out) && !/FAIL/.test(lines.join()); i++) await sleepMs(50);
     run.input.write('y\n');
     return { result: await checking, lines, sent, url: run.url };
@@ -319,7 +319,7 @@ test('the self-check walks a live trial as a real client: every step passes, and
   try {
     const secret = new URL(url).pathname.split('/')[1];
     const lines = [];
-    const checking = runSelfCheck({ url, client: 'claude', approveWaitMs: 30_000, say: l => lines.push(l) });
+    const checking = runSelfCheck({ url, approveWaitMs: 30_000, say: l => lines.push(l) });
     for (let i = 0; i < 400 && !/Approve this connection\? \[y\/N\] /.test(out()); i++) await sleepMs(50);
     input.write('y\n');
     const result = await checking;
@@ -343,7 +343,7 @@ test('the self-check stops at the first failing step, skips the rest and says FA
     if (init.method === 'POST' && String(u) === url) return new Response('', { status: 401, headers: { 'www-authenticate': 'Bearer resource_metadata="https://demo.example/.well-known/oauth-protected-resource/x/mcp"' } });
     return Response.json({ resource: url, authorization_servers: [] });
   };
-  const result = await runSelfCheck({ url, client: 'chatgpt', fetchImpl, say: l => lines.push(l) });
+  const result = await runSelfCheck({ url, fetchImpl, say: l => lines.push(l) });
   assert.equal(result.ok, false);
   assert.match(lines.join('\n'), /PASS challenge[^\n]*\nFAIL discovery[^\n]*no authorization server\nSKIP metadata[^\n]*\nSKIP registration/);
   assert.equal(lines.at(-1), 'RESULT FAIL');
@@ -358,7 +358,7 @@ test('the self-check registers as an explicit public client and accepts only the
   // A redirect to the registered callback plus an extra path is not the registered callback.
   const wrong = await liveSelfCheck(f => async (u, init) => {
     const res = await f(u, init), location = res.headers.get('location');
-    if (location?.startsWith(CLAUDE_CALLBACK)) return new Response(null, { status: res.status, headers: { location: location.replace(CLAUDE_CALLBACK, `${CLAUDE_CALLBACK}/wrong`) } });
+    if (location?.startsWith(SELFCHECK_REDIRECT)) return new Response(null, { status: res.status, headers: { location: location.replace(SELFCHECK_REDIRECT, `${SELFCHECK_REDIRECT}/wrong`) } });
     return res;
   });
   assert.equal(wrong.result.ok, false);

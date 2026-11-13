@@ -376,8 +376,8 @@ try {
 
   const legacyHome = path.join(root, 'legacy-unit');
   const legacyInstall = () => installService({ home: legacyHome, origin: 'https://legacy.example.test', port: 8790,
-    target: '127.0.0.1:8790', workers: ['dot'], gozarBin: 'gozar' }, {
-    env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn: (command, args) => args.includes('service') && args.includes('add')
+    target: '127.0.0.1:8790', workers: ['dot'] }, {
+    gozar: makeGozar({ log: [] }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn: (command, args) => args.includes('service') && args.includes('add')
       ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route: { ...route, origin: 'https://legacy.example.test', target: '127.0.0.1:8790', verification: { status: 'verified' } } }), stderr: '' }
       : { status: 0, stdout: '', stderr: '' }, waitForSocket: async () => true,
   });
