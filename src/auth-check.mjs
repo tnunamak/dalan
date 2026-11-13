@@ -33,8 +33,14 @@ export async function runAuthCheck({ home, workers, worker, request, operator, f
     say(`SKIP full walk: ${detail}`);
     return { ok: false, partial: true, results: [...partial.results, { name: 'full walk', status: 'SKIP', detail }] };
   }
-  // Registration needs an open pairing window, so the window opens first. One that is already open belongs to someone else.
-  if (listing.window) { const detail = `a pairing window is already open (worker ${listing.window.worker}); finish it or run dalan connect stop, then retry`; say(`FAIL input: ${detail}`); say('RESULT FAIL'); return fail('input', detail); }
+  // Registration needs an open pairing window, so the window opens first. A window that is already open is never taken
+  // over, not even one for this worker: its owner may be pairing a client right now. Doctor only reports it.
+  if (listing.window) {
+    const detail = listing.window.worker === worker
+      ? `your own pairing window is already open (worker ${worker}); doctor cannot check sign-in while it is open. Finish pairing the client, then run doctor again; or run dalan connect stop, then run doctor again`
+      : `a pairing window is already open (worker ${listing.window.worker}); finish it or run dalan connect stop, then retry`;
+    say(`FAIL input: ${detail}`); say('RESULT FAIL'); return fail('input', detail);
+  }
   let approved = false;
   const approve = async ({ code }) => {
     try { await request('/connect/approve', 'POST', { code, worker, replace: false }, headers()); approved = true; }

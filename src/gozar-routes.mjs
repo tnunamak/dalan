@@ -110,9 +110,10 @@ const EXPLAIN = {
 };
 export function explainRouteError(error) {
   const code = typeof error?.code === 'string' && (FROZEN_CODES.includes(error.code) || error.code === 'runtime_missing') ? error.code : null;
-  if (!code) return { code: null, line: safeDiagnostic(String(error?.message ?? error), 240), fix: null };
-  const action = error.nextAction ?? null;
-  const fix = action ? [action.label, action.instructions, action.href].filter(Boolean).join(' - ') : null;
+  // Gozar's next step is shown as text for every code, including one Dalan does not know yet; Dalan never acts on it.
+  const action = error?.nextAction ?? null;
+  const fix = action ? [action.label, action.instructions, action.href].filter(value => typeof value === 'string' && value.length > 0).map(value => safeDiagnostic(value, 240)).join(' - ') || null : null;
+  if (!code) return { code: null, line: safeDiagnostic(String(error?.message ?? error), 240), fix };
   const detail = code === 'runtime_missing' ? error.message : `${EXPLAIN[code]}${error.message && !EXPLAIN[code].includes(error.message) ? ` (${safeDiagnostic(error.message, 160)})` : ''}`;
   return { code, line: detail, fix };
 }

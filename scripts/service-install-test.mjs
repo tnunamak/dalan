@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
+import { registerHooks } from 'node:module';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -15,17 +16,20 @@ fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
 const root = fs.mkdtempSync(path.join(scratch, 'dalan-service-install-'));
 const userHome = path.join(root, 'user');
 fs.mkdirSync(userHome, { mode: 0o700 });
+const gozarHome = path.join(root, 'gozar-state');
+fs.mkdirSync(gozarHome, { mode: 0o700 });
 const xdg = path.join(userHome, '.config');
-// Gozar's state-path rule inspects every ancestor, so keep the host's directory modes out of these tests.
-const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: '/' };
+const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: gozarHome };
+const assertPrivateGozarHome = value => assert.ok(typeof value === 'string' && (path.resolve(value) === root || path.resolve(value).startsWith(`${root}${path.sep}`)), `Gozar home must be inside test root: ${value}`);
 const calls = [];
 const route = { origin: 'https://bridge.example.test', target: '192.0.2.10:8787', verification: { status: 'verified', method: 'challenge' } };
-const spawn = (command, args) => { calls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; };
+const spawn = (command, args, options = {}) => { assertPrivateGozarHome(options.env?.GOZAR_HOME); calls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; };
 // A contract-faithful Gozar (the unreleased runtime is not needed here). It records the call in the same list as systemctl so order is visible.
 const makeGozar = ({ status = 'verified', mutate = r => r, failWith = null, log = calls, statusOf = () => status } = {}) => {
   const gozar = createFakeGozar();
   const add = gozar.addService;
   gozar.addService = async request => {
+    assertPrivateGozarHome(request.home);
     log.push(['gozar-addService', request.origin, request.target, request.verifyCmd ?? null]);
     if (failWith) throw failWith;
     const reply = await add(request);
@@ -65,16 +69,24 @@ try {
   assert.equal(bundledCalls.filter(call => call[0] === 'gozar-addService').length, 1);
   assert.equal(bundledCalls.some(call => call[0] === 'gozar'), false, 'no Gozar executable is run');
 
-  // The installed Gozar here predates the route contract: refuse before starting or enabling any unit.
+  // Resolve an explicitly old module instead of depending on which Gozar npm installed.
+  const oldGozar = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier === '@tnunamak/gozar') return { url: 'data:text/javascript,export const version = "old-fixture";', shortCircuit: true };
+      return nextResolve(specifier, context);
+    },
+  });
   const missingCalls = [];
   const missingHome = path.join(root, 'missing-gozar');
-  await assert.rejects(installService({ home: missingHome, origin: route.origin, port: 8787,
-    target: route.target, lanPort: 8787, workers: ['dot'] }, {
-    env: { ...env, PATH: '', GOZAR_BIN: '' }, platform: 'linux', node: '/usr/bin/node',
-    repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
-    spawn(command, args) { missingCalls.push([command, ...args]); return { status: 0, stdout: '' }; },
-    waitForSocket: async () => true,
-  }), error => error.code === 'runtime_missing' && /Gozar.*(update|reinstall)/i.test(error.message));
+  try {
+    await assert.rejects(installService({ home: missingHome, origin: route.origin, port: 8787,
+      target: route.target, lanPort: 8787, workers: ['dot'] }, {
+      env: { ...env, PATH: '', GOZAR_BIN: '' }, platform: 'linux', node: '/usr/bin/node',
+      repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+      spawn(command, args) { missingCalls.push([command, ...args]); return { status: 0, stdout: '' }; },
+      waitForSocket: async () => true,
+    }), error => error.code === 'runtime_missing' && /Gozar.*(update|reinstall)/i.test(error.message));
+  } finally { oldGozar.deregister(); }
   assert.deepEqual(missingCalls, [], 'missing Gozar refuses before starting or enabling any unit');
   assert.equal(fs.existsSync(missingHome), false);
 
