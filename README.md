@@ -8,32 +8,24 @@ Before you begin, install Node.js 24 or newer and Tailscale with Funnel enabled.
 
 <a id="quickstart"></a>
 
-For a quick trial, install Dalan and run:
+**Just exploring?** Run a temporary, text-only trial:
 
 ```sh
 npm install -g @tnunamak/dalan
 dalan try --public --route tailscale
 ```
 
-Follow the terminal instructions to add the connector, compare the sign-in codes and approve the matching code. Paste the supplied prompt into your agent's chat. Success is a report returned to your terminal.
+Follow the terminal instructions to add the connector and approve only the matching sign-in code. Paste the supplied prompt into your agent's chat. Success is a report returned to your terminal.
 
-The trial is a text-only job with no repository access. Keep private code and secrets out of it. Ctrl-C stops the trial. A temporary demo link can change or stop without warning; Dalan ends the trial when it detects that, and the trial ends after three hours at most. For a persistent connection, follow the installation steps below.
+The trial has no repository access. Keep private code and secrets out of it. Ctrl-C stops it, and it ends after three hours at most. Its public link can change or stop without warning. For a local-only trial that opens no public route, run `dalan try --local`; to connect a worker client by hand, see [manual setup](docs/manual-setup.md#worker-setup). For a persistent connection, use the installation steps below.
 
 ### Stop a trial
 
-Ctrl-C stops the trial. It also cancels a route that is still starting. Dalan closes its forwarding gate and attempts to remove its route. If it cannot confirm cleanup, it reports that. When Gozar cannot confirm route ownership, Dalan leaves the route alone and gives no stop command; use a different port and home for another trial.
+Ctrl-C stops the trial and cancels a route that is still starting. Dalan closes its forwarding gate and attempts to remove its route. If it cannot confirm cleanup, it reports that. When Gozar cannot confirm route ownership, Dalan leaves the route alone and gives no stop command.
 
-If Gozar returns a cleanup-pending status for this trial, Dalan provides a recovery command that stops by port. Gozar does not bind that command to a session ID, so the route can change before the command runs. Inspect the current route before using it.
+If Gozar reports cleanup as pending, Dalan prints a recovery command that stops by port. Gozar does not bind that command to a session, so inspect the current route before you run it.
 
-On stop, Dalan removes the connector URL file and the bridge's secret file for temporary routes. A trial prints its own home. If you run other `dalan` commands against a trial, set `DALAN_HOME` to that printed home first.
-
-### Try without a public route
-
-```sh
-dalan try --local
-```
-
-This runs a self-check with a built-in demo worker and then lets you connect a client on this computer. It does not open a public route. To connect a worker client by hand, see [manual setup](docs/manual-setup.md#worker-setup).
+A trial prints its own home. Set `DALAN_HOME` to that home before you run other `dalan` commands against the trial. On stop, Dalan removes the connector URL file and the bridge's secret file for temporary routes.
 
 <a id="expose-your-bridge"></a>
 
@@ -65,11 +57,13 @@ Automatic updates are enabled by default. Updates that change the tools exposed 
 
 ## Give your connected agent a job
 
-In another terminal, replace `WORKER` with the name of your connected worker:
+In another terminal, send a text-only job to the worker you just connected. If you chose a name other than `assistant`, use it instead:
 
 ```sh
-dalan submit --worker WORKER --execution none --deliver none --brief "Explain what a database index does. Do not read files, run commands or call external services."
+dalan submit --worker assistant --execution none --deliver none --brief "Explain what a database index does. Do not read files, run commands or call external services."
 ```
+
+This job needs no repository access and produces a report, not a patch.
 
 Send the agent the request ID that Dalan prints. Ask it to claim that job, follow its brief and return a report. Queuing a job does not start the agent.
 
@@ -86,7 +80,9 @@ Read the report before recording your decision:
 dalan decide REQUEST_ID accepted
 ```
 
-A finished job and an accepted result are separate steps. Acceptance does not apply a patch. After review, apply a finished job's patch with:
+A finished job and an accepted result are separate steps. Acceptance records your review; it does not change your files.
+
+The text-only job above returns no patch to apply. A later [repository job](#separate-repository-assignment) can return one. Inspect it first, then replace `REQUEST_ID` with that job's ID and `PATH` with your local repository directory:
 
 ```sh
 dalan apply REQUEST_ID --dir PATH

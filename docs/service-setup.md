@@ -46,15 +46,15 @@ The authentication check tests the public route and sign-in flow, not whether an
 
 ### More workers and advanced setup
 
-Repeat `--worker NAME` in the install command to configure several workers, and pair each separately. A worker name starts with a lowercase letter, uses lowercase letters, digits, hyphens or underscores, and is at most 32 characters; `pool` and `unknown` are reserved.
+To configure several workers, repeat the flag in the install command, for example `dalan service install --worker assistant --worker reviewer --route tailscale`, and pair each separately. A worker name starts with a lowercase letter, uses lowercase letters, digits, hyphens or underscores, and is at most 32 characters; `pool` and `unknown` are reserved.
 
 ### Pairing details
 
-A client on this computer with a loopback callback needs `--confirm-redirect` with the exact redirect that `pending` shows; see [worker pairing](manual-setup.md#worker-setup). A worker on another computer follows [Native client on a remote HTTPS bridge](worker-clients.md#native-client-on-a-remote-https-bridge). Then run [submit, finish and read the result](manual-setup.md#submit-finish-and-read-the-result) with `--worker NAME`.
+A client on this computer with a loopback callback needs `--confirm-redirect` with the exact redirect that `pending` shows; see [worker pairing](manual-setup.md#worker-setup). A worker on another computer follows [Native client on a remote HTTPS bridge](worker-clients.md#native-client-on-a-remote-https-bridge). Then run [submit, finish and read the result](manual-setup.md#submit-finish-and-read-the-result) with `--worker` set to your worker's name.
 
 Where the README and manual setup use the trial worker `local`, use your service's `NAME`:
 
-- Submission: `dalan submit --worker NAME ...` for the first job and for every repository job.
+- Submission: pass `--worker NAME` to `dalan submit` for the first job and for every repository job.
 - Repository grants: `dalan worker allow NAME OWNER/REPO` and `dalan worker list NAME --json`.
 
 `wait`, `get` and `decide` select the job by request ID and take no worker flag.
@@ -66,7 +66,7 @@ The rest of this guide covers advanced routes, migration, updates and removal. N
 If you already serve a stable HTTPS address through your own reverse proxy, register that address with Gozar instead of asking Gozar for a new route:
 
 ```sh
-dalan service install --worker NAME --public-url https://HOST --port N --target HOST:PORT
+dalan service install --worker assistant --public-url https://PUBLIC_HOST --port PORT --target TARGET_HOST:TARGET_PORT
 ```
 
 Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. Prepare the proxy first so the public origin forwards to the address in `--target`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. TLS ends at the proxy. Keep the secret path out of proxy logs.
@@ -142,7 +142,7 @@ dalan service auto-update off
 dalan service auto-update on
 ```
 
-The home defaults to `~/.local/share/dalan-service` and Dalan remembers it; pass `--home DIR` only to select a different one. `service status` shows the selected version, saved automatic-update preference and last update result. Use `systemctl --user list-timers` to inspect the actual timer schedule. Turning updates off prevents future starts; it does not cancel an update already running. Preference changes refuse while an update holds the home lock. A release that was rolled back is recorded and skipped on later runs, including the timer; `dalan service update --retry` tries it again, and a newer or republished release is attempted normally. `service status` shows it as `failed_release`.
+The home defaults to `~/.local/share/dalan-service` and Dalan remembers it; pass `--home DIR` only to select a different one. `service status` shows the selected version, saved automatic-update preference and last update result. On Linux, use `systemctl --user list-timers` to inspect the actual timer schedule. Turning updates off prevents future starts; it does not cancel an update already running. Preference changes refuse while an update holds the home lock. A release that was rolled back is recorded and skipped on later runs, including the timer; `dalan service update --retry` tries it again, and a newer or republished release is attempted normally. `service status` shows it as `failed_release`.
 
 `--check` queries the public npm registry for the latest stable `@tnunamak/dalan` version and reports availability without installation or restart. A normal update installs the exact release under `HOME/versions/<version>`, with npm integrity checks and install scripts disabled. The registry's integrity value binds the downloaded bytes to its metadata; it is not an independent publisher signature. The original package must remain available until the first successful update. Later starts use the selected package through `HOME/current`.
 
