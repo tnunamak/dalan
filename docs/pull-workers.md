@@ -76,8 +76,7 @@ Maintainer check: from a source checkout installed with `npm ci`, run `node scri
 
 ### Poll interval and URL secrecy
 
-- Tailscale Funnel, Cloudflare tunnel or your own proxy: every 60 seconds.
-- ngrok: every 300 seconds. The free plan has a monthly request quota, and a 60-second hook uses up much of it. `signal-token` prints the advised interval on stderr.
+- Poll every 60 seconds. The bridge's rate limit (below) allows that interval.
 - Anyone with the URL can learn whether work is waiting, and nothing more. Store it like a password; if it leaks, run `--rotate` and update the hook.
 - The bridge limits each source address to about one request every 5 seconds (burst 3), and the whole bridge to 30 per minute. Excess requests get `429` with `Retry-After`. Behind a tunnel, every caller shares one bucket, so keep to the intervals above.
 

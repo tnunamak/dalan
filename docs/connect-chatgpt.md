@@ -8,13 +8,14 @@ A client you have not listed here follows the same flow: give it the complete MC
 
 ## Owner setup
 
-1. Follow the [service setup](service-setup.md) with a publicly reachable HTTPS origin. Set `DALAN_HOME` to that service's private home and make `dalan` available on your PATH with the [manual setup](manual-setup.md#owner-and-requester-setup) steps. Use the service's worker name wherever this guide says `NAME`.
+1. Follow the [service setup](service-setup.md): `dalan service install --worker NAME --route ROUTE` creates the public HTTPS address. Use the service's worker name wherever this guide says `NAME`.
 
    ```sh
-   dalan status --json
+   dalan status
+   dalan doctor --auth
    ```
 
-   Status shows the running bridge. Read the complete MCP URL from the private `$DALAN_HOME/resource-url` file. It has the form `https://HOST/<secret>/mcp`; enter the actual URL only in connector setup. A localhost URL cannot reach the bridge from ChatGPT's servers.
+   Status shows the running bridge. Read the complete MCP URL from the private connector URL file that install printed. It has the form `https://HOST/<secret>/mcp`; enter the actual URL only in connector setup. A localhost URL cannot reach the bridge from ChatGPT's servers.
 
 2. Open a pairing window for that worker.
 

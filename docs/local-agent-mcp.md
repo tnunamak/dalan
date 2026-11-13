@@ -15,11 +15,17 @@ Each tool runs the matching `dalan` command with `--json`, so receipts, assignme
 
 ## Access
 
-The server has the access of the user who starts it: it reaches the bridge through the local admin socket, as the CLI does. It opens no network port and has no separate credential. Do not run it for someone you would not give `dalan` to. Set `DALAN_HOME` explicitly in this MCP server's environment to the exact home of the running bridge. Use the Home line that the running trial printed. A local `dalan try` prints `$HOME/.local/share/dalan-trial`. A public trial prints `$HOME/.local/share/dalan-hosted-<client>` on a usable Tailscale route, or `$HOME/.local/share/dalan-hosted-<random hex>` on a relay. The trial home is not the CLI's normal default, and `dalan mcp` does not stop to ask which home you meant.
+The server has the access of the user who starts it: it reaches the bridge through the local admin socket, as the CLI does. It opens no network port and has no separate credential. Do not run it for someone you would not give `dalan` to. For a service made by `dalan service install`, `dalan mcp` finds the remembered service home, so you set nothing. For a `dalan try` bridge or a bridge you started by hand, set `DALAN_HOME` in this MCP server's environment to the exact home of the running bridge, using the Home line that the running trial printed. A local `dalan try` prints `$HOME/.local/share/dalan-trial`; a public trial prints its own home. A trial home is not the CLI's normal default, and `dalan mcp` does not stop to ask which home you meant.
 
 ## Claude Code
 
-This example uses the home of a local `dalan try`. For a public trial, replace it with the Home line your running bridge printed, and replace `/path/to/dalan` as described below.
+For a service made by `dalan service install`:
+
+```sh
+claude mcp add --scope user dalan -- "$(command -v dalan)" mcp
+```
+
+For a `dalan try` bridge, add its home as an override. This example uses the home of a local `dalan try`; for a public trial, use the Home line your running bridge printed:
 
 ```sh
 claude mcp add --scope user dalan --env DALAN_HOME="$HOME/.local/share/dalan-trial" -- "$(command -v dalan)" mcp
@@ -48,6 +54,8 @@ args = ["mcp"]
 env = { DALAN_HOME = "/absolute/path/to/the-running-bridge-home" }
 ```
 
+Omit the `env` line for a service made by `dalan service install`.
+
 Replace `/path/to/dalan` with the output of `command -v dalan`, or with `node /path/to/dalan/bin/dalan.mjs` split into `command = "node"` and `args = ["/path/to/dalan/bin/dalan.mjs", "mcp"]`.
 
-Use an absolute home path in the TOML; do not leave `$HOME` or `~` in it. Start a new client session and ask it to call `dalan_status`. Check that the returned status belongs to your running bridge before submitting a job. If the call cannot connect, verify the configured home and run `dalan status --json` in a shell using that same `DALAN_HOME`. For a complete submit-and-result example, follow [Send one small job and read the result](codex-to-muse.md#4-send-one-small-job-and-read-the-result), using your connected worker's name.
+Use an absolute home path in the TOML; do not leave `$HOME` or `~` in it. Start a new client session and ask it to call `dalan_status`. Check that the returned status belongs to your running bridge before submitting a job. If the call cannot connect, verify the configured home and run `dalan status --json` in a shell that selects the same home. For a complete submit-and-result example, follow [Send one small job and read the result](codex-to-muse.md#4-send-one-small-job-and-read-the-result), using your connected worker's name.

@@ -1,5 +1,7 @@
 # Upgrade to Dalan
 
+A service made by `dalan service install` updates itself and through `dalan service update`; see [service updates](service-setup.md#service-updates). This guide covers services and checkouts that earlier releases set up, and the ordered steps for a manual upgrade.
+
 `dalan` is the main command. The package also installs `dalan-worker`, `dalan-acp-agent`, `dalan-alert`, `dalan-deadman`, `dalan-heartbeat` and `dalan-pr-reviewer`. It does not install the commands of the `dot-bridge` package; change scripts, units and timers that run `dot-worker`, `dot-deadman`, `dot-heartbeat`, `dot-alert`, `dot-acp-agent` or `dot-pr-reviewer` to the `dalan` or `dalan-*` command. `DALAN_X` takes precedence over `DOT_BRIDGE_X`, including an explicitly empty value except `AUTH_MODE`; an empty `DALAN_AUTH_MODE` falls back to a non-empty legacy auth mode, or stays unset if neither supplies one; an actual legacy fallback emits at most one warning from the main thread in each process. The `DOT_ACP_*` and `DOT_DRAINED_*` adapter settings keep their existing names.
 
 ## Pre-upgrade checklist
@@ -10,7 +12,7 @@ Upgrade in this order: drain built-in-auth claims while the old service runs; st
 
 **Run a command in the service's environment.** A generated service sets `HOME` (the bridge home), `NODE_ENV=production`, `DALAN_AUTH_MODE=builtin`, `DALAN_BIND_HOST=127.0.0.1`, `DALAN_GOZAR_SERVICE=1`, `DALAN_CATALOG_PROFILE=stable`, `DALAN_ENABLE_WORKSPACE` (`1` when repository tools are on, otherwise `0`), `DALAN_ENABLE_T3_TOOLS` (`1` or `0`), `DALAN_PORT` and `PATH`. Read them, then run each command with those values in front of that one command. Do not `export` them or change `HOME` in your shell: `launchctl` and `systemctl --user` need your own `HOME`.
 
-Your shell can carry more than the service has. The README tells you to `export DALAN_HOME=...` and `DALAN_LOOPBACK=1` for a trial, and `dalan` makes `DALAN_HOME` win over the `HOME` you pass, so an inherited `DALAN_HOME` points every command at the trial, not at the service. `env -u NAME` removes a variable from one command. List the `DALAN_` and `DOT_BRIDGE_` names your shell exports, and remove each one that the service does not set:
+Your shell can carry more than the service has. A trial or a hand-started bridge has you `export DALAN_HOME=...` and `DALAN_LOOPBACK=1`, and `dalan` makes `DALAN_HOME` win over the `HOME` you pass, so an inherited `DALAN_HOME` points every command at the trial, not at the service. `env -u NAME` removes a variable from one command. List the `DALAN_` and `DOT_BRIDGE_` names your shell exports, and remove each one that the service does not set:
 
 ```sh
 env | grep -E '^(DALAN|DOT_BRIDGE)_' | cut -d= -f1

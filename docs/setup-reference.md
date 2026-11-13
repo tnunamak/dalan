@@ -4,12 +4,12 @@ Use this page after the [README](../README.md) first-job path works. It lists se
 
 ## Environment and storage
 
-Set server variables in the process or service environment, then restart the bridge. Only the `dalan` command reads `DALAN_HOME`; it does not replace the server's `HOME`.
+Set server variables in the process or service environment, then restart the bridge. Only the `dalan` command reads `DALAN_HOME`; it does not replace the server's `HOME`. A service made by `dalan service install` needs none: `dalan` remembers its home.
 
 | Setting | Effect |
 |---|---|
 | `HOME` | Selects the bridge's private configuration, state and requester receipts. The server and requester must use the same home. |
-| `DALAN_HOME` | The `dalan` command uses this directory as its `HOME`, so it reads the home of a server started with that `HOME`. `dalan try` uses it as the default trial home. |
+| `DALAN_HOME` | The `dalan` command uses this directory as its `HOME`, so it reads the home of a server started with that `HOME`. It overrides the remembered service home. `dalan try` uses it as the default trial home. |
 | `DALAN_AUTH_MODE=builtin` | Uses the built-in OAuth authorization server. `oauth` selects an external issuer instead. |
 | `DALAN_LOOPBACK=1` | Runs authenticated HTTP on loopback only. Requires `DALAN_AUTH_MODE=builtin` and a fixed `DALAN_PORT`; the public URL must be `http://127.0.0.1:<port>`. |
 | `DALAN_PORT` | Sets the HTTP listener port; the server default is 8787. |
@@ -23,7 +23,7 @@ The corresponding old `DOT_BRIDGE_*` environment names remain readable for compa
 
 ## Requester commands
 
-The table lists the common commands. Run `dalan help --all` to see every command. Export `DALAN_HOME` in each shell, so that every command reads the same home and private receipts.
+The table lists the common commands. Run `dalan help --all` to see every command. Every command must read the same home and private receipts: a service home is remembered; for a trial or a bridge you started by hand, export `DALAN_HOME` in each shell.
 
 | Command | Result |
 |---|---|
@@ -66,7 +66,7 @@ For upgrades, use the [changelog](../CHANGELOG.md) and [operations procedure](op
 
 ## Legacy service examples
 
-The `dot-bridge.service`, `dot-bridge-selfcheck.service` and `dot-bridge-selfcheck.timer` examples are in `systemd/`. Keep these filenames when installing them for an existing deployment so service dependencies and timer targets still resolve. The legacy templates retain their original checkout default for compatibility. Set each example's `WorkingDirectory` to the deployed checkout and set `PATH` to a Node.js 24 installation before installing it. Units installed as copies, and drop-ins, do not need to change. A unit installed as a symbolic link to `dot-bridge.service`, `dot-bridge-selfcheck.service` or `dot-bridge-selfcheck.timer` in the repository root breaks when you update the checkout, because 0.5.0 removes those root links: before you update, point each such link at the same file in `systemd/`, then run `systemctl --user daemon-reload`. For a new installation, prefer the generator in the [service guide](service-setup.md): `node scripts/worker-bridge-setup.mjs --worker NAME --public-url https://bridge.example.com --port PORT --home HOME_PATH --start`. The external self-check is deployment-specific; configure it before enabling its timer.
+The `dot-bridge.service`, `dot-bridge-selfcheck.service` and `dot-bridge-selfcheck.timer` examples are in `systemd/`. Keep these filenames when installing them for an existing deployment so service dependencies and timer targets still resolve. The legacy templates retain their original checkout default for compatibility. Set each example's `WorkingDirectory` to the deployed checkout and set `PATH` to a Node.js 24 installation before installing it. Units installed as copies, and drop-ins, do not need to change. A unit installed as a symbolic link to `dot-bridge.service`, `dot-bridge-selfcheck.service` or `dot-bridge-selfcheck.timer` in the repository root breaks when you update the checkout, because 0.5.0 removes those root links: before you update, point each such link at the same file in `systemd/`, then run `systemctl --user daemon-reload`. For a new installation, use `dalan service install` ([service guide](service-setup.md)). The external self-check is deployment-specific; configure it before enabling its timer.
 
 <a id="names-you-may-see"></a>
 
@@ -74,7 +74,7 @@ The `dot-bridge.service`, `dot-bridge-selfcheck.service` and `dot-bridge-selfche
 
 Earlier versions of Dalan used other names. Some remain so that existing installations keep working; use `dalan` and `DALAN_*` names for anything new.
 
-- **`dot-bridge.service`, `dot-bridge-selfcheck.service` and `dot-bridge-selfcheck.timer`** are legacy systemd templates in `systemd/`. Do not use them for a new install; use `scripts/worker-bridge-setup.mjs`.
+- **`dot-bridge.service`, `dot-bridge-selfcheck.service` and `dot-bridge-selfcheck.timer`** are legacy systemd templates in `systemd/`. Do not use them for a new install; use `dalan service install`.
 - **`.dot-bridge.json`** is the older name of a repository's check file, `.dalan.json`. Dalan still reads it when `.dalan.json` is absent.
 - **`dot-bridge.*` OAuth scopes and `DOT_BRIDGE_*` settings** are older names that still work; the `dot-worker` command is replaced by `dalan`. They do not limit which client can be a worker.
 - **T3 Code** is a separate desktop app for running coding agents. Dalan has an optional integration with it (the `t3.*` scopes, [T3 tools](t3-reverse-control.md) and [operator-registered tools](worker-clients.md#operator-registered-tools)). Ordinary jobs do not need it.

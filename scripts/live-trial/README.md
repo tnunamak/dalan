@@ -8,53 +8,27 @@ Client compatibility must be verified with the chosen connector. For ChatGPT and
 
 ## 1. Set up the trial
 
-For a Mac using its normal Tailscale node:
+Choose a Gozar route whose public HTTPS origin you know. `dalan setup` lists what Gozar can offer on this computer; the origin of the route you choose is the `--public-url`. Read what `dalan setup` shows for that route before you approve it: whether the address is stable or temporary, and whether the route operator can read traffic.
 
 ```sh
-node scripts/live-trial/setup.mjs \
+DALAN_LIVE_TRIAL_APPROVE_ROUTE=1 node scripts/live-trial/setup.mjs \
   --worker fixture-a \
-  --public-url https://<mac-node>.ts.net \
+  --public-url https://<route-origin> \
   --port 8787 \
-  --exposure mac-funnel
+  --route ROUTE
 ```
 
-For an optional Linux userspace-node deployment, record its socket path:
-
-```sh
-node scripts/live-trial/setup.mjs \
-  --worker fixture-a \
-  --public-url https://<sample-host-second-node>.ts.net \
-  --port 8787 \
-  --exposure linux-second-node \
-  --tailscale-socket /run/user/<uid>/tailscale-second/tailscaled.sock
-```
-
-Setup starts the bridge on loopback, records the exact Funnel mode, socket (for Linux), public port `443`, and local port in the manifest. It does not run Tailscale. Setup also starts a detached cutoff timer. Unless you set `--cutoff-seconds`, the timer disables and verifies this rule four hours after setup, even if teardown is never run. Its log is `exposure-cutoff.log` in the trial home. If the Tailscale command or daemon is unavailable when the timer fires, keep the home and use the manual recovery commands in that log or printed by teardown. The deadline starts at setup, before Funnel is enabled. If it has passed, do not enable or re-enable the rule; disable and verify any existing rule, then start a fresh setup for another trial.
+Setup starts the bridge on loopback, then asks Gozar to open `ROUTE` to the bridge's local port. It records the route in the manifest. If Gozar allocates an origin other than `--public-url`, setup closes the route and stops. The route lasts four hours unless you set `--lifetime-seconds` (1 to 86400); Gozar ends it at that deadline even if teardown never runs. Setup refuses `--route` without an HTTPS `--public-url`, and an HTTPS `--public-url` without `--route`, so that teardown can always identify the public route. `DALAN_LIVE_TRIAL_APPROVE_ROUTE=1` records that you approved the route.
 
 Setup prints the disposable home path and the path to a mode-0600 file that holds the MCP resource URL. Setup never prints the resource URL. Read that private file when you configure fixture-a. The resource URL is the only URL to paste into fixture-a; it discovers the OAuth endpoints. The legacy `--reveal-resource-url` flag is unsupported and is rejected before setup creates anything.
 
-## 2. Enable the trial forward
+## 2. Check the route
 
-The bridge remains bound to `127.0.0.1:8787`. Enable only its Funnel endpoint on public HTTPS port 443.
+The bridge remains bound to `127.0.0.1:8787`. Setup already opened the public route; there is no separate forwarding step. If setup stopped with an error, nothing is left running and the home is removed.
 
-On Mac:
+## 3. Verify from outside your network
 
-```sh
-tailscale funnel --bg --https=443 http://127.0.0.1:8787
-```
-
-On the Linux trial host, use the userspace node's own CLI socket:
-
-```sh
-tailscale --socket /run/user/<uid>/tailscale-second/tailscaled.sock \
-  funnel --bg --https=443 http://127.0.0.1:8787
-```
-
-If using a separate userspace node, use only that node's socket; verify its startup and authentication before the trial.
-
-## 3. Verify from outside the tailnet
-
-From a separate machine outside the tailnet, run the public-surface check with the resource URL from the private file printed by setup:
+From a separate machine outside your network, run the public-surface check with the resource URL from the private file printed by setup:
 
 ```sh
 RESOURCE_FILE='<private resource URL file printed by setup>'
@@ -133,39 +107,19 @@ The verifier checks the active connection binding, claim and report attribution,
 
 The current built-in AS returns 401 for a revoked or unknown opaque token. It returns 403 when a valid token names a worker that is absent from the configured profile. The dry run checks both cases.
 
-## 6. Disable and verify the forward
+## 6. Close the route
 
-After the job checks pass, disable the exact rule that you enabled. The Tailscale CLI reference documents this `off` form and `funnel status --json` ([Tailscale Funnel CLI reference](https://tailscale.com/docs/reference/tailscale-cli/funnel)).
-
-On Mac:
-
-```sh
-tailscale funnel --bg --https=443 http://127.0.0.1:8787 off
-tailscale funnel status --json
-```
-
-On the Linux trial host:
-
-```sh
-tailscale --socket /run/user/<uid>/tailscale-second/tailscaled.sock \
-  funnel --bg --https=443 http://127.0.0.1:8787 off
-tailscale --socket /run/user/<uid>/tailscale-second/tailscaled.sock \
-  funnel status --json
-```
-
-Confirm that no `AllowFunnel` endpoint has a `Web` handler whose `Proxy` targets local port `8787`. If the off command fails or status cannot prove the route is gone, leave the bridge running and keep the trial home. Do not let another process bind the trial port while it may still be public.
+Teardown closes the route. Run it after the job checks pass, and before that if you no longer need the public address.
 
 ## 7. Teardown
-
-Run teardown after the public forward is disabled and verified:
 
 ```sh
 HOME='<home printed by setup>' node scripts/live-trial/teardown.mjs --home '<home printed by setup>'
 ```
 
-Teardown repeats Funnel off and status verification using the recorded mode, socket, and ports. It cancels the cutoff timer only after Funnel is confirmed clear. It then closes the pairing window, settles trial jobs, revokes the active connection, stops the bridge, checks that the loopback port is closed, checks for trial-specific launchd/systemd/cron entries, and removes the private home.
+Teardown asks Gozar to remove the recorded route and checks that it is gone. It then closes the pairing window, settles trial jobs, revokes the active connection, stops the bridge, checks that the loopback port is closed, checks for trial-specific launchd/systemd/cron entries, and removes the private home.
 
-If Funnel off fails or status still shows the trial route, teardown exits non-zero before stopping the bridge and keeps the home. Follow its printed recovery instructions, verify the public route is gone, and rerun teardown. `--check-tailscale` adds status output after the teardown work; it does not replace the mandatory off/status gate.
+If Gozar cannot confirm removal, teardown exits non-zero before stopping the bridge and keeps the home. Follow its printed recovery instructions: ask Gozar which route serves the trial's origin, have it removed, then rerun teardown. Do not let another process bind the trial port while the route may still be public.
 
 ## What the live fixture-a run must check
 
@@ -177,7 +131,7 @@ If Funnel off fails or status still shows the trial route, teardown exits non-ze
 - fixture-a supports the bridge's Streamable HTTP/MCP behavior and a protocol version the bridge advertises. The dry run covers JSON requests; it does not test fixture-a's SSE handling.
 - The real connector receives the process-wide catalog selected by `DALAN_CATALOG_PROFILE` and `DALAN_ENABLE_T3_TOOLS`. With T3 tools globally disabled, `t3_thread_*` names are absent and `notify_owner` is advertised; verify that fixture-a cannot call it without the `t3` capability.
 - Confirm how the worker schedules pulls and whether a completed assignment can be fetched within its polling window.
-- Public HTTPS port 443 reaches only the loopback bridge listener. Confirm the selected Mac Funnel or Linux trial host route and turn it off during teardown.
+- The public route reaches only the loopback bridge listener. Confirm the selected route and close it during teardown.
 
 ## Dry run
 
@@ -187,7 +141,7 @@ Run the full loopback-only fake-client flow:
 node scripts/live-trial/dry-run.mjs
 ```
 
-The script removes its temporary home after every run. It does not run Tailscale, Funnel, or any tunnel command, and it does not contact an external connector provider.
+The script removes its temporary home after every run. It opens no public route, and it does not contact an external connector provider.
 
 ## Wake signal for a hook
 
@@ -199,4 +153,4 @@ SIGNAL_URL=$(cat "$SIGNAL_FILE")                 # read privately; do not echo o
 curl -fsS "$SIGNAL_URL" | grep -q '"work":true' && wake
 ```
 
-The answer is `{"work":true}` or `{"work":false}` and nothing else. Poll every 60 seconds, or every 300 seconds when the exposure is ngrok (`signal-token` prints the interval on stderr). The bridge refreshes the answer every 10 seconds. See "Wake signal for hook-driven workers" in `docs/portable-auth-profile.md`.
+The answer is `{"work":true}` or `{"work":false}` and nothing else. Poll every 60 seconds. The bridge refreshes the answer every 10 seconds. See "Wake signal for hook-driven workers" in `docs/portable-auth-profile.md`.

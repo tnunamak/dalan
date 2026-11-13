@@ -4,7 +4,7 @@
 
 `try` runs ordinary `dalan` commands in a private trial home. Use this page to run each piece yourself: to keep the bridge in the foreground, to choose your own worker name, or to set up a client that `try` does not cover. You need the npm package, two shells and a compatible HTTP MCP worker client with OAuth. This page explicitly installs the CLI globally before using bare `dalan` commands; `npx` alone does not put it on your persistent PATH.
 
-For a hosted first result instead, use `npx -y @tnunamak/dalan try` ([hosted trial](../README.md#quickstart)). In `auto` mode, a saved temporary-relay choice selects bundled Gozar. Otherwise Dalan uses a usable Tailscale route, then Gozar if Tailscale is unavailable. When Gozar is selected, Dalan names tunnl.gg, links its terms and privacy notice, and asks for consent before exposure. Gozar then creates an installation-owned key for the `tunnl-gg` relay; Dalan does not pass your SSH keys. The relay terminates TLS and can see the connector URL and traffic. Keep private work out of the demo. A temporary demo link can change or stop without warning; the three-hour trial limit is not an availability promise. Use `--route tailscale` to require Tailscale without a relay fallback. The loopback recipe below creates no public route.
+For a hosted first result instead, use `npx -y @tnunamak/dalan try` ([hosted trial](../README.md#quickstart)). Dalan asks Gozar for a public HTTPS route and asks for consent before exposure; some routes are temporary and some route operators can read the connector URL and traffic. Keep private work out of the demo. A temporary demo link can change or stop without warning; the three-hour trial limit is not an availability promise. For a bridge that keeps running, use `dalan service install` ([service setup](service-setup.md)); it needs no `DALAN_HOME`. The loopback recipe below creates no public route and uses its own home, so it sets `DALAN_HOME` as an override.
 
 <a id="owner-and-requester-setup"></a>
 
@@ -20,7 +20,7 @@ For a hosted first result instead, use `npx -y @tnunamak/dalan try` ([hosted tri
 
    **Check:** Node prints `v24` or higher, and npm finishes without an error. The server in step 3 starts Node with a changed `HOME`, so use a Node executable that works then; a version-manager shim can depend on your usual home directory.
 
-2. Choose a new, private bridge home. It must not exist yet and must not be a `try` home (`init` refuses an existing profile). Export it in every shell that you use, including the server shell; `dalan` reads it as the bridge's home. Keep paths short and free of spaces.
+2. Choose a new, private bridge home. It must not exist yet and must not be a `try` home (`init` refuses an existing profile). Export it in every shell that you use, including the server shell; `DALAN_HOME` overrides the remembered service home, and `dalan` reads it as this bridge's home. Keep paths short and free of spaces.
 
    ```sh
    export DALAN_HOME="$HOME/.local/share/dalan-manual-trial"
