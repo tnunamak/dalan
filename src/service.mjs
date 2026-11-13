@@ -484,7 +484,7 @@ export async function installService(o, seams = {}) {
     delete enrolled.enrollment_pending;
     writeAtomic(receiptFile, `${JSON.stringify(enrolled, null, 2)}\n`);
   }
-  return { schema_version: 1, origin: o.origin, home: o.home, unit: mac ? labels.service : `${name}.service`, already_installed: homeScope.hasReceipt && !needsEnrollmentRestart, units: Object.keys(files), port: o.port,
+  return { schema_version: 1, origin: routeReply.published ?? o.origin, home: o.home, unit: mac ? labels.service : `${name}.service`, already_installed: homeScope.hasReceipt && !needsEnrollmentRestart, units: Object.keys(files), port: o.port,
     workers: profile.workers, public_url: `${o.origin}/<secret>/mcp`, resource_url_file: homeFiles.resourceFile,
     target: o.target.value, started: true, route: routeReply, auto_update: autoUpdate };
 }
