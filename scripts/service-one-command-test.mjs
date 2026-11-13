@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { defaultPath } from '../src/paths.mjs';
@@ -16,7 +17,8 @@ import { controlService } from '../src/service-update-runtime.mjs';
 
 const scratch = process.env.TMPDIR ?? path.join(os.homedir(), '.tmp');
 fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-const root = fs.mkdtempSync(path.join(scratch, 'dalan-one-command-'));
+// A short root: each test home must leave its admin socket path under the platform limit (103 bytes on macOS), which install checks.
+const root = fs.mkdtempSync(path.join(scratch, 'd1-'));
 const sandbox = name => {
   const userHome = path.join(root, name);
   fs.mkdirSync(path.join(userHome, '.config'), { recursive: true, mode: 0o700 });
@@ -149,6 +151,92 @@ try {
 
   // ---- explicit external route keeps working; --route alone needs a name, nothing alone is refused ------------------------------------
   await assert.rejects(serviceMain(['install', '--worker', 'muse'], seamsFor('refuse', 'linux').seams), /pass --route NAME/);
+
+  // ---- a failed install allocates no public route: every read-only check runs first ---------------------------------------------------
+  {
+    const unitDirOf = box => path.join(box.env.XDG_CONFIG_HOME, 'systemd/user');
+    const untouched = (box, home, why) => {
+      assert.deepEqual(box.gozar.fake.state.calls, [], `${why}: Gozar is not asked for anything`);
+      assert.deepEqual(box.gozar.fake.state.effects, [], `${why}: no route is allocated`);
+      assert.equal(fs.existsSync(home), false, `${why}: no home is created`);
+      assert.equal(fs.existsSync(unitDirOf(box)), false, `${why}: no unit file is written`);
+    };
+    // The admin socket path must fit the platform limit (bytes, without the terminating NUL): exactly at the limit passes the check.
+    for (const [platform, limit, name] of [['linux', 107, 'sl'], ['darwin', 103, 'sm']]) {
+      for (const extra of [0, 1]) {
+        const box = seamsFor(`${name}${extra}`, platform);
+        const suffix = Buffer.byteLength(path.join(box.userHome, '/.local/share/dalan/admin.sock'));
+        const home = path.join(box.userHome, 'h'.repeat(limit + extra - suffix - 1));
+        assert.equal(Buffer.byteLength(path.join(home, '.local/share/dalan/admin.sock')), limit + extra);
+        const reached = new Error('the socket check passed');
+        let ports = 0;
+        const attempt = installService(options(box, { home }), { ...box.seams, freePort: async () => { ports++; throw reached; } });
+        if (extra === 0) { await assert.rejects(attempt, error => error === reached); assert.equal(ports, 1); }
+        else {
+          await assert.rejects(attempt, error => {
+            assert.ok(error.message.includes(`would be ${limit + 1} bytes`), error.message);
+            assert.ok(error.message.includes(`limit on ${platform === 'darwin' ? 'macOS' : 'Linux'} is ${limit} bytes`), error.message);
+            assert.ok(error.message.includes('shorter --home'), error.message);
+            return true;
+          });
+          assert.equal(ports, 0, 'a home that is too long is refused before anything else');
+        }
+        untouched(box, home, `socket ${platform} +${extra}`);
+      }
+    }
+    // An unreachable user systemd manager is named, with the command that shows why, before any route is allocated.
+    {
+      const box = seamsFor('nomgr', 'linux'), home = options(box).home, calls = [];
+      await assert.rejects(installService(options(box), { ...box.seams, spawn: (cmd, args) => { calls.push([cmd, ...args]); return { status: 1, stdout: '', stderr: 'Failed to connect to bus: No medium found' }; } }), error => {
+        assert.match(error.message, /user systemd manager is not reachable/);
+        assert.ok(error.message.includes('systemctl --user status'), error.message);
+        assert.ok(error.message.includes('login session') && error.message.includes('loginctl enable-linger'), error.message);
+        assert.ok(error.message.includes('Failed to connect to bus'), 'the system reason is kept');
+        return true;
+      });
+      assert.deepEqual(calls, [['systemctl', '--user', 'show-environment']]);
+      untouched(box, home, 'no systemd manager');
+    }
+    // A worker profile, a unit-name collision and an unsafe Gozar state path are all found before the allocation.
+    {
+      const box = seamsFor('noprof', 'linux'), home = options(box).home;
+      await assert.rejects(installService(options(box, { workers: [] }), box.seams), /pass --worker NAME/);
+      untouched(box, home, 'no worker profile');
+    }
+    {
+      const box = seamsFor('clash', 'linux'), home = options(box).home;
+      const unit = `dalan-${createHash('sha256').update(home).digest('hex').slice(0, 10)}.service`;
+      fs.mkdirSync(unitDirOf(box), { recursive: true }); fs.writeFileSync(path.join(unitDirOf(box), unit), '[Unit]\nDescription=someone else\n');
+      await assert.rejects(installService(options(box), box.seams), /already exists with different contents/);
+      assert.deepEqual(box.gozar.fake.state.calls, [], 'a unit collision: Gozar is not asked for anything');
+      assert.equal(fs.existsSync(home), false);
+    }
+    {
+      const box = seamsFor('gzst', 'linux'), home = options(box).home, open = path.join(box.userHome, 'gz');
+      fs.mkdirSync(open); fs.chmodSync(open, 0o777);
+      await assert.rejects(installService(options(box), { ...box.seams, env: { ...box.env, GOZAR_HOME: open } }), /writable by group or others/);
+      untouched(box, home, 'an unsafe Gozar state path');
+    }
+    // --write-units-only writes the units and allocates nothing.
+    {
+      const box = seamsFor('wuo', 'linux');
+      const written = await installService(options(box, { writeUnitsOnly: true }), box.seams);
+      assert.equal(written.started, false); assert.equal(written.route, null);
+      assert.deepEqual(box.gozar.fake.state.calls, [], '--write-units-only: Gozar is not asked for anything');
+      assert.ok(written.units.every(unit => fs.existsSync(path.join(unitDirOf(box), unit))));
+    }
+    // A failure after the allocation keeps the route's handle in the receipt, so `dalan service uninstall` releases it.
+    {
+      const box = seamsFor('late', 'linux'), home = options(box).home;
+      await assert.rejects(installService(options(box), { ...box.seams, waitForSocket: async () => false }), /did not start on its admin socket/);
+      const pin = box.gozar.fake.state.pins.get('dalan-main');
+      assert.ok(pin, 'the route was allocated');
+      const kept = JSON.parse(fs.readFileSync(path.join(defaultPath(home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
+      assert.deepEqual(kept.route_handle, pin.view.handle, 'the receipt holds the handle of the allocated route');
+      await uninstallService({ home }, box.seams);
+      assert.deepEqual(box.closed, [pin.view.handle], 'uninstall releases the route the failed install allocated');
+    }
+  }
 
   // ---- the default home pointer -------------------------------------------------------------------------------------------------------
   const pointer = sandbox('pointer');
