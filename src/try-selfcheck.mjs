@@ -13,7 +13,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // The check registers a throwaway generic client. Its redirect is an ordinary HTTPS URL: the bridge accepts any plain one.
 export const SELFCHECK_REDIRECT = 'https://selfcheck.example/oauth/callback';
 
-export async function runSelfCheck({ url, redirect = SELFCHECK_REDIRECT, fetchImpl = fetch, say = () => {}, approveWaitMs = 300_000, requestMs = 30_000, signal } = {}) {
+export async function runSelfCheck({ url, redirect = SELFCHECK_REDIRECT, fetchImpl = fetch, say = () => {}, approveWaitMs = 300_000, requestMs = 30_000, signal, approve, discoveryOnly = false } = {}) {
+  // `approve({ code })` lets the caller approve the pairing the page just showed (the owner's side); without it a human approves.
+  // `discoveryOnly` stops after the steps that need no approval: no registration, no RESULT line.
   let mcp;
   try { mcp = new URL(url); } catch { mcp = null; }
   if (!mcp || !['https:', 'http:'].includes(mcp.protocol)) { // the message is fixed: the supplied text may be a credential
@@ -70,6 +72,7 @@ export async function runSelfCheck({ url, redirect = SELFCHECK_REDIRECT, fetchIm
     if (!meta.code_challenge_methods_supported?.includes('S256')) throw new Error('S256 is not supported');
     ctx.meta = meta;
   });
+  if (discoveryOnly) return { ok: !failed, results };
   await step(`registration: an ordinary HTTPS callback is accepted as a public client`, async () => {
     const res = await get(ctx.meta.registration_endpoint, { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ redirect_uris: [callback], client_name: 'dalan self-check', token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] }) });
@@ -95,10 +98,12 @@ export async function runSelfCheck({ url, redirect = SELFCHECK_REDIRECT, fetchIm
     ctx.interaction = first.headers.get('location');
     if (first.status !== 303 || !ctx.interaction) throw new Error(`HTTP ${first.status}`);
     const page = await (await send(here(ctx.interaction))).text();
-    if (!/class="code">[A-Z0-9-]+</.test(page)) throw new Error('the pairing page shows no code');
+    ctx.pairingCode = /class="code">([A-Z0-9-]+)</.exec(page)?.[1];
+    if (!ctx.pairingCode) throw new Error('the pairing page shows no code');
   });
-  if (!failed) say(`WAIT approve the connection in the trial terminal (y); waiting up to ${Math.round(approveWaitMs / 1000)} s`);
-  await step('approval: the owner approved in the trial terminal', async () => {
+  if (!failed && !approve) say(`WAIT approve the connection in the trial terminal (y); waiting up to ${Math.round(approveWaitMs / 1000)} s`);
+  await step(approve ? 'approval: the owner approved the pairing' : 'approval: the owner approved in the trial terminal', async () => {
+    if (approve) await approve({ code: ctx.pairingCode });
     const deadline = Date.now() + approveWaitMs;
     for (;;) {
       const done = await send(here(ctx.interaction));

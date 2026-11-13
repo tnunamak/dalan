@@ -26,6 +26,7 @@ import { RESOURCE_LIMITS_UNAVAILABLE } from '../src/host-execution-policy.mjs';
 import { summarizeRejections } from '../src/rejections.mjs';
 import { VERDICT_EXIT, formatVerdict } from '../src/work-order.mjs';
 import { connectCommand } from '../src/connect-cli.mjs';
+import { runAuthCheck } from '../src/auth-check.mjs';
 import { initAsFiles, rotateKeys } from '../src/as-files.mjs';
 import { docsUrl } from '../src/docs-url.mjs';
 import { workerPrompt } from '../src/worker-prompt.mjs';
@@ -694,6 +695,17 @@ async function main() {
       break;
     }
     case 'doctor': {
+      if(args.includes('--auth')) {
+        // A real OAuth client walk against this home's public MCP URL; the owner approval goes through the admin socket and is revoked after.
+        if(args.includes('--checks')) throw new Error('doctor: --auth and --checks cannot be combined');
+        if(args.includes('--worker')&&(!option('--worker')||option('--worker').startsWith('--'))) throw new Error('--worker requires a name');
+        const lines=[];
+        const workersFile=readEnv('DALAN_WORKERS_FILE')||defaultPath(home,'.config/dot-bridge/workers.json');
+        const outcome=await runAuthCheck({home,workers:fs.existsSync(workersFile)?[...loadOwnerWorkers(workersFile).workers.keys()]:[],worker:option('--worker')??undefined,request,operator,say:line=>lines.push(line)});
+        if(!outcome.ok) process.exitCode=outcome.partial?2:1;
+        result=json?{ok:outcome.ok,results:outcome.results}:lines.join('\n');plainOutput=!json;
+        break;
+      }
       if(args.includes('--checks')) {
         // Local only: the owner's checks.json against each repo's default-branch tree (mirror). Warnings never fail the command; errors do.
         const repos=lintChecksFile();
