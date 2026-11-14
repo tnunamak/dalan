@@ -8,6 +8,44 @@ import { generateKeyPairSync } from 'node:crypto';
 import { createRequestLog } from '../src/request-log.mjs';
 import { redactLogEntry, registerSecret } from '../src/redaction.mjs';
 
+
+test('request log preserves armor-like prose across object boundaries', () => {
+  const dash = String.fromCharCode(45);
+  for (const words of [['end', 'to', 'end'], ['back', 'end']]) {
+    const status = 'neither proves ' + words.join(dash) + ' success.';
+    const detail = 'Track durable private certificate storage and cryptographic material.';
+    for (const entry of [{ detail: status + ' ' + detail }, { status, detail }]) {
+      const out = JSON.parse(logged(entry));
+      for (const [field, value] of Object.entries(entry)) assert.equal(out[field], value, field);
+    }
+  }
+});
+test('request log masks complete and truncated armor across object boundaries', async () => {
+  
+  const key = generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey.export({ type: 'pkcs1', format: 'pem' });
+  const newline = String.fromCharCode(10);
+  const lines = key.trim().split(newline);
+  const banner = lines[0];
+  assert(lines.length > 3, 'fixture must contain body lines and footer');
+  for (const text of [key, banner, banner + newline + lines[1]]) {
+    const split = text.indexOf(newline);
+    const entries = [{ detail: text }];
+    if (split !== -1) entries.push({ status: text.slice(0, split), detail: text.slice(split) });
+    for (const entry of entries) {
+      const out = JSON.stringify(JSON.parse(logged(entry)));
+      assert(out.includes('[redacted secret]'), 'armor must produce a mask');
+      assert(!out.includes(banner), 'armor banner must not survive');
+      for (const line of lines.slice(1, -1)) assert(!out.includes(line), 'key body must not survive');
+    }
+  }
+  // A complete key does not poison unrelated neighbouring fields.
+  const entry = { detail: key, status: 'ordinary readable diagnostic' };
+  assert.equal((JSON.parse(logged(entry))).status, entry.status);
+  // Nor should an isolated banner absorb a prose diagnostic.
+  const prose = { status: banner, detail: 'ordinary readable diagnostic' };
+  const cleanProse = JSON.parse(logged(prose));
+  assert.equal(cleanProse.detail, prose.detail);
+});
 const sentinel = 'ABCDEF123456abcdef'.repeat(3) + 'ABCDEF1234'; // 64 characters
 // sentinel stands for a secret the process holds, so the log masks it by value and in its encoded forms. The log has no
 // long-run or entropy rule: an unregistered opaque run is not a secret by shape alone.
