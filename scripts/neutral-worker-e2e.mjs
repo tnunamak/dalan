@@ -18,6 +18,17 @@ const WORKER = 'acme';
 const LEAK = /(?<![a-z0-9])dot(?![a-z0-9])|dot_|_dot/i;
 // Random secrets and IDs (base64, base64url) can spell "Dot" by chance. Mask mixed-case tokens with a digit before the search.
 const maskOpaque = value => value.replace(/[A-Za-z0-9+/_=-]{16,}/g, token => /\d/.test(token) && /[A-Z]/.test(token) && /[a-z]/.test(token) ? '<token>' : token);
+// Only captured CLI/server diagnostics can contain the printed checkout command.
+const normalizeCheckout = (value, checkout = repo) => {
+  const escaped = checkout.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return value.replace(new RegExp("(?<![a-zA-Z0-9_./\\\\-])" + escaped + "(?=$|[/\\\\\\s\"'`])", 'g'), '<checkout>');
+};
+const diagnostic = label => label.startsWith('cli: ') || label === 'server log' || label === 'created file: server.log';
+const controlCheckout = '/tmp/dot-checkout';
+const controlCommand = `node "${controlCheckout}/bin/dalan.mjs" status`;
+assert.doesNotMatch(normalizeCheckout(controlCommand, controlCheckout), LEAK, 'checkout path alone is not a worker identity');
+assert.match(normalizeCheckout(`${controlCommand}\nworker: dot`, controlCheckout), LEAK, 'real legacy worker still matches');
+assert.match(normalizeCheckout('/tmp/dot-checkout-other/bin/dalan.mjs', controlCheckout), LEAK, 'other paths are not normalized');
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
 fs.mkdirSync(tempRoot, { recursive: true });
 const home = fs.mkdtempSync(path.join(tempRoot, 'neutral-'));
@@ -104,7 +115,7 @@ try {
     if (/\.(json|jsonl|log|env|txt|md)$|\/env$/.test(file) && fs.statSync(file).size < 5_000_000) { text.push([`created file: ${path.relative(home, file)}`, fs.readFileSync(file, 'utf8')]); }
   }
   text.push(['server log', fs.readFileSync(log, 'utf8')], ['tool response: wait', JSON.stringify(waited)], ['tool response: get', JSON.stringify(got)], ['submit', JSON.stringify(submitted)], ...seen);
-  const leaks = [...new Set(text.map(([label, value]) => [label, maskOpaque(value)]).filter(([, value]) => LEAK.test(value)).map(([label, value]) => `${label.replace(/\d+/g, 'N')}: ${/.{0,40}(?<![a-z0-9])dot(?![a-z0-9]).{0,40}|.{0,40}(dot_|_dot).{0,40}/i.exec(value)[0]}`))];
+  const leaks = [...new Set(text.map(([label, value]) => [label, maskOpaque(diagnostic(label) ? normalizeCheckout(value) : value)]).filter(([, value]) => LEAK.test(value)).map(([label, value]) => `${label.replace(/\d+/g, 'N')}: ${/.{0,40}(?<![a-z0-9])dot(?![a-z0-9]).{0,40}|.{0,40}(dot_|_dot).{0,40}/i.exec(value)[0]}`))];
   assert.deepEqual(leaks, [], 'the legacy worker name "dot" appears in output a new user sees');
   for (const [label, text] of [['wait', JSON.stringify(waited)], ['get', JSON.stringify(got)], ['status', status], ['submit', JSON.stringify(submitted)]]) {
     assert.doesNotMatch(text, /:"dot"|"dot"[,\]]/, `${label} output names the legacy worker`);
