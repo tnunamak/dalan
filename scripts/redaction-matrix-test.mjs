@@ -9,7 +9,7 @@ import http from 'node:http';
 import {test} from 'node:test';
 import {spawn} from 'node:child_process';
 import {generateKeyPairSync} from 'node:crypto';
-import {registerSecret,redactLogEntry} from '../src/redaction.mjs';
+import {registerSecret,redactLogEntry,redactSecrets,privateKeyHeader} from '../src/redaction.mjs';
 import {createLineMasker} from '../src/diagnostic.mjs';
 import {callTool} from '../src/mcp-stdio.mjs';
 import {validateSubmissionAsync} from '../src/submission-policy.mjs';
@@ -156,12 +156,35 @@ test('redaction matrix: every sink masks every applicable form',async() => {
   assert(cells.length>=80,`too few cells: ${cells.length}`);
 });
 
+const H=String.fromCharCode(45);
+const ARMOR_PROSE=[
+  'neither proves '+['end','to','end'].join(H)+' success. Track durable private certificate storage.',
+  'neither proves '+['back','end'].join(H)+' keys are lost. Track durable private certificate storage.',
+];
+test('armor controls distinguish prose, complete keys, and truncated keys',()=>{
+  for(const text of ARMOR_PROSE) assert.equal(redactSecrets(text).text,text);
+  const banner=KEY.split('\n')[0];
+  for(const text of [KEY,banner,banner+'\n'+KEY_BODY[0]]) {
+    assert(privateKeyHeader.test(text),'key armor must still be detected');
+    const out=redactSecrets(text).text;
+    assert(out.includes('[redacted secret]'));
+    assert(!out.includes(banner),'key banner must not survive');
+    for(const line of KEY_BODY) assert(!out.includes(line),'key body must not survive');
+  }
+  // Lowercase canonical armor is deliberately conservative: normalization
+  // folds case, recognizes PRIVATE KEY and the five-dash opener, then masks.
+  const lower=H.repeat(5)+'begin rsa private key'+H.repeat(5);
+  assert(privateKeyHeader.test(lower));
+  assert(!redactSecrets(lower).text.includes('begin rsa private key'));
+});
+
 // The normal corpus: text that looks near a secret but is not one. Every sink returns it unchanged.
 const NORMAL=['0123456789abcdef0123456789abcdef01234567','550e8400-e29b-41d4-a716-446655440000','token_count: 42','max_tokens: 4096',
   'password123 is weak','author: Ada','Authorization is required','https://github.com/acme/widgets.git','code=200','IntegrityHashBase64Like0123456789abcdefXYZ'];
 // Not applicable here: the crash reply is generic by design, so input text never appears in it. The worker row is
 // checked as admission: no normal text is refused as sensitive.
 
+NORMAL.push(...ARMOR_PROSE);
 test('redaction matrix: normal text passes every sink unchanged',async() => {
   await new Promise(r=>admin.listen(path.join(sockDir,'admin.sock'),r));
   await startServer();

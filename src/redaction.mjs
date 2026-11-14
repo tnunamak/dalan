@@ -181,7 +181,9 @@ function* armorMarkers(input) {
   // the original text that callers redact.
   const original=input;
   input=input.replace(/[\p{Dash}\u02d7\u2043\u2796]/gu,char=>char.length===1?'-':char);
-  const control=/\s*(BEGIN|END)\b/iy;
+  // Raw controls are case-sensitive: hyphenated prose is not key armor.
+  // normalizedKeyMarkers still handles canonical lowercase private-key labels.
+  const control=/\s*(BEGIN|END)\b/y;
   const controlAt=start=>{
     control.lastIndex=start;
     const match=control.exec(input);
@@ -282,7 +284,8 @@ function* armorMarkers(input) {
 
 // Original main-branch armor scanner, retained for main-parity.
 function* legacyArmorMarkers(input) {
-  const control=/\s*(BEGIN|END)\b/iy;
+  // Match raw controls like armorMarkers; do not reopen lowercase prose spans.
+  const control=/\s*(BEGIN|END)\b/y;
   const controlAt=start=>{
     control.lastIndex=start;
     const match=control.exec(input);
