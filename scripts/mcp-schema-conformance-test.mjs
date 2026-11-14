@@ -4,6 +4,7 @@ const fetch=fetchForPublicHost('catalog-fixture.invalid');
 // Real loopback HTTP catalogs. All identities, keys and state are disposable fixtures.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
@@ -15,7 +16,8 @@ import addFormats from 'ajv-formats';
 
 const root = path.resolve(import.meta.dirname, '..');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const sandbox = fs.mkdtempSync(path.resolve('fixture-'));
+// Canonicalize the OS temp root; long checkout paths must not affect socket length.
+const sandbox = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'mc-'));
 fs.chmodSync(sandbox, 0o700);
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'catalog-fixture', alg: 'RS256', use: 'sig' };
@@ -43,6 +45,24 @@ async function stop(child) {
   child.kill('SIGTERM');
   const timeout = setTimeout(() => child.kill('SIGKILL'), 2000);
   try { await exited; } finally { clearTimeout(timeout); }
+}
+const isWithin = (parent, child) => {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep));
+};
+// These are pathname bytes excluding the terminating NUL: Linux sun_path is
+// 108 bytes; Darwin/BSD use 104. Do not change production socket constraints.
+const socketPathLimit = process.platform === 'linux' ? 107 : 103;
+function fixtureSockets(directory) {
+  const sockets = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const file = path.join(directory, entry.name);
+    const info = fs.lstatSync(file);
+    // Never follow links out of this disposable fixture, or read file contents.
+    if (info.isSocket()) sockets.push(file);
+    else if (info.isDirectory()) sockets.push(...fixtureSockets(file));
+  }
+  return sockets;
 }
 async function start(label, profile, oauth = false) {
   const home = path.join(sandbox, label);
@@ -76,6 +96,11 @@ async function start(label, profile, oauth = false) {
     if (match && output.includes('admin socket')) break;
     if (child.exitCode !== null) throw new Error('fixture startup failed: ' + errorOutput);
     await sleep(25);
+  }
+  const sockets = fixtureSockets(home);
+  assert(sockets.length > 0, 'fixture must expose its actual local admin socket');
+  for (const socket of sockets) {
+    assert(Buffer.byteLength(socket, 'utf8') <= socketPathLimit, 'fixture socket exceeds platform pathname limit: ' + socket);
   }
   assert(match && output.includes('admin socket'), 'fixture startup timeout: ' + errorOutput);
   const secret = fs.readFileSync(path.join(cfg, 'env'), 'utf8').match(/^BRIDGE_PATH_SECRET=(.+)$/m)[1];
@@ -149,6 +174,12 @@ function loadValidator(version) {
 }
 const validateCurrent = loadValidator('2026-07-28');
 try {
+  assert(!isWithin(fs.realpathSync(root), sandbox), 'fixture must be outside the canonical checkout');
+  assert.equal(fs.statSync(sandbox).mode & 0o777, 0o700, 'fixture must remain private');
+  // Guard the containment predicate against equal/descendant and prefix-sibling cases.
+  assert(isWithin(root, root));
+  assert(isWithin(root, path.join(root, 'fixture-child')));
+  assert(!isWithin(root, root + '-sibling'));
   const server = await start('oauth', undefined, true);
   for (const [method, params, definition] of [
     ['server/discover', {}, 'DiscoverResultResponse'],
