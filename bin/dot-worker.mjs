@@ -66,7 +66,7 @@ const FIRST_JOB_URL=docsUrl('docs/manual-setup.md','submit-finish-and-read-the-r
 const cli=json?'dalan':cliCommand(process.argv[1]);
 // Every option a command reads. An option it does not know is refused, so a typo is not ignored in silence.
 const SUBMIT_FLAGS=['--stdin','--json','--review','--wait','--dry-run','--queue-anyway','--refuse-defer','--allow-scope-prune','--fix-scope','--background','--allow-main','--exclude-sensitive'];
-const SUBMIT_VALUES=['--eligible','--policy','--file','--brief','--worker','--thread','--deliver','--timeout','--execution','--require-capability','--objective-key','--revision','--task-kind','--source','--sensitive-scope-override','--defer-if-queued','--producer-thread'];
+const SUBMIT_VALUES=['--eligible','--policy','--file','--brief','--worker','--thread','--deliver','--timeout','--execution','--require-capability','--objective-key','--revision','--task-kind','--source','--revises','--sensitive-scope-override','--defer-if-queued','--producer-thread'];
 const SUBMIT_OPTIONS=[...SUBMIT_FLAGS,...SUBMIT_VALUES];
 function refuseUnknownOptions(name,{flags=[],values=[]}) {
   for(let i=0;i<args.length;i++) {
@@ -134,12 +134,12 @@ function acpReceipt(id) {
   if(secret.length<32) return null;
   return {request_id:id,token:createHmac('sha256',secret).update(id).digest('hex'),acp:true};
 }
-function writeReceipt(id, token, body, delivery, review=false, background=false, meta=null, producer=null, routing=null, destinationRevisions=null) {
+function writeReceipt(id, token, body, delivery, review=false, background=false, meta=null, producer=null, routing=null, destinationRevisions=null, revises=null) {
   fs.mkdirSync(receipts,{recursive:true,mode:0o700});
   const file=receiptPath(id);
   try {
     const fd=fs.openSync(file,'wx',0o600);
-    try { fs.writeSync(fd,JSON.stringify({request_id:id,token,body,delivery,...(delivery.startsWith('t3:')?{thread:delivery.slice(3)}:{}),...(review?{review:true}:{}),...(background?{background:true}:{}),...(meta?{meta}:{}),...(producer?{producer}:{}),...(routing?{routing,destination_revisions:destinationRevisions??{}}:{})})+'\n'); fs.fsyncSync(fd); }
+    try { fs.writeSync(fd,JSON.stringify({request_id:id,token,body,delivery,...(delivery.startsWith('t3:')?{thread:delivery.slice(3)}:{}),...(review?{review:true}:{}),...(background?{background:true}:{}),...(meta?{meta}:{}),...(producer?{producer}:{}),...(routing?{routing,destination_revisions:destinationRevisions??{}}:{}),...(revises?{revises}:{})})+'\n'); fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
   } catch(e) { if(e.code!=='EEXIST') throw e; }
   const dir=fs.openSync(receipts,'r'); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
@@ -460,6 +460,10 @@ async function main() {
       for(const flag of ['--objective-key','--revision','--task-kind','--source']) if(args.includes(flag)&&(!option(flag)||option(flag).startsWith('--'))) throw new Error(`${flag} requires a value`);
       // Objective identity travels beside the assignment, never inside it; a plain dalan submit is an agent's.
       const given=normalizeMeta({objective_key:option('--objective-key'),revision:option('--revision'),task_kind:option('--task-kind'),source:option('--source')});
+      // --revises PRIOR_ID: this job corrects a job this home submitted. It cancels nothing; the prior job's result can no longer be accepted.
+      if(args.includes('--revises')&&(!option('--revises')||option('--revises').startsWith('--'))) throw new Error('--revises requires the request ID of the job this one corrects');
+      const revisesGiven=option('--revises')??null;
+      if(revisesGiven&&routing) throw new Error('--revises needs one worker: it cannot be combined with --eligible or --policy');
       const dryRun=args.includes('--dry-run'), queueAnyway=args.includes('--queue-anyway'), refuseDefer=args.includes('--refuse-defer');
       if(dryRun&&queueAnyway) throw new Error('--dry-run stores nothing; it cannot be combined with --queue-anyway');
       if(dryRun&&args.includes('--wait')) throw new Error('--dry-run stores nothing; it cannot be combined with --wait');
@@ -479,7 +483,7 @@ async function main() {
         }
       }
       const token=randomBytes(32).toString('hex');
-      const write=()=>writeReceipt(id,token,JSON.stringify(body),delivery,review,background,{...given,source:given.source??'agent'},producerId(),routing,destinationRevisions);
+      const write=()=>writeReceipt(id,token,JSON.stringify(body),delivery,review,background,{...given,source:given.source??'agent'},producerId(),routing,destinationRevisions,revisesGiven);
       let saved;
       if(dryRun) {
         try { saved=receipt(id); }
@@ -490,7 +494,7 @@ async function main() {
       // Receipts written by earlier releases may carry the old spelling of a source; compare the normalized form.
       const savedMeta=()=>{ try { return normalizeMeta(saved.meta); } catch { return {}; } };
       const conflicts=()=>{ const savedDelivery=saved.delivery ?? (saved.thread ? `t3:${saved.thread}` : null);
-        return JSON.stringify(canonical(saved.routing??null))!==JSON.stringify(canonical(routing))||JSON.stringify(canonical(saved.destination_revisions??{}))!==JSON.stringify(canonical(destinationRevisions))||JSON.stringify(canonical(JSON.parse(saved.body)))!==JSON.stringify(canonical(body))||savedDelivery!==delivery||!!saved.review!==review||!!saved.background!==background||metaFields.some(k=>savedMeta()[k]!=null&&given[k]!==null&&savedMeta()[k]!==given[k]); };
+        return JSON.stringify(canonical(saved.routing??null))!==JSON.stringify(canonical(routing))||JSON.stringify(canonical(saved.destination_revisions??{}))!==JSON.stringify(canonical(destinationRevisions))||JSON.stringify(canonical(JSON.parse(saved.body)))!==JSON.stringify(canonical(body))||savedDelivery!==delivery||!!saved.review!==review||!!saved.background!==background||metaFields.some(k=>savedMeta()[k]!=null&&given[k]!==null&&savedMeta()[k]!==given[k])||saved.revises!=null&&revisesGiven!==null&&saved.revises!==revisesGiven; };
       const conflict=()=>Object.assign(new Error('request_id conflict with local receipt'),{local_code:'receipt_conflict'});
       // A refused submit stores no assignment, so its receipt guards nothing. Replace it instead of refusing a corrected retry.
       if(dryRun&&conflicts()) throw conflict();
@@ -502,7 +506,8 @@ async function main() {
       }
       // A retry inherits what the receipt recorded for any flag it omits, so replaying a drainer request by hand stays one request.
       const meta=Object.fromEntries(metaFields.map(k=>[k,given[k]??savedMeta()[k]??(k==='source'?'agent':null)]));
-      const send=()=>request(dryRun?'/submit-preview':'/submit', 'POST', { ...(worker?{worker}:{}), ...(routing?{routing,destination_revisions:destinationRevisions}:{}), delivery, assignment: body, owner_token:saved.token, review, ...(background?{background:true}:{}), meta, ...(args.includes('--sensitive-scope-override')?{sensitive_scope_override:option('--sensitive-scope-override')}:{}), ...(args.includes('--allow-main')?{allow_main:true}:{}), ...(args.includes('--exclude-sensitive')?{exclude_sensitive:true}:{}), ...(execution?{execution}:{}), ...(requiredCapabilities?{required_capabilities:requiredCapabilities}:{}), ...(dryRun?{dry_run:true}:{...(refuseDefer?{refuse_defer:true}:{}),...(queueAnyway?{queue_anyway:true}:{})}), ...(args.includes('--defer-if-queued')?{defer_queued:Number(option('--defer-if-queued'))}:{}) },args.includes('--allow-main')?{'x-operator-key':operator()}:{});
+      const revisesId=revisesGiven??saved.revises??null;
+      const send=()=>request(dryRun?'/submit-preview':'/submit', 'POST', { ...(worker?{worker}:{}), ...(routing?{routing,destination_revisions:destinationRevisions}:{}), delivery, assignment: body, owner_token:saved.token, review, ...(background?{background:true}:{}), meta, ...(revisesId?{revises:{prior_id:revisesId,prior_token:receipt(revisesId).token}}:{}), ...(args.includes('--sensitive-scope-override')?{sensitive_scope_override:option('--sensitive-scope-override')}:{}), ...(args.includes('--allow-main')?{allow_main:true}:{}), ...(args.includes('--exclude-sensitive')?{exclude_sensitive:true}:{}), ...(execution?{execution}:{}), ...(requiredCapabilities?{required_capabilities:requiredCapabilities}:{}), ...(dryRun?{dry_run:true}:{...(refuseDefer?{refuse_defer:true}:{}),...(queueAnyway?{queue_anyway:true}:{})}), ...(args.includes('--defer-if-queued')?{defer_queued:Number(option('--defer-if-queued'))}:{}) },args.includes('--allow-main')?{'x-operator-key':operator()}:{});
       try {
         try { result=await send(); }
         catch(error) {
@@ -639,6 +644,8 @@ async function main() {
       if(args.includes('--dir')&&!option('--dir')) throw new Error('--dir requires a path');
       const dir=path.resolve(option('--dir')??process.cwd()), headers={'x-owner-capability':receipt(id).token};
       const got=await request('/get?id='+encodeURIComponent(id),'GET',null,headers); indexArtifacts(id,got);
+      // The bridge refuses to record an apply of a revised job, so refuse before the patch touches the directory.
+      if(got.revised_by) throw Object.assign(new Error(`${id} was revised by ${got.revised_by.request_id}; its patch is not applied. Apply the patch of ${got.revised_by.request_id} instead (dalan get ${got.revised_by.request_id}).`),{local_code:'stale_revision'});
       const ev=got.report?.workspace_evidence, art=ev?.patch_artifact;
       if(!art?.artifact_id||!art.size) throw new Error('this result has no patch artifact (nothing to apply)');
       const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'dot-apply-')), file=path.join(tmp,'patch.diff');

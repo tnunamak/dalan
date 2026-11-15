@@ -667,7 +667,7 @@ const policyPage=(worker,cursor=null)=>store.pullQueue.list(worker,admitPolicyWo
 async function submitPolicy(body,req,dryRun) {
   if(req.method!=='POST')throw new Error('policy submit requires POST');
   if(body.background!==undefined&&typeof body.background!=='boolean'||body.review!==undefined&&typeof body.review!=='boolean'||body.allow_main!==undefined&&typeof body.allow_main!=='boolean')throw new Error('invalid policy submit flags');
-  if(body.worker!==undefined||body.relationship_id!==undefined||body.command_key!==undefined||body.supersedes!==undefined||body.required_capabilities!==undefined||body.max_queued!==undefined||body.defer_queued!==undefined||body.destination_revision!==undefined) throw new Error('routing v1 cannot combine single-target, relationship, command, supersede or capacity options');
+  if(body.worker!==undefined||body.relationship_id!==undefined||body.command_key!==undefined||body.supersedes!==undefined||body.revises!==undefined||body.required_capabilities!==undefined||body.max_queued!==undefined||body.defer_queued!==undefined||body.destination_revision!==undefined) throw new Error('routing v1 cannot combine single-target, relationship, command, supersede, revise or capacity options');
   if(!body.assignment||typeof body.assignment!=='object'||Array.isArray(body.assignment)||typeof body.assignment.request_id!=='string'||!/^[-\w]{8,128}$/.test(body.assignment.request_id)||body.assignment.request_id.startsWith(PULL_PAGE_PREFIX)) throw new Error('invalid assignment request_id');
   if(!Array.isArray(body.assignment.inputs)) throw new Error('invalid assignment inputs');
   if(body.assignment.schema_version!==1||typeof body.assignment.brief!=='string'||!body.assignment.brief.trim()||typeof body.assignment.expected_output!=='string'||typeof body.assignment.execution_scope!=='string')throw new Error('invalid assignment: needs schema_version 1, brief, inputs, expected_output and execution_scope');
@@ -1087,6 +1087,8 @@ const adminServer=http.createServer(async(req,res)=>{
       if(body.assignment?.request_id===absentId) throw new Error('invalid assignment');
       const commandKey=body.command_key===undefined?null:body.command_key;
       const supersedes=body.supersedes===undefined?null:body.supersedes;
+      // {prior_id, prior_token}: this job corrects that one. Shape and authority are checked by the Store, in the submit transaction.
+      const revises=body.revises===undefined?null:body.revises;
       const destinationRevision=body.destination_revision??null;
       if(body.destination_revision!==undefined&&(typeof destinationRevision!=='string'||!/^sha256:[a-f0-9]{64}$/.test(destinationRevision)))throw new Error('invalid destination_revision');
       if(body.command_key!==undefined&&(typeof commandKey!=='string'||commandKey.length<1||commandKey.length>128)) throw new Error('invalid command_key: use a nonempty string of at most 128 characters');
@@ -1145,7 +1147,7 @@ const adminServer=http.createServer(async(req,res)=>{
       if(isNew&&dryRun) store.relationshipForSubmission(target,body.relationship_id??null);
       // Reject immutable retry conflicts using the persisted binding before any external destination inspection.
       // A matching retry still validates the current destination below; this does not accept stale environment evidence.
-      store.checkRetry(submitted,delivery,existingRequest?.environment_id,owner,body.review===true,body.background===true?'background':'normal',meta,submitted,target,explicitExecution,requiredCapabilities,commandKey,supersedes,destinationRevision);
+      store.checkRetry(submitted,delivery,existingRequest?.environment_id,owner,body.review===true,body.background===true?'background':'normal',meta,submitted,target,explicitExecution,requiredCapabilities,commandKey,supersedes,destinationRevision,revises);
       let order=null;
       if(isNew) {
         order=await compileWorkOrder({assignment:payload,review:body.review===true,priority:body.background===true?'background':'normal',jobExecution,requiredCapabilities,meta,maxQueued:body.max_queued??null,deferQueued:body.defer_queued??null,
@@ -1178,7 +1180,7 @@ const adminServer=http.createServer(async(req,res)=>{
       const {environmentId,generation}=(dryRun&&order&&order.verdict!=='admissible')?{}:await destination.validate(delivery);
       // An awaited repository/destination lookup may outlive a host policy edit.
       assertRepoAllowed(storedTarget??target??'dot',existingRequest?.assignment??payload);
-      if(dryRun) store.checkRetry(submitted,delivery,environmentId,owner,body.review===true,body.background===true?'background':'normal',meta,submitted,target,explicitExecution,requiredCapabilities,commandKey,supersedes,destinationRevision);
+      if(dryRun) store.checkRetry(submitted,delivery,environmentId,owner,body.review===true,body.background===true?'background':'normal',meta,submitted,target,explicitExecution,requiredCapabilities,commandKey,supersedes,destinationRevision,revises);
       const disclosure=isNew?store.destinationSnapshot(target??'dot',jobExecution,payload):existingRequest.destination_approval?.snapshot??null;
       if(dryRun) {
         log({kind:'submit_dry_run',request_id:submitted.request_id,task_kind:meta.task_kind??null,source:meta.source??null,verdict:order?.verdict??'admissible',reason_codes:(order?.reasons??[]).map(r=>r.code),attempt_latency_ms:Date.now()-requestStartedAt});
@@ -1193,7 +1195,7 @@ const adminServer=http.createServer(async(req,res)=>{
       const readiness=order?.check_readiness??null;
       const preflight=order?.preflight??null;
       const defaultValidity=order?.defaultValidity??null;
-      const result=store.submit(payload,delivery,environmentId,owner,body.review===true,preflight,body.background===true?'background':'normal',meta,(()=>{const r=renderAssignment(submitted);return payload.brief!==r.brief||JSON.stringify(payload.scope_paths)!==JSON.stringify(r.scope_paths);})()?submitted:payload,body.max_queued??null,target,explicitExecution,workers.defaultExecution,requiredCapabilities,defaultValidity?.valid_until??null,commandKey,supersedes,destinationRevision,null,generation??null,body.relationship_id??null);
+      const result=store.submit(payload,delivery,environmentId,owner,body.review===true,preflight,body.background===true?'background':'normal',meta,(()=>{const r=renderAssignment(submitted);return payload.brief!==r.brief||JSON.stringify(payload.scope_paths)!==JSON.stringify(r.scope_paths);})()?submitted:payload,body.max_queued??null,target,explicitExecution,workers.defaultExecution,requiredCapabilities,defaultValidity?.valid_until??null,commandKey,supersedes,destinationRevision,null,generation??null,body.relationship_id??null,revises);
       // Only a committed first replacement wakes the TARGET's already-attached waiter.
       if(supersedes&&!result.duplicate) {
         const targetId=supersedes.target_id,waiter=waiters.get(targetId);
@@ -1417,7 +1419,7 @@ const adminServer=http.createServer(async(req,res)=>{
     if(rejected) log({kind:'submit_rejected',...rejected,status:infrastructure?503:400,reason:e.message.slice(0,300),...(reasons?{verdict,reason_codes:reasons.map(r=>r.code)}:{}),bytes:e.bytes??null,attempt_latency_ms:Date.now()-requestStartedAt,...(e.suggested_scope_paths?{suggested_scope_count:e.suggested_scope_paths.length}:{})});
     if(infrastructure&&!rejected) log({kind:'admin_infrastructure_error',route:String(req.url).split('?')[0],code:e.code??null,reason:e.message.slice(0,300)});
     const shown=publicErrorText(e,'admin request');
-    json(res,infrastructure?503:400,{error:infrastructure?'admin service unavailable':shown,...(e.destination?{destination:e.destination}:{}),...(infrastructure?{code:e.code??null,reason:shown.slice(0,300)}:{}),...(!infrastructure&&e.suggested_scope_paths?{suggested_scope_paths:e.suggested_scope_paths}:{}),...(reasons?{verdict,reasons,...(e.bytes?{bytes:e.bytes}:{})}:{})});
+    json(res,infrastructure?503:400,{error:infrastructure?'admin service unavailable':shown,...(e.destination?{destination:e.destination}:{}),...(e.stale?{stale:e.stale}:{}),...(infrastructure?{code:e.code??null,reason:shown.slice(0,300)}:{}),...(!infrastructure&&e.suggested_scope_paths?{suggested_scope_paths:e.suggested_scope_paths}:{}),...(reasons?{verdict,reasons,...(e.bytes?{bytes:e.bytes}:{})}:{})});
   }
 });
 
