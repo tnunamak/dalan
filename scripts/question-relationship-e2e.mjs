@@ -66,12 +66,25 @@ if(args.includes('inspect')||args.includes('read')) {
     receiver = await startT3ResultFixture({ home: adapter.home, threadId, fakeCommand: stub, messageFile: 'sent.jsonl' });
     Object.assign(adapter.serverEnv, receiver.env, {
       NODE_ENV: 'test', DOT_BRIDGE_T3_DRY_RUN: '0', DOT_BRIDGE_T3CODE_BIN: stub,
+      DALAN_T3_HELD_RECHECK_MS: '10',
     });
     await adapter.startServer();
     const messages = id => (fs.existsSync(messagesFile) ? fs.readFileSync(messagesFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [])
       .filter(row => row.text.includes(id));
     const receiptsDir = path.join(adapter.home, '.local/share/dot-bridge/receipts');
     const owner = id => JSON.parse(fs.readFileSync(path.join(receiptsDir, createHash('sha256').update(id).digest('hex') + '.json'))).token;
+    async function resume(ordinal, notices) {
+      const before = notices();
+      parent('running', ordinal);
+      // R6 checks held wakes on its own timer, separately from the drain scheduler.
+      const deadline = Date.now() + (mode === 't3' ? 3000 : 0);
+      do {
+        await adapter.tick();
+        if (notices() > before || Date.now() >= deadline) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (true);
+      await adapter.tick();
+    }
     const revision = id => adapter.q1('SELECT revision FROM claim_command_revisions WHERE job=?', id).revision;
     const question = id => adapter.q1('SELECT * FROM job_questions WHERE request_id=? AND question_id=?', id, 'Q');
     let serial = 0;
@@ -173,7 +186,7 @@ if(args.includes('inspect')||args.includes('read')) {
       if (mode === 't3') assert.ok(adapter.q("SELECT * FROM notifications WHERE request_id=? AND kind='wait' AND state='pending'", held.id).length);
     }, mode === 't3' ? 'R6' : '');
     const beforeQuestionResume = messages(held.id).length;
-    parent('running', 3); await adapter.tick(); await adapter.tick();
+    await resume(3, () => messages(held.id).length);
     // PR R6: resume releases the held question once, under its original identity.
     cut(mode, 'held question delivered once on resume', () => {
       assert.equal(messages(held.id).length - beforeQuestionResume, mode === 't3' ? 1 : 0);
@@ -189,7 +202,7 @@ if(args.includes('inspect')||args.includes('read')) {
       assert.equal(messages(held.id).filter(row => row.text.includes('Fetch full report')).length, 0);
     }, mode === 't3' ? 'R6' : '');
     const beforeResultResume = messages(held.id).filter(row => row.text.includes('Fetch full report')).length;
-    parent('running', 5); await adapter.tick(); await adapter.tick();
+    await resume(5, () => messages(held.id).filter(row => row.text.includes('Fetch full report')).length);
     // PR R6: retained result becomes eligible on resume, exactly once.
     cut(mode, 'held result delivered once on resume', () => {
       assert.equal(messages(held.id).filter(row => row.text.includes('Fetch full report')).length - beforeResultResume, mode === 't3' ? 1 : 0);
