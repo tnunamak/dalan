@@ -6,7 +6,6 @@ import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const NOT_IN_SUITE = {
-  'scripts/question-relationship-e2e.mjs': 'B4 remains standalone until R5 answer journal and R6 wake fence merge; then add it to scripts/test-segments.json',
   // 'scripts/example-test.mjs': 'reason it does not run in the suite',
 };
 const isTest = file => /(-test|\.test|-e2e)\.mjs$/.test(file);

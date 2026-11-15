@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Standalone B4 acceptance trace. Deliberately outside test-segments.json until R5 + R6 merge.
+// B4 acceptance trace, registered in test-segments.json after R5 + R6 merged.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { DotBridgeAdapter } from './conformance/adapter-dot-bridge.mjs';
 import { startT3ResultFixture } from '../src/test-support/t3-result-fixture.mjs';
 import { createT3Destination } from '../src/destinations/t3.mjs';
+import * as journal from '../src/answer-journal.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 const threadId = '00000000-0000-4000-8000-000000000041';
@@ -129,19 +130,16 @@ if(args.includes('inspect')||args.includes('read')) {
     const questions = json(await cli(adapter, ['questions', job.id, '--json']));
     assert.equal(questions.questions[0].question_id, 'Q');
     // PR R5: the original envelope survives a committed answer whose reply was lost.
-    let journal;
-    try { journal = await import('../src/answer-journal.mjs'); }
-    catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error; }
     const savedRevision = revision(job.id);
     const envelope = { id: job.id, question_id: 'Q', text: 'JSON', command_key: 'answer:Q', expected_revision: savedRevision };
     let original;
-    if (journal) {
+    {
       const prepared = await journal.prepare(job.id, 'Q', 'JSON', { receiptsDir, readRevision: async () => savedRevision });
       await assert.rejects(journal.send(prepared, {
         attempts: 1, post: async body => { original = value(await adapter.admin('POST', '/answer', body, owner(job.id))); throw Object.assign(new Error('reply lost after commit'), { kind: 'transport' }); },
         readQuestion: async () => question(job.id),
       }), /reply lost/);
-    } else original = value(await adapter.admin('POST', '/answer', envelope, owner(job.id)));
+    }
     await worker('renew_claim', job, { lease_ms: 60000 });
     const advanced = revision(job.id);
     assert.ok(advanced > savedRevision + 1, 'worker advanced revision after answer commit');
@@ -149,7 +147,6 @@ if(args.includes('inspect')||args.includes('read')) {
     await adapter.control({ op: 'restart' }); // SIGKILL + respawn on the same SQLite file.
     const replay = await cli(adapter, ['answer', job.id, 'Q', 'JSON', '--json']);
     cut(mode, 'answer journal and CLI replay after kill at advanced revision', () => {
-      assert.ok(journal, 'R5 answer journal module missing');
       const reply = json(replay);
       assert.equal(reply.revision, original.revision, 'replay returns the original receipt');
       const saved = JSON.parse(fs.readFileSync(path.join(receiptsDir, `${job.id}.answers/Q.json`)));
@@ -157,7 +154,7 @@ if(args.includes('inspect')||args.includes('read')) {
       assert.equal(saved.state, 'committed');
       assert.equal(revision(job.id), advanced, 'replay does not mutate the job');
     }, 'R5');
-    if (journal) {
+    {
       const reconciled = await journal.reconcile(job.id, 'Q', { receiptsDir, readQuestion: async () => question(job.id) });
       assert.ok(['committed', 'confirmed'].includes(reconciled.state));
     }

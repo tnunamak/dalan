@@ -22,7 +22,7 @@ The T3 side of this test uses the existing `t3code` stub pattern and `startT3Res
 
 ## Dependencies and baseline
 
-The script collects cut failures and continues to later cuts. A failed dependency cut stays a failure; it is never converted into an expected pass. On main, where the journal module is absent, the harness commits one keyed answer directly so consumption, finish and the later cuts can still be checked. This baseline continuation does not count as journal acceptance.
+The script collects cut failures and continues to later cuts. A failed assertion stays a failure; it is never converted into an expected pass. R5 and R6 are now merged, so the journal is required and the trace runs in the default suite. The table records the original main baseline at `4d2abf19`, before those dependencies merged.
 
 | Cut | Main baseline |
 | --- | --- |
@@ -40,4 +40,4 @@ The script collects cut failures and continues to later cuts. A failed dependenc
 | Follow-up is a new job | Pass, both requesters |
 | Destination generation/admission interface | T3 waits on R6 |
 
-Keep this test outside the default suite while these dependency cuts are red. Add it to `scripts/test-segments.json` after R5 and R6 merge and the combined trace passes. Promotion to conformance traces T43+ comes afterward.
+The test is registered in `scripts/test-segments.json`; its temporary test-listing exemption has been removed. Promotion to conformance traces T43+ comes afterward.
