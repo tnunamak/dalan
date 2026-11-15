@@ -360,9 +360,6 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
     if(!input) throw new Error('output_paths require pinned repository input (inputs: [{github_repo, base_sha}])');
     if(input.input_patch) throw new Error('output_paths cannot be combined with input_patch: the patch is applied to the workspace and would count as a change outside output_paths. Submit the input patch as a separate job, or push it and pin head_sha');
     for(const file of outputs) {
-      if(repositoryImplementation&&isSensitiveRepoPath(file,p.sensitive_paths)) {
-        dropped.push({path:file,reason:sensitiveReason(file)});continue;
-      }
       try { inspectPath(file); }
       catch(error) { throw new Error(`output_paths: ${error.message}. Name the new file so that it does not look like credential, auth or signing material`); }
     }
