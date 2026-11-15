@@ -18,7 +18,7 @@ try {
   store.db.prepare('UPDATE registered_tools SET name=?,schema_hash=? WHERE name=?').run(definition.name,schemaHash(definition),'legacy_send');
   const snapshot=()=>JSON.stringify(['registered_tools','tool_grants','tool_registry_meta','tool_registry_log'].map(table=>store.db.prepare(`SELECT * FROM ${table}`).all()));
   const before=snapshot();
-  assert.throws(()=>registry.initializeT3Grants(names,['dot']),error=>error.code==='reserved_tool_conflict','old ordinary tool must never gain implicit grants');
+  assert.throws(()=>registry.initializeT3Grants(names,['dot']),error=>error.code==='reserved_tool_conflict'&&error.message.includes('t3_thread_send'),'old ordinary tool must never gain implicit grants');
   assert.equal(snapshot(),before,'collision refusal must be atomic and leave the ordinary tool untouched');
   assert.deepEqual(registry.listTools('dot').tools,[]);
   await assert.rejects(registry.callTool({worker:'dot',tool:'t3_thread_send',class:'read',args:{}}),unavailable);

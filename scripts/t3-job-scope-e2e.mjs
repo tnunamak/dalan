@@ -118,6 +118,22 @@ try {
   store.db.prepare("UPDATE claims SET lease_deadline_at='2000-01-01T00:00:00.000Z',lease_boot_id=NULL WHERE request_id='req_scoped'").run();
   await denied('t3_thread_read',{threadId:'thread-1'});
   assert.deepEqual(unwrap(await call('dot-bridge.read',secret,'t3_thread_list',{})).threads,[]);
+  // Use separate claims: maintenance may abandon a deliberately corrupted lease.
+  registry.grant('t3_thread_send','dot');
+  const malformed=[];
+  for(const deadline of [null,'garbage']) for(const sameBoot of [true,false]) {
+    const index=malformed.length,threadId=`thread-malformed-${index}`,request_id=`req_malformed_${index}`;
+    store.submit({...payload,request_id},threadId,null,'owner');
+    store.claim(request_id,'fixture','fixture-subject',6,null,'dot');
+    assert.equal(unwrap(await call('dot-bridge.read',secret,'t3_thread_read',{threadId})).thread.id,threadId,'fixture has a live grant before corruption');
+    const lease=store.db.prepare('SELECT * FROM claims WHERE request_id=?').get(request_id);
+    store.db.prepare('UPDATE claims SET lease_deadline_at=?,lease_boot_id=? WHERE request_id=?').run(deadline,sameBoot?lease.lease_boot_id:null,request_id);
+    const result=await call('dot-bridge.work',secret,'t3_thread_send',{threadId,message:'malformed lease'});
+    malformed.push({deadline,sameBoot,denied:result.isError,expired:store.leaseExpired({...lease,lease_deadline_at:deadline,lease_boot_id:sameBoot?lease.lease_boot_id:null})});
+  }
+  assert.deepEqual(malformed,[null,'garbage'].flatMap(deadline=>[true,false].map(sameBoot=>({deadline,sameBoot,denied:true,expired:true}))),'NULL and unparseable deadlines must expire and deny writes with either clock');
+  assert.equal(fs.readFileSync(path.join(home,'effects'),'utf8'),'send\nsend\n','malformed leases must dispatch no CLI writes');
+  console.log('PASS malformed lease: NULL and garbage deadlines deny T3 writes with same-boot and fallback clocks');
   console.log('receipt',JSON.stringify(store.db.prepare('SELECT tool,result_status FROM t3_audit WHERE result_status=\'success\'').all()));
   store.db.close();
   console.log('PASS job-scoped T3: three threads, discovery, read/send/set/create denial, revoke during wait');

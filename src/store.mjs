@@ -1894,8 +1894,11 @@ export class Store {
     return activity<this.startedMs&&this.nowMs()<this.startedMs+this.claimLeaseMs(claim);
   }
   leaseExpired(claim) {
+    // Missing or malformed persisted deadlines carry no authority, even with a same-boot clock.
+    const persistedDeadline=Date.parse(claim.lease_deadline_at);
+    if(!Number.isFinite(persistedDeadline)) return true;
     const deadline=this.leaseMonotonicDeadline(claim);
-    return deadline===null?this.nowMs()>=Date.parse(this.leaseExpiresAt(claim)):this.monotonicNow()>=deadline;
+    return deadline===null?this.nowMs()>=persistedDeadline:this.monotonicNow()>=deadline;
   }
   // A revoked grant cannot authorize a successor until its deadline and all
   // host effect channels have stopped. Unknown stop evidence fails closed.
