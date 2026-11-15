@@ -101,7 +101,7 @@ const exists = (a, file) => fs.existsSync(path.join(a.dir, file)) || (() => { tr
 
 try {
   if (want('withheld')) {
-    const withheld = ['.env.example', 'docs/security/credential-evidence.json'];
+    const withheld = ['.env.example', 'docs/security/credential-evidence.json', '.github/scripts/sign-dataconnect-release/check-draft-before-publish.sh', 'target/auth-data.json'];
     for (const file of withheld) {
       fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
       fs.writeFileSync(path.join(repo, file), 'WITHHELD_SENTINEL\n');

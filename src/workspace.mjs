@@ -389,8 +389,8 @@ function excludedPathsAbsent(dir,assignment) {
   const walk=base=>fs.readdirSync(path.join(dir,base),{withFileTypes:true}).every(entry=>{
     if(entry.name==='.git') return true;
     const file=base?`${base}/${entry.name}`:entry.name;
-    if(isSensitiveRepoPath(file,policy.paths)) return false;
-    return !entry.isDirectory()||walk(file);
+    if(entry.isDirectory()) return walk(file);
+    return !isSensitiveRepoPath(file,policy.paths);
   });
   return walk('');
 }
