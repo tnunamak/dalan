@@ -19,8 +19,8 @@ try {
   registry.register({name:'migration_fixture',description:'existing grant',class:'read',inputSchema:{type:'object',properties:{},additionalProperties:false},handler:{kind:'echo'}});
   registry.grant('migration_fixture','dot');
   store.submit({schema_version:1,request_id:'req_migration',brief:'retained payload',inputs:[],expected_output:'result',execution_scope:'read-only'},{mode:'none'},null,'owner');
-  // Schema 68 already contains the R7 purpose and R6 generation fields. C3's only
-  // schema addition is scope, so removing it reconstructs the real predecessor.
+  // Rewind only C3's scope addition, retaining unrelated later schema fields.
+  // The current Store must restore scope without changing any other data or schema.
   store.db.exec('ALTER TABLE tool_grants DROP COLUMN scope; PRAGMA user_version=68;');
   assert(store.db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='parent_generation'").get());
   assert(store.db.prepare("SELECT 1 FROM pragma_table_info('job_questions') WHERE name='purpose'").get());
@@ -28,7 +28,7 @@ try {
   store.db.close();
   store=new Store(file);
   const after=snapshot(store.db);
-  assert.equal(after.version,69,'schema 68 must advance directly to 69');
+  assert.equal(after.version,70,'schema 68 must advance through the current migrations to 70');
   const grant=after.tables.tool_grants[0];
   assert.equal(grant.scope,null);
   assert.deepEqual(after.tables.tool_grants.map(({scope,...row})=>row),before.tables.tool_grants);
@@ -38,6 +38,6 @@ try {
   assert.equal(store.db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
   store.db.close();
   store=new Store(file);
-  assert.deepEqual(snapshot(store.db),after,'reopening schema 69 must change nothing');
-  console.log(`MIGRATION: 68 -> ${after.version}; scope added; ${after.tables.tool_grants.length} existing grant preserved; reopen 69 unchanged`);
+  assert.deepEqual(snapshot(store.db),after,'reopening schema 70 must change nothing');
+  console.log(`MIGRATION: 68 -> ${after.version}; scope added; ${after.tables.tool_grants.length} existing grant preserved; reopen 70 unchanged`);
 } finally {store?.db.close();fs.rmSync(home,{recursive:true,force:true});}
