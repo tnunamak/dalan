@@ -25,6 +25,9 @@ function journalName(name, receiptsDir, job) {
   return QUESTION.test(question) && path.basename(journalPath(receiptsDir,job,question)) === name;
 }
 export function assertJournalAllowed(store, job) {
+  // Requesters use an authenticated availability callback, not a second Store.
+  // Await its result before preparing; local Store callers remain synchronous.
+  if (typeof store === 'function') return store(job);
   // Retained tombstones remain authoritative even if other native rows are gone.
   if (store.db.prepare('SELECT 1 FROM job_retention_tombstones WHERE job=?').get(job)) fail('TOMBSTONE');
   return store.assertProtocolAvailable(job);

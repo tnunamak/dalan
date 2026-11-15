@@ -29,12 +29,23 @@ try {
   fs.writeFileSync(path.join(outside,'Q.json'),'outside sentinel');
   fs.symlinkSync(outside,path.join(receiptsDir,linked+'.answers'),'dir');
   now+=100;expire(expired);expire(linked);
+  // Same awaited callback gate as the CLI; real Store, no server/network.
+  const refused='refused-job-001';submit(refused,now+1);now+=1;expire(refused);
+  let revisionReads=0;
+  await assert.rejects(async()=>{
+    await assertJournalAllowed(async job=>store.assertProtocolAvailable(job),refused);
+    await prepare(refused,'Q','synthetic answer only',{receiptsDir,
+      readRevision:async()=>{revisionReads++;return store.protocolRevision(refused);}});
+  },{code:'TOMBSTONE'});
+  assert.equal(revisionReads,0);
+  assert.equal(fs.existsSync(path.join(receiptsDir,refused+'.answers')),false);
   assert.equal(assertJournalAllowed(store,live),true);
   assert.throws(()=>assertJournalAllowed(store,expired),error=>error.code==='TOMBSTONE'&&error.message==='TOMBSTONE');
   assert.equal(assertJournalAllowed(store,'unknown-job-001'),true,'native legacy/unknown policy remains unchanged');
   const result=pruneExpiredAnswerJournals({store,receiptsDir});
   assert.deepEqual(result.pruned,[expired]);
-  assert.deepEqual(result.skipped,[{job:linked,reason:'unsafe_answers_directory'}]);
+  assert.deepEqual(result.skipped,[{job:linked,reason:'unsafe_answers_directory'},
+    {job:refused,reason:'journal_missing'}]);
   assert.equal(fs.existsSync(journalPath(receiptsDir,live,'Q')),true);
   assert.equal(fs.existsSync(path.join(receiptsDir,expired+'.answers')),false);
   assert.equal(fs.lstatSync(path.join(receiptsDir,linked+'.answers')).isSymbolicLink(),true);

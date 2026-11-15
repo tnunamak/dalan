@@ -38,6 +38,7 @@ import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError } from '../src/admin-socket.mjs';
 import { answerThroughJournal } from '../src/answer-journal.mjs';
+import { assertJournalAllowed } from '../src/answer-journal-retention.mjs';
 // An answer reply that takes longer than this counts as lost; the journaled envelope is sent again.
 const ANSWER_TIMEOUT_MS=30000;
 
@@ -569,6 +570,8 @@ async function main() {
     case 'answer': { if(args.some(a=>a.startsWith('-')&&a!=='--json')) throw new Error('answer accepts only --json as an option');const [id,questionId,...parts]=args.filter(a=>a!=='--json'),text=parts.join(' ');if(!id||!questionId||!text) throw new Error('answer requires request id, question id and text');
       // Every answer goes through the journal: the key and expected revision are saved before the first send, so a crash or a lost reply is retried with the same envelope.
       const owner=()=>({'x-owner-capability':receipt(id).token});
+      // Check even an existing journal before prepare can create any file.
+      await assertJournalAllowed(job=>request('/get?id='+encodeURIComponent(job)+'&peek=1','GET',null,owner()),id);
       result=await answerThroughJournal({receiptsDir:receipts,job:id,questionId,text,
         readRevision:async()=>{const got=await request('/get?id='+encodeURIComponent(id)+'&peek=1','GET',null,owner());return Number.isSafeInteger(got.protocol_revision)?got.protocol_revision:null;},
         post:envelope=>request('/answer','POST',envelope,owner(),ANSWER_TIMEOUT_MS),
