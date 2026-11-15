@@ -316,6 +316,7 @@
   "node --test scripts/systemd-container-safety-test.mjs",
   "node scripts/host-start-classification-test.mjs",
   "node scripts/t3-result-delivery-test.mjs",
+  "node scripts/t3-wake-fence-e2e.mjs",
   "node scripts/t3-transport-protocol-test.mjs",
   "node scripts/regrant-question-fencing-test.mjs",
   "node scripts/regrant-unknown-delivery-test.mjs",

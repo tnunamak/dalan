@@ -156,7 +156,8 @@ async function main() {
   const blockerSends=(await sent()).filter(x=>x.input.includes('Worker question for request '+requestId));
   assert(blockerSends.length===3,'duplicate blocker was sent or normal progress forwarded');
   for(const item of blockerSends) {
-    assert(JSON.stringify(item.args)===JSON.stringify(['--json','--origin','http://127.0.0.1:3773','threads','send','--thread','thread_active','--stdin','--if-busy','steer']),'unexpected blocker argv');
+    // A worker question now sends on the stable-id path, like a result: the same argv as the result check below.
+    assert(JSON.stringify(item.args)===JSON.stringify(['threads','send','--thread','thread_active','--stdin','--if-busy','steer']),'unexpected blocker argv');
     assert(item.input.includes('[dot-bridge event evt_')&&!item.args.includes('--wake-settled'),'blocker marker/lifecycle changed');
   }
 

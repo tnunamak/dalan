@@ -179,12 +179,26 @@ export async function inspectThread(threadId, environmentId) {
   const data=await inspectMetadata(threadId);
   if (!data?.thread || data.thread.id!==threadId || data.thread.deletedAt ||
       !environmentId || !data.runtime?.environmentId || data.runtime.environmentId!==environmentId) return {state:'unavailable'};
-  return classifyThread(data.thread);
+  return {...classifyThread(data.thread),generation:threadGeneration(data.thread,data.runtime.environmentId)};
+}
+// T3 has no 'stopped' run status. thread.stop and run.interrupt both leave the latest run 'interrupted', and inspect shows
+// nothing else that tells them apart (measured on T3 4643: docs/t3-wake-fence-r4.md). A wake after either starts a new run.
+// So a latest run in one of these states holds the wake. A held wake over-fences a plain interrupt: it costs a held wake, never a wrong one.
+export const heldRunStatuses=['interrupted','cancelled','canceled','failed'];
+// The parent generation: the thread, its environment and the latest run seen in one inspect.
+export const threadGeneration=(thread,environmentId)=>({threadId:thread.id,environmentId,runId:thread.latestRun?.runId??null,ordinal:Number.isInteger(thread.latestRun?.ordinal)?thread.latestRun.ordinal:null});
+// Best-effort check of the generation recorded at submit against the one seen now. It catches a different thread or
+// environment and a thread whose runs went backwards. It cannot see stop-then-resume: that needs a stopSeq from T3.
+export function generationDrift(recorded,current) {
+  if(!recorded||!current) return null;
+  if(recorded.threadId!==current.threadId||recorded.environmentId!==current.environmentId) return 'parent thread or environment changed since submit';
+  if(Number.isInteger(recorded.ordinal)&&(!Number.isInteger(current.ordinal)||current.ordinal<recorded.ordinal)) return `parent runs went back since submit (run ${recorded.ordinal} to ${current.ordinal??'none'})`;
+  return null;
 }
 export function classifyThread(thread) {
   if(thread.deletedAt) return {state:'deleted'};
   if(thread.archivedAt) return {state:'archived'};
-  if(['stopped','cancelled','canceled','failed'].includes(thread.latestRun?.status)) return {state:'stopped'};
+  if(heldRunStatuses.includes(thread.latestRun?.status)) return {state:'held',reason:`latest run ${thread.latestRun.status}`};
   if(['stopped','settled','archived','deleted','cancelled','canceled'].includes(thread.status)) return {state:thread.status};
   if(thread.status==='active') return {state:'active'};
   return {state:'uncertain_lifecycle'};

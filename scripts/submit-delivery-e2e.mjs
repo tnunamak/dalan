@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Store } from '../src/store.mjs';
 import { portFromListeningBanner } from '../src/test-support/port.mjs';
+import { startT3ResultFixture } from '../src/test-support/t3-result-fixture.mjs';
 
 const repo=resolve(new URL('..',import.meta.url).pathname);
 const delegated='thread:delegated-task:command%3Amcp%3A00000000-0000-4000-8000-000000000004%3Adelegate-task%3Afixture-task';
@@ -38,7 +39,7 @@ function migrateExistingCopy() {
   chmodSync(`${copy}.secrets`,0o700);
   chmodSync(`${copy}.secrets/storage.key`,0o600);
   const migrated=new Store(copy);
-  assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,67,'migration version');
+  assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,68,'migration version');
   assert.equal(migrated.get(oldId).delivery_mode,'t3:mcp:12345678-1234-1234-1234-123456789abc','legacy delivery');
   migrated.db.close();
 }
@@ -53,6 +54,10 @@ else if(args.includes('inspect')) console.log(JSON.stringify({ok:true,data:{runt
 else if(args.includes('send')) { let text=''; process.stdin.on('data',b=>text+=b); process.stdin.on('end',()=>{fs.appendFileSync(process.env.HOME+'/t3-sends.log',text+'\\n');console.log(JSON.stringify({ok:true,data:{}}));}); }
 else console.log(JSON.stringify({ok:true,data:{}}));
 `,{mode:0o755});
+// A blocker wake goes to a T3 parent on the stable-id path (HTTP and WebSocket), so this test needs the fake T3 server too.
+const drainThread='00000000-0000-4000-8000-000000000002';
+const t3Fixture=await startT3ResultFixture({home,threadId:drainThread,fakeCommand:join(home,'bin','t3code'),messageFile:'t3-sends.log'});
+Object.assign(env,t3Fixture.env);
 let service;
 let serviceExit=null;
 try {
@@ -121,7 +126,7 @@ try {
   for(const {id,type} of protectedItems) if(type==='blocker') assert.equal((await run([process.execPath,'bin/dalan.mjs','cancel',id,'--json'])).code,0);
   writeFileSync(join(home,'.config','dot-bridge','limits.json'),JSON.stringify({main_thread_ids:[]}),{mode:0o600});
 
-  const badDeliveryId=aliasId,goodDeliveryId=`req_${randomUUID()}`,drainThread='00000000-0000-4000-8000-000000000002';
+  const badDeliveryId=aliasId,goodDeliveryId=`req_${randomUUID()}`;
   const goodCreated=await submit(`t3:${drainThread}`,goodDeliveryId);assert.equal(goodCreated.code,0,goodCreated.stderr);
   const pause=await run([process.execPath,'bin/dalan.mjs','pause','--reason','quarantine test']);assert.equal(pause.code,0,pause.stderr);
   const db=new DatabaseSync(join(home,'.local','share','dot-bridge','bridge.db'));
@@ -160,5 +165,6 @@ try {
   console.log('PASS operator admission, quiet default, runtime protection, wait retention, submit delivery modes, T3 ID forms, main-thread guard, no-send wait delivery, and v15 migration copy');
 } finally {
   if(service&&serviceExit===null) { const exited=new Promise(resolveStop=>service.once('exit',resolveStop));service.kill('SIGTERM');await exited; }
+  await t3Fixture.close();
   rmSync(home,{recursive:true,force:true});
 }
