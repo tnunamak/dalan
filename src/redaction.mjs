@@ -610,7 +610,41 @@ export const maskText = text => maskCore(splitSafeJson(text) ?? String(text));
 
 // A credential may be split across sibling strings ("Bearer" / value, "password=" / value). If scanning the
 // siblings joined masks more than scanning each alone, none of them can be trusted.
+// Keep armor context when a header and its body occupy separate fields. The
+// ordinary sibling pass intentionally joins already-masked text, which otherwise
+// erases the header before a short/truncated body can be recognized.
+function maskArmorContinuations(raws, cleaned) {
+  let header = null;
+  for (let i = 0; i < raws.length; i++) {
+    const raw = raws[i];
+    if (typeof raw !== 'string') { header = null; continue; }
+    // Only an isolated, recognized BEGIN banner starts cross-field context.
+    // Complete secrets in one field must not absorb unrelated neighbours.
+    if (/^\s*[-]+BEGIN[^\r\n]+[-]+\s*$/.test(raw) &&
+        [...armorMaskRanges(raw, false)].length) {
+      header = raw;
+      continue;
+    }
+    if (header === null) continue;
+    const lines = raw.trim().split(/\r?\n/);
+    const footer = line => /^[-]+END[^\r\n]+[-]+$/.test(line);
+    const payload = lines.filter(line => !footer(line));
+    // Require actual multiline/base64 material, never arbitrary prose. A short
+    // final line is accepted together with a footer or an earlier body line.
+    const material = payload.length > 0 && payload.every(line => /^[A-Za-z0-9+/]{4,}={0,2}$/.test(line)) &&
+      (payload.some(line => line.length >= 16) || lines.some(footer));
+    if (!material) { header = null; continue; }
+    const joined = header + '\n' + raw;
+    const start = header.length + 1;
+    if ([...armorMaskRanges(joined, false)].some(range => range.start < joined.length && range.end > start)) {
+      cleaned[i][1] = '[redacted secret]';
+      cleaned[i][2] = true;
+    }
+    if (lines.some(footer)) header = null;
+  }
+}
 function splitSiblings(raws, cleaned) {
+  maskArmorContinuations(raws, cleaned);
   const at = raws.flatMap((item, i) => typeof item === 'string' && !cleaned[i][2] ? [i] : []);
   if (at.length < 2) return cleaned;
   const texts = at.map(i => raws[i]);
