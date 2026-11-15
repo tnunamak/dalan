@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Run the package's ordered test segments to completion and report every exit.
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -24,9 +24,18 @@ if (!process.env.NODE_OPTIONS?.includes(sqliteWarningFlag)) {
 process.env.GIT_CONFIG_GLOBAL ??= '/dev/null';
 // One host-check reservation per suite, inherited by every segment and bridge.
 process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `suite-${process.pid}-${randomUUID()}`;
-// Setup's production lock remains per user; every suite owns a private override.
-const setupLockDir = await mkdtemp(path.resolve(os.tmpdir(), 'dalan-setup-'));
-process.env.DALAN_SETUP_LOCK_DIR = setupLockDir;
+// A short suite root isolates home-based fixtures, caches, and setup's per-user lock.
+const suiteRoot = await mkdtemp(path.resolve(os.tmpdir(), 's-'));
+const suiteDirs = {
+  HOME: path.join(suiteRoot, 'h'), TMPDIR: path.join(suiteRoot, 't'),
+  DOT_BRIDGE_TEST_TMP: path.join(suiteRoot, 't'),
+  DALAN_SETUP_LOCK_DIR: path.join(suiteRoot, 'l'),
+  npm_config_cache: path.join(suiteRoot, 'npm'),
+};
+await Promise.all([...new Set([...Object.values(suiteDirs), path.join(suiteDirs.HOME, '.tmp')])].map(dir => mkdir(dir, {recursive:true,mode:0o700})));
+Object.assign(process.env, suiteDirs);
+// Let XDG defaults follow each fixture's HOME; retain the real user bus for systemd.
+for (const key of ['XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_CACHE_HOME']) delete process.env[key];
 let interrupted = null;
 let activeRun = null;
 
@@ -240,4 +249,4 @@ async function main() {
 main().catch(error => {
   console.error(error);
   process.exitCode = 1;
-}).finally(() => rm(setupLockDir, { recursive: true, force: true }));
+}).finally(() => rm(suiteRoot, { recursive: true, force: true }));

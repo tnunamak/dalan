@@ -131,6 +131,7 @@ function runIsolatedCheck(check,checkoutDir,runnerRoot,repoName) {
   const request={checkout_dir:checkoutDir,runner_root:root,argv:check.argv,github_repo:repoName,maskPaths:masked.paths,sourceExemptions:masked.sourceExemptions};
   const env={PATH:'/usr/bin:/bin',HOME:path.join(root,'home'),TMPDIR:path.join(root,'tmp'),LANG:'C.UTF-8',LC_ALL:'C.UTF-8',TZ:'UTC',NODE_ENV:'production',DALAN_WORKSPACE_ROOT:path.join(root,'workspace'),DALAN_INTEGRATOR_SCRATCH_ROOT:buildScratch};
   if(readEnv('DALAN_HOST_CHECKS')==='1') env.DALAN_HOST_CHECKS='1';
+  if(process.env.DALAN_HOST_CHECK_UNIT_SUFFIX) env.DALAN_HOST_CHECK_UNIT_SUFFIX=process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
   if(process.env.XDG_RUNTIME_DIR) env.XDG_RUNTIME_DIR=process.env.XDG_RUNTIME_DIR;
   if(process.env.DBUS_SESSION_BUS_ADDRESS) env.DBUS_SESSION_BUS_ADDRESS=process.env.DBUS_SESSION_BUS_ADDRESS;
   fs.mkdirSync(env.HOME,{recursive:true,mode:0o700});

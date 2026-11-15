@@ -141,6 +141,7 @@ export class DotBridgeAdapter {
     const env = {
       PATH: path.dirname(process.execPath) + ':/usr/bin:/bin', HOME: this.home, DALAN_LEGACY_PROFILE: '1', LANG: 'C.UTF-8', TZ: 'UTC', TMPDIR: path.join(this.home, 'tmp'),
       GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+      ...(process.env.DALAN_HOST_CHECK_UNIT_SUFFIX ? {DALAN_HOST_CHECK_UNIT_SUFFIX:process.env.DALAN_HOST_CHECK_UNIT_SUFFIX} : {}),
       DOT_BRIDGE_CATALOG_PROFILE: 'protocol-v0',
       DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_T3_DRY_RUN: '1',
       DOT_BRIDGE_WORKSPACE_ROOT: path.join(this.home, 'work'),

@@ -6,7 +6,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import childProcess, { spawn } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import http from 'node:http';
 import { parseHostBudget, runHostBudget } from '../src/host-budget.mjs';
 
@@ -158,32 +159,45 @@ test('install and check share storage and one output allowance', { skip: !linux 
   assert.equal(fs.existsSync(path.join(home, 'installed')), false);
 });
 
-test('production default reserves exactly one host-check unit per Unix user', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
-  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+test('production default names the fixed unit when the test seam is unset', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX, originalSpawn = childProcess.spawn;
+  const intercepted = new Error('host-check spawn intercepted');
   delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
-  let cancel = false, first, start;
+  let unit;
+  childProcess.spawn = (file, args) => {
+    assert.equal(file, '/usr/bin/systemd-run');
+    unit = args.find(arg => arg.startsWith('--unit='));
+    throw intercepted;
+  };
+  syncBuiltinESMExports();
   try {
-    // Other copies of this regression also exercise the production reservation.
-    // Wait for its owner to finish; never stop a unit we did not acquire.
-    const deadline = performance.now() + 30000;
-    while (!start) {
-      let ready;
-      const started = new Promise(resolve => { ready = value => resolve({start:value}); });
-      first = runHostBudget({dir:home,budgets,enabled:true,cancelled:()=>cancel,onOutputStarted:ready,
-        phases:[{name:'check',argv:['/runtime/node','-e','console.log("ready");setInterval(()=>{},1000)']}]});
-      const outcome = await Promise.race([started, first.then(result => ({result}))]);
-      if (outcome.start) { start = outcome.start; break; }
-      assert.match(outcome.result.error, /host budget admission failed:.*(already|exists|loaded)/s);
-      assert(performance.now() < deadline, 'production reservation remained occupied for 30 seconds');
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    assert.equal(start.unit, 'dot-bridge-host-check.service');
+    await assert.rejects(runHostBudget({dir:home,budgets,enabled:true,phases:[{name:'check',argv:['/usr/bin/true']}]}), error => error === intercepted);
+    assert.equal(unit, '--unit=dot-bridge-host-check.service');
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    if (suffix === undefined) delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+    else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = suffix;
+  }
+});
+
+test('one suite reservation refuses a second concurrent host check', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = suffix || `reservation-${process.pid}-${randomUUID()}`;
+  const expectedUnit = `dot-bridge-host-check-${process.env.DALAN_HOST_CHECK_UNIT_SUFFIX}.service`;
+  let cancel = false, ready;
+  const started = new Promise(resolve => { ready = resolve; });
+  const first = runHostBudget({dir:home,budgets,enabled:true,cancelled:()=>cancel,onOutputStarted:ready,
+    phases:[{name:'check',argv:['/runtime/node','-e','console.log("ready");setInterval(()=>{},1000)']}]});
+  try {
+    const start = await Promise.race([started, first.then(result => { throw new Error(JSON.stringify(result)); })]);
+    assert.equal(start.unit, expectedUnit);
     const second = await runHostBudget({dir:home,budgets,enabled:true,phases:[{name:'check',argv:['/usr/bin/true']}]});
-    assert.equal(second.unit, 'dot-bridge-host-check.service');
+    assert.equal(second.unit, expectedUnit);
     assert.match(second.error, /host budget admission failed/);
     assert.deepEqual(second.phases, [], 'the second check never launches a phase');
     const show = spawnSync('systemctl', ['--user','show',start.unit,'-p','ActiveState','--value'], {encoding:'utf8'});
-    assert.equal(show.stdout.trim(), 'active', 'refusing the second check leaves the reservation holder running');
+    assert.equal(show.stdout.trim(), 'active', 'the reservation holder remains running');
   } finally {
     cancel = true;
     await first;

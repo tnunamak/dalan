@@ -135,7 +135,11 @@ try {
   fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});
   const expiredFinish=await rawTool('finish',{request_id:expiredRequest,claim_id:expiredClaim.claim_id,outcome:'completed',summary:'expired claim',result:'must be refused'});
   assert.equal(expiredFinish.isError,true,'expired claim cannot use the broken-policy fallback');assert.match(expiredFinish.content[0].text,/lease_expired/);assert.equal(stateOf(expiredRequest).report,null);
-  withStore(store=>store.abandon(expiredRequest,{actor:'operator',reason:'lease_expired'}));
+  // The live lease sweeper may already have requeued this expired claim.
+  // Exercise that order deterministically; cancellation accepts either state.
+  withStore(store=>{store.startedMs=0;store.sweepStaleLeases();});
+  assert.equal(activeClaims(expiredRequest),0,'the sweeper has already released the expired claim');
+  withStore(store=>store.cancel(expiredRequest,'fixture cleanup after expired-claim refusal'));
 
   writeWorkers(true);const held=submit('read-only'),heldClaim=await tool('claim',{request_id:held,claimant:'held'});
   fs.writeFileSync(workersFile,'{ invalid json',{mode:0o600});

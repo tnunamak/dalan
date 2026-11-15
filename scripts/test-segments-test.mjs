@@ -102,6 +102,22 @@ try {
     await assert.rejects(fs.stat(other[0]), {code:'ENOENT'});
     assert((await fs.stat(root)).isDirectory(), 'cleanup preserves the inherited directory');
   });
+  await check('home, temporary files and npm cache belong to a private suite root', async () => {
+    const command = `${node} -e 'console.log("SUITE_STATE="+JSON.stringify({home:require("node:os").homedir(),tmp:require("node:os").tmpdir(),cache:process.env.npm_config_cache,xdg:process.env.XDG_CONFIG_HOME??null}))'`;
+    const first = await fixture('suite-home-first', [command], {HOME:root,XDG_CONFIG_HOME:root});
+    const second = await fixture('suite-home-second', [command], {HOME:root,XDG_CONFIG_HOME:root});
+    const a = await first.ended, b = await second.ended;
+    assert.equal(a.code, 0, a.output); assert.equal(b.code, 0, b.output);
+    const state = output => JSON.parse(/^SUITE_STATE=(.+)$/m.exec(output)[1]);
+    const x = state(a.output), y = state(b.output);
+    assert.notEqual(x.home, root); assert.notEqual(x.home, y.home);
+    const suite = path.dirname(x.home);
+    assert.equal(path.dirname(x.tmp), suite); assert.equal(path.dirname(x.cache), suite);
+    assert.equal(x.xdg, null, 'XDG defaults follow each fixture HOME');
+    await assert.rejects(fs.stat(suite), {code:'ENOENT'});
+    await assert.rejects(fs.stat(path.dirname(y.home)), {code:'ENOENT'});
+    assert((await fs.stat(root)).isDirectory(), 'caller home survives cleanup');
+  });
   await check('real entry point reports both failures and still executes later commands', async () => {
     const f = await fixture('exits', [`${node} -e 'process.exit(7)'`, `${node} -e 'console.log("LATER_RAN")'`, `${node} -e 'process.exit(9)'`]);
     const result = await f.ended;
