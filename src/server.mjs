@@ -1178,6 +1178,8 @@ const adminServer=http.createServer(async(req,res)=>{
       const got=maskedForOwner(withAvailableChecks(store.get(requestId)));
       if(url.searchParams.get('peek')!=='1') store.recordConsumed(requestId,'get');
       if(protocolServices&&store.isProtocolJob(requestId))got.protocol_stop=protocolServices.observation(requestId);
+      // The owner needs the current revision to build a keyed, revision-checked command such as `dalan answer`. It is null for a job with no protocol revisions.
+      got.protocol_revision=store.isProtocolJob(requestId)?store.protocolRevision(requestId):null;
       if(!workspaceEnabled||got.assignment?.execution_scope!=='implementation'||got.available_checks_error==='repository_policy_denied') return json(res,200,got);
       try { return json(res,200,{...got,check_metadata:workspace.checkMetadataFor(got.assignment,got.target_worker)}); }
       catch(error) { return json(res,200,{...got,check_metadata:null,check_metadata_error:publicErrorText(error,'check metadata')}); }
