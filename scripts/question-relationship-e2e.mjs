@@ -198,6 +198,7 @@ if(args.includes('inspect')||args.includes('read')) {
     cut(mode, 'result retained while parent stopped', () => {
       assert.equal(adapter.q1('SELECT outcome FROM reports WHERE request_id=?', held.id).outcome, 'completed');
     });
+    // PR R6: finishing while interrupted retains the result without waking the parent.
     cut(mode, 'stopped parent holds result wake', () => {
       assert.equal(messages(held.id).filter(row => row.text.includes('Fetch full report')).length, 0);
     }, mode === 't3' ? 'R6' : '');
