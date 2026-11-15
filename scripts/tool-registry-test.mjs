@@ -1036,7 +1036,7 @@ test('lease: a database with the old table shape gains the column and an old pen
   first.db.close();
   const store = new Store(dbPath);
   assert(store.db.prepare("SELECT 1 FROM pragma_table_info('tool_idempotency') WHERE name='lease_expires_at'").get());
-  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 66);
+  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 67);
   let runs = 0;
   const registry = createToolRegistry({ store, now: () => Date.parse('2026-11-05T00:00:01Z'), handlers: { echo: { run: async () => { runs++; return {}; } } } });
   registry.register(spec({ class: 'write' })); registry.grant('echo_tool', 'dot');
