@@ -928,7 +928,8 @@ export class Store {
       if(version<66) { migratePullQueue(this.db); this.db.exec('PRAGMA user_version=66;'); }
       if(version<67) {
         // What a question asks for. Every row that exists now is a clarification, the only kind before this step.
-        if(!this.db.prepare("SELECT 1 FROM pragma_table_info('job_questions') WHERE name='purpose'").get()) this.db.exec("ALTER TABLE job_questions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'clarification' CHECK(purpose IN ('clarification','human_decision','authentication','tool_permission'))");
+        // A historical fixture that dropped the post-54 tables has no job_questions to alter; every real database has one.
+        if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_questions'").get()&&!this.db.prepare("SELECT 1 FROM pragma_table_info('job_questions') WHERE name='purpose'").get()) this.db.exec("ALTER TABLE job_questions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'clarification' CHECK(purpose IN ('clarification','human_decision','authentication','tool_permission'))");
         this.db.exec('PRAGMA user_version=67;');
       }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
