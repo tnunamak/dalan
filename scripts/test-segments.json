@@ -266,6 +266,7 @@
   "node --test scripts/purge-home-guard-test.mjs",
   "node --test scripts/try-cli-name-test.mjs",
   "node --test scripts/readme-first-job-snippet-test.mjs",
+  "node --test scripts/requester-guide-brief-test.mjs",
   "node --test scripts/backup-recipe-test.mjs",
   "node scripts/generic-profile-test.mjs",
   "node scripts/legacy-init-start-test.mjs",

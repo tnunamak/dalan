@@ -259,6 +259,26 @@ test('every frozen code has an explanation; Gozar\'s next action is shown; no pr
   assert.equal(explainRouteError(new Error('plain')).code, null);
 });
 
+test('an error code Dalan does not know keeps Gozar\'s next step as text', () => {
+  const explained = explainRouteError(Object.assign(new Error('Choose another plan'), { code: 'account_plan_required', nextAction: { label: 'Account plan', instructions: 'Choose a supported plan' } }));
+  assert.equal(explained.code, null);
+  assert.equal(explained.fix, 'Account plan - Choose a supported plan');
+});
+
+test('Gozar next-action text is sanitized for known and unknown codes', () => {
+  const token = `ghp_${'a'.repeat(36)}`;
+  for (const code of ['setup_required', 'account_plan_required']) {
+    const explained = explainRouteError({ code, message: 'Choose another plan', nextAction: {
+      label: 'Account\u0000 plan', instructions: `Choose a supported plan ${token}`, href: `https://example.test/${'x'.repeat(300)}`,
+    } });
+    assert.ok(explained.fix.startsWith('Account plan - Choose a supported plan '));
+    assert.ok(!explained.fix.includes(token), 'action text must not expose a token');
+    assert.doesNotMatch(explained.fix, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/);
+    assert.match(explained.fix, /\[truncated\]/, 'each field has a bounded diagnostic length');
+    assert.equal(explainRouteError({ code, nextAction: { label: {}, instructions: null, href: 42 } }).fix, null, 'non-string action fields are ignored');
+  }
+});
+
 test('a candidate is described from returned data only: reach, readers, stability, cost, account, setup', async () => {
   const gozar = createFakeGozar();
   const catalog = await gozar.catalogRoutes(buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1 } }));
