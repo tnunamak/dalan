@@ -55,3 +55,24 @@ test('unknown state on either label preserves both plists before teardown', t =>
   }), /Cannot determine whether launchd service/);
   for (const label of labels) assert.equal(fs.readFileSync(path.join(dir, `${label}.plist`), 'utf8'), MARKER);
 });
+
+test('updating an agent preserves its existing plist when launchd state is unknown or bootout fails', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'launchd-update-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const unit = 'fixture', label = launchdLabels(unit).update;
+  const file = path.join(dir, `${label}.plist`), old = `${MARKER}\nold configuration`;
+  const receipt = { unit, unit_dir: dir, node: '/usr/bin/node' };
+  for (const failure of ['unknown', 'bootout']) {
+    fs.writeFileSync(file, old);
+    const calls = [];
+    const spawn = (_command, args) => {
+      calls.push(args[0]);
+      if (args[0] === 'print') return failure === 'unknown' ? { status: 1, stderr: 'Operation not permitted' } : { status: 0 };
+      if (args[0] === 'bootout') return { status: 1, stderr: 'Operation not permitted' };
+      throw new Error(`unexpected launchctl ${args[0]}`);
+    };
+    assert.throws(() => setUpdateAgent({ receipt, home: dir, enabled: true }, { uid: 501, spawn }), /Cannot determine|bootout/);
+    assert.equal(fs.readFileSync(file, 'utf8'), old);
+    assert.deepEqual(calls, failure === 'unknown' ? ['print'] : ['print', 'bootout']);
+  }
+});

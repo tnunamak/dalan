@@ -101,9 +101,9 @@ export function isLoaded(label, seams = {}) {
 const must = (result, what) => { if (result.status !== 0) fail(`${what} failed (exit ${result.status}): ${String(result.stderr || result.stdout).trim().slice(0, 500)}`); };
 
 // Load the agent from its plist, then ask launchd to start it: on macOS 26 a bootstrapped agent can stay loaded and never spawn.
-export function loadAgent({ label, plistFile }, seams = {}) {
+export function loadAgent({ label, plistFile, knownAbsent = false }, seams = {}) {
   const domain = domainOf(seams);
-  if (!isLoaded(label, seams)) must(launchctl(['bootstrap', domain, plistFile], seams), `launchctl bootstrap ${domain} ${plistFile}`);
+  if (knownAbsent || !isLoaded(label, seams)) must(launchctl(['bootstrap', domain, plistFile], seams), `launchctl bootstrap ${domain} ${plistFile}`);
   const kick = launchctl(['kickstart', `${domain}/${label}`], seams);
   return { kicked: kick.status === 0, detail: kick.status === 0 ? '' : String(kick.stderr).trim() };
 }
@@ -161,9 +161,11 @@ export function setUpdateAgent({ receipt, home, node, enabled }, seams = {}) {
   const { update } = launchdLabels(receipt.unit), file = path.join(receipt.unit_dir, `${update}.plist`);
   if (enabled) {
     fs.mkdirSync(path.join(home, 'logs'), { recursive: true, mode: 0o700 });
-    const changed = writeAgentFile(file, updatePlist({ unit: receipt.unit, node: receipt.node ?? node, home }));
+    const text = updatePlist({ unit: receipt.unit, node: receipt.node ?? node, home });
+    const changed = preflightAgentFile(file, text);
     if (changed) unloadAgent({ label: update }, seams);
-    if (!isLoaded(update, seams)) must(launchctl(['bootstrap', domainOf(seams), file], seams), `launchctl bootstrap ${file}`);
+    writeAgentFile(file, text);
+    if (changed || !isLoaded(update, seams)) must(launchctl(['bootstrap', domainOf(seams), file], seams), `launchctl bootstrap ${file}`);
   } else {
     unloadAgent({ label: update }, seams);
     fs.rmSync(file, { force: true });

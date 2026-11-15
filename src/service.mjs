@@ -10,6 +10,7 @@ import { defaultPath } from './paths.mjs';
 import { socketPathLimit } from './admin-socket.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
+import { loadCapacity } from './projects.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
 import { buildQuery, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
@@ -194,7 +195,7 @@ function profileFor(home, workers) {
 
 const POLICY_HOME_FILES = new Set([
   'service-migration.json', 'workers.json', 'workers-audit.jsonl', 'workers-audit-checkpoint.sqlite',
-  'workers-audit-checkpoint.sqlite-wal', 'workers-audit-checkpoint.sqlite-shm', 'workers-repos.json',
+  'workers-audit-checkpoint.sqlite-wal', 'workers-audit-checkpoint.sqlite-shm', 'workers-repos.json', 'limits.json',
 ]);
 const WORKSPACE_RUNTIME_DIRS = new Set(['artifacts', 'caches', 'host-receipts', 'mirrors', 'run', 'worktrees']);
 const WORKSPACE_RUNTIME_FILES = new Map([['github-askpass', 0o700]]);
@@ -248,6 +249,11 @@ function checkHomeScope(home, configDir, o, workers) {
   if (configInfo.isSymbolicLink() || !configInfo.isDirectory()) fail(`${configDir} must be a real directory`);
   const receiptFile = path.join(configDir, 'service-install.json');
   const entries = fs.readdirSync(configDir);
+  if (entries.includes('limits.json')) {
+    const file = path.join(configDir, 'limits.json'), info = fs.lstatSync(file);
+    if (!info.isFile() || info.isSymbolicLink() || (typeof process.getuid === 'function' && info.uid !== process.getuid()) || (info.mode & 0o777) !== 0o600) fail(`${file} must be a private regular file`);
+    loadCapacity(file);
+  }
   const hasReceipt = entries.includes('service-install.json');
   if (!hasReceipt && rootEntries.some(name => !['.config', '.local', '.tmp', 'resource-url', 'logs'].includes(name))) fail(`${home} contains update data without a service receipt`);
   if (hasReceipt) {
@@ -415,9 +421,10 @@ export async function installService(o, seams = {}) {
     Object.assign(files, autoUpdateUnits({ home: o.home, unit: name, node }).files);
   }
   let replaceLegacyUnit = false;
+  let updateNeedsReplace = false;
   // Check every collision before creating the bridge home or the first unit file.
   if (mac && autoUpdate && !o.writeUnitsOnly) {
-    preflightAgentFile(path.join(unitDir, `${labels.update}.plist`), updatePlist({ unit: name, node, home: o.home }));
+    updateNeedsReplace = preflightAgentFile(path.join(unitDir, `${labels.update}.plist`), updatePlist({ unit: name, node, home: o.home }));
   }
   for (const [filename, text] of Object.entries(files)) {
     const file = path.join(unitDir, filename);
@@ -433,6 +440,10 @@ export async function installService(o, seams = {}) {
       else fail(`${file} already exists with different contents; refusing to overwrite it`);
     }
   }
+  if (mac && !o.writeUnitsOnly && preflightAgentFile(path.join(unitDir, `${labels.service}.plist`), files[`${labels.service}.plist`])) {
+    isLoaded(labels.service, seams.launchd);
+  }
+  if (updateNeedsReplace) isLoaded(labels.update, seams.launchd);
   if (o.writeUnitsOnly) {
     if (replaceLegacyUnit) fail('rerun without --write-units-only to enroll an existing service for updates');
     if (mac) for (const [filename, text] of Object.entries(files)) writeAgentFile(path.join(unitDir, filename), text); else writeUnits(unitDir, files);
@@ -471,10 +482,11 @@ export async function installService(o, seams = {}) {
   if (mac) {
     fs.mkdirSync(path.join(o.home, 'logs'), { recursive: true, mode: 0o700 });
     const plistFile = path.join(unitDir, `${labels.service}.plist`);
-    const changed = writeAgentFile(plistFile, files[`${labels.service}.plist`]);
-    if (lintPlist(plistFile, seams) === false) fail(`${plistFile} is not a valid property list`);
+    const changed = preflightAgentFile(plistFile, files[`${labels.service}.plist`]);
     if (changed) unloadAgent({ label: labels.service }, seams.launchd);
-    const { kicked, detail } = loadAgent({ label: labels.service, plistFile }, seams.launchd);
+    writeAgentFile(plistFile, files[`${labels.service}.plist`]);
+    if (lintPlist(plistFile, seams) === false) fail(`${plistFile} is not a valid property list`);
+    const { kicked, detail } = loadAgent({ label: labels.service, plistFile, knownAbsent: changed }, seams.launchd);
     if (!kicked) fail(`launchctl kickstart ${labels.service} failed: ${detail}`);
   } else {
     writeUnits(unitDir, files);

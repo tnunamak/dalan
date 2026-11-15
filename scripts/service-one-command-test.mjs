@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { defaultPath } from '../src/paths.mjs';
 import { installService, serviceMain, uninstallService } from '../src/service.mjs';
+import { migrateWorkers } from '../src/service-migrate-workers.mjs';
 import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 import { servicePlist, updatePlist, controlLaunchd, launchdLabels, MARKER } from '../src/service-launchd.mjs';
 import { homePointerPath, readDefaultHome, recordDefaultHome, serviceHomeFor } from '../src/default-home.mjs';
@@ -56,6 +57,57 @@ const options = (box, extra = {}) => ({ home: path.join(box.userHome, '.local/sh
   enableWorkspace: false, enableT3: false, workers: ['muse'], verifyCmd: null, route: 'work', autoUpdate: undefined, writeUnitsOnly: false, json: false, ...extra });
 
 try {
+  {
+    const box = seamsFor('unknown-install', 'darwin');
+    const installed = await installService(options(box), box.seams);
+    const receipt = JSON.parse(fs.readFileSync(path.join(defaultPath(installed.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
+    const file = path.join(receipt.unit_dir, `${launchdLabels(receipt.unit).service}.plist`);
+    const old = `${fs.readFileSync(file, 'utf8')}\n<!-- old configuration -->\n`;
+    fs.writeFileSync(file, old);
+    const receiptBefore = fs.readFileSync(path.join(defaultPath(installed.home, '.config/dot-bridge'), 'service-install.json'), 'utf8');
+    for (const failure of ['unknown', 'bootout']) {
+      const calls = [];
+      await assert.rejects(installService(options(box), { ...box.seams, launchd: { uid: 501, spawn(_command, args) {
+        calls.push(args[0]);
+        if (args[0] === 'print' && failure === 'bootout') return { status: 0 };
+        return { status: 1, stderr: 'Operation not permitted' };
+      } } }), /Cannot determine whether launchd service|bootout/);
+      assert.equal(fs.readFileSync(file, 'utf8'), old);
+      assert.equal(fs.readFileSync(path.join(defaultPath(installed.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'), receiptBefore);
+      assert.deepEqual(calls, failure === 'unknown' ? ['print'] : ['print', 'print', 'bootout']);
+    }
+  }
+  // A migrated capacity policy must survive the install preflight and route allocation.
+  {
+    const box = seamsFor('migration-capacity', 'linux');
+    const sourceDir = path.join(root, 'source-capacity');
+    fs.mkdirSync(sourceDir, { mode: 0o700 });
+    const source = path.join(sourceDir, 'workers.json');
+    fs.writeFileSync(source, JSON.stringify({ workers: { muse: { repos: [] } } }), { mode: 0o600 });
+    fs.writeFileSync(path.join(sourceDir, 'limits.json'), JSON.stringify({ max_claimed_outer_assignments: 8 }), { mode: 0o600 });
+    const home = path.join(box.userHome, 'home');
+    const migrated = migrateWorkers({ home, sources: [source] });
+    const policy = fs.readFileSync(migrated.workers_file, 'utf8');
+    const capacity = fs.readFileSync(migrated.limits_file, 'utf8');
+    const installed = await installService(options(box, { home }), box.seams);
+    assert.equal(installed.started, true);
+    assert.equal(fs.readFileSync(migrated.workers_file, 'utf8'), policy);
+    assert.equal(fs.readFileSync(migrated.limits_file, 'utf8'), capacity);
+    for (const kind of ['invalid-json', 'invalid-capacity', 'unsafe-mode', 'symlink']) {
+      const bad = seamsFor(`bad-${kind}`, 'linux');
+      const badHome = path.join(bad.userHome, 'home');
+      const badMigration = migrateWorkers({ home: badHome, sources: [source] });
+      if (kind === 'invalid-json') fs.writeFileSync(badMigration.limits_file, '{');
+      if (kind === 'invalid-capacity') fs.writeFileSync(badMigration.limits_file, JSON.stringify({ max_claimed_outer_assignments: 0 }));
+      if (kind === 'unsafe-mode') fs.chmodSync(badMigration.limits_file, 0o644);
+      if (kind === 'symlink') { fs.unlinkSync(badMigration.limits_file); fs.symlinkSync(path.join(sourceDir, 'limits.json'), badMigration.limits_file); }
+      let allocations = 0;
+      const ensure = bad.gozar.ensureRoute;
+      bad.gozar.ensureRoute = async query => { allocations++; return ensure(query); };
+      await assert.rejects(installService(options(bad, { home: badHome }), bad.seams));
+      assert.equal(allocations, 0, `${kind}: fail before route allocation`);
+    }
+  }
   // ---- plists are well formed and keep the rules of the launchd design ---------------------------------------------------------------
   const plist = servicePlist({ unit: 'dalan-abc', node: '/opt/homebrew/bin/node', home: '/Users/t/svc', port: 8789 });
   assert.match(plist, /<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>/, 'restart after a crash, not after a clean exit');
