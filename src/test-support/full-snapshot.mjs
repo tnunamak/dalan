@@ -12,7 +12,7 @@ const unscopedIgnored=new Set(['alert_cursors','alert_episodes','break_notices',
   'learned_limits','lifecycle_daily','lifecycle_retention','operator_state','protocol_delivery_attempts','schema_migrations',
   'subscription_storage_meta','worker_activity','worker_calls']);
 // Not scoped to one assignment, but a claim-bound tool call must never write them.
-const unscopedCompared=new Set(['messages','subscriptions','t3_audit','registered_tools','tool_grants','tool_registry_log',
+const unscopedCompared=new Set(['relationships','messages','subscriptions','t3_audit','registered_tools','tool_grants','tool_registry_log',
   'tool_outbox','tool_idempotency','tool_post_log','tool_registry_meta']);
 
 export function fullSnapshot(db,id) {
