@@ -12,13 +12,52 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
 import { beginPairing, openSession, workJob } from '../src/demo-worker.mjs';
-import { describeAttempt, describeTryError, parsePending, parseTryArgs, runTry } from '../src/try.mjs';
+import { finishedNotice, reviewFinishedJob, describeAttempt, describeTryError, parsePending, parseTryArgs, runTry } from '../src/try.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
 import { defaultPath } from '../src/paths.mjs';
 import { WORKER_INSTRUCTIONS } from '../src/worker-instructions.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
-const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
+test('finished outcomes only offer acceptance for completed reports', async () => {
+  for (const outcome of ['blocked', 'failed', undefined, 'unexpected']) {
+    const lines = [], prompts = [];
+    let accepted = 0;
+    const job = { status: 'finished', report: { outcome, summary: 'Needs owner input', result: 'details' } };
+    const reviewed = await reviewFinishedJob('req_fixture', job, {
+      say: line => lines.push(line),
+      ask: async prompt => { prompts.push(prompt); return 'y'; },
+      accept: async () => { accepted++; },
+      exited: () => false, stopRequested: () => false,
+      ownCommand: () => { throw new Error('must not suggest acceptance'); },
+    });
+    assert.equal(reviewed, true);
+    assert.match(lines.join('\n'), /Your worker did not complete req_fixture/);
+    assert.ok(lines.join('\n').includes(`Outcome: ${outcome ?? 'unknown'}.`));
+    assert.match(lines.join('\n'), /Summary:\nNeeds owner input/);
+    assert.doesNotMatch(lines.join('\n'), /Your worker finished|Accept this result|Recorded as accepted/);
+    assert.deepEqual(prompts, []);
+    assert.equal(accepted, 0);
+  }
+});
+
+test('completed report notice and acceptance remain unchanged', async () => {
+  const lines = [], prompts = [];
+  let accepted = 0;
+  const job = { status: 'finished', report: { outcome: 'completed', result: 'bridge first report' } };
+  assert.equal(finishedNotice('req_fixture', job),
+    '\n✔ Your worker finished req_fixture. Report:\nbridge first report');
+  assert.equal(await reviewFinishedJob('req_fixture', job, {
+    say: line => lines.push(line),
+    ask: async prompt => { prompts.push(prompt); return ' y '; },
+    accept: async () => { accepted++; },
+    exited: () => false, stopRequested: () => false, ownCommand: () => '',
+  }), true);
+  assert.deepEqual(prompts, ['Accept this result? [y/N] ']);
+  assert.equal(accepted, 1);
+  assert.deepEqual(lines, [finishedNotice('req_fixture', job), 'Recorded as accepted.']);
+});
+
+const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? os.tmpdir();
 fs.mkdirSync(tempRoot, { recursive: true });
 const tmp = fs.mkdtempSync(path.join(tempRoot, 'dtry-'));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));

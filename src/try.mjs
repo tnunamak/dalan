@@ -255,7 +255,23 @@ async function prepareDemoRepository(home, signal, tryAgain) {
 // `pickPort` and `clock` are seams for tests: the first stands in for the free-port search so a lost race can be reproduced,
 // the second for the time and the wait between polls so minutes of waiting need no real minutes.
 // The worker wrote the report; it reaches the terminal only through terminalSafe, right before the acceptance prompt.
-export function finishedNotice(jobId, job) { return terminalSafe(`\n✔ Your worker finished ${jobId}. Report:\n${job.report?.result ?? '(empty)'}`); }
+export function finishedNotice(jobId, job) {
+  if (job.report?.outcome !== 'completed') {
+    return terminalSafe(`\nYour worker did not complete ${jobId}. Outcome: ${job.report?.outcome ?? 'unknown'}. Summary:\n${job.report?.summary ?? job.report?.result ?? '(empty)'}`);
+  }
+  return terminalSafe(`\n✔ Your worker finished ${jobId}. Report:\n${job.report?.result ?? '(empty)'}`);
+}
+
+// Shared by runTry and its no-network regression: no non-completed report reaches ask or accept.
+export async function reviewFinishedJob(jobId, job, { say, ask, accept, exited, stopRequested, ownCommand }) {
+  say(finishedNotice(jobId, job));
+  if (job.report?.outcome !== 'completed') return true;
+  const answer = await ask('Accept this result? [y/N] ');
+  if (exited() && !stopRequested()) return false;
+  if (answer?.trim().toLowerCase() === 'y') { await accept(); say('Recorded as accepted.'); }
+  else say(stopRequested() ? '\nNot recorded.' : `Not recorded. Decide later while the bridge runs:\n${commandLine(ownCommand('decide', jobId, 'accepted'))}`);
+  return true;
+}
 
 export async function runTry({ argv = [], env = process.env, out = process.stdout, input = process.stdin, signal, pickPort = choosePort, errorContext = {}, clock = { now: Date.now, sleep }, beforeCommand = null, hosted = {} } = {}) {
   const options = parseTryArgs(argv);
@@ -542,11 +558,11 @@ export async function runTry({ argv = [], env = process.env, out = process.stdou
       while (!exited && !stopRequested()) {
         const current = await job(jobId);
         if (current.status === 'finished') {
-          say(finishedNotice(jobId, current));
-          const answer = await ask('Accept this result? [y/N] ');
-          if (exited && !stopRequested()) break;
-          if (answer?.trim().toLowerCase() === 'y') { await dalan(['decide', jobId, 'accepted']); say('Recorded as accepted.'); }
-          else say(stopRequested() ? '\nNot recorded.' : `Not recorded. Decide later while the bridge runs:\n${commandLine(ownCommand('decide', jobId, 'accepted'))}`);
+          const reviewed = await reviewFinishedJob(jobId, current, {
+            say, ask, accept: () => dalan(['decide', jobId, 'accepted']),
+            exited: () => exited, stopRequested, ownCommand,
+          });
+          if (!reviewed) break;
           if (!stopRequested()) { say('The bridge stays up. Ctrl-C stops it.'); await untilStopRequested(); }
           break;
         }
