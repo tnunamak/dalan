@@ -26,8 +26,12 @@ process.env.GIT_CONFIG_GLOBAL ??= '/dev/null';
 process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `suite-${process.pid}-${randomUUID()}`;
 // A short suite root isolates home-based fixtures, caches, and setup's per-user lock.
 const suiteRoot = await mkdtemp(path.resolve(os.tmpdir(), 's-'));
+// Prepared dependency caches require non-writable ancestors, including above HOME.
+const homeScratch = path.join(os.homedir(), '.tmp');
+await mkdir(homeScratch, {recursive:true,mode:0o700});
+const suiteHome = await mkdtemp(path.join(homeScratch, 's-'));
 const suiteDirs = {
-  HOME: path.join(suiteRoot, 'h'), TMPDIR: path.join(suiteRoot, 't'),
+  HOME: suiteHome, TMPDIR: path.join(suiteRoot, 't'),
   DOT_BRIDGE_TEST_TMP: path.join(suiteRoot, 't'),
   DALAN_SETUP_LOCK_DIR: path.join(suiteRoot, 'l'),
   npm_config_cache: path.join(suiteRoot, 'npm'),
@@ -249,4 +253,4 @@ async function main() {
 main().catch(error => {
   console.error(error);
   process.exitCode = 1;
-}).finally(() => rm(suiteRoot, { recursive: true, force: true }));
+}).finally(() => Promise.all([suiteRoot,suiteHome].map(dir => rm(dir, { recursive: true, force: true }))));

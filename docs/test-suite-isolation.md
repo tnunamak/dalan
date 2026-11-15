@@ -1,6 +1,6 @@
 # Test-suite resource census
 
-The ordered commands in `scripts/test-segments.json` are the audit boundary. The suite owns mutable state below a short, randomly allocated root. Tests may allocate more private children. Code, installed dependencies, system binaries, and kernel metadata remain shared read-only inputs. Real systemd checks share the user manager but use a distinct unit name per suite.
+The ordered commands in `scripts/test-segments.json` are the audit boundary. The suite owns mutable state below private, randomly allocated roots. Tests may allocate more private children. Code, installed dependencies, system binaries, and kernel metadata remain shared read-only inputs. Real systemd checks share the user manager but use a distinct unit name per suite.
 
 ## Confirmed failures
 
@@ -14,11 +14,13 @@ The ordered commands in `scripts/test-segments.json` are the audit boundary. The
 
 Two concurrent seven-segment reproductions covered persistent setup, inbox installation, both verifier entries, both filter fixtures, and the held-claim workspace fixture. Both reported seven passes and no skips.
 
+The first full pair also exposed a budget-result ordering race: the outer supervisor can report CPU exhaustion, then its child sees EOF and reports an interruption. `src/host-budget.mjs` now remembers the observed CPU violation while retaining later usage and phase details. A synthetic trusted-pipe regression (`scripts/host-budgets-test.mjs`) fails before this change and passes afterward. Kernel limits and production reservation behavior are unchanged.
+
 ## Resource ownership
 
 | Resource | Access sites | Isolation / shared-read contract |
 | --- | --- | --- |
-| Home scratch, databases, receipts, repo caches, owner configuration, downloads | `src/paths.mjs`; all home call sites indexed below; integrator fixtures at `scripts/integrator-verifier-test.mjs:12`, `integrator-filter-safety-test.mjs:12`, `integrator-worktree-filter-context-test.mjs:12` | Runner sets a private HOME and pre-creates its `.tmp` (`scripts/test-segments.mjs:28`). Explicit fixture HOMEs are already random children. No fixture writes the operator's real HOME. |
+| Home scratch, databases, receipts, repo caches, owner configuration, downloads | `src/paths.mjs`; all home call sites indexed below; integrator fixtures at `scripts/integrator-verifier-test.mjs:12`, `integrator-filter-safety-test.mjs:12`, `integrator-worktree-filter-context-test.mjs:12` | Runner allocates a private HOME below the original home scratch directory and pre-creates its `.tmp` (`scripts/test-segments.mjs:28`). Keeping HOME outside `/tmp` preserves prepared-cache ancestor checks; temporary files and sockets still use a short TMPDIR. Explicit fixture HOMEs are already random children. No fixture writes the operator's real HOME. |
 | XDG config/data/state/cache | `scripts/worker-bridge-setup.mjs:228`, `src/test-support/fixture-env.mjs:10` | Runner clears inherited XDG base-directory overrides so defaults follow each fixture's HOME (`scripts/test-segments.mjs:38`). Helpers that set explicit XDG directories put them under their private fixture HOME. |
 | Temporary files, SQLite files, Unix admin sockets | `src/admin-socket.mjs`; `scripts/mcp-schema-conformance-test.mjs:21`; `scripts/test-segments.mjs:30` | Suite-private TMPDIR and DOT_BRIDGE_TEST_TMP; fixture mkdtemp children. Short roots keep socket addresses within the platform limit. Schema fixture's long-path fallback also uses mkdtemp, never a fixed socket leaf. |
 | Setup SQLite mutex | `scripts/worker-bridge-setup.mjs:198`, `:918`; `scripts/persistent-setup-test.mjs:300` | One suite-private override directory. Tests of a specific lock use their own fixture directory. Production's per-user default is unchanged. |
@@ -32,7 +34,7 @@ Two concurrent seven-segment reproductions covered persistent setup, inbox insta
 | OS account home, binaries, `/proc`, `/sys/fs/cgroup`, libraries | `scripts/worker-bridge-setup.mjs:89`; `scripts/require-host-sandbox.mjs:10`; `scripts/host-budgets-test.mjs:146` | Shared identity/read-only readiness, process or sandbox-security inputs. Account lookup is used for safety checks; setup tests name explicit fixture homes. Cgroup mutations belong to the suite-specific systemd unit. Denied paths in `scripts/workspace-e2e.mjs:20` are sandbox test inputs. |
 | External routes, catalogs, workers, service managers | `src/test-support/gozar-fake.mjs`; `src/test-support/public-host-fetch.mjs`; `scripts/persistent-setup-test.mjs:20` | Ordinary suite uses local fake providers, loopback fixtures, and service-manager shims. Live/archived journeys remain opt-in and explicitly skipped when not configured. No live bridge/catalog mutation is part of this proof. |
 
-The suite root is removed only after the active segment's process group has settled, including handled interrupts (`scripts/test-segments.mjs:254`). A SIGKILL cannot run finally cleanup; the caller must remove its owned TMPDIR afterward.
+The suite HOME and temporary root are removed only after the active segment's process group has settled, including handled interrupts (the final cleanup in `scripts/test-segments.mjs`). A SIGKILL cannot run finally cleanup; the caller must remove its owned TMPDIR afterward.
 
 ## Home-access census index
 

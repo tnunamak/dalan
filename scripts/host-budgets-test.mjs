@@ -8,6 +8,8 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import childProcess, { spawn } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import http from 'node:http';
 import { parseHostBudget, runHostBudget } from '../src/host-budget.mjs';
 
@@ -157,6 +159,31 @@ test('install and check share storage and one output allowance', { skip: !linux 
   assert.equal(result.error, 'budget exceeded: output', JSON.stringify(result));
   assert.equal(result.phases.length, 2); assert.equal(result.bytes.length, budgets.output_bytes);
   assert.equal(fs.existsSync(path.join(home, 'installed')), false);
+});
+
+test('a later supervisor interruption cannot erase an observed CPU budget violation', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = () => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    queueMicrotask(() => {
+      for (const event of [
+        {event:'started',phase:'check'},
+        {event:'result',result:{error:'budget exceeded: cpu',exit:{code:125},usage:{cpu_ms:260}}},
+        {event:'result',result:{error:'supervisor interrupted',exit:{code:125},usage:{cpu_ms:261}}},
+        {event:'stopped',stop:{verified:true,remaining_pids:[],result:'exit-code'}},
+      ]) child.stdout.write(JSON.stringify(event)+'\n');
+      child.emit('close',125,null);
+    });
+    return child;
+  };
+  syncBuiltinESMExports();
+  try {
+    const result = await runHostBudget({dir:home,budgets:{...budgets,cpu_ms:250},enabled:true,phases:[{name:'check',argv:['/usr/bin/true']}]});
+    assert.equal(result.error, 'budget exceeded: cpu');
+    assert.equal(result.stop.verified, true);
+    assert.equal(result.usage.cpu_ms, 261, 'later usage remains available');
+  } finally { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
 });
 
 test('production default names the fixed unit when the test seam is unset', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
