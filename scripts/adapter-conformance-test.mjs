@@ -156,6 +156,12 @@ try {
     if (url.pathname === '/submit') {
       const n = ++fake.submitSeen;
       if(fake.submitError) return json(res,400,fake.submitError);
+      if (fake.submitConflict) {
+        if (fake.submitConflict === 'visible') {
+          fake.rows.set(parsed.assignment.request_id, { payload: parsed.assignment });
+        }
+        return json(res, 409, {error:'request_id conflict'});
+      }
       if (n === 1 && fake.submitDelayMs) await sleep(fake.submitDelayMs);
       const id = parsed.assignment.request_id; fake.rows.set(id, { payload: parsed.assignment }); fake.lastSubmitId = id;
       if (res.destroyed) return;
@@ -174,6 +180,67 @@ try {
   const scripted = (extra = {}) => adapter({ DOT_ACP_SOCKET: fakeSocket, DOT_ACP_SECRET_FILE: join(home, 'fake-secret'), DOT_ACP_STATE_DIR: join(home, 'fake-state'), ...extra });
   const reset = () => { fake.calls = []; fake.submitDelayMs = 0; fake.submitSeen = 0; fake.rows.clear(); fake.cancelledRows.clear(); fake.expired = false; fake.dryRun = null; fake.submitError=null;fake.previewUnsupported=false;fake.onWait = () => ({ status: 'finished' }); };
   const plain = join(work, 'plain'); await mkdir(plain, { recursive: true });
+
+  // Bound these probes independently: regressions must refuse, not hang the suite.
+  const boundedPrompt = async promise => {
+    let timer;
+    try {
+      return await Promise.race([promise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('retry-budget probe did not settle')), 5000);
+      })]);
+    } finally { clearTimeout(timer); }
+  };
+  for (const recover of [false, true]) {
+    reset();
+    let waits = 0;
+    fake.onWait = (_rid, res) => {
+      waits++;
+      if (recover && waits > 1) return {status:'finished'};
+      json(res, 409, {error:'prior waiter still attached'});
+    };
+    const b = scripted({DOT_ACP_OUTAGE_MS:'400', DOT_ACP_HEARTBEAT_MS:'1000'});
+    await b.init();
+    const started = Date.now();
+    const result = await boundedPrompt(b.prompt((await b.newSession(plain)).sessionId,
+      '[dot-decision:dec_conf_wait409_' + recover + ']\nsynthetic wait conflict'));
+    if (recover) {
+      assert.equal(result.result.stopReason, 'end_turn');
+      assert.equal(b.text('agent_message_chunk'), 'FAKE RESULT');
+      assert.equal(waits, 2);
+    } else {
+      const r = refusal(result);
+      assert.equal(r.failure_type, 'transport_error');
+      assert.equal(r.failure_type_source, 'dot_acp_transport');
+      assert.match(r.message, /unreachable/);
+      assert.ok(Date.now() - started >= 400, '409 consumes the outage budget');
+      assert.equal(waits, 2, 'second 409 exhausts the short budget');
+      assert.match(b.text('agent_thought_chunk'), /retrying/);
+    }
+    record('wait 409 ' + (recover ? 'recovers' : 'bounded refusal'), {outcome:recover?'result':'refused'});
+  }
+  for (const visible of [false, true]) {
+    reset();
+    fake.submitConflict = visible ? 'visible' : 'absent';
+    try {
+      const b = scripted(); await b.init();
+      const result = await boundedPrompt(b.prompt((await b.newSession(plain)).sessionId,
+        '[dot-decision:dec_conf_submit409_' + visible + ']\nsynthetic submit conflict'));
+      if (visible) {
+        assert.equal(result.result.stopReason, 'end_turn');
+        assert.equal(b.text('agent_message_chunk'), 'FAKE RESULT');
+        assert.equal(fake.submitSeen, 1, 'attach to visible racing row without resubmitting');
+        assert.equal(fake.rows.size, 1);
+      } else {
+        const r = refusal(result);
+        assert.equal(r.failure_type, 'transport_error');
+        assert.equal(r.failure_type_source, 'dot_acp_transport');
+        assert.match(r.message, /submit conflict after 2 retries/);
+        assert.equal(fake.submitSeen, 3, 'initial submit plus SUBMIT_RETRIES=2');
+        assert.equal(fake.rows.size, 0);
+      }
+      record('submit conflict ' + (visible ? 'visible row' : 'bounded refusal'), {outcome:visible?'result':'refused'});
+    } finally { fake.submitConflict = null; }
+  }
 
   {
     reset();fake.submitError={error:'scope changed before submit',verdict:'clarify',reasons:[{code:'unknown_scope_path',field:'scope_paths',message:'scope needs correction',fix:'choose an existing path'}]};

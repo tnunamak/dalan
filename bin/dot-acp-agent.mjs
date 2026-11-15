@@ -130,7 +130,11 @@ async function acquire(s, parsed) {
     }
     try { await call('/submit', null, { method: 'POST', payload: body, timeoutMs: SUBMIT_DEADLINE_MS }); }
     catch (e) {
-      if (e.message === 'request_id conflict') { attempt--; continue; } // lost a race: re-read the row
+      if (e.message === 'request_id conflict') {
+        // Re-read a racing submit, but never spin forever if its row stays absent.
+        if (submitRetries++ < SUBMIT_RETRIES) { attempt--; continue; }
+        throw refuse(`worker submit conflict after ${SUBMIT_RETRIES} retries`, {failure_type:'transport_error',failure_type_source:'dot_acp_transport'});
+      }
       if(e.verdict) throw verdictRefusal(e);
       // The bridge may have stored the job before the deadline; the same id and brief make the retry attach to it.
       if (transient(e) && submitRetries++ < SUBMIT_RETRIES) { attempt--; continue; }
@@ -239,12 +243,13 @@ async function waitLoop(s, ctl, say) {
       outageSince = null;
     } catch (e) {
       if (ctl.cancelled) return { cancelled: true };
-      if (e.http_status === 409) { await sleep(1000, ctl.abort.signal); continue; } // our previous process's waiter has not detached yet
-      if (!transient(e)) throw refuse(`worker bridge error: ${e.message}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
+      // An attached prior waiter shares the outage budget, not an infinite retry.
+      const waiterConflict = e.http_status === 409;
+      if (!waiterConflict && !transient(e)) throw refuse(`worker bridge error: ${e.message}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
       outageSince ??= Date.now();
       if (Date.now() - outageSince > OUTAGE_MS) throw refuse(`worker bridge unreachable for ${Math.round(OUTAGE_MS / 60000)} min: ${e.message}`,{failure_type:'transport_error',failure_type_source:'dot_acp_transport'});
       await say('agent_thought_chunk', `bridge unreachable (${e.message}); retrying\n`);
-      await sleep(Math.min(2000, HEARTBEAT_MS), ctl.abort.signal);
+      await sleep(waiterConflict ? 1000 : Math.min(2000, HEARTBEAT_MS), ctl.abort.signal);
       continue;
     }
     if (r.status === 'timeout') { await heartbeat(s, ctl, say); continue; }
