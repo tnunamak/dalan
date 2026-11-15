@@ -24,6 +24,9 @@ if (!process.env.NODE_OPTIONS?.includes(sqliteWarningFlag)) {
 process.env.GIT_CONFIG_GLOBAL ??= '/dev/null';
 // One host-check reservation per suite, inherited by every segment and bridge.
 process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `suite-${process.pid}-${randomUUID()}`;
+// Setup's production lock remains per user; every suite owns a private override.
+const setupLockDir = await mkdtemp(path.resolve(os.tmpdir(), 'dalan-setup-'));
+process.env.DALAN_SETUP_LOCK_DIR = setupLockDir;
 let interrupted = null;
 let activeRun = null;
 
@@ -237,4 +240,4 @@ async function main() {
 main().catch(error => {
   console.error(error);
   process.exitCode = 1;
-});
+}).finally(() => rm(setupLockDir, { recursive: true, force: true }));

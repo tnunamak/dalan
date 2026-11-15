@@ -85,6 +85,23 @@ try {
     assert.equal(names[0], names[1], 'segments retain the same reservation');
     assert.notEqual(names[0], other[0], 'independent suites never inherit a shared reservation');
   });
+  await check('setup lock directories are shared within a suite, isolated between suites, and removed on exit', async () => {
+    const command = `${node} -e 'const fs=require("node:fs"),path=require("node:path"),dir=process.env.DALAN_SETUP_LOCK_DIR; fs.writeFileSync(path.join(dir,"probe"),"owned"); console.log("SETUP_LOCK_DIR="+dir)'`;
+    const first = await fixture('setup-lock-first', [command, command], {DALAN_SETUP_LOCK_DIR:root});
+    const second = await fixture('setup-lock-second', [command]);
+    const a = await first.ended, b = await second.ended;
+    assert.equal(a.code, 0, a.output); assert.equal(b.code, 0, b.output);
+    const dirs = output => [...output.matchAll(/^SETUP_LOCK_DIR=(.+)$/gm)].map(match => match[1]);
+    const names = dirs(a.output), other = dirs(b.output);
+    assert.equal(names.length, 2); assert.equal(other.length, 1);
+    assert(path.isAbsolute(names[0]));
+    assert.equal(names[0], names[1], 'segments share one setup reservation');
+    assert.notEqual(names[0], other[0], 'independent suites have separate setup reservations');
+    assert.notEqual(names[0], root, 'an inherited override cannot join another suite');
+    await assert.rejects(fs.stat(names[0]), {code:'ENOENT'});
+    await assert.rejects(fs.stat(other[0]), {code:'ENOENT'});
+    assert((await fs.stat(root)).isDirectory(), 'cleanup preserves the inherited directory');
+  });
   await check('real entry point reports both failures and still executes later commands', async () => {
     const f = await fixture('exits', [`${node} -e 'process.exit(7)'`, `${node} -e 'console.log("LATER_RAN")'`, `${node} -e 'process.exit(9)'`]);
     const result = await f.ended;
