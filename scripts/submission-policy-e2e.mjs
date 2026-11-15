@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Store } from '../src/store.mjs';
-import { validateSubmission,validateOwnerNote,validateOutputPaths } from '../src/submission-policy.mjs';
+import { validateSubmission,validateOwnerNote,validateOutputPaths,within } from '../src/submission-policy.mjs';
 const repo=path.resolve(new URL('..',import.meta.url).pathname);
 const home=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-submission-policy-'));
 const env={...process.env,HOME:home,DALAN_PORT:'0',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_DRY_RUN:'1',PATH:`${path.join(home,'bin')}:${process.env.PATH}`,DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE:path.join(home,'fixture')};
@@ -37,6 +37,38 @@ try {
   fs.writeFileSync(path.join(env.DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE,'.env.fixture'),'INERT=2\n');git(['-C',env.DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE,'commit','-am','inert sensitive change']);
   const sensitiveHead=git(['-C',env.DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE,'rev-parse','HEAD']);
   const scoped=extra=>assignment({inputs:[{github_repo:'test/fixture',base_sha:base}],scope_paths:['safe.txt'],...extra});
+  // Validation, storage, and later exact scope checks must agree on canonical paths.
+  {
+    const scanInput=()=>({files:['README.md','docs/guide.md'],diffFiles:[],diff:'',symlinks:[]});
+    const db=new Store(path.join(home,'normalized-scope.db'));
+    try {
+      for(const [raw,canonical,file] of [
+        [['./README.md'],['README.md'],'README.md'],
+        [['docs/'],['docs'],'docs/guide.md'],
+        [['README.md'],['README.md'],'README.md'],
+        [['docs'],['docs'],'docs/guide.md'],
+      ]) {
+        // Include the existing marker to keep the normal-scope byte control exact.
+        const original=scoped({scope_paths:raw,brief:'Inspect bounded input\n\nRead allow-list:\n'+canonical.join('\n')});
+        const before=JSON.stringify(original);
+        const accepted=validateSubmission(original,{scanInput});
+        assert.deepEqual(accepted.scope_paths,canonical);
+        assert.equal(JSON.stringify(original),before,'validation must not mutate caller input');
+        db.submit(accepted,{mode:'none'},null,'policy-test-owner');
+        const stored=db.get(original.request_id).assignment;
+        assert.deepEqual(stored.scope_paths,canonical);
+        assert.equal(within(file,stored.scope_paths),true,'validated file remains inside stored scope');
+        assert.equal(within('elsewhere.md',stored.scope_paths),false,'normalization does not broaden scope');
+        if(JSON.stringify(raw)===JSON.stringify(canonical))
+          assert.equal(JSON.stringify(accepted),before,'already-normal payload stays byte-identical');
+      }
+      for(const extra of [{},{scope_paths:[]}]) {
+        const input=assignment(extra);
+        assert.equal(JSON.stringify(validateSubmission(input,{scanInput})),JSON.stringify(input),
+          'input-free assignments preserve absent or empty scope');
+      }
+    } finally { db.db.close(); }
+  }
   fs.mkdirSync(path.join(home,'.config/dot-bridge'),{recursive:true});
   fs.mkdirSync(path.join(home,'.config/dot-bridge'),{recursive:true});
   fs.writeFileSync(path.join(home,'.config/dot-bridge/workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{connections:[{issuer:'https://fixture.invalid',subject:'fixture',client_id:'fixture'}],repos:["test/fixture"]}}}),{mode:0o600});

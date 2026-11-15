@@ -157,7 +157,7 @@ export { secretContent } from './redaction.mjs';
 const authority=/\b(?:we|you|dot)\s+(?:have|has|can use)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:free|available|live|idle|worker)\s+)*(?:slots?|lanes?|workers?)\b|\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:free|available|live|idle)\s+(?:slots?|lanes?|workers?)\b|\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:free|available|live|idle|worker|dot)\s+)*(?:slots?|lanes?|workers?)\s+(?:are\s+)?(?:free|available|idle|remaining|open)\b|\b(?:keep|fill|maintain)\s+(?:all\s+)?(?:\d+\s+)?(?:slots?|lanes?)\s+(?:full|busy)/i;
 // Role words only. A regex cannot tell a named person from a role or a product, so named-person claims are a documented residual.
 const grantedAuthority=/\b(?:the\s+)?(?:owner|user|operator|admin(?:istrator)?|maintainer|requester)\s+(?:has\s+)?(?:grants?|granted|approves?|approved|authorizes?|authorized)\s+(?:new|additional|expanded)\s+(?:authority|access|permissions?)\b/i;
-function within(p,scope) { return !/^(?:\/|~\/|\$HOME\/)/.test(p)&&!p.split('/').includes('..')&&scope.some(s=>s==='.'||p===s||p.startsWith(`${s}/`)); }
+export function within(p,scope) { return !/^(?:\/|~\/|\$HOME\/)/.test(p)&&!p.split('/').includes('..')&&scope.some(s=>s==='.'||p===s||p.startsWith(`${s}/`)); }
 const sourceExtension=/\.(?:mjs|cjs|jsx|ts|tsx|py|rs|go|md|txt|html|css|scss|sh|json|yaml|yml|toml|ini|conf|sql|vue|svelte|xml|pem|key|asc|jks|keystore|ppk|tfstate(?:\.backup)?)$/i;
 const pathToken=new RegExp(`(?<![A-Za-z0-9_.@-])((?:(?:~|\\$HOME)?\\/|\\.?\\.?\\/)?${firstSegment}(?:\\/${laterSegment})*\\/?)(?![A-Za-z0-9_@-])`,'gm');
 const plainToken=/(?<![A-Za-z0-9_.@-])((?:(?:~|\$HOME)?\/|\.?\.?\/)?[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)*\/?)(?![A-Za-z0-9_@-])/g;
@@ -561,7 +561,9 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
     }
     if(input.input_patch&&!/^diff --git /m.test(input.input_patch)) throw new Error('incomplete input patch');
   } else if(scope.length) throw new Error('scope_paths require pinned repository input');
-  if(!dropped.length) {const done=withOutputPaths(withAllowList(rendered,warn));checkInstructionSize(done);return done;}
+  // Persist exactly the normalized scope used above, including the no-growth path.
+  const normalized=scope.length?{...rendered,scope_paths:[...scope]}:rendered;
+  if(!dropped.length) {const done=withOutputPaths(withAllowList(normalized,warn));checkInstructionSize(done);return done;}
   const final=renderAssignment({...assignment,scope_paths:narrowedScope});
   const note=`\n\nBridge scope note: ${dropped.length} sensitive file(s) are outside scope_paths; do not read them: ${dropped.slice(0,20).map(d=>d.path).join(', ')}${dropped.length>20?`, and ${dropped.length-20} more`:''}.`;
   const brief=final.brief+note;
