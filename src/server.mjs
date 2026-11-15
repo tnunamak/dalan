@@ -761,7 +761,7 @@ async function dispatchTool(name,a,principal,notifyMeta) {
         const t3=await import('./t3.mjs');
         const authorize=()=>{
           const threads=toolRegistry.t3Threads(name,principal);
-          if(threads!==null && name!=='t3_thread_list' && !threads.has(a.threadId)) throw new RegistryError('tool_unavailable','tool unavailable');
+          if(name!=='t3_thread_list' && !threads.has(a.threadId)) throw new RegistryError('tool_unavailable','tool unavailable');
           return threads;
         };
         // Linearization point: this synchronous live-grant read follows the last await before
@@ -771,7 +771,7 @@ async function dispatchTool(name,a,principal,notifyMeta) {
         if(name==='t3_thread_list') {
           const data=await t3.callT3(t3.listArgs({cwd:a.cwd,project:a.projectId,status:a.status,workspace_mode:a.workspaceMode}));
           const threads=authorize();
-          result=control.compactThreadList({...data,threads:(data.threads??[]).filter(t=>threads===null||threads.has(t.id))});
+          result=control.compactThreadList({...data,threads:(data.threads??[]).filter(t=>threads.has(t.id))});
           result._audit_ids={threadIds:result.threads.map(t=>t.id),projectIds:result.projects.map(p=>p.id)};
         } else {
           result=await control.runT3Tool(name,t3Arguments);

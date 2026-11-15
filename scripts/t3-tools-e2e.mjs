@@ -7,6 +7,8 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import { Store } from '../src/store.mjs';
+import { syntheticThreadList } from './fixtures/t3-threads.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
@@ -62,22 +64,25 @@ let ready=false,output='';child.stdout.on('data',b=>{output+=String(b);port=port
 try {
   await waitFor(()=>ready,'service');
   const secret=(await readFile(join(home,'.config','dot-bridge','env'),'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
-  // The pre-existing local owner path has no job scope and retains full authority.
-  const ownerDb=new DatabaseSync(join(home,'.local/share/dot-bridge/bridge.db'),{readOnly:true});
-  assert(ownerDb.prepare('SELECT count(*) n FROM claims').get().n===0,'owner fixture has no claims');
-  ownerDb.close();
+  const scopedSynthetic=syntheticThreadList().threads.filter(t=>t.id.length<=128).slice(0,51);
+  const store=new Store(join(home,'.local/share/dot-bridge/bridge.db'));
+  const destinations=['thread_a','thread_b','thread_fake','thread_epipe','thread_after_epipe','thread_fail','thread_after_failure',...scopedSynthetic.map(t=>t.id)];
+  for(const [index,thread] of destinations.entries()) {
+    const payload={schema_version:1,request_id:`req_fixture_${index}`,brief:'fixture',inputs:[],expected_output:'result',execution_scope:'read-only'};
+    store.submit(payload,thread,null,'owner');store.claim(payload.request_id,'fixture','local-principal',1000,null,'dot');
+  }
+  store.db.close();
   // t3_thread_list returns the compact shape, never the raw t3code payload
   const list=toolResult(await rpc(secret,'t3_thread_list',{status:'all'}));
   assert(JSON.stringify(list.threads.map(t=>t.id))==='["thread_b","thread_a"]'&&list.total===2&&list.shown===2&&list.truncated===false,'compact list: '+JSON.stringify(list));
   assert(!('args' in list)&&!('command' in list)&&!('limitRecovery' in list.threads[1]),'raw fields leaked: '+JSON.stringify(list));
   assert(JSON.stringify(list.projects)==='[{"id":"project_fake","title":null,"count":2}]','projects: '+JSON.stringify(list.projects));
   const before=sent.t3_thread_list, large=toolResult(await rpc(secret,'t3_thread_list',{status:'active'})), largeBytes=sent.t3_thread_list-before;
-  assert(largeBytes<20000&&large.total===512&&large.truncated===true&&large.shown===large.threads.length&&large.shown>=30,`synthetic large list ${largeBytes} bytes, ${large.shown} shown`);
+  assert(largeBytes<20000&&large.total===scopedSynthetic.length&&large.truncated===true&&large.shown===large.threads.length&&large.shown>=30,`synthetic large list ${largeBytes} bytes, ${large.shown} shown`);
   const read=toolResult(await rpc(secret,'t3_thread_read',{threadId:'thread_fake',turns:2,maxChars:50}));
   assert(read.command==='read','read command');
   assert(read.args.includes('--origin')&&read.args.includes('http://127.0.0.1:3773'),'origin not pinned');
-  const create=toolResult(await rpc(secret,'t3_thread_create',{cwd:repo,provider:'claudeAgent',model:'claude-haiku-4-5',thinkingEffort:'low',permission:'full-access',prompt:'hello create'}));
-  assert(create.command==='create'&&create.stdin==='hello create'&&create.args.includes('--stdin'),'create stdin');
+  assert((await rpc(secret,'t3_thread_create',{prompt:'no unscoped creation'})).result.isError,'worker cannot create arbitrary threads');
   const send=toolResult(await rpc(secret,'t3_thread_send',{threadId:'thread_fake',mode:'queue',wakeSettled:true,provider:'claudeAgent',model:'claude-haiku-4-5',permission:'full-access',message:'hello send'}));
   assert(send.command==='send'&&send.stdin==='hello send'&&send.args.includes('--wake-settled'),'send stdin wake');
   const partial=toolResult(await rpc(secret,'t3_thread_wait',{threadId:'thread_fake',timeoutMs:1}));
@@ -119,7 +124,7 @@ try {
   const audit=await run([process.execPath,'bin/dot-worker.mjs','audit','--json']);
   assert(audit.code===0,audit.stderr);
   const entries=JSON.parse(audit.stdout).entries;
-  for(const tool of ['t3_thread_list','t3_thread_read','t3_thread_create','t3_thread_send','t3_thread_wait','t3_thread_set','notify_owner']) assert(entries.some(row=>row.tool===tool&&row.result_status==='success'),`missing audit ${tool}`);
+  for(const tool of ['t3_thread_list','t3_thread_read','t3_thread_send','t3_thread_wait','t3_thread_set','notify_owner']) assert(entries.some(row=>row.tool===tool&&row.result_status==='success'),`missing audit ${tool}`);
   assert(entries.some(row=>row.tool==='t3_thread_send'&&row.result_status.startsWith('error:')),'missing failure audit');
   assert(entries.some(row=>row.tool==='t3_thread_send'&&row.text_sha256===createHash('sha256').update('hello send').digest('hex')&&row.text_preview===null),'missing send text digest audit');
   const listAudit=entries.find(row=>row.tool==='t3_thread_list'&&row.result_status==='success'&&row.args_summary.status==='all');
@@ -150,7 +155,7 @@ try {
   await writeFile(limits,JSON.stringify({t3_read_tools:'on'}),{mode:0o600});
   assert(toolResult(await rpc(secret,'t3_thread_list',{status:'all'})).total===2,'list after t3_read_tools=on');
   console.log(`PASS t3_read_tools=off stub, audit and log; on again without restart`);
-  console.log(`PASS T3 tools, compact list (${largeBytes} bytes for 512 synthetic threads), message queue, notify_owner, audit, response bytes per tool`);
+  console.log(`PASS T3 tools, compact list (${largeBytes} bytes for ${scopedSynthetic.length} granted of 512 synthetic threads), message queue, notify_owner, audit, response bytes per tool`);
 } finally {
   if(child.exitCode===null&&child.signalCode===null) { child.kill('SIGTERM'); await new Promise(resolve=>child.once('exit',resolve)); }
   await new Promise(resolve=>ntfy.close(resolve));

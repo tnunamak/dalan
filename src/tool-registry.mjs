@@ -320,8 +320,7 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
     });
   }
   function t3Threads(tool, principal) {
-    // Only the pre-existing unauthenticated local owner path has unscoped authority.
-    if(principal.local===true) return null;
+    // The legacy local principal also resolves to a worker; it has no owner bypass.
     const row=db.prepare('SELECT g.scope FROM tool_grants g JOIN registered_tools t ON t.name=g.tool WHERE g.tool=? AND g.worker=? AND t.enabled=1').get(tool,principal.worker);
     if(!row) refuse('tool_unavailable','tool unavailable');
     const scope=row.scope===null?null:JSON.parse(row.scope);
