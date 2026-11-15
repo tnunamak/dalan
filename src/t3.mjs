@@ -184,6 +184,7 @@ export async function inspectThread(threadId, environmentId) {
 // T3 has no 'stopped' run status. thread.stop and run.interrupt both leave the latest run 'interrupted', and inspect shows
 // nothing else that tells them apart (measured on T3 4643: docs/t3-wake-fence-r4.md). A wake after either starts a new run.
 // So a latest run in one of these states holds the wake. A held wake over-fences a plain interrupt: it costs a held wake, never a wrong one.
+export const runnableRunStatuses=['completed','running'];
 export const heldRunStatuses=['interrupted','cancelled','canceled','failed'];
 // The parent generation: the thread, its environment and the latest run seen in one inspect.
 export const threadGeneration=(thread,environmentId)=>({threadId:thread.id,environmentId,runId:thread.latestRun?.runId??null,ordinal:Number.isInteger(thread.latestRun?.ordinal)?thread.latestRun.ordinal:null});
@@ -198,7 +199,10 @@ export function generationDrift(recorded,current) {
 export function classifyThread(thread) {
   if(thread.deletedAt) return {state:'deleted'};
   if(thread.archivedAt) return {state:'archived'};
-  if(heldRunStatuses.includes(thread.latestRun?.status)) return {state:'held',reason:`latest run ${thread.latestRun.status}`};
+  const runStatus=thread.latestRun?.status;
+  if(heldRunStatuses.includes(runStatus)) return {state:'held',reason:`latest run ${runStatus}`};
+  // Fail closed: only a status Dalan knows to be runnable lets a wake through. A thread with no run yet has none to check.
+  if(thread.latestRun&&!runnableRunStatuses.includes(runStatus)) return {state:'held',reason:`latest run status ${JSON.stringify(runStatus??null)} is not recognized`};
   if(['stopped','settled','archived','deleted','cancelled','canceled'].includes(thread.status)) return {state:thread.status};
   if(thread.status==='active') return {state:'active'};
   return {state:'uncertain_lifecycle'};

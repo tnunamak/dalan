@@ -2820,11 +2820,22 @@ export class Store {
   }
   // A parent that is not running (T3 reports its latest run as interrupted) holds the wake. The wake stays in the durable
   // queue like any quieted one, and held_kind remembers what it was so releaseHeld can put it back once the parent runs again.
+  // One transaction: held_kind and the quiet state land together or not at all. A crash between two separate writes would
+  // leave a sending row that recoverSends turns into uncertain, which heldDeliveries skips.
   holdDelivery(id,reason) {
-    this.db.prepare("UPDATE notifications SET held_kind=kind WHERE id=? AND kind IN ('t3','blocker','watch','break') AND state IN ('pending','failed','sending')").run(id);
-    this.quietDelivery(id,reason);
+    this.inTransaction(() => {
+      this.db.prepare("UPDATE notifications SET held_kind=kind WHERE id=? AND kind IN ('t3','blocker','watch','break') AND state IN ('pending','failed','sending')").run(id);
+      this.quietDelivery(id,reason);
+    });
   }
-  heldDeliveries(limit=20) { return this.db.prepare("SELECT * FROM notifications WHERE held_kind IS NOT NULL AND state IN ('pending','quiet') ORDER BY created_at,id LIMIT ?").all(limit); }
+  // Oldest first. `after` is the {created_at,id} of the last row a caller saw, so a caller can page past rows it has already
+  // inspected instead of reading the same oldest rows on every call.
+  heldDeliveries(limit=20,after=null) {
+    const base="SELECT * FROM notifications WHERE held_kind IS NOT NULL AND state IN ('pending','quiet')";
+    return after
+      ? this.db.prepare(`${base} AND (created_at,id)>(?,?) ORDER BY created_at,id LIMIT ?`).all(after.created_at,after.id,limit)
+      : this.db.prepare(`${base} ORDER BY created_at,id LIMIT ?`).all(limit);
+  }
   // Back to the original kind, pending and due now. A waiter that already took the row (state 'waiting') is not touched.
   releaseHeld(id) {
     return this.db.prepare("UPDATE notifications SET kind=held_kind,held_kind=NULL,state='pending',next_at=0,last_error='' WHERE id=? AND held_kind IS NOT NULL AND state IN ('pending','quiet')").run(id).changes===1;

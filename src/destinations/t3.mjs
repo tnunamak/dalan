@@ -31,6 +31,7 @@ export function createT3Destination({store,callT3=t3.callT3,inspectThread=t3.ins
   const quietItem=(item,reason)=>{ store.quietDelivery(item.id,reason); notify(item.request_id); };
   // A held parent keeps the wake in Dalan's durable wait queue, where dalan inbox and dalan wait still show it. releaseHeld
   // (below) puts it back for delivery when the parent runs again; until then nothing sends it.
+  let heldCursor=null;
   const holdItem=(item,reason)=>{ store.holdDelivery(item.id,reason); notify(item.request_id); };
   // The generation a destination records at submit is one opaque string. This module writes it (capture) and reads it back
   // (readGeneration); the Store keeps it and never parses it.
@@ -128,9 +129,14 @@ export function createT3Destination({store,callT3=t3.callT3,inspectThread=t3.ins
     // Called on a timer. A held wake is released when its parent is active again with no held reason: the user started a new
     // run, so the latest run is running or completed at a higher ordinal. The released row is an ordinary pending blocker or
     // result and goes out through the next drain, on the same stable command id as any first send. One inspect per thread.
+    // Each call looks at one page of held rows and the next call starts after it, wrapping to the oldest at the end. A fixed
+    // oldest-first page would never reach the 21st wake while the first 20 parents stay held.
     async releaseHeld({limit=20}={}) {
       const released=[], seen=new Map();
-      for(const item of store.heldDeliveries(limit)) {
+      let page=store.heldDeliveries(limit,heldCursor);
+      if(page.length<limit&&heldCursor) page=page.concat(store.heldDeliveries(limit-page.length).filter(row=>!page.some(p=>p.id===row.id)));
+      heldCursor=page.length===limit?{created_at:page.at(-1).created_at,id:page.at(-1).id}:null;
+      for(const item of page) {
         try {
           const row=store.get(item.request_id);
           if(!row||resolved(row,{...item,kind:item.held_kind})||quiet(row)) continue;

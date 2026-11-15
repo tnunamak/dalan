@@ -174,6 +174,50 @@ await row('releaseHeld: a held wake goes back to the queue only when its parent 
   assert.deepEqual(unreadable.released,[]); assert.equal(unreadable.logs[0].kind,'held_release_error');
   assert.deepEqual((await sweep({inspect:{state:'active'},row:baseRow({status:'finished'})})).released,['evt_b'],'a finished job releases its result but not its superseded question');
 });
+const assignmentRow=(db,id)=>db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,delivery) VALUES(?,?,?,?,?,?,?,?)').run(id,'{}','hash','thread','environment','queued',new Date().toISOString(),'t3:thread');
+await row('releaseHeld: a held wake behind a full page of still-held parents is still inspected and released',async()=>{
+  const real=new Store(':memory:');
+  const ids=Array.from({length:21},(_,i)=>`r${String(i).padStart(2,'0')}`);
+  ids.forEach((id,i)=>{
+    assignmentRow(real.db,id);
+    real.db.prepare("INSERT INTO notifications(id,kind,request_id,created_at,state) VALUES(?,?,?,?,'pending')").run(`evt_${id}`,'t3',id,new Date(Date.UTC(2026,0,1,0,0,i)).toISOString());
+    real.holdDelivery(`evt_${id}`,'latest run interrupted');
+  });
+  const inspected=[];
+  const store=Object.assign(Object.create(real),{get:request=>baseRow({request_id:request,thread_id:`thread-${request}`,status:'claimed'})});
+  const destination=createT3Destination({store,inspectThread:async threadId=>{inspected.push(threadId);return threadId==='thread-r20'?{state:'active',generation:{threadId,environmentId:environment,runId:'run:9',ordinal:9}}:{state:'held',reason:'latest run interrupted'};},quiet:()=>null,log:()=>{},mainThreadIds:()=>[]});
+  const released=[];
+  for(let tick=0;tick<3&&!released.length;tick++) released.push(...await destination.releaseHeld({limit:20}));
+  assert.deepEqual(released,['evt_r20'],'the 21st held wake is released once its parent resumes, though the oldest 20 stay held');
+  assert.ok(inspected.includes('thread-r20'));
+  real.db.close();
+});
+await row('holdDelivery is one transaction: a failure between its two writes leaves the row as it was, then it holds on retry',async()=>{
+  const real=new Store(':memory:');
+  assignmentRow(real.db,'req_atomic');
+  real.db.prepare("INSERT INTO notifications(id,kind,request_id,created_at,state) VALUES('evt_atomic','t3','req_atomic',?,'sending')").run(new Date().toISOString());
+  const quietDelivery=real.quietDelivery.bind(real);
+  real.quietDelivery=()=>{ throw new Error('crash between the two writes'); };
+  assert.throws(()=>real.holdDelivery('evt_atomic','latest run interrupted'),/crash between/);
+  const half=real.db.prepare("SELECT kind,state,held_kind FROM notifications WHERE id='evt_atomic'").get();
+  assert.deepEqual({...half},{kind:'t3',state:'sending',held_kind:null},'no half-held row: held_kind is not set without the matching quiet state');
+  real.quietDelivery=quietDelivery;
+  real.holdDelivery('evt_atomic','latest run interrupted');
+  assert.deepEqual({...real.db.prepare("SELECT kind,state,held_kind FROM notifications WHERE id='evt_atomic'").get()},{kind:'wait',state:'pending',held_kind:'t3'});
+  assert.equal(real.heldDeliveries(5).length,1);
+  real.db.close();
+});
+await row('classifyThread: an unknown latest run status holds the wake and names the status; known runnable statuses and no run at all do not',()=>{
+  for(const status of ['queued','paused','some_future_status','']) {
+    const result=classifyThread({status:'active',latestRun:{status}});
+    assert.equal(result.state,'held',`status ${JSON.stringify(status)} fails closed`);
+    assert.match(result.reason,/not recognized/); assert.ok(result.reason.includes(JSON.stringify(status)||'""'));
+  }
+  const noStatus=classifyThread({status:'active',latestRun:{runId:'run_x'}});
+  assert.equal(noStatus.state,'held'); assert.match(noStatus.reason,/null is not recognized/);
+  for(const latestRun of [{status:'completed'},{status:'running'},null,undefined]) assert.equal(classifyThread({status:'active',latestRun}).state,'active',JSON.stringify(latestRun));
+  for(const status of ['interrupted','cancelled','canceled','failed']) assert.equal(classifyThread({status:'active',latestRun:{status}}).state,'held');
+});
 await row('generation seam: capture writes one opaque string, readGeneration reads it back, canAdmitContinuation is the fence; none records nothing',async()=>{
   const make=(data,inspect)=>createT3Destination({store:{},callT3:async()=>data,inspectThread:inspect,quiet:()=>null,mainThreadIds:()=>[]});
   const stopped=r4Inspect('stopped',{id:thread}), delivery={mode:'t3',threadId:thread};
@@ -336,9 +380,10 @@ await row('metadata process: inspect only, fail-closed identity and lifecycle; t
       assert.equal(outcome.state,'definite_failure');
       assert.ok(readLog().every(argv=>argv[4]==='inspect'),'inactive metadata must never send/read');
     }
-    // The fake 'stopped' run status is gone: T3 never emits it, so it no longer holds a parent.
+    // T3 never emits a 'stopped' run status. If one shows up anyway it is unknown, so it holds the parent and says why.
     set({thread:{id:thread,status:'active',latestRun:{status:'stopped'}},runtime:active.runtime});
-    assert.equal((await inspectThread(thread,environment)).state,'active');
+    const unknownRun=await inspectThread(thread,environment);
+    assert.equal(unknownRun.state,'held'); assert.match(unknownRun.reason,/"stopped" is not recognized/);
     set({thread:{id:thread,...r4ThreadStates.stopped,id:thread},runtime:active.runtime});
     assert.deepEqual(await inspectThread(thread,environment),{state:'held',reason:'latest run interrupted',generation:{threadId:thread,environmentId:environment,runId:r4ThreadStates.stopped.latestRun.runId,ordinal:5}});
     set(active,{unsupported:true});
