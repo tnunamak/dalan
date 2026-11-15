@@ -9,9 +9,19 @@
 | `dalan_submit` | Queues an assignment, like `dalan submit`. Returns the `request_id` and the bridge verdict. A `clarify` or `reject` verdict comes back as an error result with its reasons. Optional: `worker`, `execution`, `dry_run`, `queue_anyway`, `refuse_defer`. | no |
 | `dalan_wait` | Waits for a finished report, question, blocker, cancellation, worker break or timeout. `timeout_seconds` defaults to 120 and is capped at 300. A timeout returns `status: timeout`; call again to keep waiting. | yes |
 | `dalan_result` | Returns the job state and, once finished, the report. Secrets are redacted. Output over 32 KiB is cut at 32 KiB and ends with a note on how to read the rest. | yes |
+| `dalan_questions` | Lists identified questions for a job. Pass `id` (the request_id). Human-only questions require operator action. | yes |
+| `dalan_answer` | Answers a question through the answer journal. Pass `id`, `question_id` and `text`. Exact retries reuse the saved attempt; different text is refused. Cannot answer human-only questions with owner authority alone. | no |
 | `dalan_status` | Returns `dalan status --json`. | yes |
 
 Each tool runs the matching `dalan` command with `--json`, so receipts, assignment checks and verdicts are the same as on the command line. Failures are tool results with `isError: true` and a message; they never end the server. Only protocol messages go to standard output; logs go to standard error.
+
+## When the worker asks a question
+
+If `dalan_wait` returns exit 3 or a waiting question, call `dalan_questions` with the job's `id`. Show the question to the person and ask for their answer; do not invent one. Send their reply with `dalan_answer`, using that same `id`, the returned `question_id` and their answer as `text`, then call `dalan_wait` again with `request_id`. Keep the same bridge home and request ID; do not submit another job.
+
+If the question is marked human-only, stop and ask the person to take the required operator action instead. Owner authority alone cannot answer it. If there is only a blocker and no identified question, use `dalan_result` to show it and wait for its resolution. Questions and blockers do not authorize scope changes, spending, access grants or new result destinations.
+
+Answers are journaled before sending. Resending the exact same answer to the same question is safe: it reuses the saved attempt rather than sending a second answer. After a lost reply, the same envelope may be retried; a different second answer is refused. Keep the same `DALAN_HOME` and journal. On an error, read `dalan_questions`/`dalan_result` to reconcile before retrying; do not change the text or delete the journal to bypass a refusal.
 
 ## Access
 
