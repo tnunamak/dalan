@@ -36,6 +36,11 @@ function install(root, { kind = 'modern', artifacts = true, checkpoint = false, 
   fs.mkdirSync(data, { recursive: true, mode: 0o700 }); fs.mkdirSync(config, { recursive: true, mode: 0o700 });
   for (const dir of ['receipts', 'artifact-index']) fs.mkdirSync(path.join(data, dir), { mode: 0o700 });
   fs.writeFileSync(path.join(data, 'receipts/r1.json'), '{}', { mode: 0o600 });
+  // Synthetic prepared entry follows answer-journal.mjs#readJournal's file contract.
+  const answers=path.join(data,'receipts/backup-fixture.answers');
+  fs.mkdirSync(answers,{mode:0o700});
+  fs.writeFileSync(path.join(answers,'q1.json'),JSON.stringify({v:1,job:'backup-fixture',question_id:'q1',
+    key:'answer:q1',text:'synthetic backup answer',expected_revision:7,state:'prepared'})+'\n',{mode:0o600});
   fs.writeFileSync(path.join(config, 'as-storage.key'), 'a'.repeat(32), { mode: 0o600 });
   fs.writeFileSync(path.join(config, 'operator.key'), 'operator-secret\n', { mode: 0o600 });
   fs.writeFileSync(path.join(config, 'workers-audit.jsonl'), '{"event_id":"e1"}\n', { mode: 0o600 });
@@ -65,7 +70,7 @@ function run(script, root, env) {
 }
 const backupIn = dir => path.join(dir, fs.readdirSync(dir).find(entry => entry.startsWith('dalan-backup-')));
 function scenario(options, body) {
-  const root = fs.mkdtempSync(path.join(root0, 'backup-recipe-'));
+  const root = fs.mkdtempSync(path.join(process.env.DOT_BRIDGE_TEST_TMP ?? os.tmpdir(), 'backup-recipe-'));
   try {
     const service = install(root, options);
     const operator = path.join(root, 'operator'); fs.mkdirSync(operator);
@@ -88,6 +93,11 @@ test('the backup recipe keeps the key, and the restore check opens and decrypts'
   assert.equal(restored.status, 0, restored.stderr);
   const report = JSON.parse(restored.stdout.trim().split('\n').at(-1));
   assert.equal(report.bridge_db, 'ok');
+  const journalRelative='receipts/backup-fixture.answers/q1.json';
+  const original=fs.readFileSync(path.join(service,'.local/share/dalan',journalRelative));
+  assert.deepEqual(fs.readFileSync(path.join(dir,'data',journalRelative)),original);
+  assert.deepEqual(fs.readFileSync(path.join(operator,'dalan-restore-check/.local/share/dalan',journalRelative)),original);
+  assert.deepEqual(report.answer_journal,{entries:1,ahead_of_db:[],divergent:[]});
   assert.equal(report.subscription_secrets_decrypted, 1);
 }));
 
@@ -184,7 +194,7 @@ test('the restore check makes no outbound call for a restored webhook and pendin
     await (await fetch(url)).text();
     assert.equal(hits, 1);
     hits = 0;
-    const root = fs.mkdtempSync(path.join(root0, 'backup-recipe-'));
+    const root = fs.mkdtempSync(path.join(process.env.DOT_BRIDGE_TEST_TMP ?? os.tmpdir(), 'backup-recipe-'));
     try {
       const service = install(root, { webhook: url });
       const row = new DatabaseSync(path.join(service, '.local/share/dalan/bridge.db'), { readOnly: true });

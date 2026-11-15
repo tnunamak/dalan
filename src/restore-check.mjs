@@ -31,7 +31,7 @@ const hasTable = (db, name) => db.prepare("SELECT 1 FROM sqlite_master WHERE typ
 // Inspect only the journal's documented layout. Never emit saved answer text.
 // src/answer-journal.mjs#journalPath and #readJournal define the file contract.
 function inspectAnswerJournal(db, receiptsDir) {
-  const result = { entries: 0, ahead_of_db: [] };
+  const result = { entries: 0, ahead_of_db: [], divergent: [] };
   if (!fs.existsSync(receiptsDir)) return result;
   if (!fs.lstatSync(receiptsDir).isDirectory() || fs.lstatSync(receiptsDir).isSymbolicLink())
     fail('receipts must be a real directory');
@@ -56,6 +56,8 @@ function inspectAnswerJournal(db, receiptsDir) {
         const row = question?.get(job, entry.question_id);
         if (['committed', 'unknown'].includes(entry.state) && (!row || row.answer === null || row.answered_at === null))
           result.ahead_of_db.push({ job, question_id: entry.question_id, state: entry.state });
+        else if (['committed', 'unknown'].includes(entry.state) && row.answer !== entry.text)
+          result.divergent.push({ job, question_id: entry.question_id, state: entry.state });
       } catch { fail('invalid or unreadable answer journal entry; inspect the receipts directory'); }
     }
   }
@@ -128,6 +130,6 @@ try {
   }
   report.answer_journal = inspectAnswerJournal(db, path.join(dataRoot, 'receipts'));
   process.stdout.write(`${JSON.stringify(report)}\n`);
-  if (report.answer_journal.ahead_of_db.length && !allowJournalAhead)
-    fail('answer journal is ahead of restored bridge.db; inspect answer_journal before resuming, or use --allow-journal-ahead to report only');
+  if ((report.answer_journal.ahead_of_db.length || report.answer_journal.divergent.length) && !allowJournalAhead)
+    fail('answer journal is ahead of or divergent from restored bridge.db; inspect answer_journal before resuming, or use --allow-journal-ahead to report only');
 } finally { db.close(); }
