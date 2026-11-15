@@ -13,7 +13,7 @@ const dataRoot = path.join(root, 'data');
 const receiptsDir = path.join(dataRoot, 'receipts');
 fs.mkdirSync(dataRoot);
 let store;
-const empty = { open_jobs: [], open_questions: [], unknown_sends: [], safe_to_switch: true };
+const empty = { open_jobs: [], open_questions: [], open_checks: [], pending_deliveries: [], unknown_sends: [], safe_to_switch: true };
 try {
   store = new Store(path.join(dataRoot, 'bridge.db'), { now: () => 1000000, limits: { leaseMs: 60000 }, resumeIdleMs: 0 });
   const snapshot = () => inventory({ dataRoot });
@@ -34,6 +34,40 @@ try {
   store.finish(id, grant.claim_id, 'completed', 'done', 'result', 'subject-1');
   assert.deepEqual(snapshot(), empty, 'finished job and answered question are clear');
 
+  // src/store.mjs#Store.migrate defines these columns; no host check is started.
+  // src/store.mjs#Store.assertRegrantReady uses running OR stop_verified IS NOT 1.
+  store.db.prepare("INSERT INTO check_jobs(id,request_id,claim_id,check_id,diff_sha256,status,started_at,stop_verified) VALUES(?,?,?,?,?,'running',?,1)")
+    .run('check-fixture', id, grant.claim_id, 'fixture-only', 'fixture-diff', store.stamp());
+  assert.deepEqual(snapshot().open_jobs, [], 'job remains finished while host work is live');
+  assert.deepEqual(snapshot().open_checks, [{ id: 'check-fixture', job: id, check_id: 'fixture-only', status: 'running', stop_verified: 1 }]);
+  assert.equal(snapshot().safe_to_switch, false, 'running blocks even if a previous phase verified stop');
+  store.db.prepare("UPDATE check_jobs SET status='completed',stop_verified=NULL WHERE id=?").run('check-fixture');
+  for (const stop of [null, 0]) {
+    store.db.prepare('UPDATE check_jobs SET stop_verified=? WHERE id=?').run(stop, 'check-fixture');
+    assert.equal(snapshot().open_checks.length, 1, 'unknown or failed stop evidence blocks');
+    assert.equal(snapshot().safe_to_switch, false);
+  }
+  store.db.prepare('UPDATE check_jobs SET stop_verified=1 WHERE id=?').run('check-fixture');
+  assert.deepEqual(snapshot(), empty, 'completed and verified stopped is safe');
+
+  // src/store.mjs#Store.finishOnce inserts pending result notices independently of job status.
+  const insertNotice = store.db.prepare('INSERT INTO notifications(id,kind,request_id,state,created_at) VALUES(?,?,?,?,?)');
+  for (const kind of ['t3', 'blocker', 'watch']) {
+    const noticeId = 'notice-' + kind;
+    insertNotice.run(noticeId, kind, id, 'pending', store.stamp());
+    for (const state of ['pending', 'sending', 'failed', 'uncertain', 'uncertain_terminal']) {
+      store.db.prepare('UPDATE notifications SET state=? WHERE id=?').run(state, noticeId);
+      const before = store.db.prepare('SELECT * FROM notifications WHERE id=?').get(noticeId);
+      assert.deepEqual(snapshot().pending_deliveries, [{ id: noticeId, job: id, kind, state }]);
+      assert.equal(snapshot().safe_to_switch, false, kind + '/' + state + ' blocks after finish');
+      assert.deepEqual(store.db.prepare('SELECT * FROM notifications WHERE id=?').get(noticeId), before, 'inventory never changes delivery state');
+    }
+    store.db.prepare("UPDATE notifications SET state='delivered' WHERE id=?").run(noticeId);
+    assert.deepEqual(snapshot(), empty, 'delivered notice is clear');
+  }
+  for (const kind of ['event', 'break']) insertNotice.run('notice-' + kind, kind, id, 'pending', store.stamp());
+  assert.deepEqual(snapshot(), empty, 'availability/break traffic is not result delivery');
+
   // src/answer-journal.mjs#prepare and #send produce real journal states.
   const attempt = await prepare(id, 'Q:1', 'yes', { receiptsDir, readRevision: async () => null });
   assert.deepEqual(snapshot().unknown_sends, [{ job: id, question_id: 'Q:1', state: 'prepared' }]);
@@ -45,6 +79,18 @@ try {
   assert.equal(snapshot().safe_to_switch, false, 'unknown send blocks even with no open jobs/questions');
   await send(attempt, { post: async () => ({ answered: true }) }); // Local deterministic dependency, not a server.
   assert.deepEqual(snapshot(), empty, 'all finished and committed');
+
+  // src/answer-journal.mjs#readJournal currently rejects unknown states.
+  // Future readers that accept another state still hit inventory's != committed gate.
+  const committedBytes = fs.readFileSync(attempt.file);
+  const futureEntry = JSON.parse(committedBytes);
+  futureEntry.state = 'future-in-flight';
+  fs.writeFileSync(attempt.file, JSON.stringify(futureEntry));
+  const futureBytes = fs.readFileSync(attempt.file);
+  assert.throws(snapshot, { code: 'answer_journal_corrupt' }, 'unknown journal state fails closed, never reports safe');
+  assert.deepEqual(fs.readFileSync(attempt.file), futureBytes, 'inventory does not repair future-state journals');
+  fs.writeFileSync(attempt.file, committedBytes);
+  assert.deepEqual(snapshot(), empty, 'restored committed journal is safe');
 
   // Explicit receipts root is honored. Missing DB must not be created.
   assert.deepEqual(inventory({ dataRoot, receiptsDir: path.join(root, 'empty-receipts') }), empty);
