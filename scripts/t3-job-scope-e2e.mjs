@@ -36,7 +36,7 @@ process.stdin.on('end', () => {
   else if(args.includes('read')) data={...data,thread:{id:args[args.indexOf('--thread')+1],projectId:'project-1',turns:[]}};
   else if(args.includes('set')) data={...data,thread:{id:args[args.indexOf('--thread')+1],projectId:'project-1'},changed:true};
   else data={threads:['thread-1','thread-2','thread-3'].map(id=>({id,projectId:id,updatedAt:'2026-01-01'}))};
-  if(args.includes('wait')) { require('fs').writeFileSync(process.env.HOME+'/waiting','1'); return setTimeout(()=>console.log(JSON.stringify({ok:true,data})),500); }
+  if(args.includes('wait')) { require('fs').writeFileSync(process.env.HOME+'/waiting','1'); const timer=setInterval(()=>{ if(require('fs').existsSync(process.env.HOME+'/release-wait')) { clearInterval(timer); console.log(JSON.stringify({ok:true,data})); } },10); return; }
   require('fs').appendFileSync(process.env.HOME+'/effects',args.includes('send')?'send\\n':args.includes('set')?'set\\n':'');
   console.log(JSON.stringify({ok:true,data}));
 });
@@ -91,10 +91,11 @@ try {
   store.db.prepare('UPDATE tool_grants SET scope=? WHERE worker=? AND tool=?').run(JSON.stringify({threads:[]}),'dot','t3_thread_read');
   await denied('t3_thread_read',{threadId:'thread-1'});
   store.db.prepare("UPDATE tool_grants SET scope=NULL WHERE worker='dot' AND tool='t3_thread_read'").run();
-  const waiting=call('dot-bridge.read',secret,'t3_thread_wait',{threadId:'thread-1',timeoutMs:2000});
+  const waiting=call('dot-bridge.read',secret,'t3_thread_wait',{threadId:'thread-1',timeoutMs:20000});
   for(let i=0;i<100&&!fs.existsSync(path.join(home,'waiting'));i++)await new Promise(r=>setTimeout(r,20));
   assert(fs.existsSync(path.join(home,'waiting')),'wait entered stub');
   store.db.prepare("DELETE FROM tool_grants WHERE worker='dot' AND tool IN ('t3_thread_wait','t3_thread_send','t3_thread_set')").run();
+  fs.writeFileSync(path.join(home,'release-wait'),'1');
   assert.equal((await waiting).isError,true,'revocation must reject the wait result');
   await denied('t3_thread_send',{threadId:'thread-1',message:'revoked'});
   await denied('t3_thread_set',{threadId:'thread-1',model:'revoked'});
