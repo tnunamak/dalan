@@ -35,7 +35,7 @@ The table lists the common commands. Run `dalan help --all` to see every command
 | `dalan inbox --all --json` | Finds receipts across requester sessions without marking results read. Covers the last 72 hours unless you pass `--since`. |
 | `dalan note REQUEST_ID "text"` | Appends a job-specific message. |
 | `dalan questions REQUEST_ID --json` | Lists identified questions when the selected catalog supports them. |
-| `dalan answer REQUEST_ID QUESTION_ID "text"` | Answers an identified question; an ordinary note does not answer it. |
+| `dalan answer REQUEST_ID QUESTION_ID "text"` | Answers an identified question; an ordinary note does not answer it. The attempt is saved under `receipts/` first, so after a crash or a lost reply, run the same command again: the answer reaches the worker once. A different text for the same question is refused. |
 | `dalan artifact ARTIFACT_ID --output PATH` | Downloads a sealed artifact after get or wait records its owning request. PATH must not exist; its directory must. |
 | `dalan decide REQUEST_ID accepted` | Records a review decision. Other choices are `applied`, `useful_no_change`, `useful_negative` and `not_useful`. |
 | `dalan apply REQUEST_ID --dir CHECKOUT` | Verifies and applies a returned patch, then records `applied`. |

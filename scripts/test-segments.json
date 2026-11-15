@@ -163,6 +163,7 @@
   "node scripts/question-projection-test.mjs",
   "node scripts/question-lifecycle-http-e2e.mjs",
   "node scripts/question-purpose-e2e.mjs",
+  "node scripts/answer-journal-e2e.mjs",
   "node scripts/grant-lease-test.mjs",
   "node scripts/grant-lease-http-e2e.mjs",
   "node scripts/submit-command-key-test.mjs",

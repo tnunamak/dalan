@@ -37,6 +37,9 @@ import { applyPatch } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError } from '../src/admin-socket.mjs';
+import { answerThroughJournal } from '../src/answer-journal.mjs';
+// An answer reply that takes longer than this counts as lost; the journaled envelope is sent again.
+const ANSWER_TIMEOUT_MS=30000;
 
 // Every line this command writes to stderr can quote a worker's report, error or path. JSON lines stay JSON; the rest is made inert.
 const writeStderr=console.error.bind(console);
@@ -86,7 +89,7 @@ function bridgeNotRunning(error) {
   if(selected) return Object.assign(error,{message:`cannot reach the bridge: no bridge is running for DALAN_HOME=${selected} (${cause})`,fix:[`start the bridge for this home the way you set it up (${docsUrl('docs/manual-setup.md','owner-and-requester-setup')}), then run this command again`]});
   return Object.assign(error,{message:`cannot reach the bridge: DALAN_HOME is not set and no bridge is running in ${home} (${cause})`,fix:[`export DALAN_HOME=DIR for the bridge home you made, or start a trial bridge with: ${cli} try`]});
 }
-function request(route, method = 'GET', payload, headers={}) {
+function request(route, method = 'GET', payload, headers={}, timeoutMs=0) {
   return new Promise((resolve, reject) => {
     const bytes = payload ? JSON.stringify(payload) : '';
     const transportFailure=error=>reject(Object.assign(error.syscall==='connect'&&['ENOENT','ECONNREFUSED'].includes(error.code)?bridgeNotRunning(error):error,{kind:'transport'}));
@@ -104,6 +107,7 @@ function request(route, method = 'GET', payload, headers={}) {
         else resolve(value);
       });
     });
+    if(timeoutMs>0) req.setTimeout(timeoutMs,()=>req.destroy(Object.assign(new Error(`admin request timed out after ${timeoutMs} ms`),{code:'ETIMEDOUT'})));
     req.on('error',transportFailure); req.end(bytes);
   });
 }
@@ -562,7 +566,14 @@ async function main() {
     case 'wait': { refuseUnknownOptions('wait',{flags:['--json','--drained'],values:['--timeout','--producer-thread','--max-claimed','--max-queued']}); if(args.includes('--drained')) { result=await waitDrained(); waitOutput=true; process.exitCode=drainedExitCodes[result.status]; break; } const id=args[0]; if(!id||id.startsWith('-')) throw new Error(`wait needs a request ID: ${cli} wait REQUEST_ID (list your jobs with: ${cli} inbox --all)`); result=await waitForAssignment(id,option('--timeout')); indexArtifacts(id,result); waitOutput=true; process.exitCode=waitExitCode(result.status); if(!json&&process.stdout.isTTY) { result=formatWaitLine(result,{id,cli,seconds:option('--timeout')===null?300:Number(option('--timeout'))}); plainOutput=true; } else if(!json) waitTimeoutNote(id,result); break; }
     case 'note': { if(args.some(a=>a.startsWith('-')&&a!=='--json')) throw new Error('note accepts only --json as an option'); const [id,...parts]=args.filter(a=>a!=='--json'),text=parts.join(' '); if(!id||!text) throw new Error('note requires request id and text'); result=await request('/note','POST',{id,text},{'x-owner-capability':receipt(id).token}); break; }
     case 'questions': { const ids=args.filter(a=>a!=='--json');if(ids.length!==1||ids[0].startsWith('-')) throw new Error('questions requires one request id (optional --json)');result=await request('/questions?id='+encodeURIComponent(ids[0]),'GET',null,{'x-owner-capability':receipt(ids[0]).token});break; }
-    case 'answer': { if(args.some(a=>a.startsWith('-')&&a!=='--json')) throw new Error('answer accepts only --json as an option');const [id,questionId,...parts]=args.filter(a=>a!=='--json'),text=parts.join(' ');if(!id||!questionId||!text) throw new Error('answer requires request id, question id and text');result=await request('/answer','POST',{id,question_id:questionId,text},{'x-owner-capability':receipt(id).token});break; }
+    case 'answer': { if(args.some(a=>a.startsWith('-')&&a!=='--json')) throw new Error('answer accepts only --json as an option');const [id,questionId,...parts]=args.filter(a=>a!=='--json'),text=parts.join(' ');if(!id||!questionId||!text) throw new Error('answer requires request id, question id and text');
+      // Every answer goes through the journal: the key and expected revision are saved before the first send, so a crash or a lost reply is retried with the same envelope.
+      const owner=()=>({'x-owner-capability':receipt(id).token});
+      result=await answerThroughJournal({receiptsDir:receipts,job:id,questionId,text,
+        readRevision:async()=>{const got=await request('/get?id='+encodeURIComponent(id)+'&peek=1','GET',null,owner());return Number.isSafeInteger(got.protocol_revision)?got.protocol_revision:null;},
+        post:envelope=>request('/answer','POST',envelope,owner(),ANSWER_TIMEOUT_MS),
+        readQuestion:async()=>(await request('/questions?id='+encodeURIComponent(id),'GET',null,owner())).questions.find(q=>q.question_id===questionId)});
+      break; }
     case 'tell': { const worker=option('--worker'),rest=args.filter((a,i)=>a!=='--worker'&&args[i-1]!=='--worker');if(rest.some(a=>a.startsWith('-')&&a!=='--json')) throw new Error('tell accepts --worker NAME and --json');const text=rest.filter(a=>a!=='--json').join(' ');if(!text) throw new Error('tell requires text');result=await request('/tell','POST',{text,...(worker?{worker}:{})});break; }
     case 'untell': { const worker=option('--worker'),rest=args.filter((a,i)=>a!=='--worker'&&args[i-1]!=='--worker'&&a!=='--json');if(rest.length!==1||rest[0].startsWith('-')) throw new Error('untell requires message ID (optional --worker NAME, --json)');result=await request('/untell','POST',{message_id:rest[0],...(worker?{worker}:{})});break; }
     case 'audit': { const since=option('--since'); result=await request('/audit'+(since?'?since='+encodeURIComponent(since):''),'GET',null,{'x-operator-key':operator()}); break; }
