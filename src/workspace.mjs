@@ -369,6 +369,12 @@ function withholdExcludedPaths(dir,assignment) {
     const parent=path.posix.dirname(file);
     if(parent!=='.') safePath(dir,parent);
     fs.rmSync(path.join(dir,file),{force:true});
+    // Prune empty ancestors too: a sensitive directory name must not remain in
+    // the execution checkout after its last withheld file is removed.
+    for(let ancestor=parent;ancestor!=='.';ancestor=path.posix.dirname(ancestor)) {
+      try { fs.rmdirSync(path.join(dir,ancestor)); }
+      catch(error) { if(error.code==='ENOTEMPTY'||error.code==='EEXIST') break;if(error.code!=='ENOENT') throw error; }
+    }
   }
   const tracked=new Set(git(['-C',dir,'ls-files','-z']).split('\0').filter(Boolean));
   const omitted=excluded.filter(file=>tracked.has(file));
@@ -389,8 +395,8 @@ function excludedPathsAbsent(dir,assignment) {
   const walk=base=>fs.readdirSync(path.join(dir,base),{withFileTypes:true}).every(entry=>{
     if(entry.name==='.git') return true;
     const file=base?`${base}/${entry.name}`:entry.name;
-    if(entry.isDirectory()) return walk(file);
-    return !isSensitiveRepoPath(file,policy.paths);
+    if(isSensitiveRepoPath(file,policy.paths)) return false;
+    return !entry.isDirectory()||walk(file);
   });
   return walk('');
 }

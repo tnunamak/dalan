@@ -106,7 +106,8 @@ try {
       fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
       fs.writeFileSync(path.join(repo, file), 'WITHHELD_SENTINEL\n');
     }
-    const probe = `const fs=require('fs');for(const p of ${JSON.stringify(withheld)})if(fs.existsSync(p))throw Error('withheld file present');if(fs.existsSync('.git'))throw Error('git exposed');console.log('WITHHELD_CHECK_RAN');`;
+    const hiddenDirectories = ['.github/scripts/sign-dataconnect-release'];
+    const probe = `const fs=require('fs');for(const p of ${JSON.stringify([...withheld, ...hiddenDirectories])})if(fs.existsSync(p))throw Error('withheld file present');if(fs.existsSync('.git'))throw Error('git exposed');console.log('WITHHELD_CHECK_RAN');`;
     fs.writeFileSync(path.join(repo, 'test/withheld.js'), probe);
     run('git', ['add', '.'], repo); run('git', ['commit', '-qm', 'withheld fixture'], repo);
     const pinned = run('git', ['rev-parse', 'HEAD'], repo);
@@ -117,6 +118,7 @@ try {
     assert.match(hostCheckRefusal(assignment), /scope_paths_read_isolation_unavailable/, 'assignment exclusions alone are not proof');
     const { request_id, ...extra } = assignment;
     const a = open(extra);
+    for (const directory of hiddenDirectories) assert.equal(exists(a, directory), false, 'empty sensitive ancestor directory is withheld too');
     for (const file of withheld) {
       assert.equal(exists(a, file), false, 'materialized workspace physically lacks withheld files');
       assert.throws(() => ws.read(a.id, a.claim, 'subject', file), /outside scope_paths/);
