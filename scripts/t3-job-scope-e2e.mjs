@@ -10,14 +10,16 @@ import { generateKeyPairSync, sign, randomUUID, createHash } from 'node:crypto';
 import { createToolRegistry } from '../src/tool-registry.mjs';
 import { Store } from '../src/store.mjs';
 import { DatabaseSync } from 'node:sqlite';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const home = fs.mkdtempSync(path.join(os.homedir(), '.tmp/dalan-bridge-t3-scope-'));
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const jwks = http.createServer((req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({keys: [jwk]})); });
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {modulusLength: 2048});
 const jwk = {...publicKey.export({format: 'jwk'}), kid: 'test', alg: 'RS256', use: 'sig'};
-const jwksPort = await reservedPort(), port = await reservedPort();
+await new Promise(resolve => jwks.listen(0, '127.0.0.1', resolve));
+const jwksPort = jwks.address().port;
+let port=null;
 const issuer = `http://127.0.0.1:${jwksPort}/realms/fake`, audience = 'https://dot-bridge.example.test';
 const configDir = path.join(home, '.config/dot-bridge');
 fs.mkdirSync(configDir, {recursive: true});
@@ -43,7 +45,7 @@ process.stdin.on('end', () => {
   console.log(JSON.stringify({ok:true,data}));
 });
 `, {mode: 0o755});
-const env = {...process.env,DALAN_ENABLE_T3_TOOLS:'1', HOME: home, DALAN_LEGACY_PROFILE: '1', NODE_ENV: 'test', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_T3CODE_BIN: stub};
+const env = {...process.env,DALAN_ENABLE_T3_TOOLS:'1', HOME: home, DALAN_LEGACY_PROFILE: '1', NODE_ENV: 'test', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_PORT: '0', DOT_BRIDGE_T3CODE_BIN: stub};
 let child;
 function token(scope) {
   const head = Buffer.from(JSON.stringify({alg: 'RS256', kid: 'test'})).toString('base64url');
@@ -57,11 +59,10 @@ async function call(scope, secret, name, args) {
   return (await response.json()).result;
 }
 try {
-  await new Promise(resolve => jwks.listen(jwksPort, '127.0.0.1', resolve));
   const start=async()=>{
   child = spawn(process.execPath, ['src/server.mjs'], {cwd: root, env, stdio: ['ignore', 'pipe', 'pipe']});
-  let ready = false;
-  child.stdout.on('data', chunk => {if (String(chunk).includes('MCP listening')) ready = true;});
+  let ready = false, output='';
+  child.stdout.on('data', chunk => {output+=String(chunk);port=portFromListeningBanner(output);if(port)ready=true;});
   child.stderr.on('data', chunk => process.stderr.write(chunk));
   for (let i=0; i<100 && !ready; i++) await new Promise(resolve => setTimeout(resolve, 50));
   assert(ready, 'server did not start');
