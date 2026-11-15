@@ -18,32 +18,32 @@ try {
   writeGenericProfile(profile,'fixture');
   fs.mkdirSync(path.dirname(database),{recursive:true,mode:0o700});
   fs.writeFileSync(database,'deliberately corrupt SQLite fixture');
-  const partial=cli('example/repo');
-  assert(loadOwnerWorkers(profile).repoPolicy('fixture').repos.includes('example/repo'),'the repository grant must already be committed');
-  assert.equal(partial.status,0,'repository policy was committed but the command reported failure: '+partial.stderr);
-  const receipt=JSON.parse(partial.stdout);
-  assert.equal(receipt.partial,true);
-  assert.equal(receipt.repository_policy_applied,true);
-  assert.equal(receipt.relationship_enrollment.status,'pending');
-  assert.match(receipt.relationship_enrollment.repair,/worker allow fixture example\/repo/);
-  assert(receipt.relationship_enrollment.reason);
-
-  const plain=cli('example/other',false);
-  assert.equal(plain.status,0,plain.stderr);
-  assert.match(plain.stdout,/repository policy applied/i);
-  assert.match(plain.stdout,/relationship enrollment pending/i);
-  assert.match(plain.stdout,/worker allow fixture example\/other/);
-  assert(loadOwnerWorkers(profile).repoPolicy('fixture').repos.includes('example/other'));
+  const policyBefore=fs.readFileSync(profile,'utf8');
+  const denied=cli('example/repo');
+  assert.equal(fs.readFileSync(profile,'utf8'),policyBefore,'relationship failure must leave repository policy unchanged');
+  assert.notEqual(denied.status,0,'corrupt relationship database must refuse enrollment');
+  assert.match(denied.stderr,/file is not a database/);
 
   fs.unlinkSync(database);
-  new Store(database).db.close();
+  let store=new Store(database);
+  store.db.exec("CREATE TRIGGER fail_relationship_enrollment BEFORE INSERT ON relationships BEGIN SELECT RAISE(ABORT,'fixture relationship creation failed'); END;");
+  store.db.close();
+  const failedInsert=cli('example/repo',false);
+  assert.equal(fs.readFileSync(profile,'utf8'),policyBefore,'failed relationship insertion must leave repository policy unchanged');
+  assert.notEqual(failedInsert.status,0,'failed relationship creation must refuse enrollment');
+  assert.match(failedInsert.stderr,/fixture relationship creation failed/);
+  assert.deepEqual(loadOwnerWorkers(profile).repoPolicy('fixture').repos,[]);
+  store=new Store(database);
+  assert.equal(store.db.prepare('SELECT count(*) n FROM relationships').get().n,0);
+  store.db.exec('DROP TRIGGER fail_relationship_enrollment');
+  store.db.close();
+
   const repaired=cli('example/repo');
   assert.equal(repaired.status,0,repaired.stderr);
-  assert.equal(JSON.parse(repaired.stdout).partial,undefined);
-  const store=new Store(database);
+  store=new Store(database);
   try {
     assert.equal(store.db.prepare('SELECT count(*) n FROM relationships WHERE counterpart_ref=?').get('fixture').n,1);
   } finally {store.db.close();}
-  assert.deepEqual(loadOwnerWorkers(profile).repoPolicy('fixture').repos.sort(),['example/other','example/repo']);
-  console.log('PASS worker allow reports applied policy and pending enrollment after a database fault; retry repairs enrollment');
+  assert.deepEqual(loadOwnerWorkers(profile).repoPolicy('fixture').repos,['example/repo']);
+  console.log('PASS relationship database and insertion failures leave repository policy unchanged; retry enrolls before applying access');
 } finally {fs.rmSync(home,{recursive:true,force:true});}

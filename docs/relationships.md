@@ -4,7 +4,7 @@ A relationship records the worker and its declared continuity. New jobs for that
 
 Worker repository enrollment and connection approval create a relationship without another approval. When a worker is configured while the service is offline before its database exists, the next service start creates the row. Existing ended relationships are never reopened by worker enrollment, connection approval or restart. Legacy single-worker profiles without a relationship remain usable.
 
-If repository access is applied but relationship enrollment fails, `worker allow` reports partial success: the policy is applied, enrollment is pending, and the receipt gives a repair command. After repairing or unlocking the database, repeat that command to enroll the relationship.
+When a bridge database exists, `worker allow` enrolls the relationship before applying repository access. If database access or relationship creation fails, the command fails and leaves the repository policy unchanged. After repairing or unlocking the database, repeat the command.
 
 `dalan grants --json` shows the relationships and the current grants from each enforcer. Each grant has an `enforcer` and an `expires_at` field; null means the enforcer has no recorded deadline, except an external connection explicitly marked `expiry_status: unknown`. Job owner capabilities for protocol jobs expire at their retention deadline. Ending a relationship does not revoke any grant.
 
