@@ -137,7 +137,22 @@ try {
   assert.deepEqual(narrowClaim.available_checks, []);
   assert.equal(narrowClaim.host_execution_available, false);
   assert.match(narrowClaim.host_execution_unavailable_reason, /scope_paths_read_isolation_unavailable/);
-  console.log('PASS unproven isolation: an unaccounted sensitive file or a narrowed scope still refuses');
+  await finish(narrow.id, narrowClaim.claim_id);
+
+  // 4. Negative: a malformed persisted exclusion entry refuses with the isolation reason; it does not fail the claim or get.
+  for (const bad of [[{ path: '../escape' }], [{ path: 42 }], [null]]) {
+    const malformed = open(baseOne, a => ({ ...a, scope_excluded: bad }));
+    const badClaim = await call('claim', { request_id: malformed.id, claimant: 'dot' });
+    assert(badClaim.claim_id, JSON.stringify(badClaim));
+    assert.deepEqual(badClaim.available_checks, []);
+    assert.equal(badClaim.host_execution_available, false);
+    assert.match(badClaim.host_execution_unavailable_reason, /scope_paths_read_isolation_unavailable/);
+    const badGet = await call('get', { request_id: malformed.id });
+    assert.deepEqual(badGet.available_checks, []);
+    assert.match(badGet.host_execution_unavailable_reason, /scope_paths_read_isolation_unavailable/);
+    await finish(malformed.id, badClaim.claim_id);
+  }
+  console.log('PASS unproven isolation: an unaccounted sensitive file, a narrowed scope or a malformed record still refuses');
 } finally {
   await stopChild(service);
   await new Promise(resolve => jwks.close(resolve));

@@ -414,14 +414,16 @@ function excludedPathsAbsent(dir,assignment) {
 }
 // The same proof as excludedPathsAbsent, made from the pinned tree for callers with no checkout. Withholding removes exactly the paths in
 // scope_excluded, so the proof holds when no other path in the tree (or any directory above it) is sensitive under the current policy.
-// A sensitive file the record does not list, an unreadable tree or an unreadable policy all give false.
+// A sensitive file the record does not list, a malformed record, an unreadable tree or an unreadable policy all give false.
 function excludedPathsAccountedAtBase(mirror,assignment) {
   if(!assignment.scope_excluded?.length) return false;
   const policy=sensitivePolicyPaths();
   if(policy.error) return false;
   const listed=spawnSync('git',['-C',mirror,'ls-tree','-r','-z','--name-only','--full-tree',assignmentInput(assignment).base_sha],{encoding:'utf8',timeout:10000,maxBuffer:64*1024*1024,env:gitEnv()});
   if(listed.error||listed.status!==0) return false;
-  const excluded=new Set(assignment.scope_excluded.map(entry=>relative(entry.path)));
+  let excluded;
+  // A malformed persisted entry is not proof; refuse instead of throwing from claim or get.
+  try { excluded=new Set(assignment.scope_excluded.map(entry=>relative(entry.path))); } catch { return false; }
   return listed.stdout.split('\0').filter(file=>file&&!excluded.has(file)).every(file=>{
     const parts=file.split('/');
     return parts.every((_,i)=>!isSensitiveRepoPath(parts.slice(0,i+1).join('/'),policy.paths));
