@@ -68,7 +68,8 @@ export function validateProtocol(value) {
 }
 
 const questionError=(code,message)=>Object.assign(new Error(`${code}: ${message}`),{code});
-export const QUESTION_PURPOSES=['clarification','human_decision'];
+// A purpose other than clarification marks a question only a human may answer. SQLite cannot change a CHECK in place, so the schema 67 list below is the whole set.
+export const QUESTION_PURPOSES=['clarification','human_decision','authentication','tool_permission'];
 function validateQuestion(questionId,text) {
   if(typeof questionId!=='string'||!/^[A-Za-z0-9_.:-]{1,128}$/.test(questionId)) throw new Error('invalid question_id');
   if(arguments.length>1&&(typeof text!=='string'||!text.trim()||Buffer.byteLength(text)>4096)) throw new Error('question text must be 1-4096 UTF-8 bytes');
@@ -927,7 +928,7 @@ export class Store {
       if(version<66) { migratePullQueue(this.db); this.db.exec('PRAGMA user_version=66;'); }
       if(version<67) {
         // What a question asks for. Every row that exists now is a clarification, the only kind before this step.
-        if(!this.db.prepare("SELECT 1 FROM pragma_table_info('job_questions') WHERE name='purpose'").get()) this.db.exec("ALTER TABLE job_questions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'clarification' CHECK(purpose IN ('clarification','human_decision'))");
+        if(!this.db.prepare("SELECT 1 FROM pragma_table_info('job_questions') WHERE name='purpose'").get()) this.db.exec("ALTER TABLE job_questions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'clarification' CHECK(purpose IN ('clarification','human_decision','authentication','tool_permission'))");
         this.db.exec('PRAGMA user_version=67;');
       }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
@@ -2060,7 +2061,7 @@ export class Store {
   }
   hasAssignment(id) { return !!this.db.prepare('SELECT 1 FROM assignments WHERE request_id=?').get(id); }
   ownerNotes(id) { return this.db.prepare('SELECT id,at,text FROM owner_notes WHERE request_id=? ORDER BY sequence').all(id); }
-  // A clarification row keeps the shape it had before purposes existed; only a human_decision row shows its purpose.
+  // A clarification row keeps the shape it had before purposes existed; a row with another purpose shows it.
   questions(id) { this.assertProtocolAvailable(id);return this.db.prepare('SELECT * FROM job_questions WHERE request_id=? ORDER BY rowid').all(id).map(({purpose,...row})=>purpose==='clarification'?row:{...row,purpose}); }
   questionPurpose(id,questionId) { return this.db.prepare('SELECT purpose FROM job_questions WHERE request_id=? AND question_id=?').get(id,questionId)?.purpose??null; }
   askQuestion(id,claimId,questionId,text,subject='local-principal',worker='dot',ctx=null,connectionId=null,purpose='clarification') {
@@ -2596,7 +2597,7 @@ export class Store {
     this.lifecycle(id,question?'waiting':progressType(note,blocker),`worker:${subject}`,question?`question:ask:${question.questionId}`:null,claim);
     if(isBlocker) {
       const ownerNoteSeq=this.db.prepare('SELECT COALESCE(max(sequence),0) sequence FROM owner_notes WHERE request_id=?').get(id).sequence;
-      const body=JSON.stringify({note,epoch:claim.epoch,owner_note_seq:ownerNoteSeq,...(question?{question_id:question.questionId,...(question.purpose==='human_decision'?{purpose:'human_decision'}:{})}:{})});
+      const body=JSON.stringify({note,epoch:claim.epoch,owner_note_seq:ownerNoteSeq,...(question?{question_id:question.questionId,...(question.purpose&&question.purpose!=='clarification'?{purpose:question.purpose}:{})}:{})});
       // Legacy bodies have no generation fields. Preserve them only before any later answer/claim boundary;
       // equal timestamps at a boundary cannot prove the original generation, so do not suppress a fresh question.
       // Owner notes have no shared sequence with notifications; table-local rowids or a delivered-ID set cannot

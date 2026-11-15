@@ -327,12 +327,13 @@ const questionPurpose=value=>{
   if(!QUESTION_PURPOSES.includes(value)) throw new Error(`invalid purpose: use ${QUESTION_PURPOSES.join(' or ')}`);
   return value;
 };
-// A human_decision question is answered by a person holding the operator key. The owner capability alone, which a
-// parent model may hold, is refused before anything is stored.
-function requireOperatorForHumanDecision(req,requestId,questionId) {
-  if(store.questionPurpose(requestId,questionId)!=='human_decision') return;
+// Any question with a purpose other than clarification is answered by a person holding the operator key. The owner
+// capability alone, which a parent model may hold, is refused before anything is stored.
+function requireOperatorForHumanQuestion(req,requestId,questionId) {
+  const purpose=store.questionPurpose(requestId,questionId);
+  if(purpose===null||purpose==='clarification') return;
   try { adminOperator(req); }
-  catch { throw new Error(`FORBIDDEN: question ${questionId} on ${requestId} is a human decision; answering it needs the operator key, not the owner capability alone`); }
+  catch { throw new Error(`FORBIDDEN: question ${questionId} on ${requestId} has purpose ${purpose}, reserved for a human; answering it needs the operator key, not the owner capability alone`); }
 }
 
 const event = {
@@ -355,7 +356,7 @@ const tools = [
   { name:'get',description:'Read assignment, available_checks, cancellation, progress, report and delivery facts.',inputSchema:schema({request_id:string},['request_id']) },
   { name:'ack_message',description:'Acknowledge a lightweight message after reading it; no claim or finish is needed.',inputSchema:schema({message_id:string},['message_id']) },
   { name:'progress',description:'Append progress. Set blocker:true or start note with BLOCKED: or QUESTION: to forward a question to the owner thread. A note over 4096 bytes is cut.',inputSchema:schema({request_id:string,claim_id:string,note:message,blocker:bool},['request_id','claim_id','note']) },
-  { name:'ask_question',description:'Ask an identified question under the current grant. The owner answers this question explicitly; ordinary notes do not answer it. Consume its answer before reporting completed. Set purpose to human_decision when only a human may decide it (consent, approval, a choice that is theirs); no model can answer such a question for them.',inputSchema:schema({request_id:string,claim_id:string,question_id:{type:'string',minLength:1,maxLength:128},text:{type:'string',minLength:1,maxLength:4096},purpose:{type:'string',enum:['clarification','human_decision']}},['request_id','claim_id','question_id','text']) },
+  { name:'ask_question',description:'Ask an identified question under the current grant. The owner answers this question explicitly; ordinary notes do not answer it. Consume its answer before reporting completed. Set purpose to human_decision (a choice only a human may make), authentication (a sign-in only a human can complete) or tool_permission (a permission only a human may grant) when only a human may answer; no model can answer such a question for them.',inputSchema:schema({request_id:string,claim_id:string,question_id:{type:'string',minLength:1,maxLength:128},text:{type:'string',minLength:1,maxLength:4096},purpose:{type:'string',enum:['clarification','human_decision','authentication','tool_permission']}},['request_id','claim_id','question_id','text']) },
   { name:'consume_answer',description:'Read and durably consume the identified question answer under its original current grant. Refuses unanswered or stale-epoch questions.',inputSchema:schema({request_id:string,claim_id:string,question_id:{type:'string',minLength:1,maxLength:128}},['request_id','claim_id','question_id']) },
   { name:'finish',description:'Store a terminal worker report; completion is not owner acceptance. summary is optional: when absent it is the first line of result, and one over 4096 bytes is cut.',inputSchema:schema({request_id:string,claim_id:string,outcome:{type:'string',enum:['completed','blocked','failed']},summary:message,result:{type:'string',maxLength:262144},artifact_ids:{type:'array',items:string,maxItems:8}},['request_id','claim_id','outcome','result']) },
   { name:'list_files',description:"List files in this assignment's checked-out repository workspace. Read-only; scoped to the assignment. When truncated is true, pass next_cursor as cursor to get the next page.",inputSchema:schema({request_id:string,claim_id:string,path:string,limit:{type:'integer',minimum:1,maximum:200},cursor:{type:'string',maxLength:1024}},['request_id','claim_id']) },
@@ -1254,7 +1255,7 @@ const adminServer=http.createServer(async(req,res)=>{
       return json(res,200,store.integrated(id(body.id),body.reason===undefined||body.reason===null?null:str(body.reason,'reason',512)));
     }
     if(url.pathname==='/note'&&req.method==='POST') { const requestId=id(body.id); adminOwner(req,requestId); return json(res,200,store.note(requestId,body.text)); }
-    if(url.pathname==='/answer'&&req.method==='POST') { const requestId=id(body.id); adminOwner(req,requestId);const questionId=str(body.question_id,'question_id',128); requireOperatorForHumanDecision(req,requestId,questionId);return json(res,200,store.answerQuestion(requestId,questionId,str(body.text,'text',4096),{key:body.command_key,revision:body.expected_revision},req.headers['x-owner-capability'])); }
+    if(url.pathname==='/answer'&&req.method==='POST') { const requestId=id(body.id); adminOwner(req,requestId);const questionId=str(body.question_id,'question_id',128); requireOperatorForHumanQuestion(req,requestId,questionId);return json(res,200,store.answerQuestion(requestId,questionId,str(body.text,'text',4096),{key:body.command_key,revision:body.expected_revision},req.headers['x-owner-capability'])); }
     if(url.pathname==='/questions'&&req.method==='GET') { const requestId=id(url.searchParams.get('id'));adminOwner(req,requestId);return json(res,200,{request_id:requestId,questions:store.questions(requestId)}); }
     if(url.pathname==='/tell'&&req.method==='POST') return json(res,200,store.tell(str(body.text,'text',4096),body.worker===undefined&&workers.workers.has('dot')?'dot':submitTarget(workers,body.worker)??assertTarget(workers,'dot')));
     if(url.pathname==='/untell'&&req.method==='POST') return json(res,200,store.untell(id(body.message_id,'message_id'),body.worker===undefined?null:assertTarget(workers,body.worker)));
