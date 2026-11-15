@@ -76,7 +76,7 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
     `ExecStopPost=${[process.execPath, stopRecorder,...(receipts?['--check-run-id',receipts.checkRunId,'--receipt-dir',receipts.receiptDir]:[])].map(propertyArg).join(' ')}`,
   ];
   // Test suites isolate their reservation without changing the production default.
-  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  const suffix = process.env.NODE_ENV === 'production' ? undefined : process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
   if (suffix && !/^[a-zA-Z0-9-]{1,80}$/.test(suffix)) throw new Error('invalid DALAN_HOST_CHECK_UNIT_SUFFIX');
   const unit = `dot-bridge-host-check${suffix ? '-' + suffix : ''}.service`;
   const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', `--unit=${unit}`, ...properties.map(p => `--property=${p}`), '--', process.execPath, service];
@@ -84,7 +84,7 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const child = spawn('/usr/bin/systemd-run', args, { stdio: ['pipe', 'pipe', 'pipe'] });
   onSpawned();
   child.stdin.write(serialized+'\n');
-  let buffer = '', message = null, stopped = null, pid = null, diagnostic = '', callbackError = null, cancellationSent = false;
+  let buffer = '', message = null, stopped = null, pid = null, diagnostic = '', callbackError = null, cancellationSent = false, cpuExceeded = false;
   const launched = [];
   const partial = new Map();
   let partialUsage = null;
@@ -117,7 +117,11 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
           partial.set(event.phase, chunks);
           partialUsage = event.usage;
         }
-        if (event.event === 'result') message = event.result;
+        if (event.event === 'result') {
+          // Both supervisors report here; EOF cleanup cannot undo an observed limit.
+          cpuExceeded ||= event.result?.error === 'budget exceeded: cpu';
+          message = event.result;
+        }
         if (event.event === 'stopped') stopped = event.stop;
       } catch { diagnostic = 'invalid supervisor response'; }
     }
@@ -134,7 +138,7 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   // application TTL can certify a still-running tree as stopped.
   const stopEvidence=resolveHostStopEvidence(receipts,stopped);
   const stop = { verified: stopEvidence?.verified === true, reason: stopEvidence?.verified ? 'systemd_control_group_stopped' : 'service_stop_not_observed', service_result: stopped?.result ?? null, invocation_id: stopEvidence?.invocationId ?? stopped?.invocation_id ?? null, remaining_pids: stopEvidence?.remaining_pids ?? stopped?.remaining_pids ?? null, oom_kill: stopped?.oom_kill ?? null };
-  let error = message?.error ?? null;
+  let error = cpuExceeded ? 'budget exceeded: cpu' : message?.error ?? null;
   if (stopped?.oom_kill > 0 || stopped?.result === 'oom-kill') error = 'budget exceeded: memory';
   else if (stopped?.result === 'timeout') error = 'budget exceeded: wall';
   else if (stopped && !message) error = stopped.result === 'signal' ? 'supervisor interrupted' : `host preparation failed: ${diagnostic.trim() || stopped.exit_status || 'supervisor exited without a receipt'}`;

@@ -85,6 +85,54 @@ try {
     assert.equal(names[0], names[1], 'segments retain the same reservation');
     assert.notEqual(names[0], other[0], 'independent suites never inherit a shared reservation');
   });
+  await check('setup lock directories are shared within a suite, isolated between suites, and removed on exit', async () => {
+    const command = `${node} -e 'const fs=require("node:fs"),path=require("node:path"),dir=process.env.DALAN_SETUP_LOCK_DIR; fs.writeFileSync(path.join(dir,"probe"),"owned"); console.log("SETUP_LOCK_DIR="+dir)'`;
+    const first = await fixture('setup-lock-first', [command, command], {DALAN_SETUP_LOCK_DIR:root});
+    const second = await fixture('setup-lock-second', [command]);
+    const a = await first.ended, b = await second.ended;
+    assert.equal(a.code, 0, a.output); assert.equal(b.code, 0, b.output);
+    const dirs = output => [...output.matchAll(/^SETUP_LOCK_DIR=(.+)$/gm)].map(match => match[1]);
+    const names = dirs(a.output), other = dirs(b.output);
+    assert.equal(names.length, 2); assert.equal(other.length, 1);
+    assert(path.isAbsolute(names[0]));
+    assert.equal(names[0], names[1], 'segments share one setup reservation');
+    assert.notEqual(names[0], other[0], 'independent suites have separate setup reservations');
+    assert.notEqual(names[0], root, 'an inherited override cannot join another suite');
+    await assert.rejects(fs.stat(names[0]), {code:'ENOENT'});
+    await assert.rejects(fs.stat(other[0]), {code:'ENOENT'});
+    assert((await fs.stat(root)).isDirectory(), 'cleanup preserves the inherited directory');
+  });
+  await check('home, temporary files and npm cache are private to each suite', async () => {
+    const command = `${node} -e 'console.log("SUITE_STATE="+JSON.stringify({home:require("node:os").homedir(),tmp:require("node:os").tmpdir(),cache:process.env.npm_config_cache,xdg:process.env.XDG_CONFIG_HOME??null}))'`;
+    const first = await fixture('suite-home-first', [command], {HOME:root,XDG_CONFIG_HOME:root});
+    const second = await fixture('suite-home-second', [command], {HOME:root,XDG_CONFIG_HOME:root});
+    const a = await first.ended, b = await second.ended;
+    assert.equal(a.code, 0, a.output); assert.equal(b.code, 0, b.output);
+    const state = output => JSON.parse(/^SUITE_STATE=(.+)$/m.exec(output)[1]);
+    const x = state(a.output), y = state(b.output);
+    assert.notEqual(x.home, root); assert.notEqual(x.home, y.home);
+    const suite = path.dirname(x.tmp);
+    assert.equal(path.dirname(x.cache), suite);
+    assert.equal(x.xdg, null, 'XDG defaults follow each fixture HOME');
+    await assert.rejects(fs.stat(suite), {code:'ENOENT'});
+    await assert.rejects(fs.stat(x.home), {code:'ENOENT'});
+    await assert.rejects(fs.stat(y.home), {code:'ENOENT'});
+    await assert.rejects(fs.stat(path.dirname(y.tmp)), {code:'ENOENT'});
+    assert((await fs.stat(root)).isDirectory(), 'caller home survives cleanup');
+  });
+  await check('bootstrap failure removes roots allocated before setup completed', async () => {
+    const record = path.join(root, 'bootstrap-root');
+    const preload = path.join(root, 'bootstrap-failure.cjs');
+    await fs.writeFile(preload, `const fs=require('node:fs'),p=fs.promises,m=p.mkdtemp.bind(p),mkdir=p.mkdir.bind(p);let allocated=false;p.mkdtemp=async(...args)=>{const dir=await m(...args);fs.writeFileSync(${JSON.stringify(record)},dir);allocated=true;return dir;};p.mkdir=(...args)=>allocated?Promise.reject(new Error('CONTROL_BOOTSTRAP_FAILURE')):mkdir(...args);require('node:module').syncBuiltinESMExports();`);
+    let owned;
+    try {
+      const f = await fixture('bootstrap-failure', [`${node} -e 'throw Error("must not run")'`], {NODE_OPTIONS:`--require=${preload}`});
+      const result = await f.ended;
+      owned = (await fs.readFile(record,'utf8')).trim();
+      assert.equal(result.code,1,result.output); assert.match(result.output,/CONTROL_BOOTSTRAP_FAILURE/);
+      await assert.rejects(fs.stat(owned), {code:'ENOENT'});
+    } finally { if(owned) await fs.rm(owned,{recursive:true,force:true}); }
+  });
   await check('real entry point reports both failures and still executes later commands', async () => {
     const f = await fixture('exits', [`${node} -e 'process.exit(7)'`, `${node} -e 'console.log("LATER_RAN")'`, `${node} -e 'process.exit(9)'`]);
     const result = await f.ended;
@@ -199,32 +247,38 @@ try {
     await check(`${mode} group probe cannot succeed past the settlement deadline`, async () => {
       const dir=path.join(root,`deadline-${mode}`);
       await fs.mkdir(dir,{recursive:true});
-      const pidFile=path.join(dir,'pid'),ready=path.join(dir,'ready');
+      const pidFile=path.join(dir,'pid'),ready=path.join(dir,'ready'),rootsFile=path.join(dir,'roots.json');
       const parent=path.join(dir,'parent.mjs'),stubborn=path.join(dir,'stubborn.mjs'),preload=path.join(dir,'probe.cjs');
       await fs.writeFile(stubborn,`import fs from 'node:fs';for(const s of ['SIGINT','SIGTERM','SIGHUP'])process.on(s,()=>{});fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000);`);
-      await fs.writeFile(parent,`import fs from 'node:fs';import{spawn}from'node:child_process';for(const s of ['SIGINT','SIGTERM','SIGHUP'])process.on(s,()=>process.exit(0));spawn(process.execPath,[${JSON.stringify(stubborn)}],{stdio:'inherit'});fs.writeFileSync(${JSON.stringify(ready)},String(process.ppid));setInterval(()=>{},1000);`);
+      await fs.writeFile(parent,`import fs from 'node:fs';import{spawn}from'node:child_process';for(const s of ['SIGINT','SIGTERM','SIGHUP'])process.on(s,()=>process.exit(0));spawn(process.execPath,[${JSON.stringify(stubborn)}],{stdio:'inherit'});fs.writeFileSync(${JSON.stringify(rootsFile)},JSON.stringify({home:process.env.HOME,tmp:process.env.TMPDIR,lock:process.env.DALAN_SETUP_LOCK_DIR}));fs.writeFileSync(${JSON.stringify(ready)},String(process.ppid));setInterval(()=>{},1000);`);
       // A late negative result advances a controlled monotonic clock. A stalled
       // result has no timer of its own: the runner must own its deadline timer.
       await fs.writeFile(preload,`if(process.argv[1]?.endsWith('/scripts/test-segments.mjs')){const fs=require('node:fs');const kill=process.kill.bind(process),read=fs.promises.readdir;let accepted=false,clock=0;Object.defineProperty(globalThis,'performance',{value:{now:()=>clock},configurable:true});process.kill=(pid,signal)=>{if(pid<0&&signal==='SIGKILL'){accepted=true;return true;}return kill(pid,signal);};fs.promises.readdir=(dir,...args)=>{if(dir==='/proc'&&accepted){process.stdout.write('CONTROL_PROBE_ENTERED\\n');if(${JSON.stringify(mode)}==='late-negative'){clock+=6000;return Promise.resolve([]);}return new Promise(()=>{});}return read(dir,...args);};require('node:module').syncBuiltinESMExports();}`);
       const f=await fixture(`deadline-${mode}`,[`trap 'exit 0' INT TERM HUP; ${node} ${quote(parent)} & wait`],{NODE_OPTIONS:`--require=${preload}`});
-      let pid,group,timer;
+      let pid,group,timer,owned;
       try {
         group=Number(await waitForFile(ready));pid=Number(await waitForFile(pidFile));
+        owned=JSON.parse(await waitForFile(rootsFile));
         const exited=once(f.child,'exit');
         f.child.kill('SIGHUP');
         const [code]=await Promise.race([exited,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('probe timeout did not release the runner')),15000);})]);
         assert.equal(await isRunning(pid),true,'the negative probe is controlled, not actual group absence');
+        for(const dir of [owned.home,owned.tmp,owned.lock]) assert((await fs.stat(dir)).isDirectory(), 'unconfirmed cleanup must retain '+dir);
         process.kill(-group,'SIGKILL');
         const result=await f.ended;
         assert.match(result.output,/CONTROL_PROBE_ENTERED/,'the delayed probe must execute');
         assert.equal(code,1,result.output);
         assert.match(result.output,/segment process group did not stop before settlement deadline/);
+        assert.match(result.output,/SUITE ROOTS RETAINED/);
+        assert(result.output.includes(owned.home)); assert(result.output.includes(path.dirname(owned.tmp)));
+        assert(result.output.includes(String(pid)), 'diagnostic includes the surviving PID');
       } finally {
         clearTimeout(timer);
         if(group)try{process.kill(-group,'SIGKILL');}catch(error){if(error.code!=='ESRCH')throw error;}
         if(pid&&await isRunning(pid))killIfAlive(pid,'SIGKILL');
         if(f.child.exitCode===null&&f.child.signalCode===null)f.child.kill('SIGKILL');
         await f.ended;
+        if(owned) for(const dir of [owned.home,path.dirname(owned.tmp)]) await fs.rm(dir,{recursive:true,force:true});
       }
     });
   }
