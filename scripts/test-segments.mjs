@@ -209,7 +209,22 @@ async function runSegment(command) {
   try {
     const result = await runCommand(command, { env: { ...process.env, DALAN_TEST_SKIP_REPORT: report } });
     const text = await readFile(report, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
-    const skippedChecks = text.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    const skippedChecks = [], malformedLines = [];
+    for (const [offset, line] of text.split('\n').entries()) {
+      if (!line) continue;
+      try { skippedChecks.push(JSON.parse(line)); }
+      catch { malformedLines.push(offset + 1); }
+    }
+    if (malformedLines.length) {
+      const status = exitStatus(result);
+      // Corrupt skip evidence is a failure, even when the child passed or skipped.
+      // Do not echo report contents or parser messages into the summary.
+      return {
+        ...result, code: status === 0 || status === 77 ? 1 : status,
+        error: new Error(`malformed skip report JSON at line(s): ${malformedLines.join(', ')}`),
+        skippedChecks
+      };
+    }
     return { ...result, skippedChecks };
   } finally { if (!activeRun) await rm(dir, { recursive: true, force: true }); }
 }

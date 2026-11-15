@@ -205,6 +205,39 @@ try {
     assert.match(result.output, /^SKIP #3\/3: /m);
   });
 
+  for (const childExit of [0, 7, 77]) {
+    await check('torn skip report fails but later segments run, child exit ' + childExit, async () => {
+      const valid = JSON.stringify({name:'synthetic skipped group',reason:'synthetic fixture',count:2});
+      const contents = valid + '\n' + '{"TORN_PRIVATE_MARKER":';
+      const writer = `${node} -e ${quote(`require('node:fs').writeFileSync(process.env.DALAN_TEST_SKIP_REPORT,${JSON.stringify(contents)});process.exit(${childExit})`)}`;
+      const later = `${node} -e 'console.log("AFTER_TORN_REPORT")'`;
+      const f = await fixture('torn-skip-' + childExit, [writer, later]);
+      const result = await f.ended;
+      const expectedExit = childExit === 7 ? 7 : 1;
+      assert.equal(result.code, 1, result.output);
+      assert.match(result.output, /^AFTER_TORN_REPORT$/m);
+      assert.match(result.output, /TEST SEGMENTS: 2 total, 1 passed, 1 failed, 0 skipped, 2 checks skipped/);
+      const failure = result.output.split('\n').find(line => line.startsWith('FAIL #1/2 '));
+      assert.ok(failure, result.output);
+      assert.ok(failure.includes('exit=' + expectedExit), failure);
+      assert.ok(failure.endsWith('(malformed skip report JSON at line(s): 2)'), failure);
+      assert.match(result.output, /^SKIPPED CHECK #1\/2: synthetic skipped group — synthetic fixture$/m);
+    });
+  }
+
+  await check('clean skip report preserves pass, grouped counts and a final line without newline', async () => {
+    const contents = JSON.stringify({name:'first synthetic',reason:'fixture',count:2}) + '\n\n'
+      + JSON.stringify({name:'last synthetic',reason:'fixture'});
+    const writer = `${node} -e ${quote(`require('node:fs').writeFileSync(process.env.DALAN_TEST_SKIP_REPORT,${JSON.stringify(contents)})`)}`;
+    const f = await fixture('clean-skip-report', [writer]);
+    const result = await f.ended;
+    assert.equal(result.code, 0, result.output);
+    assert.match(result.output, /TEST SEGMENTS: 1 total, 1 passed, 0 failed, 0 skipped, 3 checks skipped/);
+    assert.match(result.output, /^SKIPPED CHECK #1\/1: first synthetic — fixture$/m);
+    assert.match(result.output, /^SKIPPED CHECK #1\/1: last synthetic — fixture$/m);
+    assert.ok(!result.output.includes('malformed skip report'));
+  });
+
   if (process.platform !== 'win32') await check('SIGKILL acceptance does not release a still-running owned group', async () => {
     const dir=path.join(root,'deferred-kill');
     await fs.mkdir(dir,{recursive:true});
