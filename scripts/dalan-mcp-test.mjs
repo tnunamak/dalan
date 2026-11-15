@@ -11,6 +11,8 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { beginPairing, openSession, DEMO_REDIRECT } from '../src/demo-worker.mjs';
 import { reservedPort } from '../src/test-support/port.mjs';
+import { MAX_ANSWER_BYTES } from '../src/answer-journal.mjs';
+import { defaultPath } from '../src/paths.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
 const WORKER = 'acme';
@@ -161,12 +163,46 @@ try {
   const questions = await call('dalan_questions', { id: requestId });
   assert.notEqual(questions.isError, true);
   assert.ok(textOf(questions).questions.some(q => q.question_id === questionId));
-  // Exactly 4096 UTF-8 bytes is allowed. Preserve the exact text through the CLI journal.
-  const answerText = '--force  is fine\n' + 'é'.repeat(2040);
+  // Real bridge state, not a mocked post counter. This fixture answers only this question.
+  const answerPostCount = () => fs.readFileSync(defaultPath(home, '.local/state/dot-bridge', 'requests.jsonl'), 'utf8')
+    .trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    .filter(row => row.kind === 'admin_call' && row.route === '/answer' && row.method === 'POST').length;
+  assert.equal(answerPostCount(), 0);
+  const invalidUtf8 = await new Promise(resolve => {
+    const child = execFile(process.execPath, [path.join(repo, 'bin/dalan.mjs'), 'answer', requestId, questionId, '--stdin', '--json'],
+      { env, cwd: repo, timeout: 30_000 }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+    child.stdin.on('error', () => {});
+    child.stdin.end(Buffer.from([0xFF]));
+  });
+  assert.ok(invalidUtf8.error, 'invalid UTF-8 stdin is refused');
+  assert.match(invalidUtf8.stderr, /stdin must be valid UTF-8/);
+  assert.equal(answerPostCount(), 0, 'invalid UTF-8 never posts an answer');
+
+  // Exactly MAX_ANSWER_BYTES, including the final newline, is allowed.
+  const answerPrefix = '--force  is fine\n';
+  const answerText = answerPrefix + 'é'.repeat((MAX_ANSWER_BYTES - Buffer.byteLength(answerPrefix) - 1) / 2) + '\n';
+  assert.equal(Buffer.byteLength(answerText), MAX_ANSWER_BYTES);
+  assert.ok(answerText.endsWith('\n'));
+  const tooLarge = answerText + 'x';
+  assert.equal(Buffer.byteLength(tooLarge), MAX_ANSWER_BYTES + 1);
+  const refusedEdge = await call('dalan_answer', { id: requestId, question_id: questionId, text: tooLarge });
+  assert.equal(refusedEdge.isError, true);
+  assert.match(refusedEdge.content[0].text, /4096 UTF-8 bytes/);
+  assert.equal(answerPostCount(), 0, '4097 bytes never posts an answer');
+  const stillOpen = textOf(await call('dalan_questions', { id: requestId }));
+  assert.equal(stillOpen.questions.filter(q => q.question_id === questionId && typeof q.answer === 'string').length, 0);
   const answerArgs = { id: requestId, question_id: questionId, text: answerText };
   const answered = await call('dalan_answer', answerArgs);
   assert.notEqual(answered.isError, true, JSON.stringify(answered));
+  assert.equal(answerPostCount(), 1, 'first answer posts exactly once to the hermetic bridge');
+  const beforeRetry = textOf(await call('dalan_questions', { id: requestId })).questions.filter(q => q.question_id === questionId);
+  assert.equal(beforeRetry.length, 1);
+  assert.equal(beforeRetry[0].answer, answerText);
   assert.notEqual((await call('dalan_answer', answerArgs)).isError, true, 'exact retry uses saved journal');
+  assert.equal(answerPostCount(), 1, 'exact retry causes no second server-side post');
+  const afterRetry = textOf(await call('dalan_questions', { id: requestId })).questions.filter(q => q.question_id === questionId);
+  assert.equal(afterRetry.length, 1, 'server still holds exactly one answer for this question');
+  assert.equal(afterRetry[0].answer, answerText);
   const mismatch = await call('dalan_answer', { ...answerArgs, text: 'different' });
   assert.equal(mismatch.isError, true);
   assert.match(mismatch.content[0].text, /answer_text_mismatch|different text/);

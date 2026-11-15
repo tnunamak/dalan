@@ -579,7 +579,10 @@ async function main() {
           if(bytes>MAX_ANSWER_BYTES) throw new Error(`answer text exceeds ${MAX_ANSWER_BYTES} UTF-8 bytes; nothing was sent or saved`);
           chunks.push(chunk);
         }
-        text=Buffer.concat(chunks).toString('utf8');
+        try { text=new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).decode(Buffer.concat(chunks)); }
+        catch {
+          throw new Error('answer stdin must be valid UTF-8; nothing was sent or saved');
+        }
         if(!text.trim()||text.includes('\u0000')) throw new Error('answer text must be nonblank and contain no NUL');
       }
       if(!text) throw new Error('answer requires request id, question id and text');
