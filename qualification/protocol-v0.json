@@ -4,7 +4,7 @@
   "adapter_id": "protocol-v0",
   "observed_on": "2026-11-15",
   "pins": {
-    "dalan_commit": "404554c53c4ed2e5c5d0ce751aef760b1e69fc83",
+    "dalan_commit": "cf23cceed3ada4ffda321966f616a55b1696e447",
     "requester_ref": "private admin HTTP",
     "worker_host_ref": "local OAuth protocol fixture; not a live hosted worker",
     "protocol": "protocol-v0",
