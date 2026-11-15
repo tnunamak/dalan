@@ -92,7 +92,11 @@ test('the package names the commands it installs', () => {
   assert.ok(Array.isArray(pkg.files) && pkg.files.length, 'an allow-list, not "everything not ignored"');
   assert.equal(pkg.bin.dalan, 'bin/dalan.mjs');
   for (const target of Object.values(pkg.bin)) assert.ok(files.has(target), `${target} ships`);
-  for (const required of ['README.md', 'LICENSE', 'package.json', 'src/try.mjs', 'src/demo-worker.mjs', 'src/server.mjs', 'CONTRIBUTING.md']) assert.ok(files.has(required), `${required} ships`);
+  for (const required of [
+    'README.md', 'LICENSE', 'package.json', 'src/try.mjs', 'src/demo-worker.mjs', 'src/server.mjs', 'CONTRIBUTING.md',
+    'qualification/mcp.json', 'qualification/protocol-v0.json', 'qualification/README.md',
+    'contracts/adapter-qualification.schema.json',
+  ]) assert.ok(files.has(required), `${required} ships`);
 });
 
 test('the scripts that the installed-package setup, upgrade and removal documentation runs ship', () => {
