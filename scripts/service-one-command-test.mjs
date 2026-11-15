@@ -4,17 +4,24 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { defaultPath } from '../src/paths.mjs';
 import { installService, serviceMain, uninstallService } from '../src/service.mjs';
+import { migrateWorkers } from '../src/service-migrate-workers.mjs';
 import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 import { servicePlist, updatePlist, controlLaunchd, launchdLabels, MARKER } from '../src/service-launchd.mjs';
 import { homePointerPath, readDefaultHome, recordDefaultHome, serviceHomeFor } from '../src/default-home.mjs';
 import { followTarget } from '../src/follow-current.mjs';
 import { controlService } from '../src/service-update-runtime.mjs';
 
-const scratch = process.env.TMPDIR ?? path.join(os.homedir(), '.tmp');
+// A short root: each test home must leave its admin socket path under the platform limit (103 bytes on macOS), which install checks.
+// The deepest one is <root>/mac/.local/share/dalan-service/.local/share/dalan/admin.sock, so a long TMPDIR falls back to /tmp.
+const preferred = process.env.TMPDIR ?? path.join(os.homedir(), '.tmp');
+const scratch = preferred.length <= 30 ? preferred : fs.realpathSync('/tmp');
 fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-const root = fs.mkdtempSync(path.join(scratch, 'dalan-one-command-'));
+const root = fs.mkdtempSync(path.join(scratch, 'd1-'));
 const sandbox = name => {
   const userHome = path.join(root, name);
   fs.mkdirSync(path.join(userHome, '.config'), { recursive: true, mode: 0o700 });
@@ -27,7 +34,7 @@ const fakeLaunchctl = () => {
   const spawn = (cmd, args) => {
     assert.equal(cmd, 'launchctl'); log.push(args.join(' '));
     const [verb, target, file] = args, label = String(target).split('/').pop();
-    if (verb === 'print') return { status: loaded.has(label) ? 0 : 113, stdout: '', stderr: '' };
+    if (verb === 'print') return { status: loaded.has(label) ? 0 : 113, stdout: '', stderr: loaded.has(label) ? '' : `Could not find service "${label}" in domain for user/501` };
     if (verb === 'bootstrap') { const text = fs.readFileSync(file, 'utf8'); loaded.add(/<key>Label<\/key>\s*<string>([^<]+)/.exec(text)[1]); return { status: 0, stdout: '', stderr: '' }; }
     if (verb === 'bootout') { loaded.delete(label); return { status: 0, stdout: '', stderr: '' }; }
     return { status: 0, stdout: '', stderr: '' }; // kickstart
@@ -50,6 +57,57 @@ const options = (box, extra = {}) => ({ home: path.join(box.userHome, '.local/sh
   enableWorkspace: false, enableT3: false, workers: ['muse'], verifyCmd: null, route: 'work', autoUpdate: undefined, writeUnitsOnly: false, json: false, ...extra });
 
 try {
+  {
+    const box = seamsFor('unknown-install', 'darwin');
+    const installed = await installService(options(box), box.seams);
+    const receipt = JSON.parse(fs.readFileSync(path.join(defaultPath(installed.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
+    const file = path.join(receipt.unit_dir, `${launchdLabels(receipt.unit).service}.plist`);
+    const old = `${fs.readFileSync(file, 'utf8')}\n<!-- old configuration -->\n`;
+    fs.writeFileSync(file, old);
+    const receiptBefore = fs.readFileSync(path.join(defaultPath(installed.home, '.config/dot-bridge'), 'service-install.json'), 'utf8');
+    for (const failure of ['unknown', 'bootout']) {
+      const calls = [];
+      await assert.rejects(installService(options(box), { ...box.seams, launchd: { uid: 501, spawn(_command, args) {
+        calls.push(args[0]);
+        if (args[0] === 'print' && failure === 'bootout') return { status: 0 };
+        return { status: 1, stderr: 'Operation not permitted' };
+      } } }), /Cannot determine whether launchd service|bootout/);
+      assert.equal(fs.readFileSync(file, 'utf8'), old);
+      assert.equal(fs.readFileSync(path.join(defaultPath(installed.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'), receiptBefore);
+      assert.deepEqual(calls, failure === 'unknown' ? ['print'] : ['print', 'print', 'bootout']);
+    }
+  }
+  // A migrated capacity policy must survive the install preflight and route allocation.
+  {
+    const box = seamsFor('migration-capacity', 'linux');
+    const sourceDir = path.join(root, 'source-capacity');
+    fs.mkdirSync(sourceDir, { mode: 0o700 });
+    const source = path.join(sourceDir, 'workers.json');
+    fs.writeFileSync(source, JSON.stringify({ workers: { muse: { repos: [] } } }), { mode: 0o600 });
+    fs.writeFileSync(path.join(sourceDir, 'limits.json'), JSON.stringify({ max_claimed_outer_assignments: 8 }), { mode: 0o600 });
+    const home = path.join(box.userHome, 'home');
+    const migrated = migrateWorkers({ home, sources: [source] });
+    const policy = fs.readFileSync(migrated.workers_file, 'utf8');
+    const capacity = fs.readFileSync(migrated.limits_file, 'utf8');
+    const installed = await installService(options(box, { home }), box.seams);
+    assert.equal(installed.started, true);
+    assert.equal(fs.readFileSync(migrated.workers_file, 'utf8'), policy);
+    assert.equal(fs.readFileSync(migrated.limits_file, 'utf8'), capacity);
+    for (const kind of ['invalid-json', 'invalid-capacity', 'unsafe-mode', 'symlink']) {
+      const bad = seamsFor(`bad-${kind}`, 'linux');
+      const badHome = path.join(bad.userHome, 'home');
+      const badMigration = migrateWorkers({ home: badHome, sources: [source] });
+      if (kind === 'invalid-json') fs.writeFileSync(badMigration.limits_file, '{');
+      if (kind === 'invalid-capacity') fs.writeFileSync(badMigration.limits_file, JSON.stringify({ max_claimed_outer_assignments: 0 }));
+      if (kind === 'unsafe-mode') fs.chmodSync(badMigration.limits_file, 0o644);
+      if (kind === 'symlink') { fs.unlinkSync(badMigration.limits_file); fs.symlinkSync(path.join(sourceDir, 'limits.json'), badMigration.limits_file); }
+      let allocations = 0;
+      const ensure = bad.gozar.ensureRoute;
+      bad.gozar.ensureRoute = async query => { allocations++; return ensure(query); };
+      await assert.rejects(installService(options(bad, { home: badHome }), bad.seams));
+      assert.equal(allocations, 0, `${kind}: fail before route allocation`);
+    }
+  }
   // ---- plists are well formed and keep the rules of the launchd design ---------------------------------------------------------------
   const plist = servicePlist({ unit: 'dalan-abc', node: '/opt/homebrew/bin/node', home: '/Users/t/svc', port: 8789 });
   assert.match(plist, /<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>/, 'restart after a crash, not after a clean exit');
@@ -99,7 +157,7 @@ try {
     const spawned = new Set(), loadedNow = new Set(), calls = [];
     const fake = (cmd, args) => {
       calls.push(args.join(' ')); const [verb, target, file] = args, label = String(target).split('/').pop();
-      if (verb === 'print') return { status: loadedNow.has(label) ? 0 : 113, stdout: '', stderr: '' };
+      if (verb === 'print') return { status: loadedNow.has(label) ? 0 : 113, stdout: '', stderr: loadedNow.has(label) ? '' : `Could not find service "${label}" in domain for user/501` };
       if (verb === 'bootstrap') { loadedNow.add(/<key>Label<\/key>\s*<string>([^<]+)/.exec(fs.readFileSync(file, 'utf8'))[1]); return { status: 0, stdout: '', stderr: '' }; }
       if (verb === 'bootout') { loadedNow.delete(label); spawned.delete(label); return { status: 0, stdout: '', stderr: '' }; }
       if (verb === 'kickstart') { if (!loadedNow.has(label)) return { status: 113, stdout: '', stderr: 'not loaded' }; spawned.add(label); return { status: 0, stdout: '', stderr: '' }; }
@@ -114,6 +172,20 @@ try {
   // a plist someone else wrote is never overwritten
   fs.writeFileSync(path.join(mac.userHome, 'Library/LaunchAgents', `${labels.service}.plist`), '<plist>hand made</plist>');
   await assert.rejects(installService(options(mac), mac.seams), /not generated by dalan/);
+
+  // Unknown launchctl state must stop uninstall before updates, routes or files change.
+  const plistDir = path.join(mac.userHome, 'Library/LaunchAgents');
+  const savedPlists = fs.readdirSync(plistDir).map(name => [name, fs.readFileSync(path.join(plistDir, name), 'utf8')]);
+  const unknownCalls = [];
+  await assert.rejects(uninstallService({ home: first.home }, { ...mac.seams, launchd: { uid: 501, spawn(command, args) {
+    unknownCalls.push(args[0]);
+    return { status: 1, stderr: 'Operation not permitted' };
+  } } }), /Cannot determine whether launchd service/);
+  assert.deepEqual(unknownCalls, ['print']);
+  for (const [name, text] of savedPlists) assert.equal(fs.readFileSync(path.join(plistDir, name), 'utf8'), text);
+  assert.equal(mac.closed.length, 0, 'route was not closed');
+  assert.equal(fs.existsSync(homePointerPath(mac.env)), true, 'default home remains recorded');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(defaultPath(first.home, '.config/dot-bridge'), 'service-install.json'), 'utf8')).auto_update, true);
 
   // uninstall: agents gone, plists gone, route closed, pointer forgotten, home kept
   fs.writeFileSync(path.join(mac.userHome, 'Library/LaunchAgents', `${labels.service}.plist`), servicePlist({ unit: receipt.unit, node: '/usr/bin/node', home: first.home, port: 8789 }));
@@ -148,6 +220,109 @@ try {
   // ---- explicit external route keeps working; --route alone needs a name, nothing alone is refused ------------------------------------
   await assert.rejects(serviceMain(['install', '--worker', 'muse'], seamsFor('refuse', 'linux').seams), /pass --route NAME/);
 
+  // ---- a read-only preflight refusal allocates no public route ---------------------------------------------------
+  {
+    const unitDirOf = box => path.join(box.env.XDG_CONFIG_HOME, 'systemd/user');
+    const untouched = (box, home, why) => {
+      assert.deepEqual(box.gozar.fake.state.calls, [], `${why}: Gozar is not asked for anything`);
+      assert.deepEqual(box.gozar.fake.state.effects, [], `${why}: no route is allocated`);
+      assert.equal(fs.existsSync(home), false, `${why}: no home is created`);
+      assert.equal(fs.existsSync(unitDirOf(box)), false, `${why}: no unit file is written`);
+    };
+    // The admin socket path must fit the platform limit (bytes, without the terminating NUL): exactly at the limit passes the check.
+    for (const [platform, limit, name] of [['linux', 107, 'sl'], ['darwin', 103, 'sm']]) {
+      for (const extra of [0, 1]) {
+        const box = seamsFor(`${name}${extra}`, platform);
+        const suffix = Buffer.byteLength(path.join(box.userHome, '/.local/share/dalan/admin.sock'));
+        const home = path.join(box.userHome, 'h'.repeat(limit + extra - suffix - 1));
+        assert.equal(Buffer.byteLength(path.join(home, '.local/share/dalan/admin.sock')), limit + extra);
+        const reached = new Error('the socket check passed');
+        let ports = 0;
+        const attempt = installService(options(box, { home }), { ...box.seams, freePort: async () => { ports++; throw reached; } });
+        if (extra === 0) { await assert.rejects(attempt, error => error === reached); assert.equal(ports, 1); }
+        else {
+          await assert.rejects(attempt, error => {
+            assert.ok(error.message.includes(`would be ${limit + 1} bytes`), error.message);
+            assert.ok(error.message.includes(`limit on ${platform === 'darwin' ? 'macOS' : 'Linux'} is ${limit} bytes`), error.message);
+            assert.ok(error.message.includes('shorter --home'), error.message);
+            return true;
+          });
+          assert.equal(ports, 0, 'a home that is too long is refused before anything else');
+        }
+        untouched(box, home, `socket ${platform} +${extra}`);
+      }
+    }
+    // An unreachable user systemd manager is named, with the command that shows why, before any route is allocated.
+    {
+      const box = seamsFor('nomgr', 'linux'), home = options(box).home, calls = [];
+      await assert.rejects(installService(options(box), { ...box.seams, spawn: (cmd, args) => { calls.push([cmd, ...args]); return { status: 1, stdout: '', stderr: 'Failed to connect to bus: No medium found' }; } }), error => {
+        assert.match(error.message, /user systemd manager is not reachable/);
+        assert.ok(error.message.includes('systemctl --user status'), error.message);
+        assert.ok(error.message.includes('login session') && error.message.includes('loginctl enable-linger'), error.message);
+        assert.ok(error.message.includes('Failed to connect to bus'), 'the system reason is kept');
+        return true;
+      });
+      assert.deepEqual(calls, [['systemctl', '--user', 'show-environment']]);
+      untouched(box, home, 'no systemd manager');
+    }
+    // A worker profile, a unit-name collision and an unsafe Gozar state path are all found before the allocation.
+    {
+      const box = seamsFor('noprof', 'linux'), home = options(box).home;
+      await assert.rejects(installService(options(box, { workers: [] }), box.seams), /pass --worker NAME/);
+      untouched(box, home, 'no worker profile');
+    }
+    {
+      const box = seamsFor('clash', 'linux'), home = options(box).home;
+      const unit = `dalan-${createHash('sha256').update(home).digest('hex').slice(0, 10)}.service`;
+      fs.mkdirSync(unitDirOf(box), { recursive: true }); fs.writeFileSync(path.join(unitDirOf(box), unit), '[Unit]\nDescription=someone else\n');
+      await assert.rejects(installService(options(box), box.seams), /already exists with different contents/);
+      assert.deepEqual(box.gozar.fake.state.calls, [], 'a unit collision: Gozar is not asked for anything');
+      assert.equal(fs.existsSync(home), false);
+    }
+    // Fresh macOS collisions must be rejected before even asking Gozar about routes.
+    for (const agent of ['service', 'update']) {
+      const testName = `macOS fresh-home ${agent} plist collision preflight`;
+      const box = seamsFor(agent === 'service' ? 'mc' : 'mu', 'darwin'), home = options(box).home;
+      const unit = `dalan-${createHash('sha256').update(home).digest('hex').slice(0, 10)}`;
+      const dir = path.join(box.userHome, 'Library', 'LaunchAgents');
+      const file = path.join(dir, `${launchdLabels(unit)[agent]}.plist`), text = 'handwritten agent\n';
+      fs.writeFileSync(file, text);
+      await assert.rejects(installService(options(box), box.seams), /not generated by dalan/);
+      assert.deepEqual(box.gozar.fake.state.calls, [], `${testName}: zero Gozar calls`);
+      assert.deepEqual(box.gozar.fake.state.effects, [], `${testName}: no route effects`);
+      assert.equal(fs.existsSync(home), false, `${testName}: no home creation`);
+      assert.deepEqual(box.launchctl.log, [], `${testName}: no launchctl calls`);
+      assert.deepEqual(fs.readdirSync(dir), [path.basename(file)], `${testName}: no plist creation`);
+      assert.equal(fs.readFileSync(file, 'utf8'), text, `${testName}: collision unchanged`);
+      console.log(`PASS ${testName}`);
+    }
+    {
+      const box = seamsFor('gzst', 'linux'), home = options(box).home, open = path.join(box.userHome, 'gz');
+      fs.mkdirSync(open); fs.chmodSync(open, 0o777);
+      await assert.rejects(installService(options(box), { ...box.seams, env: { ...box.env, GOZAR_HOME: open } }), /writable by group or others/);
+      untouched(box, home, 'an unsafe Gozar state path');
+    }
+    // --write-units-only writes the units and allocates nothing.
+    {
+      const box = seamsFor('wuo', 'linux');
+      const written = await installService(options(box, { writeUnitsOnly: true }), box.seams);
+      assert.equal(written.started, false); assert.equal(written.route, null);
+      assert.deepEqual(box.gozar.fake.state.calls, [], '--write-units-only: Gozar is not asked for anything');
+      assert.ok(written.units.every(unit => fs.existsSync(path.join(unitDirOf(box), unit))));
+    }
+    // A failure after the allocation keeps the route's handle in the receipt, so `dalan service uninstall` releases it.
+    {
+      const box = seamsFor('late', 'linux'), home = options(box).home;
+      await assert.rejects(installService(options(box), { ...box.seams, waitForSocket: async () => false }), /did not start on its admin socket/);
+      const pin = box.gozar.fake.state.pins.get('dalan-main');
+      assert.ok(pin, 'the route was allocated');
+      const kept = JSON.parse(fs.readFileSync(path.join(defaultPath(home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
+      assert.deepEqual(kept.route_handle, pin.view.handle, 'the receipt holds the handle of the allocated route');
+      await uninstallService({ home }, box.seams);
+      assert.deepEqual(box.closed, [pin.view.handle], 'uninstall releases the route the failed install allocated');
+    }
+  }
+
   // ---- the default home pointer -------------------------------------------------------------------------------------------------------
   const pointer = sandbox('pointer');
   assert.equal(readDefaultHome(pointer.env), null);
@@ -167,5 +342,25 @@ try {
   assert.equal(followTarget({ ownBin: path.join(pkg, 'dalan.mjs'), env: follow.env }), null, 'no handover when already that version');
   assert.equal(followTarget({ ownBin: own, env: { ...follow.env, DALAN_NO_FOLLOW: '1' } }), null);
   assert.equal(followTarget({ ownBin: own, env: { ...follow.env, DALAN_FOLLOWED: '1' } }), null, 'one handover at most');
+  // An explicit --home names another home, so the default home's version is not the one to run. DALAN_HOME still selects its own.
+  for (const argv of [['service', 'status', '--home', '/different/home'], ['service', 'status', '--home=/different/home']]) {
+    assert.equal(followTarget({ ownBin: own, env: follow.env, argv }), null, `an explicit home does not follow the default home: ${argv.join(' ')}`);
+  }
+  assert.equal(followTarget({ ownBin: own, env: follow.env, argv: ['service', 'status'] }), fs.realpathSync(path.join(pkg, 'dalan.mjs')));
+  assert.equal(followTarget({ ownBin: own, env: { ...follow.env, DALAN_HOME: fhome }, argv: [] }), fs.realpathSync(path.join(pkg, 'dalan.mjs')), 'DALAN_HOME still selects its own package');
+  {
+    // The real entry point passes its arguments: with --home it stays in this package; without, it hands over.
+    const real = sandbox('follow-bin'), rhome = path.join(real.userHome, 'svc'), rpkg = path.join(rhome, 'versions/9.9.9/bin');
+    fs.mkdirSync(path.join(rhome, '.config'), { recursive: true }); fs.mkdirSync(rpkg, { recursive: true });
+    fs.writeFileSync(path.join(rpkg, 'dalan.mjs'), "process.stdout.write('followed\\n');\n");
+    fs.symlinkSync(path.join(rhome, 'versions/9.9.9'), path.join(rhome, 'current'));
+    recordDefaultHome(rhome, real.env);
+    const bin = fileURLToPath(new URL('../bin/dalan.mjs', import.meta.url));
+    const run = args => spawnSync(process.execPath, [bin, ...args], { env: real.env, encoding: 'utf8' });
+    const ownVersion = `${JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version}\n`;
+    assert.equal(run(['--version']).stdout, 'followed\n', 'without --home the CLI hands over to the default home');
+    assert.equal(run(['--version', '--home', path.join(real.userHome, 'other')]).stdout, ownVersion, 'an explicit --home stays in this package');
+    assert.equal(run(['--version', `--home=${path.join(real.userHome, 'other')}`]).stdout, ownVersion, 'an explicit --home= stays in this package');
+  }
   console.log('service-one-command-test: ok');
 } finally { if (!process.env.KEEP) fs.rmSync(root, { recursive: true, force: true }); }

@@ -18,5 +18,6 @@
   {"rule": "worker-nickname", "path": "^scripts/.*\\.mjs$", "line": "ALLOWED_SUBJECTS=dot", "reason": "Test fixture: the OAuth allowed-subject value equals the legacy first-worker name."},
   {"rule": "worker-nickname", "path": "^scripts/worker-isolation-test\\.mjs$", "line": ".", "reason": "This file tests the legacy first-worker name `dot` against named workers; its fixtures use the literal name throughout."},
   {"rule": "worker-nickname", "path": "^scripts/neutral-worker-e2e\\.mjs$", "line": ".", "reason": "This test asserts that a fresh install never shows the legacy worker name, so it searches output for the literal name."},
-  {"rule": "worker-nickname", "path": "^(src/test-support/worker-history/|spec/tla/results/|scripts/fixtures/)", "line": ".", "reason": "Recorded historical schema, model-check output and served-catalog golden files. They must stay byte-identical, and tools/list must not change."}
+  {"rule": "worker-nickname", "path": "^(src/test-support/worker-history/|spec/tla/results/|scripts/fixtures/)", "line": ".", "reason": "Recorded historical schema, model-check output and served-catalog golden files. They must stay byte-identical, and tools/list must not change."},
+  {"rule":"worker-nickname","path":"^src/store-stale-claims\\.test\\.mjs$","token":"^status\\.by_worker\\.dot\\.stale_claims$","reason":"Regression fixture checks that legacy top-level stale-claim status matches the legacy worker entry."}
 ]

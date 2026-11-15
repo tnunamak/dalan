@@ -13,6 +13,7 @@ import { remainingProcesses, verifyStopped } from '../src/sandbox-supervisor.mjs
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-receipt-repair-'));
 process.env.HOME = home;
+process.env.XDG_CONFIG_HOME = path.join(home, ".config");
 process.env.DOT_BRIDGE_WORKSPACE_ROOT = path.join(home, 'work');
 delete process.env.DOT_BRIDGE_ALLOW_SHARED_NET_INSTALL; // the install phase goes through pasta, as in production
 const { Store } = await import('../src/store.mjs');
@@ -41,6 +42,24 @@ const base = run('git', ['rev-parse', 'HEAD'], repo);
 process.env.DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE = repo;
 const store = new Store(path.join(home, 'db.sqlite'));
 const ws = new Workspace(store);
+// Enabling the backend alone does not authorize this legacy fixture. Probe the
+// real policy before expecting a check receipt, and prove refusal writes none.
+const { hostCheckRefusal } = await import('../src/host-execution-policy.mjs');
+const fixtureRefusal = hostCheckRefusal({}, 'example-owner/fixture', 'default');
+if (fixtureRefusal) {
+  try {
+    const id = 'req_' + randomUUID();
+    store.submit({ schema_version: 1, request_id: id, brief: 'fixture', inputs: [{ github_repo: 'example-owner/fixture', base_sha: base }], expected_output: 'patch', execution_scope: 'implementation' }, 'thread', 'environment', 'owner');
+    const claim = store.claim(id, 'dot', 'subject', 99).claim_id;
+    const refused = await ws.check(id, claim, 'subject', 'default');
+    assert.equal(refused.status, 'capability_not_available');
+    assert.equal(refused.reason, fixtureRefusal);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM check_runs').get().n, 0);
+    console.log('SKIP receipt execution journeys: ' + fixtureRefusal + ' (refusal and absent receipt verified)');
+    process.exitCode = 77;
+  } finally { store.db.close(); fs.rmSync(home, { recursive: true, force: true }); }
+  process.exit(process.exitCode);
+}
 
 function assignment() {
   const id = `req_${randomUUID()}`, payload = { schema_version: 1, request_id: id, brief: 'fixture', inputs: [{ github_repo: 'example-owner/fixture', base_sha: base }], expected_output: 'patch', execution_scope: 'implementation' };

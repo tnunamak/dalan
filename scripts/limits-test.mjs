@@ -30,7 +30,7 @@ try {
   // Every key is independently optional.
   write({ main_thread_ids: ['00000000-0000-4000-8000-000000000001'] });
   assert.equal(loadCapacity(file), 1, 'only main_thread_ids: capacity defaults');
-  assert.deepEqual(loadRedeliveryLimits(file), { intervalMs: 600000, maxCount: 3, silenceMs: 1200000, leaseMs: 3600000, laneCapacity: 6, rewakeMs: 90000, rewakeWindowMs: 7200000, rewakeStaleMs: 1200000, breakSilenceMs: 1200000, breakProbeMs: 1800000, maxClaimsPerHour: 90, maxToolCallsPerHour: 1000, maxToolCallsPer24h: 10000, maxResponseBytesPer24h: 100000000, maxResponseBytesPerHour: 8000000 }, 'only main_thread_ids: redelivery defaults');
+  assert.deepEqual(loadRedeliveryLimits(file), { intervalMs: 600000, maxCount: 3, silenceMs: 1200000, claimIdleWarningMs: 900000, leaseMs: 3600000, laneCapacity: 6, rewakeMs: 90000, rewakeWindowMs: 7200000, rewakeStaleMs: 1200000, breakSilenceMs: 1200000, breakProbeMs: 1800000, maxClaimsPerHour: 90, maxToolCallsPerHour: 1000, maxToolCallsPer24h: 10000, maxResponseBytesPer24h: 100000000, maxResponseBytesPerHour: 8000000 }, 'only main_thread_ids: redelivery defaults');
   // Queue re-wake keys, validated; the legacy re-announce keys of the live file still load.
   write({ queue_rewake_ms: 30000, queue_rewake_window_ms: 600000 });
   assert.deepEqual([loadRedeliveryLimits(file).rewakeMs, loadRedeliveryLimits(file).rewakeWindowMs], [30000, 600000], 'lower re-wake bounds accepted');
@@ -42,7 +42,7 @@ try {
   write({ queue_rewake_stale_ms: 86400000 }); assert.equal(loadRedeliveryLimits(file).rewakeStaleMs, 86400000, 'upper stale bound accepted');
   for (const bad of [299999, 86400001, 1.5, '1200000']) { write({ queue_rewake_stale_ms: bad }); assert.throws(() => loadRedeliveryLimits(file), /invalid queue_rewake_stale_ms/, JSON.stringify(bad)); }
   write({ max_claimed_outer_assignments: 10, main_thread_ids: ['00000000-0000-4000-8000-000000000002'], background_max_in_flight: 10, assignment_reannounce_interval_ms: 120000, assignment_reannounce_max_count: 10 });
-  assert.deepEqual(loadRedeliveryLimits(file), { intervalMs: 120000, maxCount: 10, silenceMs: 1200000, leaseMs: 3600000, laneCapacity: 6, rewakeMs: 90000, rewakeWindowMs: 7200000, rewakeStaleMs: 1200000, breakSilenceMs: 1200000, breakProbeMs: 1800000, maxClaimsPerHour: 90, maxToolCallsPerHour: 1000, maxToolCallsPer24h: 10000, maxResponseBytesPer24h: 100000000, maxResponseBytesPerHour: 8000000 }, 'live-shaped file with legacy re-announce keys loads');
+  assert.deepEqual(loadRedeliveryLimits(file), { intervalMs: 120000, maxCount: 10, silenceMs: 1200000, claimIdleWarningMs: 900000, leaseMs: 3600000, laneCapacity: 6, rewakeMs: 90000, rewakeWindowMs: 7200000, rewakeStaleMs: 1200000, breakSilenceMs: 1200000, breakProbeMs: 1800000, maxClaimsPerHour: 90, maxToolCallsPerHour: 1000, maxToolCallsPer24h: 10000, maxResponseBytesPer24h: 100000000, maxResponseBytesPerHour: 8000000 }, 'live-shaped file with legacy re-announce keys loads');
   // Usage-break and throttle keys: defaults above; bounds validated; each independently optional.
   write({ worker_break_silence_ms: 60000, worker_break_probe_ms: 86400000, max_claims_per_hour: 1, max_tool_calls_per_hour: 100000 });
   assert.deepEqual((({ breakSilenceMs, breakProbeMs, maxClaimsPerHour, maxToolCallsPerHour }) => [breakSilenceMs, breakProbeMs, maxClaimsPerHour, maxToolCallsPerHour])(loadRedeliveryLimits(file)), [60000, 86400000, 1, 100000], 'break/throttle bounds accepted');
