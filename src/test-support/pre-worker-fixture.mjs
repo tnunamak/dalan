@@ -1,4 +1,5 @@
 const post54Tables = [
+  'relationships',
   'policy_work_orders',
   'submit_supersedes',
   'destination_blocks', 'destination_approvals',
@@ -12,6 +13,9 @@ const post54Tables = [
 ];
 
 function validateEmptyPost54State(db) {
+  const hasRelationship = !!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='relationship_id'").get();
+  if (hasRelationship && db.prepare('SELECT 1 FROM assignments WHERE relationship_id IS NOT NULL LIMIT 1').get())
+    throw new Error('historical fixture cannot drop nonnull assignments.relationship_id');
   const existing = [];
   for (const table of post54Tables) {
     if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?").get(table)) continue;
@@ -30,7 +34,7 @@ function validateEmptyPost54State(db) {
   const hasMonotonicDeadline=db.prepare("SELECT 1 FROM pragma_table_info('claims') WHERE name='lease_deadline_monotonic_ms'").get();
   if(hasMonotonicDeadline&&db.prepare('SELECT 1 FROM claims WHERE lease_deadline_monotonic_ms IS NOT NULL OR lease_boot_id IS NOT NULL LIMIT 1').get())
     throw new Error('historical fixture cannot drop nonnull claims monotonic lease clock');
-  return {existing, hasLeaseDeadline: !!hasLeaseDeadline, hasDestinationRevision: !!hasDestinationRevision};
+  return {existing, hasLeaseDeadline: !!hasLeaseDeadline, hasDestinationRevision: !!hasDestinationRevision, hasRelationship};
 }
 
 export function dropEmptyPost54FixtureState(db,{requireEmptyLeaseDeadlines=false}={}) {
@@ -42,7 +46,8 @@ export function dropEmptyPost54FixtureState(db,{requireEmptyLeaseDeadlines=false
     const hasMonotonicDeadline=!!db.prepare("SELECT 1 FROM pragma_table_info('claims') WHERE name='lease_deadline_monotonic_ms'").get();
     if(hasMonotonicDeadline&&!requireEmptyLeaseDeadlines) db.prepare('UPDATE claims SET lease_deadline_monotonic_ms=NULL,lease_boot_id=NULL').run();
     // Validate the complete downgrade before the first DROP or ALTER.
-    const {existing, hasLeaseDeadline, hasDestinationRevision} = validateEmptyPost54State(db);
+    const {existing, hasLeaseDeadline, hasDestinationRevision, hasRelationship} = validateEmptyPost54State(db);
+    if (hasRelationship) db.exec('ALTER TABLE assignments DROP COLUMN relationship_id');
     for (const table of existing) db.exec(`DROP TABLE "${table}"`);
     if (existing.includes('policy_work_orders') && db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='bridge_state'").get())
       db.prepare("DELETE FROM bridge_state WHERE key='pull_cursor_key'").run();

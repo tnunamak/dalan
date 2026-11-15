@@ -6,6 +6,8 @@ import { docsUrl } from './docs-url.mjs';
 // commands without a group only appear under `dalan help --all`, and internal maintenance commands only under
 // `dalan help --internal`. Every command runs and has its own help either way.
 export const COMMANDS = [
+  { name: 'relationships', group: 'operator', summary: 'List or end relationships', usage: 'dalan relationships list | end RELATIONSHIP_ID [--json]', detail: ['Ending a relationship blocks new work; existing jobs and grants remain.'] },
+  { name: 'grants', group: 'operator', summary: 'List authority held by each enforcer', usage: 'dalan grants [--json]', detail: ['Shows relationship and grant lifetimes independently.'] },
   { name: 'try', group: 'start', summary: 'Try Dalan with a hosted MCP client, or on this computer only', usage: 'dalan try [--local | --public [--route NAME]] [--home DIR] [--port N] [--callback PATTERN]...',
     detail: ['In an interactive terminal, asks where your worker runs. Choose a hosted MCP client (the default) or this computer only. For a hosted client, Dalan asks Gozar for a public HTTPS route, shows what Gozar says about it (who can read the traffic, whether the address is stable, what it costs), and asks for consent before anything is exposed.',
       'Dalan checks the original public address and ends the trial when it detects a change or route loss. A temporary route lasts for the trial, 3 hours at most; Ctrl-C stops the run and Dalan asks Gozar to remove the route. If cleanup cannot be confirmed, it reports this. A route you saved with `dalan setup` is durable: ending the run never removes it. Keep private work out of a temporary demo.',

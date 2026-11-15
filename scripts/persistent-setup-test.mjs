@@ -14,6 +14,8 @@ import { WORKER_INSTRUCTIONS } from '../src/worker-instructions.mjs';
 process.env.DALAN_SETUP_SOCKET_WAIT_MS = '0';
 
 const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ps-'));
+// Share the installer mutex within this fixture, while keeping parallel test runs independent.
+process.env.DALAN_SETUP_LOCK_DIR = path.join(root, 'setup-locks');
 const bin = path.join(root, 'bin'), xdg = path.join(root, 'xdg'), calls = path.join(root, 'systemctl.log');
 fs.mkdirSync(bin);
 fs.writeFileSync(path.join(bin, 'launchctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });

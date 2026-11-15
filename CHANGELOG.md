@@ -2,6 +2,11 @@
 
 This file lists user-visible changes, newest first. Check the section for your target release before you upgrade.
 
+## Unreleased
+
+- **Relationships, work and authority have separate lifetimes.** Ending a worker relationship refuses new jobs while existing jobs, questions and results remain available under their own permissions and expiry.
+- **Inspect relationships and permissions from the CLI.** `dalan relationships list` shows active and ended relationships, and `dalan relationships end ID` ends one. `dalan grants` lists permissions with each permission's enforcing component and expiry.
+
 ## 0.8.0
 
 **After you update, refresh every hosted connector you use (for example ChatGPT).** The `ask_question` tool now takes an optional `purpose` input, so the tool list the connector cached is out of date. Remove and re-add the connector, or use the connector's refresh action, so it reads the new list.

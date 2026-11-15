@@ -1,4 +1,8 @@
 [
+  "node scripts/relationship-lifecycle-e2e.mjs",
+  "node scripts/relationship-routing-e2e.mjs",
+  "node scripts/relationship-enrollment-test.mjs",
+  "node scripts/relationship-grants-e2e.mjs",
   "node scripts/conformance/native-authority-test.mjs",
   "node --test src/test-support/port.test.mjs",
   "node scripts/conformance/profile-version-test.mjs",
@@ -92,6 +96,7 @@
   "node scripts/inbox-e2e.mjs",
   "node scripts/message-e2e.mjs",
   "node scripts/t3-grant-migration-test.mjs && node scripts/t3-grant-collision-test.mjs && node scripts/t3-job-scope-e2e.mjs && node scripts/t3-tools-e2e.mjs",
+  "node scripts/relationship-migration-test.mjs",
   "node scripts/t3-list-compact-test.mjs",
   "node scripts/durability-e2e.mjs",
   "node scripts/liveness-e2e.mjs",
