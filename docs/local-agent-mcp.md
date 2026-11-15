@@ -17,11 +17,11 @@ Each tool runs the matching `dalan` command with `--json`, so receipts, assignme
 
 ## When the worker asks a question
 
-If `dalan_wait` returns exit 3 or a waiting question, call `dalan_questions` with the job's `id`. Show the question to the person and ask for their answer; do not invent one. Send their reply with `dalan_answer`, using that same `id`, the returned `question_id` and their answer as `text`, then call `dalan_wait` again with `request_id`. Keep the same bridge home and request ID; do not submit another job.
+If `dalan_wait` reports a waiting question, call `dalan_questions` with the job's `id`. Show the question to the person and ask for their answer; do not invent one. Send their reply with `dalan_answer`, using that same `id`, the returned `question_id` and their answer as `text`, then call `dalan_wait` again with `request_id`. Keep the same bridge home and request ID; do not submit another job.
 
-If the question is marked human-only, stop and ask the person to take the required operator action instead. Owner authority alone cannot answer it. If there is only a blocker and no identified question, use `dalan_result` to show it and wait for its resolution. Questions and blockers do not authorize scope changes, spending, access grants or new result destinations.
+If the question is marked human-only, stop and ask the person to take the required operator action instead. Owner authority alone cannot answer it. After the person confirms the action, call `dalan_wait` again. If there is only a blocker and no identified question, use `dalan_result` to show it and wait for its resolution. Questions and blockers do not authorize scope changes, spending, access grants or new result destinations.
 
-Answers are journaled before sending. Resending the exact same answer to the same question is safe: it reuses the saved attempt rather than sending a second answer. After a lost reply, the same envelope may be retried; a different second answer is refused. Keep the same `DALAN_HOME` and journal. On an error, read `dalan_questions`/`dalan_result` to reconcile before retrying; do not change the text or delete the journal to bypass a refusal.
+Answers starting with a dash are refused; ask the person to rephrase so the answer does not start with a dash. Answers are journaled before sending. Resending the exact same answer to the same question is safe: it reuses the saved attempt rather than sending a second answer. After a lost reply, the same envelope may be retried; a different second answer is refused. Keep the same `DALAN_HOME` and journal. On an error, read `dalan_questions`/`dalan_result` to reconcile before retrying; do not change the text or delete the journal to bypass a refusal.
 
 ## Access
 
