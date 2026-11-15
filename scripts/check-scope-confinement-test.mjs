@@ -135,8 +135,13 @@ try {
       assert.equal(fs.readFileSync(path.join(repo, file), 'utf8'), 'WITHHELD_SENTINEL\n', 'owner source is unchanged');
     }
     assert.equal(ws.result(a.id, a.claim, 'subject').diff_preview, '', 'withholding is not a worker deletion patch');
+    assert.equal((await treeDigest(a.dir)).reason, 'index_flags_present', 'unbound digest callers still reject skipped entries');
+    run('git', ['update-index', '--skip-worktree', 'README.md'], a.dir);
+    assert.equal((await treeDigest(a.dir, undefined, assignment.scope_excluded.map(e => e.path))).reason, 'index_flags_present', 'unrelated skipped entries remain untrusted');
+    run('git', ['update-index', '--no-skip-worktree', 'README.md'], a.dir);
     const c = await check(a, 'withheld');
     assert.equal(c.evidence?.exit_code, 0, JSON.stringify(c.r) + c.text);
+    assert.match(c.evidence.install_input_tree_sha256 ?? '', /^[a-f0-9]{40}$/, 'withholding retains the sanitized host candidate digest');
     assert.equal((c.text.match(/WITHHELD_CHECK_RAN/g) || []).length, 2, 'install and check both run without withheld files');
     assert(!c.text.includes('WITHHELD_SENTINEL'));
     assert.equal(ws.snapshot(a.id, a.claim, 'subject').diff_preview, '');

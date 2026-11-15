@@ -221,8 +221,9 @@ const GENERATED_EXCLUDES=[...GENERATED_DIRS].map(name=>`:(exclude,glob)**/${name
 // environment, so symlinks are stored as links and never followed, and a path behind a symlinked directory is not read. New objects go to
 // `scratch`, a throw-away directory, never into the mirror. Returns the tree id, or null with a reason when git could not read everything
 // (an unreadable tracked file, an unreadable untracked directory, a timeout, a skip-worktree or assume-unchanged index entry, a missing
-// index): then the receipt says the observation is unavailable instead of hashing a placeholder. The whole call has a 120 s deadline.
-export async function treeDigest(dir,scratch) {
+// index): then the receipt says the observation is unavailable instead of hashing a placeholder. Explicitly withheld, absent
+// skip-worktree entries are omitted from the private digest index. The whole call has a 120 s deadline.
+export async function treeDigest(dir,scratch,withheldPaths=[]) {
   const own=!scratch;if(own) fs.mkdirSync(path.join(root,'run'),{recursive:true,mode:0o700});scratch??=fs.mkdtempSync(path.join(root,'run','digest-'));
   try {
     const base=gitEnv(),deadline=Date.now()+DIGEST_DEADLINE_MS,left=()=>Math.max(1000,deadline-Date.now());
@@ -241,7 +242,18 @@ export async function treeDigest(dir,scratch) {
     // Index flags that tell git not to look at the worktree (skip-worktree, assume-unchanged) would hide changes from `add -u`.
     const flags=await gitAsync2(dir,['ls-files','-v','-z'],env,left());
     if(flags.status!==0) return {sha256:null,reason:flags.status===null?'git_timeout_or_error':`git_could_not_read_a_file: ${flags.stderr.split('\n')[0].slice(0,160)}`};
-    if(flags.stdout.split('\0').some(record=>record&&(record[0]==='S'||/[a-z]/.test(record[0])))) return {sha256:null,reason:'index_flags_present'};
+    const withheld=new Set(withheldPaths),omitted=[];
+    for(const record of flags.stdout.split('\0').filter(Boolean)) {
+      const file=record.slice(2);
+      if(record[0]==='S'&&withheld.has(file)&&!pathExistsOrThrow(absBytes(dir,file))) omitted.push(file);
+      else if(record[0]==='S'||/[a-z]/.test(record[0])) return {sha256:null,reason:'index_flags_present'};
+    }
+    // Only this private index drops verified absent exclusions. The workspace
+    // index retains its flags so physical withholding is never a worker patch.
+    if(omitted.length) {
+      const removed=await gitAsyncInput(dir,['update-index','--force-remove','-z','--stdin'],env,Buffer.from(omitted.join('\0')+'\0'));
+      if(removed.status!==0) return {sha256:null,reason:'withheld_index_removal_failed'};
+    }
     const deleted=await gitAsync2(dir,['ls-files','--deleted','-z'],env,left());
     if(deleted.status!==0) return {sha256:null,reason:deleted.status===null?'git_timeout_or_error':`git_could_not_read_a_file: ${deleted.stderr.split('\n')[0].slice(0,160)}`};
     for(const file of deleted.stdout.split('\0').filter(Boolean)) {
@@ -891,7 +903,7 @@ export class Workspace {
       const backend=hostBackend();let evidenceMs=0;
       const timed=async fn=>{const t=Date.now();try{return await fn();}finally{evidenceMs+=Date.now()-t;}};
       fs.mkdirSync(path.join(root,'run'),{recursive:true,mode:0o700});scratch=fs.mkdtempSync(path.join(root,'run','digest-'));
-      const firstSnap=await timed(()=>treeDigest(dir,scratch));
+      const firstSnap=await timed(()=>treeDigest(dir,scratch,a.assignment.scope_excluded?.map(entry=>entry.path)));
       const sourceCopyDir=path.join(scratch,'source-exemptions');fs.mkdirSync(sourceCopyDir,{mode:0o700});
       const masked=sensitiveMasks(dir,input.github_repo,sourceCopyDir);
       // One service reservation and one cumulative envelope cover preparation,
