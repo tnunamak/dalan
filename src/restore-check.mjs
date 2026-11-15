@@ -6,11 +6,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SubscriptionCodec } from './subscription-storage.mjs';
+import { journalPath, readJournal } from './answer-journal.mjs';
 import { openAsValue } from './as-store.mjs';
 
 const fail = message => { process.stderr.write(`restore-check: ${message}\n`); process.exit(1); };
-const [dataRoot, configRoot, requestId, extra] = process.argv.slice(2);
-if (!dataRoot || !configRoot || extra !== undefined || requestId?.startsWith('-')) fail('usage: restore-check.mjs DATA_ROOT CONFIG_ROOT [REQUEST_ID]');
+const args = process.argv.slice(2);
+const allowJournalAhead = args.includes('--allow-journal-ahead');
+const positional = args.filter(arg => arg !== '--allow-journal-ahead');
+const [dataRoot, configRoot, requestId, extra] = positional;
+if (!dataRoot || !configRoot || extra !== undefined || positional.some(arg => arg.startsWith('-')) ||
+    args.filter(arg => arg === '--allow-journal-ahead').length > 1)
+  fail('usage: restore-check.mjs DATA_ROOT CONFIG_ROOT [REQUEST_ID] [--allow-journal-ahead]');
 
 function readKey(file, what) {
   if (!fs.existsSync(file)) fail(`${what} is missing: ${file}`);
@@ -21,6 +27,40 @@ function readKey(file, what) {
   return key;
 }
 const hasTable = (db, name) => db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) !== undefined;
+
+// Inspect only the journal's documented layout. Never emit saved answer text.
+// src/answer-journal.mjs#journalPath and #readJournal define the file contract.
+function inspectAnswerJournal(db, receiptsDir) {
+  const result = { entries: 0, ahead_of_db: [] };
+  if (!fs.existsSync(receiptsDir)) return result;
+  if (!fs.lstatSync(receiptsDir).isDirectory() || fs.lstatSync(receiptsDir).isSymbolicLink())
+    fail('receipts must be a real directory');
+  const question = hasTable(db, 'job_questions')
+    ? db.prepare('SELECT answer,answered_at FROM job_questions WHERE request_id=? AND question_id=?') : null;
+  for (const name of fs.readdirSync(receiptsDir).sort()) {
+    if (!name.endsWith('.answers')) continue;
+    const job = name.slice(0, -8), dir = path.join(receiptsDir, name);
+    if (!/^[-A-Za-z0-9_]{8,128}$/.test(job) || !fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink())
+      fail('invalid answer journal directory');
+    for (const name of fs.readdirSync(dir).sort()) {
+      if (!name.endsWith('.json')) continue; // journal staging files are not published entries
+      const file = path.join(dir, name);
+      try {
+        if (!fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink()) throw new Error();
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (typeof raw.question_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(raw.question_id) ||
+            path.resolve(journalPath(receiptsDir, job, raw.question_id)) !== path.resolve(file)) throw new Error();
+        const entry = readJournal(file, job, raw.question_id);
+        if (!entry) throw new Error();
+        result.entries++;
+        const row = question?.get(job, entry.question_id);
+        if (['committed', 'unknown'].includes(entry.state) && (!row || row.answer === null || row.answered_at === null))
+          result.ahead_of_db.push({ job, question_id: entry.question_id, state: entry.state });
+      } catch { fail('invalid or unreadable answer journal entry; inspect the receipts directory'); }
+    }
+  }
+  return result;
+}
 
 const file = path.join(dataRoot, 'bridge.db');
 if (!fs.existsSync(file)) fail(`no bridge.db in ${dataRoot}`);
@@ -86,5 +126,8 @@ try {
       report.audit_checkpoint = hasTable(checkpoint, 'checkpoint') && checkpoint.prepare('SELECT 1 FROM checkpoint WHERE id=1').get() ? 'ok, recorded' : 'ok, empty';
     } finally { checkpoint.close(); }
   }
+  report.answer_journal = inspectAnswerJournal(db, path.join(dataRoot, 'receipts'));
   process.stdout.write(`${JSON.stringify(report)}\n`);
+  if (report.answer_journal.ahead_of_db.length && !allowJournalAhead)
+    fail('answer journal is ahead of restored bridge.db; inspect answer_journal before resuming, or use --allow-journal-ahead to report only');
 } finally { db.close(); }
