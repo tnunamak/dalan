@@ -35,7 +35,7 @@ import { formatGetSummary, formatWaitLine } from '../src/get-summary.mjs';
 import { cliCommand } from '../src/cli-name.mjs';
 import { applyPatch } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
-import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
+import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, ensureWorkerRelationship, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError } from '../src/admin-socket.mjs';
 import { answerThroughJournal } from '../src/answer-journal.mjs';
 // An answer reply that takes longer than this counts as lost; the journaled envelope is sent again.
@@ -352,6 +352,19 @@ async function main() {
       else result={config_dir:selectors['--config-root'](),data_dir:root,state_dir:selectors['--state-root'](),workspace_root:workspaceRoot(home),...(json?{warnings}:{})};
       break;
     }
+    case 'relationships': {
+      const [action,relationshipId,...extra]=args.filter(a=>a!=='--json');
+      const headers={'x-operator-key':operator()};
+      if(action==='list'&&!relationshipId&&!extra.length) result=await request('/relationships','GET',null,headers);
+      else if(action==='end'&&relationshipId&&!extra.length) result=await request('/relationships/end','POST',{relationship_id:relationshipId},headers);
+      else throw new Error('usage: dalan relationships list | end RELATIONSHIP_ID [--json]');
+      break;
+    }
+    case 'grants': {
+      if(args.some(a=>a!=='--json')) throw new Error('usage: dalan grants [--json]');
+      result=await request('/grants','GET',null,{'x-operator-key':operator()});
+      break;
+    }
     case 'worker': {
       const [action,name,repo,...extra]=args.filter(a=>a!=='--json');
       if(args.filter(a=>a==='--json').length>1) throw new Error('usage: dalan worker allow|deny NAME OWNER/REPO [--json] | worker list [NAME] [--json]');
@@ -385,6 +398,13 @@ async function main() {
       }
       if(!['allow','deny'].includes(action)||!name||!repo||extra.length) throw new Error('usage: dalan worker allow|deny NAME OWNER/REPO [--json]');
       result=updateWorkerRepoPolicy(file,name,action,repo);
+      if(action==='allow'&&fs.existsSync(path.join(root,'bridge.db'))) {
+        const db=new DatabaseSync(path.join(root,'bridge.db'));
+        try {
+          db.exec('PRAGMA busy_timeout=5000');
+          if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='relationships'").get()) ensureWorkerRelationship(db,name);
+        } finally { db.close(); }
+      }
       if(!json) { result=`${name}: ${result.mode}${result.repos?.length?` (${result.repos.join(', ')})`:''}${result.denied?.length?` except ${result.denied.join(', ')}`:''}${result.reset_to_audited?.length?`\nthe audit log failed its checkpoint, so workers.json was reset to the audited grants; allow again: ${result.reset_to_audited.map(item=>`${item.worker}${item.repos.length?` (${item.repos.join(', ')})`:''}`).join('; ')}`:''}`; plainOutput=true; }
       break;
     }

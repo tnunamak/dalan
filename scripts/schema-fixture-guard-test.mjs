@@ -19,6 +19,7 @@ const snapshot = db => ({
   version: db.prepare('PRAGMA user_version').get().user_version,
 });
 const newTables = [
+  'relationships',
   'policy_work_orders','protocol_delivery_attempts', 'protocol_delivery_receipts', 'protocol_stop_enrollments', 'protocol_stop_observations', 'protocol_stop_receipts', 'submit_supersedes', 'destination_approvals', 'destination_blocks'];
 
 try {
@@ -29,6 +30,13 @@ try {
   assert.equal(hasTable(minimal, 'question_answer_wakes'), true);
   assert.equal(hasTable(minimal, 'job_questions'), true);
   minimal.close();
+
+  const related = new DatabaseSync(':memory:');
+  related.exec("CREATE TABLE assignments(request_id TEXT, relationship_id TEXT); INSERT INTO assignments VALUES('retained-work','retained-relationship'); CREATE TABLE question_answer_wakes(id);");
+  const beforeRelationship = snapshot(related);
+  assert.throws(() => dropEmptyPost54FixtureState(related), /nonnull assignments\.relationship_id/);
+  assert.deepEqual(snapshot(related), beforeRelationship, 'fixture downgrade must preserve the relationship binding');
+  related.close();
 
   const protocolFile = path.join(root, 'protocol.db');
   const protocol = new DatabaseSync(protocolFile);
@@ -72,7 +80,7 @@ try {
   store.db.exec('PRAGMA user_version=55');
   store.db.close();
   store = new Store(file);
-  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,69);
+  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,70);
   assert.deepEqual({...store.db.prepare('SELECT claim_id,lease_ms,lease_deadline_at FROM claims WHERE request_id=?').get(assignment.request_id)}, {...beforeFixture, lease_deadline_at: new Date(Date.parse(store.db.prepare('SELECT last_claim_activity_at FROM claims WHERE request_id=?').get(assignment.request_id).last_claim_activity_at) + beforeFixture.lease_ms).toISOString()});
   // Opening the store backfills a missing deadline from the claim's last activity and its lease duration.
   assert.equal(store.db.prepare('SELECT claim_id FROM claims WHERE request_id=?').get(assignment.request_id).claim_id, claim.claim_id);

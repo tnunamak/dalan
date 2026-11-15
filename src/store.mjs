@@ -50,7 +50,7 @@ function waiterOwnerGone(attemptId) {
   return !!(owner.boot&&owner.start&&current.boot&&current.start&&(owner.boot!==current.boot||owner.start!==current.start));
 }
 
-const SUPPORTED_SCHEMA_VERSION = 69;
+const SUPPORTED_SCHEMA_VERSION = 70;
 const monotonicMs=()=>Number(process.hrtime.bigint())/1e6;
 function systemBootId() {
   if(process.platform!=='linux') return null;
@@ -948,6 +948,11 @@ export class Store {
         if(!this.db.prepare("SELECT 1 FROM pragma_table_info('tool_grants') WHERE name='scope'").get()) this.db.exec('ALTER TABLE tool_grants ADD COLUMN scope TEXT');
         this.db.exec('PRAGMA user_version=69;');
       }
+      if(version<70) {
+        this.db.exec(`CREATE TABLE IF NOT EXISTS relationships (relationship_id TEXT PRIMARY KEY, my_roles TEXT NOT NULL, counterpart_ref TEXT NOT NULL, pattern TEXT NOT NULL CHECK(pattern IN ('outbound_only','service_native','controllable')), continuity TEXT NOT NULL CHECK(continuity IN ('retained_native','checkpoint_replay','reconstructed_explicit_context','new_work','inbox_only','unknown')), onward TEXT NOT NULL CHECK(onward IN ('none','attenuated')), inbound_grant_ref TEXT, created_at TEXT NOT NULL, ended_at TEXT);`);
+        if(!this.db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='relationship_id'").get()) this.db.exec('ALTER TABLE assignments ADD COLUMN relationship_id TEXT REFERENCES relationships(relationship_id)');
+        this.db.exec('PRAGMA user_version=70;');
+      }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
       this.legacyFixNames=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assignments' AND instr(sql,?)>0").get(`'${legacyFixLoopName}'`);
@@ -1269,8 +1274,14 @@ export class Store {
     return {request_id:payload.request_id,status:old.status,duplicate:true,...(approval?{destination_approval:approval}:{})};
   }
   // identity: the assignment as the submitter sent it, when the stored payload differs (scope narrowing); a retry then still matches.
+  relationshipForSubmission(worker,relationshipId=null) {
+    const relationship=this.db.prepare('SELECT * FROM relationships WHERE counterpart_ref=? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(worker??'dot');
+    if(relationshipId!==null&&relationshipId!==relationship?.relationship_id) throw new Error('relationship_mismatch');
+    if(relationship?.ended_at) throw new Error('relationship_ended');
+    return relationship;
+  }
   submit(...args) { return this.transaction(()=>this.submitInTransaction(...args)); }
-  submitInTransaction(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, preflight=null, priority='normal', meta=null, identity=payload, maxQueued=null, targetWorker=undefined, execution=null, defaultExecution='host', requiredCapabilities=null, defaultValidUntil=null, commandKey=null, supersedes=null, destinationRevision=null, inheritedOwnerHash=null, parentGeneration=null) {
+  submitInTransaction(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, preflight=null, priority='normal', meta=null, identity=payload, maxQueued=null, targetWorker=undefined, execution=null, defaultExecution='host', requiredCapabilities=null, defaultValidUntil=null, commandKey=null, supersedes=null, destinationRevision=null, inheritedOwnerHash=null, parentGeneration=null, relationshipId=null) {
     if(!this.db.isTransaction) throw new Error('transaction_required');
     if(payload.request_id.startsWith(PULL_PAGE_PREFIX)||!inheritedOwnerHash&&this.pullQueue.row(payload.request_id)) throw new Error('request_id reserved for policy work');
     const protocol=!this.hasAssignment(payload.request_id)&&Object.hasOwn(payload,'protocol')?validateProtocol(payload.protocol):null;
@@ -1282,6 +1293,7 @@ export class Store {
     if(!['normal','background'].includes(priority)) throw new Error('invalid priority');
     const retry=this.checkRetry(payload,delivery,environmentId,ownerToken,review,priority,meta,identity,targetWorker,execution,requiredCapabilities,commandKey,supersedes,destinationRevision);
     if(retry) return retry;
+    const relationship=this.relationshipForSubmission(targetWorker,relationshipId);
     const id=payload.request_id, body=JSON.stringify(payload),payloadHash=hash(JSON.stringify(canonical(identity))),ownerHash=inheritedOwnerHash??hash(ownerToken);
     // checkRetry validated this target in the same transaction; only counts containing it gain room.
     const supersededId=supersedes?.target_id??null;
@@ -1324,6 +1336,7 @@ export class Store {
     // The target is a column, not payload: an omitted worker means 'dot'.
     this.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,owner_hash,review,delivery,priority,objective_key,revision,task_kind,source,target_worker,execution,required_capabilities) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id,body,payloadHash,threadId,environmentId??'','queued',this.stamp(),ownerHash,review?1:0,deliveryValue,priority,...metaFields.map(k=>k==='source'?toStoredSource(m[k],this.legacyFixNames):m[k]),targetWorker??'dot',execution??defaultExecution,requiredCapabilities?JSON.stringify(requiredCapabilities):null);
     if(typeof parentGeneration==='string')this.db.prepare('UPDATE assignments SET parent_generation=? WHERE request_id=?').run(parentGeneration,id);
+    if(relationship) this.db.prepare('UPDATE assignments SET relationship_id=? WHERE request_id=?').run(relationship.relationship_id,id);
     if(disclosure)this.db.prepare('INSERT INTO destination_approvals(request_id,revision,snapshot,actor,approved_at) VALUES(?,?,?,?,?)').run(id,disclosure.revision,JSON.stringify(disclosure),JSON.stringify({kind:'owner_capability',id:ownerHash}),this.stamp());
     const requestedValidUntil=validUntilOf(payload);
     const mayUseDefault=priority==='normal'&&!this.paused()&&!((targetWorker??'dot')==='dot'&&this.holdingBreak());

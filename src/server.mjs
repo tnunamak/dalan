@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
-import { loadWorkers, hasInstalledDatabase, legacyMarkerPath, seedWorkerRepos, resolveWorker, hasCapability, assertTarget, submitTarget } from './workers.mjs';
+import { loadWorkers, loadEffectiveOwnerWorkers, hasInstalledDatabase, legacyMarkerPath, seedWorkerRepos, resolveWorker, hasCapability, assertTarget, submitTarget, ensureWorkerRelationship } from './workers.mjs';
 import { Store, QUESTION_PURPOSES, nonterminalOutcome, validateProtocol, loadRedeliveryLimits, resumeNudge } from './store.mjs';
 import {protocolArtifactChunk} from './protocol-artifact-commands.mjs';
 import { sendWebhook, validSecret } from './webhooks.mjs';
@@ -148,6 +148,9 @@ const store = new Store(path.join(dataDir, 'bridge.db'),{
   // Intentional service startup opts past Store's accidental-migration footgun guard.
   deferSubscriptionRetirement:true,markProfileModeSeen:!legacyProfile,allowDefaultHomeMigration:true
 });
+// An offline worker allow can precede the database. Reconcile named profiles at startup;
+// legacy installations retain their pre-relationship behavior until explicitly enrolled.
+if(!legacyProfile) for(const worker of workers.workers.keys()) ensureWorkerRelationship(store.db,worker);
 const ackLedger=new AckLedger(path.join(dataDir,'delivery-acks.db'));
 const notifyLedger=new NotifyLedger(path.join(dataDir,'notify-sent.db'));
 process.on('exit',()=>{try{ackLedger.close();}catch{}try{notifyLedger.close();}catch{}});
@@ -1131,6 +1134,7 @@ const adminServer=http.createServer(async(req,res)=>{
       // even when validation changed the stored brief (scope narrowing, the appended allow-list).
       const submitted=payload;
       const isNew=!store.hasAssignment(payload.request_id);
+      if(isNew&&dryRun) store.relationshipForSubmission(target,body.relationship_id??null);
       // Reject immutable retry conflicts using the persisted binding before any external destination inspection.
       // A matching retry still validates the current destination below; this does not accept stale environment evidence.
       store.checkRetry(submitted,delivery,existingRequest?.environment_id,owner,body.review===true,body.background===true?'background':'normal',meta,submitted,target,explicitExecution,requiredCapabilities,commandKey,supersedes,destinationRevision);
@@ -1181,7 +1185,7 @@ const adminServer=http.createServer(async(req,res)=>{
       const readiness=order?.check_readiness??null;
       const preflight=order?.preflight??null;
       const defaultValidity=order?.defaultValidity??null;
-      const result=store.submit(payload,delivery,environmentId,owner,body.review===true,preflight,body.background===true?'background':'normal',meta,(()=>{const r=renderAssignment(submitted);return payload.brief!==r.brief||JSON.stringify(payload.scope_paths)!==JSON.stringify(r.scope_paths);})()?submitted:payload,body.max_queued??null,target,explicitExecution,workers.defaultExecution,requiredCapabilities,defaultValidity?.valid_until??null,commandKey,supersedes,destinationRevision,null,generation??null);
+      const result=store.submit(payload,delivery,environmentId,owner,body.review===true,preflight,body.background===true?'background':'normal',meta,(()=>{const r=renderAssignment(submitted);return payload.brief!==r.brief||JSON.stringify(payload.scope_paths)!==JSON.stringify(r.scope_paths);})()?submitted:payload,body.max_queued??null,target,explicitExecution,workers.defaultExecution,requiredCapabilities,defaultValidity?.valid_until??null,commandKey,supersedes,destinationRevision,null,generation??null,body.relationship_id??null);
       // Only a committed first replacement wakes the TARGET's already-attached waiter.
       if(supersedes&&!result.duplicate) {
         const targetId=supersedes.target_id,waiter=waiters.get(targetId);
@@ -1287,6 +1291,29 @@ const adminServer=http.createServer(async(req,res)=>{
     if(url.pathname==='/questions'&&req.method==='GET') { const requestId=id(url.searchParams.get('id'));adminOwner(req,requestId);return json(res,200,{request_id:requestId,questions:store.questions(requestId)}); }
     if(url.pathname==='/tell'&&req.method==='POST') return json(res,200,store.tell(str(body.text,'text',4096),body.worker===undefined&&workers.workers.has('dot')?'dot':submitTarget(workers,body.worker)??assertTarget(workers,'dot')));
     if(url.pathname==='/untell'&&req.method==='POST') return json(res,200,store.untell(id(body.message_id,'message_id'),body.worker===undefined?null:assertTarget(workers,body.worker)));
+    if(url.pathname==='/relationships'&&req.method==='GET') { adminOperator(req); return json(res,200,{relationships:store.db.prepare('SELECT * FROM relationships ORDER BY created_at, rowid').all()}); }
+    if(url.pathname==='/relationships/end'&&req.method==='POST') {
+      adminOperator(req);
+      const relationshipId=str(body.relationship_id,'relationship_id',128);
+      const changed=store.db.prepare('UPDATE relationships SET ended_at=COALESCE(ended_at,?) WHERE relationship_id=?').run(new Date(store.nowMs()).toISOString(),relationshipId);
+      if(!changed.changes) throw new Error('relationship_not_found');
+      return json(res,200,{relationship:store.db.prepare('SELECT * FROM relationships WHERE relationship_id=?').get(relationshipId)});
+    }
+    if(url.pathname==='/grants'&&req.method==='GET') {
+      adminOperator(req);
+      const currentWorkers=loadEffectiveOwnerWorkers(workersFile);
+      const grants=[
+        ...store.db.prepare("SELECT c.*,a.relationship_id FROM claims c JOIN assignments a USING(request_id) WHERE c.state='active' AND a.status='claimed'").all().filter(row=>!store.leaseExpired(row)).map(row=>({request_id:row.request_id,worker:row.worker,relationship_id:row.relationship_id,expires_at:store.leaseExpiresAt(row),enforcer:'claim_lease'})),
+        ...store.db.prepare('SELECT g.tool,g.worker,g.granted_at FROM tool_grants g JOIN registered_tools t ON t.name=g.tool WHERE t.enabled=1').all().map(row=>({...row,enforcer:'tool_registry',expires_at:null})),
+        ...store.db.prepare('SELECT d.request_id,d.revision,d.approved_at,a.relationship_id FROM destination_approvals d JOIN assignments a USING(request_id)').all().map(row=>({...row,enforcer:'destination_approval',expires_at:null})),
+        ...store.activeSubscriptions().map(({id,principal,worker,expires_at})=>({id,principal,worker,expires_at,enforcer:'subscription'})),
+        ...store.db.prepare('SELECT request_id,relationship_id FROM assignments WHERE owner_hash IS NOT NULL').all().filter(row=>store.protocolListingLive(row.request_id)).map(row=>({...row,enforcer:'owner_capability',expires_at:store.getProtocol(row.request_id)?new Date(store.getProtocol(row.request_id).retain_until_ms).toISOString():null})),
+        ...[...currentWorkers.workers.keys()].flatMap(worker=>(currentWorkers.repoPolicy(worker)?.repos??[]).map(repo=>({worker,repo,enforcer:'repository_policy',expires_at:null}))),
+        ...(as?as.store.db.prepare("SELECT c.connection_id,c.worker,c.scopes,c.created_at,o.expires_at FROM connections c JOIN oidc o ON o.model='Grant' AND o.id=c.grant_id WHERE c.revoked_at IS NULL AND (o.expires_at IS NULL OR o.expires_at>?)").all(store.nowMs()).map(row=>({connection_id:row.connection_id,worker:row.worker,scopes:row.scopes.split(' '),created_at:new Date(row.created_at).toISOString(),enforcer:'connection',expires_at:row.expires_at===null?null:new Date(row.expires_at).toISOString()})):
+          [...workers.workers].flatMap(([worker,profile])=>(profile.connections??[]).map(({issuer,subject,client_id,connection_id})=>({worker,issuer,subject,client_id,connection_id,enforcer:'external_connection',expires_at:null,expiry_status:'unknown'})))),
+      ];
+      return json(res,200,{relationships:store.db.prepare('SELECT * FROM relationships ORDER BY created_at, rowid').all(),grants});
+    }
     if(url.pathname.startsWith('/connect/')) {
       adminOperator(req);
       if(!as) throw new Error('built-in authorization server is not enabled (DALAN_AUTH_MODE=builtin)');
@@ -1298,7 +1325,11 @@ const adminServer=http.createServer(async(req,res)=>{
       if(url.pathname==='/connect/reset'&&req.method==='POST') return json(res,200,ops.reset());
       if(url.pathname==='/connect/stop'&&req.method==='POST') return json(res,200,ops.stop());
       if(url.pathname==='/connect/pending'&&req.method==='GET') return json(res,200,ops.pending());
-      if(url.pathname==='/connect/approve'&&req.method==='POST') return json(res,200,await ops.approve({code:body.code,worker:body.worker,replace:body.replace===true?true:body.replace===undefined?false:body.replace,confirm_redirect:body.confirm_redirect}));
+      if(url.pathname==='/connect/approve'&&req.method==='POST') {
+        const approval=await ops.approve({code:body.code,worker:body.worker,replace:body.replace===true?true:body.replace===undefined?false:body.replace,confirm_redirect:body.confirm_redirect});
+        ensureWorkerRelationship(store.db,approval.worker);
+        return json(res,200,approval);
+      }
       if(url.pathname==='/connect/list'&&req.method==='GET') return json(res,200,ops.list());
       if(url.pathname==='/connect/revoke'&&req.method==='POST') return json(res,200,ops.revoke({worker:body.worker}));
       if(url.pathname==='/connect/signal-token'&&req.method==='POST') return json(res,200,signal.tokenUrl({worker:body.worker,rotate:body.rotate===true}));

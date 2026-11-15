@@ -12,6 +12,12 @@ const fail=message=>{throw new Error(`workers: ${message}`);};
 const object=(v,keys)=>{if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).some(k=>!keys.includes(k))) fail(`expected object with keys ${keys.join(', ')}`);};
 const text=v=>{if(typeof v!=='string'||!v||v.length>2048) fail('connection fields must be non-empty strings');return v;};
 const legacyWorker={connections:[],capabilities:new Set(['t3']),guidance:'resume'};
+// Enrollment never revives an ended relationship. A new relationship requires an explicit future transition.
+export function ensureWorkerRelationship(db,worker,pattern='outbound_only') {
+  db.prepare(`INSERT INTO relationships(relationship_id,my_roles,counterpart_ref,pattern,continuity,onward,created_at)
+    SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM relationships WHERE counterpart_ref=?)`)
+    .run(`rel_${randomUUID()}`,JSON.stringify(['requester']),worker,pattern,'unknown','none',new Date().toISOString(),worker);
+}
 const repoPart=/^[A-Za-z0-9_.-]+$/;
 function validRepoName(repo) {
   if(typeof repo!=='string'||repo.split('/').length!==2) return false;
