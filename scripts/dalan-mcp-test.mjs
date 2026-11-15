@@ -14,11 +14,11 @@ import { reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
 const WORKER = 'acme';
-const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
+const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? os.tmpdir();
 fs.mkdirSync(tempRoot, { recursive: true });
 const home = fs.mkdtempSync(path.join(tempRoot, 'dalan-mcp-'));
 let port = null;
-const env = { PATH: process.env.PATH, HOME: home, DALAN_LOOPBACK: '1', DALAN_AUTH_MODE: 'builtin', DALAN_PORT: '0' };
+const env = { PATH: process.env.PATH, HOME: home, DALAN_LOOPBACK: '1', DALAN_AUTH_MODE: 'builtin', DALAN_PORT: '0', DALAN_CATALOG_PROFILE: 'questions-v1' };
 const dalan = args => new Promise((resolve, reject) => execFile(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args], { env, cwd: repo, timeout: 30_000 },
   (error, stdout, stderr) => error ? reject(new Error(`dalan ${args.slice(0, 2).join(' ')}: ${(stderr || stdout || error.message).trim()}`)) : resolve(stdout)));
 const log = path.join(home, 'server.log');
@@ -91,18 +91,41 @@ try {
 
   // tools/list: exact names, schemas and annotations.
   const tools = (await rpc('tools/list', {})).result.tools;
-  assert.deepEqual(tools.map(t => t.name).sort(), ['dalan_result', 'dalan_status', 'dalan_submit', 'dalan_wait']);
+  assert.deepEqual(tools.map(t => t.name).sort(), ['dalan_answer', 'dalan_questions', 'dalan_result', 'dalan_status', 'dalan_submit', 'dalan_wait']);
   const byName = Object.fromEntries(tools.map(t => [t.name, t]));
   for (const tool of tools) {
     assert.equal(tool.inputSchema.type, 'object', tool.name);
     assert.equal(tool.inputSchema.additionalProperties, false, tool.name);
     assert.ok(tool.description.length > 20, tool.name);
   }
-  for (const name of ['dalan_status', 'dalan_result', 'dalan_wait']) assert.equal(byName[name].annotations.readOnlyHint, true, name);
+  for (const name of ['dalan_status', 'dalan_result', 'dalan_wait', 'dalan_questions']) assert.equal(byName[name].annotations.readOnlyHint, true, name);
   assert.equal(byName.dalan_submit.annotations.readOnlyHint, false);
   assert.equal(byName.dalan_submit.annotations.destructiveHint, false);
   assert.deepEqual(byName.dalan_wait.inputSchema.required, ['request_id']);
   assert.equal(byName.dalan_wait.inputSchema.properties.timeout_seconds.maximum, 300);
+
+  assert.deepEqual(byName.dalan_questions.inputSchema.required, ['id']);
+  assert.deepEqual(byName.dalan_answer.inputSchema.required, ['id', 'question_id', 'text']);
+  assert.equal(byName.dalan_answer.annotations.readOnlyHint, false);
+  assert.equal(byName.dalan_answer.annotations.idempotentHint, true);
+  assert.match(byName.dalan_wait.description, /dalan_questions.*dalan_answer.*dalan_wait/);
+  // Validation errors must be local, before an unknown job can reach the CLI.
+  for (const [args, message] of [
+    [{ id: 'req_unknown_validation', question_id: 'q1', text: '' }, /must not be blank/],
+    [{ id: 'req_unknown_validation', question_id: 'q1', text: '   ' }, /must not be blank/],
+    [{ id: 'req_unknown_validation', question_id: 'q1', text: 'x'.repeat(4097) }, /4096 UTF-8 bytes/],
+    [{ id: 'req_unknown_validation', question_id: 'q1', text: 'é'.repeat(2049) }, /4096 UTF-8 bytes/],
+    [{ id: 'req_unknown_validation', question_id: '../q1', text: 'ok' }, /question_id/],
+    [{ id: 'req_unknown_validation', text: 'ok' }, /question_id/],
+    [{ id: 'req_unknown_validation', question_id: 'q1', text: 42 }, /text/],
+    [{ id: 'req_unknown_validation', question_id: 'q1', text: '-option' }, /dash/],
+  ]) {
+    const invalid = await call('dalan_answer', args);
+    assert.equal(invalid.isError, true); assert.match(invalid.content[0].text, message);
+  }
+  assert.equal((await call('dalan_questions', {})).isError, true);
+  assert.equal((await call('dalan_questions', { id: 'bad/id' })).isError, true);
+  assert.equal((await call('dalan_questions', { id: 'req_unknown_validation', extra: true })).isError, true);
 
   // dalan_status reaches the bridge through the admin socket.
   const status = await call('dalan_status', {});
@@ -129,6 +152,27 @@ try {
   assert.notEqual(textOf(notFinished).status, 'finished');
 
   const { claim_id } = await workerCall('claim', { request_id: requestId, claimant: 'acme-agent' });
+  // openSession is a real generic worker client; questions-v1 exposes identified questions.
+  const questionId = 'roundtrip.question';
+  await workerCall('ask_question', { request_id: requestId, claim_id, question_id: questionId, text: 'Which report phrase?', purpose: 'clarification' });
+  const waiting = await call('dalan_wait', { request_id: requestId, timeout_seconds: 1 });
+  assert.notEqual(waiting.isError, true);
+  assert.equal(textOf(waiting).status, 'question');
+  const questions = await call('dalan_questions', { id: requestId });
+  assert.notEqual(questions.isError, true);
+  assert.ok(textOf(questions).questions.some(q => q.question_id === questionId));
+  // Exactly 4096 UTF-8 bytes is allowed. Preserve the exact text through the CLI journal.
+  const answerText = 'é'.repeat(2048);
+  const answerArgs = { id: requestId, question_id: questionId, text: answerText };
+  const answered = await call('dalan_answer', answerArgs);
+  assert.notEqual(answered.isError, true, JSON.stringify(answered));
+  assert.notEqual((await call('dalan_answer', answerArgs)).isError, true, 'exact retry uses saved journal');
+  const mismatch = await call('dalan_answer', { ...answerArgs, text: 'different' });
+  assert.equal(mismatch.isError, true);
+  assert.match(mismatch.content[0].text, /answer_text_mismatch|different text/);
+  const answeredQuestions = textOf(await call('dalan_questions', { id: requestId }));
+  assert.equal(answeredQuestions.questions.find(q => q.question_id === questionId).answer, answerText);
+  await workerCall('consume_answer', { request_id: requestId, claim_id, question_id: questionId });
   await workerCall('finish', { request_id: requestId, claim_id, outcome: 'completed', summary: 'mcp roundtrip report', result: 'mcp roundtrip report' });
   const waited = await call('dalan_wait', { request_id: requestId, timeout_seconds: 20 });
   assert.notEqual(waited.isError, true, JSON.stringify(waited));
