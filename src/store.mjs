@@ -50,7 +50,7 @@ function waiterOwnerGone(attemptId) {
   return !!(owner.boot&&owner.start&&current.boot&&current.start&&(owner.boot!==current.boot||owner.start!==current.start));
 }
 
-const SUPPORTED_SCHEMA_VERSION = 67;
+const SUPPORTED_SCHEMA_VERSION = 68;
 const monotonicMs=()=>Number(process.hrtime.bigint())/1e6;
 function systemBootId() {
   if(process.platform!=='linux') return null;
@@ -935,6 +935,15 @@ export class Store {
         if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_questions'").get()&&!this.db.prepare("SELECT 1 FROM pragma_table_info('job_questions') WHERE name='purpose'").get()) this.db.exec("ALTER TABLE job_questions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'clarification' CHECK(purpose IN ('clarification','human_decision','authentication','tool_permission'))");
         this.db.exec('PRAGMA user_version=67;');
       }
+      if(version<68) {
+        // The parent generation a destination recorded when the job was submitted. One opaque string: the destination
+        // module writes it (capture) and reads it (readGeneration); the Store never parses it. NULL means none was recorded
+        // (older rows, delivery none, policy-queue jobs).
+        if(!this.db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='parent_generation'").get()) this.db.exec('ALTER TABLE assignments ADD COLUMN parent_generation TEXT');
+        // The kind a notification had before a held parent moved it into the wait queue. Set only by holdDelivery.
+        if(!this.db.prepare("SELECT 1 FROM pragma_table_info('notifications') WHERE name='held_kind'").get()) this.db.exec('ALTER TABLE notifications ADD COLUMN held_kind TEXT');
+        this.db.exec('PRAGMA user_version=68;');
+      }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
       this.legacyFixNames=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assignments' AND instr(sql,?)>0").get(`'${legacyFixLoopName}'`);
@@ -1257,7 +1266,7 @@ export class Store {
   }
   // identity: the assignment as the submitter sent it, when the stored payload differs (scope narrowing); a retry then still matches.
   submit(...args) { return this.transaction(()=>this.submitInTransaction(...args)); }
-  submitInTransaction(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, preflight=null, priority='normal', meta=null, identity=payload, maxQueued=null, targetWorker=undefined, execution=null, defaultExecution='host', requiredCapabilities=null, defaultValidUntil=null, commandKey=null, supersedes=null, destinationRevision=null, inheritedOwnerHash=null) {
+  submitInTransaction(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, preflight=null, priority='normal', meta=null, identity=payload, maxQueued=null, targetWorker=undefined, execution=null, defaultExecution='host', requiredCapabilities=null, defaultValidUntil=null, commandKey=null, supersedes=null, destinationRevision=null, inheritedOwnerHash=null, parentGeneration=null) {
     if(!this.db.isTransaction) throw new Error('transaction_required');
     if(payload.request_id.startsWith(PULL_PAGE_PREFIX)||!inheritedOwnerHash&&this.pullQueue.row(payload.request_id)) throw new Error('request_id reserved for policy work');
     const protocol=!this.hasAssignment(payload.request_id)&&Object.hasOwn(payload,'protocol')?validateProtocol(payload.protocol):null;
@@ -1310,6 +1319,7 @@ export class Store {
     if(priority==='background'&&this.db.prepare(`SELECT count(*) n FROM assignments WHERE priority='background' AND target_worker=? AND request_id IS NOT ? AND (status='claimed' OR status='queued' AND ${live(this.nowMs())})`).get(targetWorker??'dot',supersededId).n>=this.backgroundMaxInFlight) throw new Error('background_capacity_full');
     // The target is a column, not payload: an omitted worker means 'dot'.
     this.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,owner_hash,review,delivery,priority,objective_key,revision,task_kind,source,target_worker,execution,required_capabilities) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id,body,payloadHash,threadId,environmentId??'','queued',this.stamp(),ownerHash,review?1:0,deliveryValue,priority,...metaFields.map(k=>k==='source'?toStoredSource(m[k],this.legacyFixNames):m[k]),targetWorker??'dot',execution??defaultExecution,requiredCapabilities?JSON.stringify(requiredCapabilities):null);
+    if(typeof parentGeneration==='string')this.db.prepare('UPDATE assignments SET parent_generation=? WHERE request_id=?').run(parentGeneration,id);
     if(disclosure)this.db.prepare('INSERT INTO destination_approvals(request_id,revision,snapshot,actor,approved_at) VALUES(?,?,?,?,?)').run(id,disclosure.revision,JSON.stringify(disclosure),JSON.stringify({kind:'owner_capability',id:ownerHash}),this.stamp());
     const requestedValidUntil=validUntilOf(payload);
     const mayUseDefault=priority==='normal'&&!this.paused()&&!((targetWorker??'dot')==='dot'&&this.holdingBreak());
@@ -2065,7 +2075,7 @@ export class Store {
     const supersedes=this.db.prepare('SELECT target_id AS request_id,created_at FROM submit_supersedes WHERE request_id=?').get(id)??null;
     const superseded_by=this.db.prepare('SELECT request_id,created_at FROM submit_supersedes WHERE target_id=?').get(id)??null;
     const authorityRevoked=!!a.cancelled_at||this.isProtocolJob(id)&&a.status==='finished';
-    return {...this.destinationFields(id),...(this.pullQueue.row(id)?{work_order_id:this.pullQueue.row(id).work_order_id,child_request_id:id}:{}),request_id:id,supersedes,superseded_by,target_worker:a.target_worker,assignment:JSON.parse(a.payload),delivery_mode:a.delivery,t3_muted:this.deliveryMuted(id),thread_id:a.thread_id||null,environment_id:a.environment_id||null,status:a.status,execution:a.execution,required_capabilities:a.required_capabilities?JSON.parse(a.required_capabilities):[],review:!!a.review,created_at:a.created_at,valid_until:a.valid_until??null,valid_until_source:a.valid_until_source??null,expiry_requeues:a.expiry_requeues??0,...this.failureFields(id),cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancellation_requested:!!a.cancelled_at,authority_revoked:authorityRevoked,...this.sandboxStop(id,authorityRevoked),claim,progress,lifecycle_events:this.db.prepare("SELECT type,at,actor,reason FROM lifecycle_events WHERE request_id=? ORDER BY id").all(id),report:report??null,late_evidence,delivery,watch,owner_notes:this.ownerNotes(id),worker_break_notices:this.breakNotices(id),claim_denied:this.claimDenial(id),skipped_by_worker:a.skipped_at?{at:a.skipped_at,listed_count:a.listed_count,passed_over:a.passed_over}:null,pr_preflights:this.db.prepare("SELECT phase,evidence FROM pr_preflights WHERE request_id=? ORDER BY CASE phase WHEN 'submit' THEN 0 ELSE 1 END").all(id).map(row=>({phase:row.phase,...JSON.parse(row.evidence)}))};
+    return {...this.destinationFields(id),...(this.pullQueue.row(id)?{work_order_id:this.pullQueue.row(id).work_order_id,child_request_id:id}:{}),request_id:id,supersedes,superseded_by,target_worker:a.target_worker,assignment:JSON.parse(a.payload),delivery_mode:a.delivery,t3_muted:this.deliveryMuted(id),thread_id:a.thread_id||null,environment_id:a.environment_id||null,parent_generation:a.parent_generation??null,status:a.status,execution:a.execution,required_capabilities:a.required_capabilities?JSON.parse(a.required_capabilities):[],review:!!a.review,created_at:a.created_at,valid_until:a.valid_until??null,valid_until_source:a.valid_until_source??null,expiry_requeues:a.expiry_requeues??0,...this.failureFields(id),cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancellation_requested:!!a.cancelled_at,authority_revoked:authorityRevoked,...this.sandboxStop(id,authorityRevoked),claim,progress,lifecycle_events:this.db.prepare("SELECT type,at,actor,reason FROM lifecycle_events WHERE request_id=? ORDER BY id").all(id),report:report??null,late_evidence,delivery,watch,owner_notes:this.ownerNotes(id),worker_break_notices:this.breakNotices(id),claim_denied:this.claimDenial(id),skipped_by_worker:a.skipped_at?{at:a.skipped_at,listed_count:a.listed_count,passed_over:a.passed_over}:null,pr_preflights:this.db.prepare("SELECT phase,evidence FROM pr_preflights WHERE request_id=? ORDER BY CASE phase WHEN 'submit' THEN 0 ELSE 1 END").all(id).map(row=>({phase:row.phase,...JSON.parse(row.evidence)}))};
   }
   recordPrPreflight(id,phase,assignment,evidence,replace=false) {
     assertPreflight(assignment,evidence,this.nowMs());
@@ -2807,6 +2817,28 @@ export class Store {
     // get without masquerading as a worker blocker or an outbound retry.
     this.db.prepare("UPDATE notifications SET kind=CASE WHEN kind='watch' THEN kind ELSE 'wait' END,state=CASE WHEN kind='watch' THEN 'quiet' ELSE 'pending' END,next_at=0,last_error=? WHERE id=? AND kind IN ('t3','blocker','watch','break') AND state IN ('pending','failed','sending')").run(reason,id);
     this.suppressFinishedQuestions(this.db.prepare('SELECT request_id FROM notifications WHERE id=?').get(id)?.request_id??null);
+  }
+  // A parent that is not running (T3 reports its latest run as interrupted) holds the wake. The wake stays in the durable
+  // queue like any quieted one, and held_kind remembers what it was so releaseHeld can put it back once the parent runs again.
+  // One transaction: held_kind and the quiet state land together or not at all. A crash between two separate writes would
+  // leave a sending row that recoverSends turns into uncertain, which heldDeliveries skips.
+  holdDelivery(id,reason) {
+    this.inTransaction(() => {
+      this.db.prepare("UPDATE notifications SET held_kind=kind WHERE id=? AND kind IN ('t3','blocker','watch','break') AND state IN ('pending','failed','sending')").run(id);
+      this.quietDelivery(id,reason);
+    });
+  }
+  // Oldest first. `after` is the {created_at,id} of the last row a caller saw, so a caller can page past rows it has already
+  // inspected instead of reading the same oldest rows on every call.
+  heldDeliveries(limit=20,after=null) {
+    const base="SELECT * FROM notifications WHERE held_kind IS NOT NULL AND state IN ('pending','quiet')";
+    return after
+      ? this.db.prepare(`${base} AND (created_at,id)>(?,?) ORDER BY created_at,id LIMIT ?`).all(after.created_at,after.id,limit)
+      : this.db.prepare(`${base} ORDER BY created_at,id LIMIT ?`).all(limit);
+  }
+  // Back to the original kind, pending and due now. A waiter that already took the row (state 'waiting') is not touched.
+  releaseHeld(id) {
+    return this.db.prepare("UPDATE notifications SET kind=held_kind,held_kind=NULL,state='pending',next_at=0,last_error='' WHERE id=? AND held_kind IS NOT NULL AND state IN ('pending','quiet')").run(id).changes===1;
   }
   quarantineDelivery(id,reason) {
     return this.db.prepare("UPDATE notifications SET state='suppressed',last_error=?,uncertain_reason=NULL WHERE id=? AND state IN ('pending','failed')").run(String(reason).slice(0,500),id).changes===1;

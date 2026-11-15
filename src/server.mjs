@@ -1137,7 +1137,7 @@ const adminServer=http.createServer(async(req,res)=>{
         if(!dryRun&&(order.verdict==='reject'||order.verdict==='clarify'||order.blocking)) throw Object.assign(order.refusal,{verdict:order.verdict,reasons:order.reasons,bytes:order.bytes});
         payload=order.payload;
       }
-      const {environmentId}=(dryRun&&order&&order.verdict!=='admissible')?{}:await destination.validate(delivery);
+      const {environmentId,generation}=(dryRun&&order&&order.verdict!=='admissible')?{}:await destination.validate(delivery);
       // An awaited repository/destination lookup may outlive a host policy edit.
       assertRepoAllowed(storedTarget??target??'dot',existingRequest?.assignment??payload);
       if(dryRun) store.checkRetry(submitted,delivery,environmentId,owner,body.review===true,body.background===true?'background':'normal',meta,submitted,target,explicitExecution,requiredCapabilities,commandKey,supersedes,destinationRevision);
@@ -1155,7 +1155,7 @@ const adminServer=http.createServer(async(req,res)=>{
       const readiness=order?.check_readiness??null;
       const preflight=order?.preflight??null;
       const defaultValidity=order?.defaultValidity??null;
-      const result=store.submit(payload,delivery,environmentId,owner,body.review===true,preflight,body.background===true?'background':'normal',meta,(()=>{const r=renderAssignment(submitted);return payload.brief!==r.brief||JSON.stringify(payload.scope_paths)!==JSON.stringify(r.scope_paths);})()?submitted:payload,body.max_queued??null,target,explicitExecution,workers.defaultExecution,requiredCapabilities,defaultValidity?.valid_until??null,commandKey,supersedes,destinationRevision);
+      const result=store.submit(payload,delivery,environmentId,owner,body.review===true,preflight,body.background===true?'background':'normal',meta,(()=>{const r=renderAssignment(submitted);return payload.brief!==r.brief||JSON.stringify(payload.scope_paths)!==JSON.stringify(r.scope_paths);})()?submitted:payload,body.max_queued??null,target,explicitExecution,workers.defaultExecution,requiredCapabilities,defaultValidity?.valid_until??null,commandKey,supersedes,destinationRevision,null,generation??null);
       // Only a committed first replacement wakes the TARGET's already-attached waiter.
       if(supersedes&&!result.duplicate) {
         const targetId=supersedes.target_id,waiter=waiters.get(targetId);
@@ -1493,6 +1493,15 @@ if(workspace) {
 setInterval(()=>{if(t3PostHandler.hasHeld())t3PostHandler.flushDue().catch(()=>{});},60000).unref();
 setInterval(maintain,500).unref(); maintain();
 setInterval(runDrain,500).unref(); runDrain();
+// A wake held because its parent was interrupted goes back to the queue once the parent runs again (see the T3 destination).
+let releasingHeld=false;
+const releaseHeldWakes=async()=>{
+  if(releasingHeld||!store.heldDeliveries(1).length) return; releasingHeld=true;
+  try { const destination=await destinations.for('t3'); if((await destination.releaseHeld()).length) runDrain(); }
+  catch(error) { log({kind:'held_release_error',reason:String(error?.message??error).slice(0,300)}); }
+  finally { releasingHeld=false; }
+};
+setInterval(releaseHeldWakes,Number(readEnv('DALAN_T3_HELD_RECHECK_MS'))||15000).unref();
 reconcileTick().catch(e=>log({kind:'reconciliation_error',reason:e.message}));
 setInterval(()=>reconcileTick().catch(e=>log({kind:'reconciliation_error',reason:e.message})),60000).unref();
 const retain=()=>{try{const r=retainLifecycle(store);if(r.rolled_up)log({kind:'lifecycle_rollup',...r});}catch(error){log({kind:'lifecycle_rollup_error',reason:error.message});}};
