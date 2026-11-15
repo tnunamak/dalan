@@ -69,7 +69,7 @@ db.prepare("INSERT INTO notifications(id,request_id,kind,state,created_at) VALUE
 assert.equal(inboxItem(state(12)).group, 'undecided', 'delivered to T3 and unread by the owner still needs a decision');
 assert.equal(inboxItem({ ...state(10), inbox: { ...state(10).inbox, decision: undefined } }), null, 'an older bridge without the field is not asked');
 const box = buildInbox([state(10), state(11), state(12), state(1)], 'all');
-assert.deepEqual(box.counts, { finished_unread: 1, question: 0, undecided: 2, cancelled_unread: 0 });
+assert.deepEqual(box.counts, { finished_unread: 1, question: 0, undecided: 2, cancelled_unread: 0, held_wake: 0 });
 assert.match(formatInbox(box), /undecided  req_10_aaaaaaaa.*dalan decide req_10_aaaaaaaa accepted\|applied/);
 assert.ok(formatInbox(box).indexOf('finished_unread') < formatInbox(box).indexOf('undecided'));
 

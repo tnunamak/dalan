@@ -5,7 +5,7 @@ import { validateOwnerNote } from './submission-policy.mjs';
 import { redactOutput } from './redaction.mjs';
 import { statusEvidence } from './status-evidence.mjs';
 import { assertPreflight } from './pr-preflight.mjs';
-import { lifecycleSchema, backfillLifecycle, progressType } from './lifecycle.mjs';
+import { lifecycleSchema, backfillLifecycle, progressType, addControlColumns, controlTypes } from './lifecycle.mjs';
 import { objectiveSources, metaFields, normalizeMeta, toStoredSource, fromStoredSource, canonicalMetaValue, canonicalKindSql, canonicalKindLabel, storedObjectiveKey, storedTaskKind, verifyObjective } from './objectives.mjs';
 import { legacyFixLoopName } from './legacy-names.mjs';
 import { LEGACY_PROFILE, canSee, resolveWorker, destinationDisclosure, destinationDifferences, destinationError, connectionsDigest } from './workers.mjs';
@@ -50,7 +50,7 @@ function waiterOwnerGone(attemptId) {
   return !!(owner.boot&&owner.start&&current.boot&&current.start&&(owner.boot!==current.boot||owner.start!==current.start));
 }
 
-const SUPPORTED_SCHEMA_VERSION = 71;
+const SUPPORTED_SCHEMA_VERSION = 72;
 const monotonicMs=()=>Number(process.hrtime.bigint())/1e6;
 function systemBootId() {
   if(process.platform!=='linux') return null;
@@ -351,10 +351,20 @@ export class Store {
   markProfileModeSeen() { this.db.prepare("INSERT INTO bridge_state(key,value) VALUES('workers_profile_seen','1') ON CONFLICT(key) DO NOTHING").run(); }
   // Record one lifecycle event; callers run it inside the transaction of the state change it describes.
   // claim defaults to the claim in force (the active row); an explicit claim_id without epoch resolves its epoch from history.
-  lifecycle(id,type,actor='system',reason=null,claim=this.db.prepare("SELECT claim_id,epoch FROM claims WHERE request_id=? AND state='active'").get(id)) {
+  // Control events (controlTypes) also carry the scope they acted on and an outcome: extra={scope,outcome}.
+  lifecycle(id,type,actor='system',reason=null,claim=this.db.prepare("SELECT claim_id,epoch FROM claims WHERE request_id=? AND state='active'").get(id),extra={}) {
     const epoch=claim?.claim_id&&claim.epoch==null?this.db.prepare('SELECT epoch FROM claims WHERE claim_id=?').get(claim.claim_id)?.epoch??this.db.prepare('SELECT epoch FROM lifecycle_events WHERE claim_id=? AND epoch IS NOT NULL LIMIT 1').get(claim.claim_id)?.epoch??null:claim?.epoch??null;
     const worker=claim?.worker??(claim?.claim_id?this.db.prepare('SELECT worker FROM claims WHERE claim_id=?').get(claim.claim_id)?.worker??this.db.prepare('SELECT worker FROM lifecycle_events WHERE claim_id=? LIMIT 1').get(claim.claim_id)?.worker:null)??'unknown';
-    this.db.prepare("INSERT INTO lifecycle_events(request_id,claim_id,epoch,type,at,actor,source,reason,worker) VALUES(?,?,?,?,?,?,'live',?,?)").run(id,claim?.claim_id??null,epoch,type,this.stamp(),actor,reason,worker);
+    this.db.prepare("INSERT INTO lifecycle_events(request_id,claim_id,epoch,type,at,actor,source,reason,worker,scope,outcome) VALUES(?,?,?,?,?,?,'live',?,?,?,?)").run(id,claim?.claim_id??null,epoch,type,this.stamp(),actor,reason,worker,extra.scope??null,extra.outcome??null);
+  }
+  // Record a control request (detach, interrupt_foreground, withdraw_work, revoke_grant) with the scope it named.
+  // The outcome is 'unknown' unless the caller holds an observation (confirmed). A denial is a request that did not take
+  // effect as asked, and says nothing about what already stopped, so it is unknown too: never success.
+  recordControl(id,type,{scope,confirmed=false,denied=null,actor='owner',reason=null}={}) {
+    if(!controlTypes.includes(type)) throw new Error(`not a control type: ${type}`);
+    if(typeof scope!=='string'||!scope.trim()) throw new Error('a control event needs a scope');
+    if(confirmed&&denied) throw new Error('a control request cannot be both denied and confirmed');
+    return this.inTransaction(()=>this.lifecycle(id,type,actor,[reason,denied].filter(Boolean).join('; ')||null,undefined,{scope:scope.trim(),outcome:confirmed?'confirmed':'unknown'}));
   }
   migrate() {
     this.transaction(() => {
@@ -978,6 +988,12 @@ export class Store {
             reason TEXT,
             attempt TEXT);
           PRAGMA user_version=71;`);
+      }
+      if(version<72) {
+        // Typed control events: wake_held and the control vocabulary join the lifecycle types, and each event may carry the
+        // scope it acted on and an outcome. See addControlColumns for the table rebuild.
+        addControlColumns(this.db);
+        this.db.exec('PRAGMA user_version=72;');
       }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
@@ -2565,6 +2581,7 @@ export class Store {
     if(reason==='lease_expired') reason=Store.expirySummary(old);
     this.db.prepare("UPDATE claims SET state='abandoned',abandoned_at=?,abandon_reason=? WHERE request_id=?").run(at,reason,id);
     this.db.prepare("UPDATE assignments SET status='queued' WHERE request_id=?").run(id);
+    this.lifecycle(id,'detach',actor,reason,old,{scope:`claim:${old.claim_id}@${old.epoch}`,outcome:'done'});
     this.lifecycle(id,'abandoned',actor,reason,old);
     this.lifecycle(id,'queued',actor,'requeued',null);
     if(this.isProtocolJob(id)) {
@@ -2781,6 +2798,7 @@ export class Store {
       this.assertNoUncertainDelivery(id);
       if(a.status==='claimed') this.laneFreed();
       this.db.prepare("UPDATE assignments SET status='cancelled',cancelled_at=?,cancelled_reason=? WHERE request_id=?").run(this.stamp(),reason,id);
+      this.lifecycle(id,'withdraw_work','owner',reason,undefined,{scope:`job:${id}`,outcome:'done'});
       this.lifecycle(id,'cancelled','owner',reason);
       this.db.prepare("UPDATE notifications SET state='suppressed' WHERE request_id=? AND state IN ('pending','failed','waiting')").run(id);
       this.db.prepare("UPDATE watches SET state='suppressed',updated_at=? WHERE request_id=? AND state IN ('armed','fired')").run(this.stamp(),id);
@@ -2798,6 +2816,7 @@ export class Store {
     const a=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
     if(a.status!=='queued') return {request_id:id,status:a.status,cancelled:false};
     this.db.prepare("UPDATE assignments SET status='cancelled',cancelled_at=? WHERE request_id=? AND status='queued'").run(this.stamp(),id);
+    this.lifecycle(id,'withdraw_work','owner',null,undefined,{scope:`job:${id}`,outcome:'done'});
     this.lifecycle(id,'cancelled','owner');
     this.db.prepare("UPDATE notifications SET state='suppressed' WHERE request_id=? AND state IN ('pending','failed','waiting')").run(id);
     this.db.prepare("UPDATE watches SET state='suppressed',updated_at=? WHERE request_id=? AND state IN ('armed','fired')").run(this.stamp(),id);
@@ -2905,10 +2924,14 @@ export class Store {
   // queue like any quieted one, and held_kind remembers what it was so releaseHeld can put it back once the parent runs again.
   // One transaction: held_kind and the quiet state land together or not at all. A crash between two separate writes would
   // leave a sending row that recoverSends turns into uncertain, which heldDeliveries skips.
+  // The same transaction writes the typed wake_held event, once per hold: a row that is already held no longer matches the
+  // UPDATE (quietDelivery moved its kind to 'wait'), so a repeat hold changes nothing and writes nothing.
   holdDelivery(id,reason) {
     this.inTransaction(() => {
-      this.db.prepare("UPDATE notifications SET held_kind=kind WHERE id=? AND kind IN ('t3','blocker','watch','break') AND state IN ('pending','failed','sending')").run(id);
+      const held=this.db.prepare("UPDATE notifications SET held_kind=kind WHERE id=? AND kind IN ('t3','blocker','watch','break') AND state IN ('pending','failed','sending')").run(id).changes===1;
       this.quietDelivery(id,reason);
+      const request=held&&this.db.prepare('SELECT request_id FROM notifications WHERE id=?').get(id)?.request_id;
+      if(request) this.lifecycle(request,'wake_held','system','parent_stopped',undefined,{scope:`wake:${id}`,outcome:'unknown'});
     });
   }
   // Oldest first. `after` is the {created_at,id} of the last row a caller saw, so a caller can page past rows it has already
@@ -3019,7 +3042,15 @@ export class Store {
       cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancelled_by_owner:cancelActor==='owner',read:a.owner_read_at!==null,
       ...this.failureFields(id),
       unanswered_blocker:lastBlocker&&(lastAnswer===null||lastBlocker.created_at>lastAnswer)?{text:lastBlocker.note,at:lastBlocker.created_at}:null,
+      held_wake:this.heldWake(id),
     };
+  }
+  // The oldest wake still held for this request, with the typed reason its wake_held event recorded. Reads only.
+  heldWake(id) {
+    const row=this.db.prepare("SELECT id,held_kind,last_error FROM notifications WHERE request_id=? AND held_kind IS NOT NULL AND state IN ('pending','quiet') ORDER BY created_at,id LIMIT 1").get(id);
+    if(!row) return null;
+    const event=this.db.prepare("SELECT at,reason FROM lifecycle_events WHERE request_id=? AND type='wake_held' AND scope=? ORDER BY id DESC LIMIT 1").get(id,`wake:${row.id}`);
+    return {kind:row.held_kind,reason:event?.reason??'parent_stopped',detail:row.last_error||null,since:event?.at??null,notification_id:row.id};
   }
   // Owner action for `dalan inbox --mark-read`: the same read marker as get, without fetching the result. True when it was unread.
   markInboxRead(id,via) { return this.transaction(() => {
@@ -3264,7 +3295,7 @@ export class Store {
       return [worker,{scope:'worker',counts:workerCounts,queued_expired:expired,queued_expired_requeued:requeued,active_claims:liveness.claimed_outer_count,queued_live:liveQueued,subscriptions_active:workerSubscriptions.length,capacity:this.workerCapacityEvidence(worker,workerSubscriptions,limits,capacity),last_call_at:liveness.last_worker_call_at,last_list_pending_at:liveness.last_list_pending_at,stale_claims:liveness.stale_claims,queue_classes:liveness.queue_classes,unclaimed_after_reannounce:liveness.unclaimed_after_reannounce,oldest_claim_age_ms:liveness.oldest_claim_age_ms,oldest_claim_progress_age_ms:liveness.oldest_claim_progress_age_ms,oldest_unclaimed_event_2xx_age_ms:liveness.oldest_unclaimed_event_2xx_age_ms,silence_ms:liveness.worker_silence_ms}];
     }));
     const released=this.db.prepare("SELECT id,id notice_id,request_id,message_id,subscription_id,attempt_id,attempt_started_at,terminal_at,terminal_reason FROM notifications WHERE state='uncertain_terminal' ORDER BY terminal_at DESC LIMIT 20").all();
-    return {dispatch,liveness_scope:legacyScope,counts,counts_scope:'global',by_worker,priority_counts,priority_counts_scope:'global',background_max_in_flight:backgroundMaxInFlight,skipped_by_worker:(skipped=>({count:skipped.length,request_ids:skipped.slice(0,20).map(x=>x.request_id)}))(this.skippedByDot()),claim_denied:{count:denied.length,request_ids:denied.map(d=>d.request_id).slice(0,20),capacity_hold_until:this.capacityHoldUntil()},subscriptions_active:active.length,last_verified:sub?.verified_at||null,oldest_pending:oldest,last_claim:lastClaim,last_claim_at:lastClaim,subscription,queued_without_active_subscription:dotQueuedWithoutSubscription,oldest_queue_age_ms:oldest?this.nowMs()-Date.parse(oldest):null,uncertain_deliveries:uncertain,uncertain_terminal_deliveries:released,queued_expired:queuedExpired,queued_expired_requeued:queuedExpiredRequeued,paused:!!pause.paused_at,pause_reason:pause.reason,...(({items,...rest})=>rest)(this.liveness(limits,capacity)),worker_break:this.breakState(),throttle,budget,...statusEvidence(this)};
+    return {held_wakes:this.db.prepare("SELECT count(*) n FROM notifications WHERE held_kind IS NOT NULL AND state IN ('pending','quiet')").get().n,dispatch,liveness_scope:legacyScope,counts,counts_scope:'global',by_worker,priority_counts,priority_counts_scope:'global',background_max_in_flight:backgroundMaxInFlight,skipped_by_worker:(skipped=>({count:skipped.length,request_ids:skipped.slice(0,20).map(x=>x.request_id)}))(this.skippedByDot()),claim_denied:{count:denied.length,request_ids:denied.map(d=>d.request_id).slice(0,20),capacity_hold_until:this.capacityHoldUntil()},subscriptions_active:active.length,last_verified:sub?.verified_at||null,oldest_pending:oldest,last_claim:lastClaim,last_claim_at:lastClaim,subscription,queued_without_active_subscription:dotQueuedWithoutSubscription,oldest_queue_age_ms:oldest?this.nowMs()-Date.parse(oldest):null,uncertain_deliveries:uncertain,uncertain_terminal_deliveries:released,queued_expired:queuedExpired,queued_expired_requeued:queuedExpiredRequeued,paused:!!pause.paused_at,pause_reason:pause.reason,...(({items,...rest})=>rest)(this.liveness(limits,capacity)),worker_break:this.breakState(),throttle,budget,...statusEvidence(this)};
   }
   workerCapacityEvidence(worker,subscriptions,limits,capacity) {
     const byPrincipal=[...new Map(subscriptions.map(sub=>[sub.principal,sub])).values()];

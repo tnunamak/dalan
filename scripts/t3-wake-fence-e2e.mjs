@@ -307,9 +307,9 @@ if(sub==='inspect'||sub==='read') {
     // The Store keeps the string as given and never parses it: text that is not JSON reads back unchanged.
     reopened.db.prepare('UPDATE assignments SET parent_generation=? WHERE request_id=?').run('opaque, not json', first);
     assert(reopened.get(first).parent_generation === 'opaque, not json', 'the Store changed or parsed the opaque generation');
-    assert(reopened.db.prepare('PRAGMA user_version').get().user_version === 71, 'current schema version is not 71');
+    assert(reopened.db.prepare('PRAGMA user_version').get().user_version === 72, 'schema version is not 72');
   } finally { reopened.db.close(); }
-  log('migration 68: both nullable columns added from schema 67, old rows read NULL, current schema 71');
+  log('migration 68: both nullable columns added in one step from schema 67, old rows read NULL, then the typed-control step runs and the version is 72');
   console.log('t3-wake-fence e2e passed');
 } catch (error) { console.error(`FAIL ${error.stack || error}`); process.exitCode = 1; }
 finally {

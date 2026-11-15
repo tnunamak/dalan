@@ -105,6 +105,18 @@ Native protocol leases instead expire at their fixed deadline and require explic
 
 `dalan abandon ID --reason TEXT --json` returns a claimed assignment to the queue, and the old `claim_id` stops working; a successor still waits for the old deadline. Abandon and takeover are refused while a delivery for the assignment is uncertain or sending; reconcile it first.
 
+**Control events and their scope.** `dalan cancel`, `dalan cancel-if-queued` and `dalan abandon` print a `scope` block. `scope.ref` names what the command acted on, `scope.controlled` says what changed, and `scope.not_controlled` says what the command did not touch. Cancel controls the job and not the worker's compute. Abandon controls the claim and not the worker's session. The same facts go to the lifecycle log as typed events, in the transaction of the change:
+
+| Event | Written by | Scope ref | Outcome |
+|---|---|---|---|
+| `withdraw_work` | `cancel`, `cancel-if-queued` | `job:REQUEST_ID` | `done` (the store withdrew the job) |
+| `detach` | `abandon` | `claim:CLAIM_ID@EPOCH` | `done` (the store released the claim) |
+| `interrupt_foreground` | a request to stop a foreground run (`Store.recordControl`) | `thread:ENV/THREAD#run:N` | `unknown`, or `confirmed` only with an observation |
+| `revoke_grant` | a grant revocation (`Store.recordControl`) | `grant:NAME` | `unknown`, or `confirmed` only with an observation |
+| `wake_held` | a wake held because the parent stopped | `wake:NOTIFICATION_ID` | `unknown` (the wake is not delivered) |
+
+A request to something outside the store is `unknown` until an observation says otherwise. A denied stop is `unknown` too: a denial does not prove that nothing stopped, so it is never recorded as success. `interrupt_foreground` and `revoke_grant` have no automatic caller yet; the stop observer and grant revocation will call `Store.recordControl`. A `withdraw_work` or `detach` event comes just before the `cancelled` or `abandoned` event it describes, so the existing event order for those is unchanged.
+
 ### Metrics
 
 `dalan metrics [--since RFC3339] [--json]` (default window: 30 days) derives queue latency, claim-to-first-activity, working/blocked/waiting/idle time against claimed time, lane utilization (see below), completed reports per day by kind, rework, duplicates and objective coverage, orphaned claims, check outcomes and owner acceptance from the lifecycle event table; `dalan status --explain` adds a one-line summary. A value the events cannot show is `{"value":null,"unknown_reason":"..."}`, never zero.
