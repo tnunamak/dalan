@@ -4,7 +4,7 @@ To the T3 Code maintainers.
 
 ## 1. Request
 
-Add a monotonic integer `stopSeq` to the thread projection. Increment it only when `thread.stop` commits, not for `run.interrupt` or a new run. The CLI thread view spreads `...projection.thread`, so the field would appear in `threads inspect` without a CLI change. **Source: read in T3 source at build 4643, `t3code dist/service.js:92`, as reported in the supplied investigation.** Optionally add an `ifStopSeq` precondition to `message.dispatch`: refuse dispatch if the current sequence differs, and evaluate the condition in the same commit as admitting the message. These field and precondition semantics are proposed, not existing behavior.
+Add a monotonic integer `stopSeq` to the thread projection. Increment it once per committed `thread.stop` event, not for `run.interrupt` or a new run. A stop request on an already-stopped thread is a no-op: it commits no new `thread.stop` event and does not increment the sequence. Require `stopSeq` in the thread object returned by `threads inspect`; this is an output requirement, not an assumption about how the CLI builds its view. Optionally add an `ifStopSeq` precondition to both `message.dispatch` and the `threads send` CLI path: refuse dispatch if the current sequence differs, and evaluate the condition in the same commit as admitting the message. The CLI must accept and forward the precondition because the external sender delivers through `threads send`. These field and precondition semantics are proposed, not existing behavior.
 
 ## 2. Problem
 
@@ -19,7 +19,7 @@ The supplied investigation reports these observations on T3 build 4643 using one
 
 These observations do not establish behavior for other builds or every lifecycle path. They show that the inspected status cannot distinguish a user thread stop from a run interruption. A conservative external sender must therefore hold every wake to an interrupted thread, including wakes the user may want.
 
-The consumer now holds wakes when the latest run is `interrupted`, `cancelled` or `canceled`. This conservatively holds plain interrupts too. **Source: read in the consumer at pin `919ed1c8a81b123d6617bb2e8e395e6e142e3769`, `src/t3.mjs#classifyThread` (lines 200-209, with `heldRunStatuses` at line 189); comparison against the build-4643 measurement above.** Changing this reader alone cannot recover the missing distinction.
+The consumer now holds wakes when the latest run is `interrupted`, `cancelled` or `canceled`, and fails closed for any unrecognized latest-run status. When a latest run exists, only `completed`, `running` or `failed` passes that run-status gate; a thread with no latest run has none to check. Delivery then requires an active thread, as well as matching thread and environment bindings. This conservatively holds plain interrupts too. **Source: read in the consumer at pin `0bf28e19c953625c813ed60d321534c548397d61`, `src/t3.mjs#classifyThread`, `#inspectThread` and `#deliverT3`; CLI delivery is defined by `#sendArgs` and `#deliverT3`; comparison against the build-4643 measurement above.** Changing this reader alone cannot recover the missing distinction.
 
 ## 3. Client behavior
 
