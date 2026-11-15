@@ -60,13 +60,17 @@ try {
     if(args.length!==5||!['initial','reminder'].includes(args[1])||!['sent','unsent'].includes(args[2])||args[3]!=='--evidence')
       throw new Error('usage: dalan-deadman reconcile EPISODE initial|reminder sent|unsent --evidence RECEIPT');
     const episodeId=Number(args[0]);
+    if(!Number.isSafeInteger(episodeId)||episodeId<=0)
+      throw new Error('usage: dalan-deadman reconcile requires a positive integer EPISODE');
+    if(!process.env.DOT_DEADMAN_TOKEN || process.env.DOT_DEADMAN_TOKEN.length<32 || !/^[A-Za-z0-9._~+\/-]+=*$/.test(process.env.DOT_DEADMAN_TOKEN))
+      throw new Error('reconcile bearer token must contain at least 32 valid bearer characters');
     const port=Number(process.env.DOT_DEADMAN_PORT||8788);
     if(!Number.isInteger(port)||port<1||port>65535)throw new Error('invalid dead-man service port');
     const response=await fetch(`http://127.0.0.1:${port}/reconcile`,{
       method:'POST',headers:{Authorization:`Bearer ${process.env.DOT_DEADMAN_TOKEN||''}`,'Content-Type':'application/json'},
       body:JSON.stringify({episodeId,phase:args[1],outcome:args[2],receipt:args[4]}),signal:AbortSignal.timeout(5000)
     });
-    if(!response.ok)throw new Error(response.status===409?'owning publisher has not settled this publication':'owning dead-man service is unavailable');
+    if(!response.ok)throw new Error(response.status===409?'owning publisher has not settled this publication':`reconcile rejected with HTTP ${response.status}`);
     console.log(JSON.stringify(await response.json()));
   }
   else if (command === 'serve') {

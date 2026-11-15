@@ -282,6 +282,47 @@ try {
   assert(!stalePing.stderr.includes(token), 'health gate error does not expose bearer');
   await new Promise(resolve => pingServer.close(resolve));
 
+  // CLI validation must happen before even a local HTTP request.
+  let reconcileCalls = 0;
+  const reconcileServer = http.createServer((req, res) => {
+    reconcileCalls++;
+    req.resume();
+    res.writeHead(401, {'content-type':'application/json'}).end('{"error":"unauthorized"}');
+  });
+  await new Promise(resolve => reconcileServer.listen(0, '127.0.0.1', resolve));
+  const runReconcile = (id, bearer) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['bin/dot-deadman.mjs', 'reconcile', id, 'initial', 'sent', '--evidence', 'synthetic-receipt'], {
+      cwd: path.resolve(new URL('..', import.meta.url).pathname),
+      env: {...process.env, HOME:root, DOT_DEADMAN_ENV:path.join(root,'missing.env'),
+        DOT_DEADMAN_PORT:String(reconcileServer.address().port), DOT_DEADMAN_TOKEN:bearer},
+      stdio:['ignore','pipe','pipe']
+    });
+    let stderr = '';
+    child.stderr.on('data', chunk => stderr += chunk);
+    child.stdout.resume();
+    child.once('error', reject);
+    child.once('close', code => resolve({code,stderr}));
+  });
+  try {
+    for (const id of ['typo','0','-1','1.5','Infinity','9007199254740992']) {
+      const result = await runReconcile(id, token);
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /usage:.*positive integer EPISODE/);
+      assert.equal(reconcileCalls, 0);
+    }
+    for (const bearer of ['', 'short', ' '.repeat(40)]) {
+      const result = await runReconcile('1', bearer);
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /reconcile bearer token.*32 valid bearer characters/);
+      assert.equal(reconcileCalls, 0);
+    }
+    const unauthorizedReconcile = await runReconcile('1', token);
+    assert.equal(unauthorizedReconcile.code, 1);
+    assert.match(unauthorizedReconcile.stderr, /HTTP 401/);
+    assert.equal(reconcileCalls, 1);
+    assert.ok(!unauthorizedReconcile.stderr.includes(token));
+  } finally { await new Promise(resolve => reconcileServer.close(resolve)); }
+
   const db = new DatabaseSync(path.join(root, 'uncertain.sqlite'), { readOnly: true });
   assert.equal(db.prepare('SELECT count(*) AS n FROM episodes').get().n, 1, 'one durable episode per outage');
   db.close();

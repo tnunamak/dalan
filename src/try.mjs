@@ -425,7 +425,11 @@ export async function runTry({ argv = [], env = process.env, out = process.stdou
       const logged = fs.readFileSync(logFile, 'utf8').trim();
       const tail = logged.split('\n').slice(-5).join('\n');
       await stop();
-      if (attempt < 3 && freshHome && !options.port && /EADDRINUSE/.test(logged)) { fs.rmSync(configDir, { recursive: true, force: true }); continue; }
+      if (attempt < 3 && freshHome && !options.port && /EADDRINUSE/.test(logged)) {
+        fs.rmSync(configDir, { recursive: true, force: true });
+        storedPort = null;
+        continue;
+      }
       const error = new Error(`the bridge did not start; last log lines:\n${tail}`);
       error.tryKind = 'startup';
       throw error;

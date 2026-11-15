@@ -212,6 +212,48 @@ test('a bridge that does not start prints its log, a retry and a concrete new-ho
   } finally { blocker.close(); }
 });
 
+test('fresh trial bind retry clears an as.json port before choosing again', {timeout:60_000}, async () => {
+  const {tryInternals} = await import('../src/try.mjs');
+  const home = path.join(tmp, 'stale-port');
+  const config = defaultPath(home, '.config/dot-bridge');
+  fs.mkdirSync(config, {recursive:true});
+  fs.writeFileSync(path.join(home, '.dalan-trial'), 'synthetic trial\n');
+  const busy = await listenOn(0);
+  const oldPort = busy.address().port;
+  fs.writeFileSync(path.join(config, 'as.json'), JSON.stringify({public_url:'http://127.0.0.1:' + oldPort}));
+  assert.equal(fs.existsSync(path.join(config,'workers.json')), false);
+  const controller = new AbortController(), input = new PassThrough();
+  let calls = 0, output = '', startedPort = null;
+  try {
+    await runTry({
+      argv:['--home',home], env:{PATH:process.env.PATH}, input, signal:controller.signal,
+      pickPort: async options => {
+        calls++;
+        if (calls === 1) {
+          assert.equal(options.stored, oldPort);
+          return oldPort; // Deterministically lose the probe/bind race.
+        }
+        assert.equal(options.stored, null, 'deleted config must release the in-memory port binding');
+        assert.ok(options.skip.has(oldPort));
+        return tryInternals.choosePort(options);
+      },
+      out:{write(text) {
+        output += text;
+        const match = output.match(/Bridge up on http:\/\/127\.0\.0\.1:(\d+)/);
+        if (match) { startedPort = Number(match[1]); controller.abort(); }
+      }}
+    }).catch(error => { if (startedPort === null) throw error; });
+    assert.ok(calls >= 2);
+    assert.ok(startedPort !== null);
+    assert.notEqual(startedPort, oldPort);
+    assert.doesNotMatch(output, /tied to port/);
+    assert.equal(await bridgeClosed(home), true);
+  } finally {
+    controller.abort(); input.destroy();
+    await new Promise(resolve => busy.close(resolve));
+  }
+});
+
 test('pending output is read as data, and a changed shape stops the command instead of skipping an attempt', () => {
   const ok = parsePending({ window: { worker: 'local', expires_at: 'x' }, pending: [attempt({ superseded: true }), attempt({ code: 'WXYZ-9876' })] });
   assert.deepEqual(ok.pending.map(p => [p.code, p.superseded, p.resource]), [['ABCD-1234', true, ''], ['WXYZ-9876', false, '']]);
