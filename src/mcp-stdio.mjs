@@ -8,6 +8,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { redactOutput, redactSinkText } from './redaction.mjs';
 import { safeDiagnostic } from './diagnostic.mjs';
+import { MAX_ANSWER_BYTES } from './answer-journal.mjs';
 
 export const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 export const RESULT_CAP_BYTES = 32 * 1024;
@@ -28,7 +29,7 @@ export const TOOLS = [
       refuse_defer: { type: 'boolean', description: 'Fail instead of deferring.' } } },
     annotations: { title: 'Submit a job', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
   { name: 'dalan_wait', title: 'Wait for a job',
-    description: `Wait for a job to reach a stop (finished, blocker, question, cancelled, worker_break). Returns after at most timeout_seconds (default ${WAIT_DEFAULT}, maximum ${WAIT_MAX}) with the current state; status "timeout" means it is still running, so call again.`,
+    description: `Wait for a job to reach a stop (finished, blocker, question, cancelled, worker_break). Returns after at most timeout_seconds (default ${WAIT_DEFAULT}, maximum ${WAIT_MAX}) with the current state; status "timeout" means it is still running, so call again. Exit 3 or a waiting question means: call dalan_questions, then dalan_answer, then dalan_wait again.`,
     inputSchema: { type: 'object', additionalProperties: false, required: ['request_id'], properties: {
       request_id: requestId,
       timeout_seconds: { type: 'integer', minimum: 1, maximum: WAIT_MAX, default: WAIT_DEFAULT, description: `Seconds to wait; values above ${WAIT_MAX} are lowered to ${WAIT_MAX}.` } } },
@@ -37,6 +38,17 @@ export const TOOLS = [
     description: `Read the current state of a job, with the worker's report once it has finished. Secrets are redacted and output is capped at ${RESULT_CAP_BYTES / 1024} KiB.`,
     inputSchema: { type: 'object', additionalProperties: false, required: ['request_id'], properties: { request_id: requestId } },
     annotations: { title: 'Read a job result', readOnlyHint: true, openWorldHint: false } },
+  { name: 'dalan_questions', title: 'Read job questions',
+    description: 'Read identified questions with the local owner receipt. After exit 3 or a waiting question, call dalan_questions, then dalan_answer, then dalan_wait again. Human-only questions still require operator action.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['id'], properties: { id: requestId } },
+    annotations: { title: 'Read job questions', readOnlyHint: true, openWorldHint: false } },
+  { name: 'dalan_answer', title: 'Answer a job question',
+    description: 'Answer an identified clarification through the CLI answer journal. Exact retries reuse the saved envelope; different text for the same saved attempt is refused. Then call dalan_wait again. This cannot answer human-only questions with owner authority alone.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['id', 'question_id', 'text'], properties: {
+      id: requestId,
+      question_id: { type: 'string', pattern: '^[A-Za-z0-9_.:-]{1,128}$' },
+      text: { type: 'string', description: `Nonblank answer, at most ${MAX_ANSWER_BYTES} UTF-8 bytes. Text beginning with a dash is not supported by the CLI.` } } },
+    annotations: { title: 'Answer a job question', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
   { name: 'dalan_status', title: 'Bridge status',
     description: 'Show the bridge status (`dalan status --json`): queue, workers and health.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
@@ -130,6 +142,20 @@ const handlers = {
     const value = run.code === 0 ? parseJson(run.stdout) : undefined;
     return value !== undefined ? asResult({ value }) : asResult(cliError(run, 'get'));
   },
+  async dalan_questions(args) {
+    const run = await runCli(['questions', args.id]);
+    const value = run.code === 0 ? parseJson(run.stdout) : undefined;
+    return value !== undefined ? asResult({ value }) : asResult(cliError(run, 'questions'));
+  },
+  async dalan_answer(args) {
+    if (!args.text.trim()) throw fail('answer text must not be blank');
+    if (Buffer.byteLength(args.text) > MAX_ANSWER_BYTES) throw fail(`answer text exceeds ${MAX_ANSWER_BYTES} UTF-8 bytes; nothing was sent or saved`);
+    // The CLI treats leading dashes as options and argv cannot carry NUL.
+    if (args.text.startsWith('-') || args.text.includes('\u0000')) throw fail('answer text must not start with a dash or contain NUL');
+    const run = await runCli(['answer', args.id, args.question_id, args.text]);
+    const value = run.code === 0 ? parseJson(run.stdout) : undefined;
+    return value !== undefined ? asResult({ value }) : asResult(cliError(run, 'answer'));
+  },
   async dalan_status() {
     const run = await runCli(['status']);
     const value = run.code === 0 ? parseJson(run.stdout) : undefined;
@@ -161,7 +187,7 @@ export async function handleFrame(message) {
   switch (method) {
     case 'initialize': return ok({ protocolVersion: PROTOCOL_VERSIONS.includes(params?.protocolVersion) ? params.protocolVersion : PROTOCOL_VERSIONS[0],
       capabilities: { tools: {} }, serverInfo: { name: 'dalan-mcp', version: '1' },
-      instructions: 'Local requester tools for a Dalan bridge: dalan_submit queues a job, dalan_wait waits for it, dalan_result reads the report, dalan_status shows the bridge.' });
+      instructions: 'Local requester tools for a Dalan bridge: dalan_submit queues a job, dalan_wait waits for it; on a waiting question call dalan_questions, dalan_answer, then dalan_wait again. dalan_result reads the report, dalan_status shows the bridge.' });
     case 'ping': return ok({});
     case 'tools/list': return ok({ tools: TOOLS });
     case 'tools/call': {
