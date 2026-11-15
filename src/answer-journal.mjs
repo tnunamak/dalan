@@ -12,6 +12,9 @@
 //       and saves {key, expected_revision, text} before anything is sent. Throws invalid_answer for a blank answer,
 //       an invalid question ID, or text over 4096 UTF-8 BYTES (the server counts bytes, not characters). It never truncates.
 //   send(prepared, deps)                  -> reply
+//       A committed entry is checked against readQuestion when supplied: same text returns committed,
+//       different text conflicts, and pending replays the saved envelope below. Without readQuestion,
+//       the committed shortcut is unchanged. reconcile remains read-only and reports pending for replay.
 //       Send the saved envelope (deps.post). A lost reply or timeout re-sends the identical envelope, original key and
 //       original expected revision, never a refreshed one. command_conflict, revision_conflict and ALREADY_ANSWERED
 //       are settled by reading the question back (deps.readQuestion): equal text is confirmed; anything else throws
@@ -163,7 +166,16 @@ async function settle(prepared, readQuestion, cause) {
 
 export async function send(prepared, { post, readQuestion, attempts = 3, retryDelayMs = 200, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
   const { job, questionId, file, entry } = prepared;
-  if (entry.state === 'committed') return answered(job, questionId, { journal: 'committed' });
+  if (entry.state === 'committed') {
+    if (readQuestion === undefined) return answered(job, questionId, { journal: 'committed' });
+    // A restored server may be behind this journal. Never refresh the saved envelope.
+    const settled = await settle(prepared, readQuestion);
+    if (settled.state === 'confirmed') return answered(job, questionId, { journal: 'committed' });
+    if (settled.state === 'conflict') throw new AnswerJournalError('answer_conflict',
+      'a different answer is already recorded for this question. The saved attempt was left unchanged',
+      ['the saved attempt is in ' + file]);
+    // Pending: use the existing send/retry path with the original key and revision.
+  }
   // The envelope is frozen here. A retry sends these exact fields: same key, same expected revision, same text.
   const envelope = { id: job, question_id: questionId, text: entry.text, command_key: entry.key, ...(entry.expected_revision === null ? {} : { expected_revision: entry.expected_revision }) };
   for (let attempt = 1; ; attempt++) {
@@ -190,9 +202,11 @@ export async function reconcile(job, questionId, { receiptsDir, readQuestion }) 
   const file = journalPath(receiptsDir, job, questionId);
   const entry = readJournal(file, job, questionId);
   if (!entry) return { state: 'none' };
-  if (entry.state === 'committed') return { state: 'committed' };
+  const wasCommitted = entry.state === 'committed';
+  if (wasCommitted && readQuestion === undefined) return { state: 'committed' };
   const settled = await settle({ job, questionId, file, entry }, readQuestion);
-  return { state: settled.state };
+  // Reconcile remains read-only; callers replay a pending saved attempt with send().
+  return { state: wasCommitted && settled.state === 'confirmed' ? 'committed' : settled.state };
 }
 
 export async function answerThroughJournal({ job, questionId, text, ...deps }) {

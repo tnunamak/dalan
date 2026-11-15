@@ -124,12 +124,14 @@ try {
     assert.equal(receipts(job.id), 1); assert.equal(answerOf(job.id), text);
 
     const again = await runCli([job.id, 'Q', text]);
-    assert.equal(again.code, 0, again.stderr); assert.equal(again.calls.length, 0, 'a committed journal answers locally');
+    assert.equal(again.code, 0, again.stderr); assert.equal(again.calls.length, 1, 'a committed journal checks current server state');
+    assert.equal(again.calls[0].method, 'GET');
+    assert.equal(again.calls[0].route, '/questions?id=' + encodeURIComponent(job.id));
     const changed = await runCli([job.id, 'Q', 'a different answer']);
     assert.notEqual(changed.code, 0); assert.equal(changed.calls.length, 0, 'different text under a journal makes no network call');
     assert.equal(parse(changed.stderr).error.includes('different text'), true);
     assert.equal(answerOf(job.id), text); assert.equal(journal(job.id).text, text);
-    console.log('PASS happy path: journal written 0600 with the frozen envelope; same text resumes locally; different text refuses with no network');
+    console.log('PASS happy path: journal written 0600 with the frozen envelope; same text confirms by readback without post; different text refuses with no network');
 
     // The server treats a changed text or a changed expected revision under the same key as a conflict.
     for (const change of [{ text: 'tampered' }, { expected_revision: job.revision + 1 }]) {
