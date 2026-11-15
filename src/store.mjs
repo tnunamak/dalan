@@ -1293,7 +1293,15 @@ export class Store {
     if(!['normal','background'].includes(priority)) throw new Error('invalid priority');
     const retry=this.checkRetry(payload,delivery,environmentId,ownerToken,review,priority,meta,identity,targetWorker,execution,requiredCapabilities,commandKey,supersedes,destinationRevision);
     if(retry) return retry;
-    const relationship=this.relationshipForSubmission(targetWorker,relationshipId);
+    let relationship;
+    if(inheritedOwnerHash) {
+      const order=this.pullQueue.row(payload.request_id);
+      if(!order||order.owner_hash!==inheritedOwnerHash) throw new Error('invalid policy work owner');
+      const relationships=JSON.parse(order.options).relationships;
+      if(relationships&&!Object.hasOwn(relationships,targetWorker)) throw new Error('invalid policy relationship binding');
+      const bound=relationships?.[targetWorker]??null;
+      relationship=bound?{relationship_id:bound}:null;
+    } else relationship=this.relationshipForSubmission(targetWorker,relationshipId);
     const id=payload.request_id, body=JSON.stringify(payload),payloadHash=hash(JSON.stringify(canonical(identity))),ownerHash=inheritedOwnerHash??hash(ownerToken);
     // checkRetry validated this target in the same transaction; only counts containing it gain room.
     const supersededId=supersedes?.target_id??null;

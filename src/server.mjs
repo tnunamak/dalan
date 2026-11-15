@@ -667,7 +667,7 @@ const policyPage=(worker,cursor=null)=>store.pullQueue.list(worker,admitPolicyWo
 async function submitPolicy(body,req,dryRun) {
   if(req.method!=='POST')throw new Error('policy submit requires POST');
   if(body.background!==undefined&&typeof body.background!=='boolean'||body.review!==undefined&&typeof body.review!=='boolean'||body.allow_main!==undefined&&typeof body.allow_main!=='boolean')throw new Error('invalid policy submit flags');
-  if(body.worker!==undefined||body.command_key!==undefined||body.supersedes!==undefined||body.required_capabilities!==undefined||body.max_queued!==undefined||body.defer_queued!==undefined||body.destination_revision!==undefined) throw new Error('routing v1 cannot combine single-target, command, supersede or capacity options');
+  if(body.worker!==undefined||body.relationship_id!==undefined||body.command_key!==undefined||body.supersedes!==undefined||body.required_capabilities!==undefined||body.max_queued!==undefined||body.defer_queued!==undefined||body.destination_revision!==undefined) throw new Error('routing v1 cannot combine single-target, relationship, command, supersede or capacity options');
   if(!body.assignment||typeof body.assignment!=='object'||Array.isArray(body.assignment)||typeof body.assignment.request_id!=='string'||!/^[-\w]{8,128}$/.test(body.assignment.request_id)||body.assignment.request_id.startsWith(PULL_PAGE_PREFIX)) throw new Error('invalid assignment request_id');
   if(!Array.isArray(body.assignment.inputs)) throw new Error('invalid assignment inputs');
   if(body.assignment.schema_version!==1||typeof body.assignment.brief!=='string'||!body.assignment.brief.trim()||typeof body.assignment.expected_output!=='string'||typeof body.assignment.execution_scope!=='string')throw new Error('invalid assignment: needs schema_version 1, brief, inputs, expected_output and execution_scope');
@@ -685,6 +685,7 @@ async function submitPolicy(body,req,dryRun) {
   const approvals=body.destination_revisions??{};
   if(!approvals||typeof approvals!=='object'||Array.isArray(approvals)||Object.keys(approvals).some(worker=>!routing.allowed_workers.includes(worker)))throw new Error('invalid destination_revisions');
   const options={delivery,environmentId:oldOptions?.environmentId??'',execution,review:body.review===true,priority,meta};
+  if(oldOptions&&Object.hasOwn(oldOptions,'relationships')) options.relationships=oldOptions.relationships;
   if(old)return store.pullQueue.submit(JSON.parse(old.payload),identity,options,routing,approvals,owner,{dryRun});
   let payload=identity,preflight=null;
   // Validate scope under each candidate's current repository policy. No candidate
@@ -700,10 +701,17 @@ async function submitPolicy(body,req,dryRun) {
   preflight=await preflightPR(payload);
   options.environmentId=(await destination.validate(delivery)).environmentId??'';
   for(const worker of routing.allowed_workers)if(!dryRun)admitPolicyWorker(worker,payload,execution,approvals[worker]);
-  if(dryRun)return {...store.pullQueue.submit(payload,identity,options,routing,approvals,owner,{dryRun:true}),destination_disclosures:disclosures};
-  // Synchronous checks immediately precede the transaction; acquisition repeats
-  // them in its write transaction after its own async preflight.
-  const result=store.pullQueue.submit(payload,identity,options,routing,approvals,owner);
+  // Capture each candidate's relationship at the same transaction boundary as admission.
+  // Acquisition uses this binding, so ending it later does not revoke accepted work.
+  const result=store.inTransaction(()=>{
+    const existing=store.pullQueue.row(identity.request_id);
+    if(existing) {
+      const saved=JSON.parse(existing.options);
+      if(Object.hasOwn(saved,'relationships')) options.relationships=saved.relationships;
+    } else options.relationships=Object.fromEntries(routing.allowed_workers.map(worker=>[worker,store.relationshipForSubmission(worker)?.relationship_id??null]));
+    return store.pullQueue.submit(payload,identity,options,routing,approvals,owner,{dryRun});
+  });
+  if(dryRun)return {...result,destination_disclosures:disclosures};
   log({kind:'policy_work_submitted',request_id:identity.request_id,work_order_id:result.work_order_id});
   return {...result,execution};
 }
