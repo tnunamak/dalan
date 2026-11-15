@@ -21,7 +21,9 @@ process.env.DOT_BRIDGE_WORKSPACE_ROOT = path.join(home, 'work');
 const { Store } = await import('../src/store.mjs');
 const { prepareGithubRepo } = await import('../src/projects.mjs');
 const workspaceModule = await import('../src/workspace.mjs');
-const { Workspace, treeDigest, writableScope, restoreOutsideWritable } = workspaceModule;
+const { Workspace, treeDigest, writableScope, restoreOutsideWritable, validateIntegrationPatch } = workspaceModule;
+const { validateSubmission } = await import('../src/submission-policy.mjs');
+const { hostCheckRefusal } = await import('../src/host-execution-policy.mjs');
 const run = (cmd, args, cwd) => { const x = spawnSync(cmd, args, { cwd, encoding: 'utf8' }); if (x.status !== 0) throw new Error(x.stderr || x.stdout); return x.stdout.trim(); };
 const NODE = '/runtime/node', NODE_HOST = process.execPath;
 const want = id => !process.env.ONLY || process.env.ONLY === id; // ONLY=sensitive runs one block
@@ -98,6 +100,63 @@ const read = (a, file) => fs.readFileSync(path.join(a.dir, file), 'utf8');
 const exists = (a, file) => fs.existsSync(path.join(a.dir, file)) || (() => { try { fs.lstatSync(path.join(a.dir, file)); return true; } catch { return false; } })();
 
 try {
+  if (want('withheld')) {
+    const withheld = ['.env.example', 'docs/security/credential-evidence.json', '.github/scripts/sign-dataconnect-release/check-draft-before-publish.sh', 'target/auth-data.json'];
+    for (const file of withheld) {
+      fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+      fs.writeFileSync(path.join(repo, file), 'WITHHELD_SENTINEL\n');
+    }
+    const hiddenDirectories = ['.github/scripts/sign-dataconnect-release'];
+    const probe = `const fs=require('fs');for(const p of ${JSON.stringify([...withheld, ...hiddenDirectories])})if(fs.existsSync(p))throw Error('withheld file present');if(fs.existsSync('.git'))throw Error('git exposed');console.log('WITHHELD_CHECK_RAN');`;
+    fs.writeFileSync(path.join(repo, 'test/withheld.js'), probe);
+    run('git', ['add', '.'], repo); run('git', ['commit', '-qm', 'withheld fixture'], repo);
+    const pinned = run('git', ['rev-parse', 'HEAD'], repo);
+    setOwnerChecks({ withheld: { argv: [NODE, 'test/withheld.js'], install_argv: [NODE, 'test/withheld.js'], timeout_ms: 30000, output_bytes: 65536 } });
+    const assignment = validateSubmission({ schema_version: 1, request_id: `req_${randomUUID()}`, brief: 'Run checks.', expected_output: 'Patch', execution_scope: 'implementation', scope_paths: ['.'], inputs: [{ github_repo: 'example-owner/fixture', base_sha: pinned }] });
+    assert.deepEqual(assignment.scope_paths, ['.']);
+    for (const file of withheld) assert(assignment.scope_excluded.some(e => e.path === file));
+    assert.match(hostCheckRefusal(assignment), /scope_paths_read_isolation_unavailable/, 'assignment exclusions alone are not proof');
+    const { request_id, ...extra } = assignment;
+    const a = open(extra);
+    for (const directory of hiddenDirectories) assert.equal(exists(a, directory), false, 'empty sensitive ancestor directory is withheld too');
+    for (const file of withheld) {
+      assert.equal(exists(a, file), false, 'materialized workspace physically lacks withheld files');
+      assert.throws(() => ws.read(a.id, a.claim, 'subject', file), /outside scope_paths/);
+      assert(!ws.list(a.id, a.claim, 'subject', '', 2000).files.includes(file));
+      const modify = `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-WITHHELD_SENTINEL\n+changed\n`;
+      const create = `diff --git a/${file} b/${file}\nnew file mode 100644\n--- /dev/null\n+++ b/${file}\n@@ -0,0 +1 @@\n+changed\n`;
+      const remove = `diff --git a/${file} b/${file}\n--- a/${file}\n+++ /dev/null\n@@ -1 +0,0 @@\n-WITHHELD_SENTINEL\n`;
+      for (const patch of [modify, create, remove]) {
+        assert.throws(() => ws.apply(a.id, a.claim, 'subject', patch), /outside scope_paths/);
+        assert.throws(() => validateIntegrationPatch(a.dir, patch, assignment), /outside scope_paths/);
+        assert.throws(() => validateSubmission({ ...extra, inputs: [{ ...extra.inputs[0], input_patch: patch }] }), /sensitive/);
+      }
+      assert.throws(() => ws.read(a.id, a.claim, 'subject', file.toUpperCase()), /outside scope_paths/);
+      assert.equal(fs.readFileSync(path.join(repo, file), 'utf8'), 'WITHHELD_SENTINEL\n', 'owner source is unchanged');
+    }
+    assert.equal(ws.result(a.id, a.claim, 'subject').diff_preview, '', 'withholding is not a worker deletion patch');
+    assert.equal((await treeDigest(a.dir)).reason, 'index_flags_present', 'unbound digest callers still reject skipped entries');
+    run('git', ['update-index', '--skip-worktree', 'README.md'], a.dir);
+    assert.equal((await treeDigest(a.dir, undefined, assignment.scope_excluded.map(e => e.path))).reason, 'index_flags_present', 'unrelated skipped entries remain untrusted');
+    run('git', ['update-index', '--no-skip-worktree', 'README.md'], a.dir);
+    const c = await check(a, 'withheld');
+    assert.equal(c.evidence?.exit_code, 0, JSON.stringify(c.r) + c.text);
+    assert.match(c.evidence.install_input_tree_sha256 ?? '', /^[a-f0-9]{40}$/, 'withholding retains the sanitized host candidate digest');
+    assert.equal((c.text.match(/WITHHELD_CHECK_RAN/g) || []).length, 2, 'install and check both run without withheld files');
+    assert(!c.text.includes('WITHHELD_SENTINEL'));
+    assert.equal(ws.snapshot(a.id, a.claim, 'subject').diff_preview, '');
+    const fresh = 'docs/new-credentials.json';
+    const freshPatch = `diff --git a/${fresh} b/${fresh}\nnew file mode 100644\n--- /dev/null\n+++ b/${fresh}\n@@ -0,0 +1 @@\n+synthetic\n`;
+    assert.throws(() => ws.apply(a.id, a.claim, 'subject', freshPatch), /outside scope_paths/);
+    assert.throws(() => validateIntegrationPatch(a.dir, freshPatch, assignment), /outside scope_paths/);
+    replaceFile(a, 'README.md', 'safe edit\n');
+    assert.deepEqual(patchFiles(ws.result(a.id, a.claim, 'subject').diff_preview), ['README.md']);
+    fs.writeFileSync(path.join(a.dir, withheld[0]), 'RECREATED_SENTINEL\n');
+    await assert.rejects(() => ws.runConfined(a.id, a.dir, [NODE, 'test/withheld.js'], {}), /scope_paths_read_isolation_unavailable/, 'launch rechecks physical absence');
+    fs.unlinkSync(path.join(a.dir, withheld[0]));
+    console.log('PASS withheld: admission, physical absence, worker read/list denial, patch create/modify/delete denial, install and check');
+  }
+
   // Implementation job, scope_paths src + test.
   if (want('implementation')) {
     // A job with a narrow scope cannot run a host check at all: the executor exposes the whole checkout, so the check is refused

@@ -96,13 +96,15 @@ function safePath(dir,p,existing=false) { p=relative(p); let cursor=dir; for(con
 // alias (docs/PRIVATE-NOTE.TXT, a decomposed "é") that a case-insensitive or normalizing filesystem (macOS APFS) opens as
 // the excluded file is excluded too. On case-sensitive Linux this over-excludes a differently-cased sibling: that fails closed.
 export const canonicalPath=p=>p.split('/').map(part=>part.normalize('NFC').toLowerCase()).join('/');
-export const isExcludedPath=(p,excluded)=>excluded.has(canonicalPath(p));
+export const isExcludedPath=(p,excluded)=>{const parts=canonicalPath(p).split('/');return parts.some((_,i)=>excluded.has(parts.slice(0,i+1).join('/')));};
 function scopeOf(assignment) {
   const raw=assignment.scope_paths, excluded=new Set((assignment.scope_excluded||[]).map(d=>canonicalPath(d.path)));
   const scope=Array.isArray(raw)&&raw.length?raw.map(p=>String(p).replace(/^\.\//,'').replace(/\/$/,'')):[];
   const paths=!scope.length||scope.includes('.')?null:scope;
   const outputs=outputsOf(assignment);
-  return paths||excluded.size||outputs.size?{paths,excluded,outputs}:null;
+  const sensitive=assignment.execution_scope==='implementation'&&!paths&&excluded.size?sensitivePolicyPaths():null;
+  if(sensitive?.error) throw new Error('sensitive_policy_unavailable');
+  return paths||excluded.size||outputs.size?{paths,excluded,outputs,sensitive}:null;
 }
 // output_paths: new files the job may create. They are readable and writable once they exist, and are the only writable
 // files of a read-only assignment. Submit proved they are absent at the pinned revision and not sensitive.
@@ -115,7 +117,7 @@ function existsAtHead(dir,file) {
   if(r.error||r.status!==0) throw new Error(`git ls-tree failed: ${(r.stderr||r.error?.message||'').slice(0,200)}`);
   return r.stdout.length>0;
 }
-const inScope=(p,scope)=>!scope||(!scope.paths||scope.outputs.has(p)||scope.paths.some(s=>p===s||p.startsWith(`${s}/`)))&&!isExcludedPath(p,scope.excluded);
+const inScope=(p,scope)=>!scope||(!scope.paths||scope.outputs.has(p)||scope.paths.some(s=>p===s||p.startsWith(`${s}/`)))&&!isExcludedPath(p,scope.excluded)&&(!scope.sensitive||!isSensitiveRepoPath(p,scope.sensitive.paths));
 // A directory that holds a scope entry may be listed so the walk can reach it.
 const leadsToScope=(p,scope)=>!scope||!scope.paths||inScope(p,scope)||scope.paths.some(s=>s.startsWith(`${p}/`))||[...scope.outputs].some(o=>o.startsWith(`${p}/`));
 function outputDirectoryHint(file,outputs) {
@@ -219,8 +221,9 @@ const GENERATED_EXCLUDES=[...GENERATED_DIRS].map(name=>`:(exclude,glob)**/${name
 // environment, so symlinks are stored as links and never followed, and a path behind a symlinked directory is not read. New objects go to
 // `scratch`, a throw-away directory, never into the mirror. Returns the tree id, or null with a reason when git could not read everything
 // (an unreadable tracked file, an unreadable untracked directory, a timeout, a skip-worktree or assume-unchanged index entry, a missing
-// index): then the receipt says the observation is unavailable instead of hashing a placeholder. The whole call has a 120 s deadline.
-export async function treeDigest(dir,scratch) {
+// index): then the receipt says the observation is unavailable instead of hashing a placeholder. Explicitly withheld, absent
+// skip-worktree entries are omitted from the private digest index. The whole call has a 120 s deadline.
+export async function treeDigest(dir,scratch,withheldPaths=[]) {
   const own=!scratch;if(own) fs.mkdirSync(path.join(root,'run'),{recursive:true,mode:0o700});scratch??=fs.mkdtempSync(path.join(root,'run','digest-'));
   try {
     const base=gitEnv(),deadline=Date.now()+DIGEST_DEADLINE_MS,left=()=>Math.max(1000,deadline-Date.now());
@@ -239,7 +242,18 @@ export async function treeDigest(dir,scratch) {
     // Index flags that tell git not to look at the worktree (skip-worktree, assume-unchanged) would hide changes from `add -u`.
     const flags=await gitAsync2(dir,['ls-files','-v','-z'],env,left());
     if(flags.status!==0) return {sha256:null,reason:flags.status===null?'git_timeout_or_error':`git_could_not_read_a_file: ${flags.stderr.split('\n')[0].slice(0,160)}`};
-    if(flags.stdout.split('\0').some(record=>record&&(record[0]==='S'||/[a-z]/.test(record[0])))) return {sha256:null,reason:'index_flags_present'};
+    const withheld=new Set(withheldPaths),omitted=[];
+    for(const record of flags.stdout.split('\0').filter(Boolean)) {
+      const file=record.slice(2);
+      if(record[0]==='S'&&withheld.has(file)&&!pathExistsOrThrow(absBytes(dir,file))) omitted.push(file);
+      else if(record[0]==='S'||/[a-z]/.test(record[0])) return {sha256:null,reason:'index_flags_present'};
+    }
+    // Only this private index drops verified absent exclusions. The workspace
+    // index retains its flags so physical withholding is never a worker patch.
+    if(omitted.length) {
+      const removed=await gitAsyncInput(dir,['update-index','--force-remove','-z','--stdin'],env,Buffer.from(omitted.join('\0')+'\0'));
+      if(removed.status!==0) return {sha256:null,reason:'withheld_index_removal_failed'};
+    }
     const deleted=await gitAsync2(dir,['ls-files','--deleted','-z'],env,left());
     if(deleted.status!==0) return {sha256:null,reason:deleted.status===null?'git_timeout_or_error':`git_could_not_read_a_file: ${deleted.stderr.split('\n')[0].slice(0,160)}`};
     for(const file of deleted.stdout.split('\0').filter(Boolean)) {
@@ -358,6 +372,46 @@ export function sensitiveMasks(dir,repo,copyDir) {
   if(maskedPaths.length>MASK_LIMIT) throw new Error(`sensitive_mask_limit: ${maskedPaths.length} sensitive files in the checkout (limit ${MASK_LIMIT}); a check cannot be confined around that many`);
   return {paths:maskedPaths,sourceExemptions,policyError:policy.error};
 }
+// Excluded implementation files never enter the runner's source tree. Skip-worktree
+// keeps these deliberate omissions out of the worker's patch without reading blobs.
+function withholdExcludedPaths(dir,assignment) {
+  if(assignment.execution_scope!=='implementation'||!assignment.scope_paths?.includes('.')||!assignment.scope_excluded?.length) return;
+  const excluded=assignment.scope_excluded.map(entry=>relative(entry.path));
+  for(const file of excluded) {
+    const parent=path.posix.dirname(file);
+    if(parent!=='.') safePath(dir,parent);
+    fs.rmSync(path.join(dir,file),{force:true});
+    // Prune empty ancestors too: a sensitive directory name must not remain in
+    // the execution checkout after its last withheld file is removed.
+    for(let ancestor=parent;ancestor!=='.';ancestor=path.posix.dirname(ancestor)) {
+      try { fs.rmdirSync(path.join(dir,ancestor)); }
+      catch(error) { if(error.code==='ENOTEMPTY'||error.code==='EEXIST') break;if(error.code!=='ENOENT') throw error; }
+    }
+  }
+  const tracked=new Set(git(['-C',dir,'ls-files','-z']).split('\0').filter(Boolean));
+  const omitted=excluded.filter(file=>tracked.has(file));
+  if(omitted.length) git(['-C',dir,'update-index','--skip-worktree','--',...omitted]);
+}
+function excludedPathsAbsent(dir,assignment) {
+  if(!assignment.scope_excluded?.length) return false;
+  if(!dir) return false;
+  const policy=sensitivePolicyPaths();
+  if(policy.error) return false;
+  for(const entry of assignment.scope_excluded) {
+    const file=relative(entry.path),parent=path.posix.dirname(file);
+    if(parent!=='.') safePath(dir,parent);
+    try { fs.lstatSync(path.join(dir,file));return false; } catch(error) { if(error.code!=='ENOENT') return false; }
+  }
+  // Check the current policy too, including ignored and generated files. A new
+  // sensitive file or policy change invalidates the proof rather than unmasking it.
+  const walk=base=>fs.readdirSync(path.join(dir,base),{withFileTypes:true}).every(entry=>{
+    if(entry.name==='.git') return true;
+    const file=base?`${base}/${entry.name}`:entry.name;
+    if(isSensitiveRepoPath(file,policy.paths)) return false;
+    return !entry.isDirectory()||walk(file);
+  });
+  return walk('');
+}
 // A list shown in the receipt: the first `shown` names, the true total, and a flag when the preview is shorter than the total.
 const preview=(list,shown)=>list===null?null:({preview:list.slice(0,shown),total:list.length,truncated:list.length>shown});
 // The lists go to one bounded artifact; null when every list is empty. The cap counts the serialized JSON, envelope and separators
@@ -454,10 +508,11 @@ export class Workspace {
       row=this.store.db.prepare('SELECT * FROM workspaces WHERE request_id=?').get(requestId);
     }
     if(row.claim_id!==claimId||row.base_sha!==ctx.input.base_sha||row.path!==dir||git(['-C',dir,'rev-parse','HEAD']).trim()!==checkoutSha) throw new Error('workspace binding mismatch');
+    withholdExcludedPaths(dir,ctx.a.assignment);
     if(!row.initial_patch_applied) {
       if(ctx.input.input_patch) {
         const reverse=spawnSync('git',['-C',dir,'apply','--reverse','--check','-'],{input:ctx.input.input_patch,encoding:'utf8',timeout:10000,env:gitEnv()});
-        if(reverse.status!==0) applyPatchToTree(dir,ctx.input.input_patch);
+        if(reverse.status!==0) applyPatchToTree(dir,ctx.input.input_patch,scopeOf(ctx.a.assignment));
       }
       this.store.db.prepare('UPDATE workspaces SET initial_patch_applied=1 WHERE request_id=?').run(requestId);
     }
@@ -715,9 +770,10 @@ export class Workspace {
       const repo=assignment.inputs[0].github_repo;
       const declared=dir?availableChecks(repo,dir):this.availableChecksFor(assignment,worker);
       if(execution!=='host') return {available_checks:declared};
-      const baseRefusal=hostCheckRefusal(assignment);
+      const absent=excludedPathsAbsent(dir,assignment);
+      const baseRefusal=hostCheckRefusal(assignment,null,null,null,absent);
       const readiness=hostReadiness();
-      const candidates=baseRefusal||!readiness.ready?[]:declared.filter(id=>!hostCheckRefusal(assignment,repo,id));
+      const candidates=baseRefusal||!readiness.ready?[]:declared.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
       const reason=baseRefusal||(!readiness.ready?readiness.reason:null)||(!candidates.length?'host_check_not_allowlisted: no permitted owner-configured check is runnable':null);
       return {available_checks:candidates,host_execution_available:candidates.length>0,host_execution_unavailable_reason:reason};
     } catch(error) {
@@ -787,7 +843,8 @@ export class Workspace {
     if(execution!=='host') return refuse();
     // Refuse before resolving worker-controlled check metadata or launching either phase.
     const inputForPolicy=assignmentInput(context.a.assignment);
-    const refusal=hostCheckRefusal(context.a.assignment,inputForPolicy.github_repo,checkId);
+    const prepared=context.a.assignment.scope_excluded?.length?this.ensure(requestId,claimId,subject,true,worker):null;
+    const refusal=hostCheckRefusal(context.a.assignment,inputForPolicy.github_repo,checkId,null,excludedPathsAbsent(prepared?.dir,context.a.assignment));
     if(refusal) return refuse(refusal);
     const readiness=hostReadiness();
     if(!readiness.ready) return refuse(`host_execution (${readiness.reason})`);
@@ -846,13 +903,13 @@ export class Workspace {
       const backend=hostBackend();let evidenceMs=0;
       const timed=async fn=>{const t=Date.now();try{return await fn();}finally{evidenceMs+=Date.now()-t;}};
       fs.mkdirSync(path.join(root,'run'),{recursive:true,mode:0o700});scratch=fs.mkdtempSync(path.join(root,'run','digest-'));
-      const firstSnap=await timed(()=>treeDigest(dir,scratch));
+      const firstSnap=await timed(()=>treeDigest(dir,scratch,a.assignment.scope_excluded?.map(entry=>entry.path)));
       const sourceCopyDir=path.join(scratch,'source-exemptions');fs.mkdirSync(sourceCopyDir,{mode:0o700});
       const masked=sensitiveMasks(dir,input.github_repo,sourceCopyDir);
       // One service reservation and one cumulative envelope cover preparation,
       // install and check. Mutations stay in the private tmpfs execution copy.
       assertCurrentAuthority();
-      const launchRefusal=hostCheckRefusal(this.store.get(requestId).assignment,input.github_repo,checkId,spec);
+      const launchRefusal=hostCheckRefusal(this.store.get(requestId).assignment,input.github_repo,checkId,spec,excludedPathsAbsent(dir,this.store.get(requestId).assignment));
       if(launchRefusal) throw new Error(launchRefusal);
       const hosted=await this.runConfined(requestId,dir,spec.argv,{...spec,host_budget:jobBudget,maskPaths:masked.paths,sourceExemptions:masked.sourceExemptions},{checkRunId,repo:input.github_repo,checkId,expectedSpec:spec,cancelled:()=>{
         try { assertCurrentAuthority(); return false; } catch { return true; }
@@ -939,7 +996,7 @@ export class Workspace {
   async runConfined(requestId,dir,command,spec,{cancelled,checkRunId,repo=null,checkId=null,expectedSpec=null}={}) {
     // Policy is rechecked at the only launch boundary; repository metadata
     // cannot opt the operator in or bypass the whole-repository read grant.
-    const refusal=hostCheckRefusal(this.store.get(requestId).assignment,repo,checkId,expectedSpec);
+    const refusal=hostCheckRefusal(this.store.get(requestId).assignment,repo,checkId,expectedSpec,excludedPathsAbsent(dir,this.store.get(requestId).assignment));
     if(refusal) throw new Error(refusal);
     const budgets=parseHostBudget(spec.host_budget);
     budgets.wall_ms=Math.min(budgets.wall_ms,spec.timeout_ms??budgets.wall_ms);

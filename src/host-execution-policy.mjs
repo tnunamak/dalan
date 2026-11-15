@@ -20,10 +20,10 @@ export function hostCheckAuthorization(repo, checkId, expectedSpec = null) {
   return { spec };
 }
 
-export function hostCheckRefusal(assignment={}, repo=null, checkId=null, expectedSpec=null) {
+export function hostCheckRefusal(assignment={}, repo=null, checkId=null, expectedSpec=null,excludedPathsAbsent=false) {
   const scope=assignment.scope_paths;
   const narrow=Array.isArray(scope)&&scope.length&&!scope.some(p=>p.replace(/^\.\//,'').replace(/\/$/,'')==='.');
-  if(narrow||assignment.scope_excluded?.length) {
+  if(narrow||(assignment.scope_excluded?.length&&!excludedPathsAbsent)) {
     return 'scope_paths_read_isolation_unavailable: this executor exposes the whole checkout; a check needs an owner-approved repository-wide read grant';
   }
   if(sensitivePolicyPaths().error) return 'sensitive_policy_unavailable: restore a valid mode-0600 submission policy before running host checks';
