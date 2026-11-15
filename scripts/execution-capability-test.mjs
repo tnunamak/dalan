@@ -117,12 +117,12 @@ await withServer({ port: 0 }, async ({ submit, task, row, admin, home }) => {
   assert.equal((await submit(task(), { execution: 'bogus' })).code, 400);
   assert.match((await submit(task(), { execution: 'bogus' })).body.error, /invalid execution/);
 
-  // required_capabilities: only a host job can require them, and only verified ones are admitted.
+  // Required capabilities are checked against the executor or adapter; unknown is refused.
   const refuse = async (extra, pattern) => { const t = task(), r = await submit(t, extra); assert.equal(r.code, 400, JSON.stringify(r)); assert.match(r.body.error, pattern); assert.equal(row(t.request_id), undefined, 'a refused submit stores no row'); };
   await refuse({ execution: 'host', required_capabilities: ['native_darwin_execution'] }, unavailableHost);
   await refuse({ execution: 'host', required_capabilities: ['immutable_input_snapshot'] }, unavailableHost);
   await refuse({ execution: 'host', required_capabilities: ['nope'] }, /invalid required_capabilities/);
-  await refuse({ execution: 'worker', required_capabilities: ['private_loopback'] }, /only execution=host jobs can require bridge capabilities/);
+  await refuse({ execution: 'worker', required_capabilities: ['private_loopback'] }, /capability_not_available: private_loopback/);
 });
 
 // Same fixture, repository fine, but this host models "no executor": a host job is refused with the named reason, never queued.

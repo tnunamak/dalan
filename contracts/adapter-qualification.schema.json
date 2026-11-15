@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dalan-handoff:adapter-qualification:1",
+  "title": "Draft adapter qualification record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_kind",
+    "adapter_id",
+    "observed_on",
+    "pins",
+    "roles",
+    "continuity",
+    "activation",
+    "capabilities",
+    "qualification",
+    "limits"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "record_kind": {
+      "const": "draft_internal_qualification_record_not_wire_protocol"
+    },
+    "adapter_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observed_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "pins": {
+      "type": "object",
+      "required": [
+        "dalan_commit",
+        "requester_ref",
+        "worker_host_ref",
+        "protocol",
+        "sdk",
+        "catalog_fingerprint"
+      ],
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "roles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "requester",
+          "worker",
+          "tool_provider",
+          "tool_consumer"
+        ]
+      }
+    },
+    "continuity": {
+      "enum": [
+        "retained_native",
+        "checkpoint_replay",
+        "reconstructed_explicit_context",
+        "new_work",
+        "inbox_only",
+        "unknown"
+      ]
+    },
+    "activation": {
+      "enum": [
+        "manual",
+        "host_schedule",
+        "host_event",
+        "native_endpoint",
+        "unknown"
+      ]
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "declared",
+          "observed",
+          "required"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "declared": {
+            "enum": [
+              "yes",
+              "no",
+              "unknown"
+            ]
+          },
+          "observed": {
+            "enum": [
+              "not_tested",
+              "passed",
+              "failed",
+              "blocked",
+              "inconclusive"
+            ]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "evidence_level",
+        "run_refs"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not_run",
+            "partial",
+            "passed_for_declared_scope",
+            "failed",
+            "blocked",
+            "inconclusive"
+          ]
+        },
+        "evidence_level": {
+          "enum": [
+            "documentation",
+            "source_inspection",
+            "deterministic_component",
+            "actual_store_integration",
+            "live_host",
+            "independent_review"
+          ]
+        },
+        "run_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -22,10 +22,13 @@ export const CAPABILITY_NAMES = Object.freeze([
   'offline_transition_revokes_connections', 'artifact_export_no_follow', 'runner_observed_evidence', 'native_darwin_execution', 'immutable_input_snapshot']);
 export const CAPABILITY_STATES = Object.freeze(['verified', 'unsupported', 'unknown']);
 
+export const ADAPTER_CAPABILITY_NAMES = Object.freeze(['identified_questions']);
+const REQUIRED_CAPABILITY_NAMES = Object.freeze([...CAPABILITY_NAMES, ...ADAPTER_CAPABILITY_NAMES]);
+
 export function parseRequiredCapabilities(value) {
   if (value === undefined || value === null) return null;
-  if (!Array.isArray(value) || value.length > CAPABILITY_NAMES.length || value.some(c => !CAPABILITY_NAMES.includes(c))) {
-    throw new Error(`invalid required_capabilities: expected a list of ${CAPABILITY_NAMES.join(', ')}`);
+  if (!Array.isArray(value) || value.length > REQUIRED_CAPABILITY_NAMES.length || value.some(c => !REQUIRED_CAPABILITY_NAMES.includes(c))) {
+    throw new Error(`invalid required_capabilities: expected a list of ${REQUIRED_CAPABILITY_NAMES.join(', ')}`);
   }
   return value.length ? [...new Set(value)].sort() : null;
 }
@@ -109,4 +112,19 @@ export const capabilityNotAvailable = (execution, reason) => ({ status: 'capabil
 export function withEvidence(row) {
   const evidence = row.evidence ? JSON.parse(row.evidence) : null;
   return withCheckCoverage({ ...row, evidence, trust: evidence?.trust ?? null });
+}
+
+// Committed adapter qualification is independent of per-worker authority grants.
+export const ADAPTER_QUALIFICATIONS = Object.freeze({
+  mcp: Object.freeze({capabilities: Object.freeze({})}),
+  'protocol-v0': Object.freeze({capabilities: Object.freeze({identified_questions: 'verified'})}),
+});
+
+export function admitAdapterCapabilities(adapter, required, catalogProfile) {
+  const qualification = Object.hasOwn(ADAPTER_QUALIFICATIONS, adapter) ? ADAPTER_QUALIFICATIONS[adapter] : null;
+  for (const name of required ?? []) {
+    const state = adapter === 'protocol-v0' && catalogProfile !== 'protocol-v0' ? 'unknown' : qualification?.capabilities[name] ?? 'unknown';
+    if (state !== 'verified') throw new Error(
+      'capability_not_available: ' + name + ' (adapter ' + (adapter ?? 'undeclared') + ' declares ' + state + ')');
+  }
 }

@@ -20,6 +20,8 @@
     "packages/job-core/",
     "!packages/job-core/test/",
     "integrations/t3/acp-kit/src/",
+    "qualification/",
+    "contracts/adapter-qualification.schema.json",
     "scripts/daily-selfcheck.mjs",
     "scripts/dalan-try-selfcheck.mjs",
     "scripts/monitor-targets.mjs",

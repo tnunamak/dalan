@@ -34,7 +34,7 @@ import { compileWorkOrder, reasonsFromError, strongest } from './work-order.mjs'
 import { assertNoDeclaredConsumer, unprovenSource } from './consumers.mjs';
 import { preflightPR } from './pr-preflight.mjs';
 import { admitImplementation } from './check-readiness.mjs';
-import { parseExecution, parseRequiredCapabilities, admitHostExecution, withEvidence } from './execution.mjs';
+import { parseExecution, parseRequiredCapabilities, admitHostExecution, admitAdapterCapabilities, ADAPTER_CAPABILITY_NAMES, withEvidence } from './execution.mjs';
 import { loadCapacity } from './projects.mjs';
 import { authConfig, assertPublicRouteAuth, isLoopbackBindHost, protectedResource, challenge, verifyBearer, needScope } from './auth.mjs';
 import { beginMcpOutcome, recordMcpResponse, pathShape, uaToken } from './mcp-outcome.mjs';
@@ -1115,9 +1115,10 @@ const adminServer=http.createServer(async(req,res)=>{
           excludeSensitive:body.exclude_sensitive===true,sensitiveScopeOverride:body.sensitive_scope_override??null,target:target??'dot'},{
           render:renderAssignment,
           admitExecution:(p,r)=>{
-            if(r.requiredCapabilities&&r.jobExecution!=='host') throw new Error(`invalid required_capabilities: only execution=host jobs can require bridge capabilities (this job has execution=${r.jobExecution})`);
+            const adapterRequired=r.jobExecution==='host'?r.requiredCapabilities?.filter(name=>ADAPTER_CAPABILITY_NAMES.includes(name)):r.requiredCapabilities;
+            admitAdapterCapabilities(workers.workers.get(storedTarget??target??'dot')?.adapter,adapterRequired,catalogProfile);
             // No usable executor, or a required capability the backend does not declare verified: never degraded to a run without it.
-            if(r.jobExecution==='host'&&(p.execution_scope==='implementation'||r.requiredCapabilities)) admitHostExecution(r.requiredCapabilities);
+            if(r.jobExecution==='host'&&(p.execution_scope==='implementation'||r.requiredCapabilities)) admitHostExecution(r.requiredCapabilities?.filter(name=>!ADAPTER_CAPABILITY_NAMES.includes(name)));
           },
           validate:(p,{warnings})=>validateSubmissionAsync(p,{sensitiveScopeOverride:body.sensitive_scope_override??null,warnings,excludeSensitive:body.exclude_sensitive===true,review:body.review===true,worker:storedTarget??target??'dot'}),
           admitReadiness:p=>{

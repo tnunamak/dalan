@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "record_kind": "draft_internal_qualification_record_not_wire_protocol",
+  "adapter_id": "protocol-v0",
+  "observed_on": "2026-11-15",
+  "pins": {
+    "dalan_commit": "cf23cceed3ada4ffda321966f616a55b1696e447",
+    "requester_ref": "private admin HTTP",
+    "worker_host_ref": "local OAuth protocol fixture; not a live hosted worker",
+    "protocol": "protocol-v0",
+    "sdk": null,
+    "catalog_fingerprint": "a7dff975bf96b3cb6fb0436ae3c597db5543e6cb4cca5b9874f551f2e88f0b12"
+  },
+  "roles": [
+    "worker"
+  ],
+  "continuity": "unknown",
+  "activation": "unknown",
+  "capabilities": [
+    {
+      "name": "private_loopback",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "host_loopback_denied",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "lan_denied",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "unix_sockets_denied",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "credential_services_denied",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "closed_inherited_fds",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "read_scope_enforced",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "write_scope_enforced",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "full_tree_cancel_verified",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "offline_transition_revokes_connections",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "artifact_export_no_follow",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "runner_observed_evidence",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "native_darwin_execution",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "immutable_input_snapshot",
+      "declared": "unknown",
+      "observed": "not_tested",
+      "required": false
+    },
+    {
+      "name": "identified_questions",
+      "declared": "yes",
+      "observed": "passed",
+      "required": false,
+      "evidence_refs": [
+        "scripts/question-lifecycle-http-e2e.mjs"
+      ]
+    }
+  ],
+  "qualification": {
+    "state": "passed_for_declared_scope",
+    "evidence_level": "actual_store_integration",
+    "run_refs": [
+      "scripts/question-lifecycle-http-e2e.mjs",
+      "scripts/pull-catalog-hash-test.mjs"
+    ]
+  },
+  "limits": [
+    "No live hosted-worker qualification.",
+    "No native session continuity or activation guarantee.",
+    "Sandbox capabilities remain unknown; host execution keeps its separate backend admission."
+  ]
+}

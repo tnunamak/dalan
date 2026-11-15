@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { writeAtomic } from './as-files.mjs';
-import { parseExecution } from './execution.mjs';
+import { parseExecution, ADAPTER_QUALIFICATIONS } from './execution.mjs';
 
 const fail=message=>{throw new Error(`workers: ${message}`);};
 const object=(v,keys)=>{if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).some(k=>!keys.includes(k))) fail(`expected object with keys ${keys.join(', ')}`);};
@@ -62,7 +62,8 @@ export function parseWorkers(value,{builtin=false,builtinConnectionIds}={}) {
     if(name==='pool'||name==='unknown') fail(`worker name "${name}" is reserved and unsupported`);
     if(!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) fail('invalid worker name');
     if(Object.hasOwn(config??{},'pool')) fail(`${name}.pool is not supported`);
-    object(config,['connections','capabilities','guidance','repos','repo_access','denied_repos','destination','workspaceAllowed']);
+    object(config,['connections','capabilities','guidance','repos','repo_access','denied_repos','destination','workspaceAllowed','adapter']);
+    if(Object.hasOwn(config,'adapter')&&(typeof config.adapter!=='string'||!Object.hasOwn(ADAPTER_QUALIFICATIONS,config.adapter))) fail(`${name}.adapter must name a qualified adapter: ${Object.keys(ADAPTER_QUALIFICATIONS).join(', ')}`);
     const repoSettings=normalizeRepoSettings(config,name);
     if(config.guidance!==undefined&&config.guidance!=='resume') fail(`${name}.guidance may only be "resume"`);
     if(builtin&&config.connections!==undefined&&!(Array.isArray(config.connections)&&!config.connections.length)) fail(`${name}.connections must be absent in built-in mode; connections are recorded by dalan connect approve`);
@@ -81,7 +82,7 @@ export function parseWorkers(value,{builtin=false,builtinConnectionIds}={}) {
     if(config.workspaceAllowed!==undefined&&typeof config.workspaceAllowed!=='boolean') fail(`${name}.workspaceAllowed must be boolean`);
     const caps=config.capabilities??[];
     if(!Array.isArray(caps)||caps.some(c=>c!=='t3')) fail('capabilities may only contain t3');
-    workers.set(name,{connections,capabilities:new Set(caps),...(config.workspaceAllowed!==undefined?{workspaceAllowed:config.workspaceAllowed}:{}),...(config.guidance?{guidance:config.guidance}:{}),...repoSettings,
+    workers.set(name,{connections,capabilities:new Set(caps),...(config.adapter!==undefined?{adapter:config.adapter}:{}),...(config.workspaceAllowed!==undefined?{workspaceAllowed:config.workspaceAllowed}:{}),...(config.guidance?{guidance:config.guidance}:{}),...repoSettings,
       ...(Object.hasOwn(config,'destination')?{destination:parseDestinationDeclaration(config.destination)}:{})});
   }
   if(!workers.size) fail('workers must not be empty');
