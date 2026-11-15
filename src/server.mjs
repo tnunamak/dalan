@@ -1312,7 +1312,7 @@ const adminServer=http.createServer(async(req,res)=>{
       const currentWorkers=loadEffectiveOwnerWorkers(workersFile);
       const grants=[
         ...store.db.prepare("SELECT c.*,a.relationship_id FROM claims c JOIN assignments a USING(request_id) WHERE c.state='active' AND a.status='claimed'").all().filter(row=>!store.leaseExpired(row)).map(row=>({request_id:row.request_id,worker:row.worker,relationship_id:row.relationship_id,expires_at:store.leaseExpiresAt(row),enforcer:'claim_lease'})),
-        ...store.db.prepare('SELECT g.tool,g.worker,g.granted_at FROM tool_grants g JOIN registered_tools t ON t.name=g.tool WHERE t.enabled=1').all().map(row=>({...row,enforcer:'tool_registry',expires_at:null})),
+        ...store.db.prepare('SELECT g.tool,g.worker,g.granted_at,g.scope FROM tool_grants g JOIN registered_tools t ON t.name=g.tool WHERE t.enabled=1').all().map(row=>({...row,scope:row.scope===null?null:JSON.parse(row.scope),enforcer:'tool_registry',expires_at:null})),
         ...store.db.prepare('SELECT d.request_id,d.revision,d.approved_at,a.relationship_id FROM destination_approvals d JOIN assignments a USING(request_id)').all().map(row=>({...row,enforcer:'destination_approval',expires_at:null})),
         ...store.activeSubscriptions().map(({id,principal,worker,expires_at})=>({id,principal,worker,expires_at,enforcer:'subscription'})),
         ...store.db.prepare('SELECT request_id,relationship_id FROM assignments WHERE owner_hash IS NOT NULL').all().filter(row=>store.protocolListingLive(row.request_id)).map(row=>({...row,enforcer:'owner_capability',expires_at:store.getProtocol(row.request_id)?new Date(store.getProtocol(row.request_id).retain_until_ms).toISOString():null})),

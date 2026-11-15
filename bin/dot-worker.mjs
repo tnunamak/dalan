@@ -399,13 +399,24 @@ async function main() {
       if(!['allow','deny'].includes(action)||!name||!repo||extra.length) throw new Error('usage: dalan worker allow|deny NAME OWNER/REPO [--json]');
       result=updateWorkerRepoPolicy(file,name,action,repo);
       if(action==='allow'&&fs.existsSync(path.join(root,'bridge.db'))) {
-        const db=new DatabaseSync(path.join(root,'bridge.db'));
         try {
-          db.exec('PRAGMA busy_timeout=5000');
-          if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='relationships'").get()) ensureWorkerRelationship(db,name);
-        } finally { db.close(); }
+          const db=new DatabaseSync(path.join(root,'bridge.db'));
+          try {
+            db.exec('PRAGMA busy_timeout=5000');
+            if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='relationships'").get()) ensureWorkerRelationship(db,name);
+          } finally { db.close(); }
+        } catch(error) {
+          // Repository authority already committed; an enrollment failure must not imply that it was refused.
+          result={...result,partial:true,repository_policy_applied:true,relationship_enrollment:{status:'pending',reason:error.message,
+            repair:`Repair or unlock the bridge database, then retry: ${cli} worker allow ${name} ${repo}`}};
+        }
       }
-      if(!json) { result=`${name}: ${result.mode}${result.repos?.length?` (${result.repos.join(', ')})`:''}${result.denied?.length?` except ${result.denied.join(', ')}`:''}${result.reset_to_audited?.length?`\nthe audit log failed its checkpoint, so workers.json was reset to the audited grants; allow again: ${result.reset_to_audited.map(item=>`${item.worker}${item.repos.length?` (${item.repos.join(', ')})`:''}`).join('; ')}`:''}`; plainOutput=true; }
+      if(!json) {
+        const pending=result.relationship_enrollment;
+        result=`${name}: ${result.mode}${result.repos?.length?` (${result.repos.join(', ')})`:''}${result.denied?.length?` except ${result.denied.join(', ')}`:''}${result.reset_to_audited?.length?`\nthe audit log failed its checkpoint, so workers.json was reset to the audited grants; allow again: ${result.reset_to_audited.map(item=>`${item.worker}${item.repos.length?` (${item.repos.join(', ')})`:''}`).join('; ')}`:''}`;
+        if(pending) result+=`\nRepository policy applied; relationship enrollment pending. ${pending.repair}`;
+        plainOutput=true;
+      }
       break;
     }
     case 'submit': {
