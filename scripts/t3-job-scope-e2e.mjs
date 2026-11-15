@@ -7,6 +7,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync, sign, randomUUID, createHash } from 'node:crypto';
+import { createToolRegistry } from '../src/tool-registry.mjs';
 import { Store } from '../src/store.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { reservedPort } from '../src/test-support/port.mjs';
@@ -38,6 +39,7 @@ process.stdin.on('end', () => {
   else data={threads:['thread-1','thread-2','thread-3'].map(id=>({id,projectId:id,updatedAt:'2026-01-01'}))};
   if(args.includes('wait')) { require('fs').writeFileSync(process.env.HOME+'/waiting','1'); const timer=setInterval(()=>{ if(require('fs').existsSync(process.env.HOME+'/release-wait')) { clearInterval(timer); console.log(JSON.stringify({ok:true,data})); } },10); return; }
   require('fs').appendFileSync(process.env.HOME+'/effects',args.includes('send')?'send\\n':args.includes('set')?'set\\n':'');
+  if(args.includes('send') && body==='held send') { require('fs').writeFileSync(process.env.HOME+'/sending','1'); const timer=setInterval(()=>{ if(require('fs').existsSync(process.env.HOME+'/release-send')) { clearInterval(timer); console.log(JSON.stringify({ok:true,data})); } },10); return; }
   console.log(JSON.stringify({ok:true,data}));
 });
 `, {mode: 0o755});
@@ -91,6 +93,15 @@ try {
   store.db.prepare('UPDATE tool_grants SET scope=? WHERE worker=? AND tool=?').run(JSON.stringify({threads:[]}),'dot','t3_thread_read');
   await denied('t3_thread_read',{threadId:'thread-1'});
   store.db.prepare("UPDATE tool_grants SET scope=NULL WHERE worker='dot' AND tool='t3_thread_read'").run();
+  const registry=createToolRegistry({store});
+  const sending=call('dot-bridge.work',secret,'t3_thread_send',{threadId:'thread-1',message:'held send'});
+  for(let i=0;i<100&&!fs.existsSync(path.join(home,'sending'));i++)await new Promise(r=>setTimeout(r,20));
+  assert(fs.existsSync(path.join(home,'sending')),'send entered stub');
+  registry.revoke('t3_thread_send','dot');
+  fs.writeFileSync(path.join(home,'release-send'),'1');
+  assert.equal((await sending).isError,false,'a successful dispatched write must retain its receipt after revoke');
+  await denied('t3_thread_send',{threadId:'thread-1',message:'after dispatched write'});
+  registry.grant('t3_thread_send','dot');
   const waiting=call('dot-bridge.read',secret,'t3_thread_wait',{threadId:'thread-1',timeoutMs:20000});
   for(let i=0;i<100&&!fs.existsSync(path.join(home,'waiting'));i++)await new Promise(r=>setTimeout(r,20));
   assert(fs.existsSync(path.join(home,'waiting')),'wait entered stub');
@@ -99,7 +110,7 @@ try {
   assert.equal((await waiting).isError,true,'revocation must reject the wait result');
   await denied('t3_thread_send',{threadId:'thread-1',message:'revoked'});
   await denied('t3_thread_set',{threadId:'thread-1',model:'revoked'});
-  assert.equal(fs.readFileSync(path.join(home,'effects'),'utf8'),'send\n','only granted send reached CLI');
+  assert.equal(fs.readFileSync(path.join(home,'effects'),'utf8'),'send\nsend\n','only two granted sends reached CLI');
   child.kill('SIGTERM'); await new Promise(resolve=>child.once('exit',resolve));
   await start();
   await denied('t3_thread_send',{threadId:'thread-1',message:'still revoked after restart'});

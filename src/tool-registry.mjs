@@ -14,7 +14,8 @@ const refuse = (code, message) => { throw new RegistryError(code, message); };
 
 const NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const WORKER = /^[a-z][a-z0-9_-]{0,31}$/;
-const RESERVED = new Set(['list_tools', 'call_tool_read', 'call_tool_write']);
+const T3_NAMES = new Set(['t3_thread_list','t3_thread_read','t3_thread_wait','t3_thread_create','t3_thread_send','t3_thread_set']);
+const RESERVED = new Set(['list_tools', 'call_tool_read', 'call_tool_write', ...T3_NAMES]);
 const FORBIDDEN_KIND = /(delete|overwrite|unlink|truncate|wipe|destroy|remove)/i;
 const FORBIDDEN_WORD = /^(delete|overwrite|remove|unlink|truncate|wipe|destroy|rm|rmdir|erase|replace)$/i;
 // The longest a handler may run (the t3-post command timeout), and the lease a pending reservation holds: that timeout plus
@@ -138,14 +139,15 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
       record({ kind: enabled ? 'enable' : 'disable', tool: name, outcome: 'ok', schema_hash: row.schema_hash });
     });
   }
-  function grantChange(kind, name, worker, scope = null) {
+  function grantChange(kind, name, worker, scope) {
     const row = getTool(name);
     if (!row) refuse('unknown_tool', `tool "${String(name).slice(0, 64)}" is not registered`);
     if (typeof worker !== 'string' || !WORKER.test(worker)) refuse('invalid_tool', 'worker must be a worker name');
-    if(scope !== null && (!scope || Object.keys(scope).join() !== 'threads' || !Array.isArray(scope.threads) || scope.threads.some(id=>typeof id!=='string'||!id||id.length>128))) refuse('invalid_tool', 'scope must be {threads: [thread IDs]}');
-    if(scope!==null && JSON.parse(row.handler).kind!=='t3_control') refuse('invalid_tool','thread scope applies only to T3 control grants');
+    if(scope !== undefined && scope !== null && (!scope || Object.keys(scope).join() !== 'threads' || !Array.isArray(scope.threads) || scope.threads.some(id=>typeof id!=='string'||!id||id.length>128))) refuse('invalid_tool', 'scope must be {threads: [thread IDs]}');
+    if(scope!==undefined && scope!==null && JSON.parse(row.handler).kind!=='t3_control') refuse('invalid_tool','thread scope applies only to T3 control grants');
     atomically(() => {
-      if (kind === 'grant') db.prepare('INSERT INTO tool_grants(tool,worker,granted_at,scope) VALUES(?,?,?,?) ON CONFLICT(tool,worker) DO UPDATE SET scope=excluded.scope').run(name, worker, iso(now()), scope===null?null:JSON.stringify(scope));
+      if (kind === 'grant' && scope === undefined) db.prepare('INSERT OR IGNORE INTO tool_grants(tool,worker,granted_at) VALUES(?,?,?)').run(name,worker,iso(now()));
+      else if (kind === 'grant') db.prepare('INSERT INTO tool_grants(tool,worker,granted_at,scope) VALUES(?,?,?,?) ON CONFLICT(tool,worker) DO UPDATE SET scope=excluded.scope').run(name, worker, iso(now()), scope===null?null:JSON.stringify(scope));
       else { db.prepare('DELETE FROM tool_grants WHERE tool=? AND worker=?').run(name, worker); dropQueued(name, worker); }
       bump();
       record({ kind, tool: name, worker, outcome: 'ok', schema_hash: row.schema_hash });
@@ -305,6 +307,13 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
   // Provision a worker once: restarting must not restore a revoked grant.
   function initializeT3Grants(names, workers) {
     atomically(()=>{
+      // Older registries allowed these names. Never turn an ordinary tool into an
+      // implicit grant while upgrading; leave it untouched for operator resolution.
+      for(const name of names) {
+        if(!T3_NAMES.has(name)) refuse('invalid_tool','unknown T3 authority tool');
+        const existing=getTool(name);
+        if(existing && JSON.parse(existing.handler).kind!=='t3_control') refuse('reserved_tool_conflict',`registered tool ${name} conflicts with T3 authority; remove or rename it before enabling T3 tools`);
+      }
       for(const name of names) {
         const definition={name,description:'Job-scoped T3 authority',input_schema:{type:'object',properties:{},additionalProperties:false},
           class:['t3_thread_list','t3_thread_read','t3_thread_wait'].includes(name)?'read':'write',handler:{kind:'t3_control'}};
@@ -321,7 +330,7 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
   }
   function t3Threads(tool, principal) {
     // The legacy local principal also resolves to a worker; it has no owner bypass.
-    const row=db.prepare('SELECT g.scope FROM tool_grants g JOIN registered_tools t ON t.name=g.tool WHERE g.tool=? AND g.worker=? AND t.enabled=1').get(tool,principal.worker);
+    const row=db.prepare("SELECT g.scope FROM tool_grants g JOIN registered_tools t ON t.name=g.tool WHERE g.tool=? AND g.worker=? AND t.enabled=1 AND json_extract(t.handler,'$.kind')='t3_control'").get(tool,principal.worker);
     if(!row) refuse('tool_unavailable','tool unavailable');
     const scope=row.scope===null?null:JSON.parse(row.scope);
     if(scope!==null&&(!Array.isArray(scope.threads)||Object.keys(scope).join()!=='threads')) refuse('tool_unavailable','tool unavailable');

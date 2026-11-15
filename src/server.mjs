@@ -775,8 +775,9 @@ async function dispatchTool(name,a,principal,notifyMeta) {
           result._audit_ids={threadIds:result.threads.map(t=>t.id),projectIds:result.projects.map(p=>p.id)};
         } else {
           result=await control.runT3Tool(name,t3Arguments);
-          // Wait/read results also require current authority; never carry a pre-wait grant forward.
-          authorize();
+          // Wait/read results require current authority. Writes linearize at dispatch:
+          // revocation afterward cannot turn a successful effect into a denied receipt.
+          if(t3ReadTools.has(name)) authorize();
         }
       } else result=await notifyLedger.send(principal.worker,str(a.text,'text',1000),notificationKey,idempotencyKey=>publishAlert('Dalan message',a.text,log,{requirePublisher:true,idempotencyKey}));
       t3Audit.appendT3Audit(store.db,audit,principal.subject,'success',result);
