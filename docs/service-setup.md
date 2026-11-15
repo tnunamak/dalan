@@ -2,7 +2,7 @@
 
 Install Dalan once to keep your MCP agent connected to your Mac or Linux computer. You do not need to run the trial first.
 
-Before you begin, install Node.js 24 or newer and Tailscale with Funnel enabled. Your agent's account must allow custom MCP connectors. The commands below are the same on macOS and Linux.
+Before you begin, install Node.js 24 or newer and Tailscale with Funnel enabled. Your agent's account must allow custom MCP connectors. The basic install commands below are the same on macOS and Linux; forwarding to a non-loopback target is Linux-only.
 
 **Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
 
@@ -83,7 +83,7 @@ The proxy must forward these routes without removing their prefixes, methods, qu
 | `/signal/*` | Answers wake hooks when configured. |
 | `/.well-known/gozar/service` | Answers the Gozar check, with its query string. |
 
-An unauthenticated request to `/admin` on the public origin must return 404. The Dalan process listens on `127.0.0.1:PORT`. When the target is another address on this computer, pass `--lan-port N`; the service then opens the target address and forwards it to the loopback listener. Use a distinct non-wildcard address, not 0.0.0.0, which collides with loopback. If Gozar runs on this computer and reaches loopback directly, use `--target 127.0.0.1:PORT`. Challenge verification binds the receiving socket port to the declared target port. Translating to a different numeric port needs an explicit, trusted `--verify-cmd COMMAND`. If the origin filters the Gozar verifier by source IP, pass the same option. Install succeeds only when Gozar returns a verified route.
+An unauthenticated request to `/admin` on the public origin must return 404. The Dalan process listens on `127.0.0.1:PORT`. On Linux, when the target is another address on this computer, pass `--lan-port N`; the service then opens the target address and forwards it to the loopback listener. Use a distinct non-wildcard address, not 0.0.0.0, which collides with loopback. macOS refuses other targets: use `--target 127.0.0.1:PORT` with the same port as `--port`. If Gozar runs on this computer and reaches loopback directly, use `--target 127.0.0.1:PORT`. Challenge verification binds the receiving socket port to the declared target port. Translating to a different numeric port needs an explicit, trusted `--verify-cmd COMMAND`. If the origin filters the Gozar verifier by source IP, pass the same option. Install succeeds only when Gozar returns a verified route.
 
 ### Migrate an older bridge
 
@@ -132,7 +132,7 @@ A schedule or hook in the worker's vendor tool is outside Dalan's supported path
 
 ## Service updates
 
-New installs enable a daily update check with up to one hour of random delay: a systemd user timer on Linux (daily, up to one hour of random delay) and a launchd agent on macOS (every day at a fixed minute between 03:00 and 03:59 that depends on the home). A missed run can run after the user manager or login session next starts. Installation with `--no-auto-update` disables the timer; `--auto-update` explicitly enables it. Reinstalling preserves the saved choice unless you pass one of those flags. The timer needs your systemd user manager to run; it does not configure login lingering.
+New installs enable a daily update check: a systemd user timer on Linux (daily, up to one hour of random delay) and a launchd agent on macOS (every day at a fixed minute between 03:00 and 03:59 that depends on the home). On Linux, a missed run can run when the user manager next starts. On macOS, a check missed while the Mac is shut down or you are logged out is not caught up at the next login; run `dalan service update --check` yourself or wait for the next scheduled check. Installation with `--no-auto-update` disables the timer; `--auto-update` explicitly enables it. Reinstalling preserves the saved choice unless you pass one of those flags. On Linux, the timer needs your systemd user manager to run; it does not configure login lingering.
 
 ```sh
 dalan service update --check

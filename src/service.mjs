@@ -7,13 +7,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
 import { defaultPath } from './paths.mjs';
+import { socketPathLimit } from './admin-socket.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
 import { buildQuery, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
-import { launchdLabels, launchAgentsDir, servicePlist, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist } from './service-launchd.mjs';
+import { launchdLabels, launchAgentsDir, servicePlist, updatePlist, preflightAgentFile, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist, isLoaded } from './service-launchd.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/;
@@ -371,18 +372,21 @@ export async function installService(o, seams = {}) {
   if (!path.isAbsolute(o.home) || !SAFE_PATH.test(o.home)) fail('--home must be an absolute service-safe path');
   assertRealDirectoryPath(path.dirname(o.home), { owner: true });
   assertRealDirectoryPath(o.home, { owner: true });
-  let gozar = null;
+  // Every check up to the route allocation below only reads. A public route is allocated after the last of them passes, so a
+  // read-only preflight refusal leaves no route behind. Later writes or startup can still fail.
+  const adminSocket = path.join(defaultPath(o.home, '.local/share/dot-bridge'), 'admin.sock');
+  const socketBytes = Buffer.byteLength(adminSocket), socketLimit = socketPathLimit(platform);
+  if (socketBytes > socketLimit) fail(`--home is too long: the bridge's admin socket ${adminSocket} would be ${socketBytes} bytes, and the limit on ${mac ? 'macOS' : 'Linux'} is ${socketLimit} bytes. Use a shorter --home.`);
+  let gozar = null, allocate = false;
   if (o.auto) {
-    // The one-command install: reuse the port and address a previous run recorded, or pick a free port and ask Gozar for the address.
+    // The one-command install: reuse the port and address a previous run recorded, or pick a free port now and ask Gozar for
+    // the address once every check has passed.
     const prior = readReceipt(o.home);
     if (prior?.origin && prior.port) o = { ...o, origin: prior.origin, port: prior.port, target: parseTarget(prior.target) };
     else {
       const port = await (seams.freePort ?? firstFreePort)(8789);
-      gozar = seams.gozar ?? await resolveGozar();
-      const wanted = buildQuery({ home: gozarHomeFor(env), target: `127.0.0.1:${port}`, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, address: 'stable' });
-      const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
-      const view = await ensureDurableRoute({ gozar, query, pick, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
-      o = { ...o, origin: parseOrigin(view.origin), port, target: parseTarget(`127.0.0.1:${port}`) };
+      o = { ...o, origin: null, port, target: parseTarget(`127.0.0.1:${port}`) };
+      allocate = true;
     }
   }
   const target = parseTarget(typeof o.target === 'string' ? o.target : `${o.target?.host}:${o.target?.port}`);
@@ -412,8 +416,12 @@ export async function installService(o, seams = {}) {
   }
   let replaceLegacyUnit = false;
   // Check every collision before creating the bridge home or the first unit file.
-  for (const [filename, text] of mac ? [] : Object.entries(files)) {
+  if (mac && autoUpdate && !o.writeUnitsOnly) {
+    preflightAgentFile(path.join(unitDir, `${labels.update}.plist`), updatePlist({ unit: name, node, home: o.home }));
+  }
+  for (const [filename, text] of Object.entries(files)) {
     const file = path.join(unitDir, filename);
+    if (mac) { preflightAgentFile(file, text); continue; }
     if (fs.existsSync(file) && (!fs.lstatSync(file).isFile() || fs.readFileSync(file, 'utf8') !== text)) {
       const actual = fs.lstatSync(file).isFile() ? fs.readFileSync(file, 'utf8') : '';
       const oldRepo = actual.match(/^WorkingDirectory=(.+)$/m)?.[1];
@@ -434,9 +442,22 @@ export async function installService(o, seams = {}) {
   assertGozarStatePath(env);
   const needsEnrollmentRestart = replaceLegacyUnit || !!previous && (!previous.repo || previous.enrollment_pending === true);
   const spawn = seams.spawn ?? spawnSync;
-  if (!mac) runCommand('systemctl', ['--user', 'show-environment'], { env, spawn });
+  if (!mac) {
+    try { runCommand('systemctl', ['--user', 'show-environment'], { env, spawn }); }
+    catch (error) { fail(`the user systemd manager is not reachable (${error.message}). Run \`systemctl --user status\` to see why; a login session or \`loginctl enable-linger\` may be needed.`); }
+  }
+  let allocated = null;
+  if (allocate) {
+    const wanted = buildQuery({ home: gozarHomeFor(env), target: o.target.value, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, address: 'stable' });
+    const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
+    const view = await ensureDurableRoute({ gozar, query, pick, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
+    o = { ...o, origin: parseOrigin(view.origin) };
+    // Gozar's reply does not say whether this call created the route or reused one that already existed (from `dalan setup`, or
+    // another install), so a failure below never closes it. The receipt keeps its handle, and `dalan service uninstall` releases it.
+    allocated = view.handle ?? null;
+  }
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  if (!homeScope.hasReceipt) writePrivate(receiptFile, `${JSON.stringify({ ...installReceipt(o.home, configDir, o, profile.workers), repo, node, unit_dir: unitDir, auto_update: autoUpdate, platform, route: o.route ?? null }, null, 2)}\n`);
+  if (!homeScope.hasReceipt) writePrivate(receiptFile, `${JSON.stringify({ ...installReceipt(o.home, configDir, o, profile.workers), repo, node, unit_dir: unitDir, auto_update: autoUpdate, platform, route: o.route ?? null, ...(allocated ? { route_handle: allocated } : {}) }, null, 2)}\n`);
   if (!hasCurrent) fs.symlinkSync(repo, current);
   const homeFiles = prepareHome(o, profile);
   if (needsEnrollmentRestart) {
@@ -453,7 +474,8 @@ export async function installService(o, seams = {}) {
     const changed = writeAgentFile(plistFile, files[`${labels.service}.plist`]);
     if (lintPlist(plistFile, seams) === false) fail(`${plistFile} is not a valid property list`);
     if (changed) unloadAgent({ label: labels.service }, seams.launchd);
-    loadAgent({ label: labels.service, plistFile }, seams.launchd);
+    const { kicked, detail } = loadAgent({ label: labels.service, plistFile }, seams.launchd);
+    if (!kicked) fail(`launchctl kickstart ${labels.service} failed: ${detail}`);
   } else {
     writeUnits(unitDir, files);
     runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn });
@@ -499,7 +521,9 @@ export async function uninstallService({ home }, seams = {}) {
   const removed = [];
   const unitDir = receipt.unit_dir;
   if (!unitDir || !path.isAbsolute(unitDir)) fail('the service receipt names no unit directory');
-  if (receipt.auto_update) { try { await setAutoUpdate({ home, enabled: false }, { ...seams, env, platform }); removed.push('automatic updates off'); } catch (error) { removed.push(`update job not removed: ${error.message}`); } }
+  // Verify both jobs before removing either plist or disabling automatic updates.
+  if (mac) for (const label of Object.values(launchdLabels(receipt.unit))) isLoaded(label, seams.launchd);
+  if (receipt.auto_update) { try { await setAutoUpdate({ home, enabled: false }, { ...seams, env, platform }); removed.push('automatic updates off'); } catch (error) { if (mac) throw error; removed.push(`update job not removed: ${error.message}`); } }
   if (mac) removed.push(...removeAgents({ unit: receipt.unit, unit_dir: unitDir }, seams.launchd));
   else {
     const spawn = seams.spawn ?? spawnSync, name = receipt.unit;

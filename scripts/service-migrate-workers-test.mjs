@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { loadCapacity } from '../src/projects.mjs';
 import { migrateWorkers } from '../src/service-migrate-workers.mjs';
 import { loadWorkers, loadOwnerWorkers, inspectGrantAudit, updateWorkerRepoPolicy, workerRepoMigrationFile } from '../src/workers.mjs';
 
@@ -112,6 +113,59 @@ try {
     assert.deepEqual(snapshot(sourceDir), before, 'changed-prefix: source bytes, modes, mtimes and sidecars stay unchanged');
     assert.equal(loadWorkers(migrated.workers_file, { builtin: true, auditGrants: true }).allowsRepo('evidence', 'acme/edited'), false);
   }
+
+  // Capacity is part of the migrated policy, not an implicit reset to one lane.
+  const capacitySource = (name, value) => {
+    const dir = path.join(root, 'capacity-' + name);
+    fs.mkdirSync(dir, { mode: 0o700 });
+    const source = path.join(dir, 'workers.json');
+    save(source, { workers: { [name]: { repos: [] } } });
+    if (value !== undefined) save(path.join(dir, 'limits.json'), value);
+    return source;
+  };
+  const eight = capacitySource('eight', { max_claimed_outer_assignments: 8 });
+  const eightAgain = capacitySource('eightagain', { max_claimed_outer_assignments: 8 });
+  const absent = capacitySource('absent');
+  const sourceBefore = snapshot(path.dirname(eight));
+  const carried = migrateWorkers({ home: path.join(root, 'capacity-carried'), sources: [eight, eightAgain, absent] });
+  assert.deepEqual(carried.limits, { max_claimed_outer_assignments: 8 });
+  assert.equal(carried.limits_file, path.join(carried.home, '.config/dalan/limits.json'));
+  assert.equal(loadCapacity(carried.limits_file), 8);
+  assert.equal(fs.statSync(carried.limits_file).mode & 0o777, 0o600);
+  assert.deepEqual(snapshot(path.dirname(eight)), sourceBefore);
+  const without = migrateWorkers({ home: path.join(root, 'capacity-absent-new'), sources: [absent] });
+  assert.equal(without.limits, null);
+  assert.equal(without.limits_file, null);
+  assert.equal(fs.existsSync(path.join(without.home, '.config/dalan/limits.json')), false);
+  const four = capacitySource('four', { max_claimed_outer_assignments: 4 });
+  const conflictHome = path.join(root, 'capacity-conflict');
+  assert.throws(() => migrateWorkers({ home: conflictHome, sources: [eight, four] }), /conflicting capacity limits/);
+  assert.equal(fs.existsSync(conflictHome), false);
+  for (const [name, value] of [['zero', 0], ['eleven', 11], ['fraction', 1.5], ['string', '8']]) {
+    const source = capacitySource(name, { max_claimed_outer_assignments: value });
+    const home = path.join(root, 'invalid-' + name);
+    assert.throws(() => migrateWorkers({ home, sources: [source] }), /invalid max_claimed_outer_assignments/);
+    assert.equal(fs.existsSync(home), false);
+  }
+  const invalidJson = capacitySource('invalidjson', {});
+  fs.writeFileSync(path.join(path.dirname(invalidJson), 'limits.json'), '{');
+  assert.throws(() => migrateWorkers({ home: path.join(root, 'invalid-json-new'), sources: [invalidJson] }), SyntaxError);
+  const invalidMode = capacitySource('invalidmode', { max_claimed_outer_assignments: 8 });
+  fs.chmodSync(path.join(path.dirname(invalidMode), 'limits.json'), 0o644);
+  assert.throws(() => migrateWorkers({ home: path.join(root, 'invalid-mode-new'), sources: [invalidMode] }), /mode 0600/);
+  const fallback = capacitySource('fallback', {});
+  const defaulted = migrateWorkers({ home: path.join(root, 'capacity-defaulted'), sources: [fallback] });
+  assert.equal(loadCapacity(defaulted.limits_file), 1);
+  // A write failure after home creation must clean up the entire new home.
+  const failedHome = path.join(root, 'capacity-write-failure'), write = fs.writeFileSync;
+  fs.writeFileSync = function(file, ...args) {
+    if (file === path.join(failedHome, '.config/dalan/limits.json')) throw new Error('injected limits write failure');
+    return write.call(this, file, ...args);
+  };
+  try { assert.throws(() => migrateWorkers({ home: failedHome, sources: [eight] }), /injected limits write failure/); }
+  finally { fs.writeFileSync = write; }
+  assert.equal(fs.existsSync(failedHome), false);
+  console.log('PASS capacity migration: carried 8, absent, equal sources, conflicting, invalid value/JSON/mode, default and cleanup');
   const a = path.join(root, 'a.json'), b = path.join(root, 'b.json');
   save(a, { workers: { alpha: { connections: [{ issuer: 'https://old.test', subject: 'old-subject', client_id: 'old-client' }], capabilities: ['t3'], repos: ['acme/alpha'], destination: { provider: 'Example', operator: 'Example operator' } } }, default_execution: 'host' });
   save(b, { workers: { beta: { repos: ['acme/beta'], guidance: 'resume' }, 'gamma': { repos: [] }, 'delta': { repos: [] } } });

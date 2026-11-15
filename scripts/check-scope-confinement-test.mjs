@@ -112,6 +112,8 @@ try {
     const a = open({ scope_paths: ['.'] });
     replaceFile(a, 'test/in-scope.test.js', WRITER);
     const before = ws.result(a.id, a.claim, 'subject');
+    const executeBitsBefore = fs.statSync(path.join(a.dir, 'scripts/run.sh')).mode & 0o111;
+    assert.notEqual(executeBitsBefore & 0o100, 0, 'the prepared fixture is owner-executable');
     assert.deepEqual(patchFiles(before.diff_preview), ['test/in-scope.test.js']);
     const c = await check(a);
     assert.equal(c.evidence.exit_code, 0, JSON.stringify(c.r));
@@ -120,7 +122,7 @@ try {
     assert.equal(exists(a, '.github/workflows/evil.yml'), false, 'an out-of-scope file created by the check never reaches the worktree');
     assert.equal(read(a, '.github/workflows/ci.yml'), 'name: ci\n'); assert.equal(read(a, 'package.json'), BASE_FILES['package.json']);
     assert.equal(read(a, 'README.md'), 'readme\n', 'a file the check deleted is still there');
-    assert.equal(fs.statSync(path.join(a.dir, 'scripts/run.sh')).mode & 0o111, 0o111, 'a mode change by the check does not reach the worktree');
+    assert.equal(fs.statSync(path.join(a.dir, 'scripts/run.sh')).mode & 0o111, executeBitsBefore, 'a mode change by the check does not reach the worktree');
     assert.equal(fs.lstatSync(path.join(a.dir, 'docs')).isSymbolicLink(), false, 'a directory swapped for a symlink by the check does not reach the worktree');
     assert.equal(read(a, 'docs/note.md'), 'note\n');
     assert.equal(exists(a, 'notes/out.md'), false);
