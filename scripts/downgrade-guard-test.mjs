@@ -26,7 +26,7 @@ const makeFutureDb = file => {
   const assignment = { schema_version: 1, request_id: 'req_future', brief: 'future schema fixture', inputs: [], expected_output: 'report' };
   store.submit(assignment, { mode: 'none' }, null, 'owner');
   store.claim(assignment.request_id, 'dot', 'owner', 6);
-  store.db.exec("CREATE TABLE future_marker(value TEXT NOT NULL); INSERT INTO future_marker VALUES('preserve'); PRAGMA user_version=72;");
+  store.db.exec("CREATE TABLE future_marker(value TEXT NOT NULL); INSERT INTO future_marker VALUES('preserve'); PRAGMA user_version=70;");
   store.db.close();
 };
 
@@ -34,7 +34,7 @@ try {
   const file = path.join(root, 'bridge.db');
   makeFutureDb(file);
   const before = snapshot(file);
-  assert.equal(before.version, 72);
+  assert.equal(before.version, 70);
   assert.equal(before.claims[0].request_id, 'req_future');
   const home = path.join(root, 'home');
   fs.mkdirSync(path.join(home, '.local/share/dot-bridge'), { recursive: true });
@@ -49,23 +49,23 @@ try {
   assert.ifError(server.error);
   assert.equal(server.signal, null, 'refusal must complete without a timeout or signal');
   assert.equal(server.status, 1, 'server must refuse startup for a future schema');
-  assert.match(output, /schema version 72.*supported version 71/);
+  assert.match(output, /schema version 70.*supported version 69/);
   assert.match(output, /matching or newer dot-bridge code|consistent compatible backup/);
   assert.doesNotMatch(output, /MCP listening|admin socket/);
   assert.deepEqual(snapshot(path.join(home, '.local/share/dot-bridge/bridge.db')), before, 'startup must not alter schema, claims, lifecycle history, or version');
-  assert.throws(() => new Store(file), /schema version 72.*supported version 71/);
+  assert.throws(() => new Store(file), /schema version 70.*supported version 69/);
   assert.deepEqual(snapshot(file), before, 'refusal must leave future database contents unchanged');
 
   const unknown = path.join(root, 'unknown-schema.db');
   const unknownDb = new DatabaseSync(unknown);
   unknownDb.exec('CREATE TABLE future_only(value TEXT); INSERT INTO future_only VALUES(\'intact\'); PRAGMA user_version=99;');
   unknownDb.close();
-  assert.throws(() => new Store(unknown), /schema version 99.*supported version 71.*Do not reset user_version/);
+  assert.throws(() => new Store(unknown), /schema version 99.*supported version 69.*Do not reset user_version/);
   const unknownAfter = new DatabaseSync(unknown);
   assert.equal(unknownAfter.prepare('PRAGMA user_version').get().user_version, 99);
   assert.equal(unknownAfter.prepare('SELECT value FROM future_only').get().value, 'intact');
   assert.equal(unknownAfter.prepare("SELECT count(*) n FROM sqlite_schema WHERE name='assignments'").get().n, 0, 'guard must run before bootstrap DDL');
-  assert.throws(() => Store.prototype.migrate.call({ db: unknownAfter, transaction: fn => fn() }), /schema version 99.*supported version 71/);
+  assert.throws(() => Store.prototype.migrate.call({ db: unknownAfter, transaction: fn => fn() }), /schema version 99.*supported version 69/);
   unknownAfter.close();
 
   // Draft builds may have installed any subset of schema 60 before recording its version.
@@ -88,7 +88,7 @@ try {
     draft.db.close();
     const migrated = new Store(file59);
     try {
-      assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,71);
+      assert.equal(migrated.db.prepare('PRAGMA user_version').get().user_version,69);
       assert.equal(migrated.db.prepare("SELECT count(*) n FROM pragma_table_info('claims') WHERE name='destination_revision'").get().n, 1);
       for (const name of names) assert.ok(migrated.db.prepare('SELECT 1 FROM sqlite_schema WHERE name=?').get(name));
       assert.equal(migrated.db.prepare('SELECT payload_hash FROM assignments WHERE request_id=?').get(id).payload_hash, 'draft-fixture');
@@ -100,7 +100,7 @@ try {
       }
     } finally { migrated.db.close(); }
     const again = new Store(file59);
-    assert.equal(again.db.prepare('PRAGMA user_version').get().user_version,71);
+    assert.equal(again.db.prepare('PRAGMA user_version').get().user_version,69);
     again.db.close();
   }
 
@@ -117,7 +117,7 @@ try {
     old.db.close();
     const migrated61 = new Store(file60);
     try {
-      assert.equal(migrated61.db.prepare('PRAGMA user_version').get().user_version,71);
+      assert.equal(migrated61.db.prepare('PRAGMA user_version').get().user_version,69);
       assert.equal(migrated61.db.prepare("SELECT count(*) n FROM pragma_table_info('claims') WHERE name='connection_id'").get().n, 1);
       assert.equal(migrated61.db.prepare('SELECT connection_id FROM claims WHERE request_id=?').get(id).connection_id, null);
     } finally { migrated61.db.close(); }
@@ -125,10 +125,10 @@ try {
 
   const current = path.join(root, 'current.db');
   const store = new Store(current);
-  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,71);
+  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,69);
   store.db.close();
   const reopened = new Store(current);
-  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version,71);
+  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version,69);
   reopened.db.close();
   console.log('PASS future schema refusal preserves data before startup recovery; unknown identity gets version guidance; current schema reopens');
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

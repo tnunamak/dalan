@@ -50,7 +50,7 @@ function waiterOwnerGone(attemptId) {
   return !!(owner.boot&&owner.start&&current.boot&&current.start&&(owner.boot!==current.boot||owner.start!==current.start));
 }
 
-const SUPPORTED_SCHEMA_VERSION = 71;
+const SUPPORTED_SCHEMA_VERSION = 69;
 const monotonicMs=()=>Number(process.hrtime.bigint())/1e6;
 function systemBootId() {
   if(process.platform!=='linux') return null;
@@ -944,9 +944,9 @@ export class Store {
         if(!this.db.prepare("SELECT 1 FROM pragma_table_info('notifications') WHERE name='held_kind'").get()) this.db.exec('ALTER TABLE notifications ADD COLUMN held_kind TEXT');
         this.db.exec('PRAGMA user_version=68;');
       }
-      if(version<71) {
+      if(version<69) {
         if(!this.db.prepare("SELECT 1 FROM pragma_table_info('tool_grants') WHERE name='scope'").get()) this.db.exec('ALTER TABLE tool_grants ADD COLUMN scope TEXT');
-        this.db.exec('PRAGMA user_version=71;');
+        this.db.exec('PRAGMA user_version=69;');
       }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
