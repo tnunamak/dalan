@@ -65,17 +65,24 @@ try {
   assert.equal(bundledCalls.filter(call => call[0] === 'gozar-addService').length, 1);
   assert.equal(bundledCalls.some(call => call[0] === 'gozar'), false, 'no Gozar executable is run');
 
-  // The installed Gozar here predates the route contract: refuse before starting or enabling any unit.
-  const missingCalls = [];
+  // Simulate an installed SDK without the route contract; do not depend on the real package being old.
   const missingHome = path.join(root, 'missing-gozar');
-  await assert.rejects(installService({ home: missingHome, origin: route.origin, port: 8787,
-    target: route.target, lanPort: 8787, workers: ['dot'] }, {
-    env: { ...env, PATH: '', GOZAR_BIN: '' }, platform: 'linux', node: '/usr/bin/node',
-    repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
-    spawn(command, args) { missingCalls.push([command, ...args]); return { status: 0, stdout: '' }; },
-    waitForSocket: async () => true,
-  }), error => error.code === 'runtime_missing' && /Gozar.*(update|reinstall)/i.test(error.message));
-  assert.deepEqual(missingCalls, [], 'missing Gozar refuses before starting or enabling any unit');
+  const missingRuntime = spawnSync(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', `
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { mock } from 'node:test';
+mock.module('@tnunamak/gozar', { namedExports: {} });
+const { installService } = await import(${JSON.stringify(new URL('../src/service.mjs', import.meta.url).href)});
+const calls = [];
+await assert.rejects(installService(${JSON.stringify({ home: missingHome, origin: route.origin, port: 8787,
+  target: route.target, lanPort: 8787, workers: ['dot'] })}, {
+  env: process.env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+  spawn(command, args) { calls.push([command, ...args]); return { status: 0, stdout: '' }; },
+  waitForSocket: async () => true,
+}), error => error.code === 'runtime_missing' && /Gozar.*(update|reinstall)/i.test(error.message));
+assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling any unit');
+`], { cwd: repo, env: { ...env, PATH: '', GOZAR_BIN: '' }, encoding: 'utf8' });
+  assert.equal(missingRuntime.status, 0, missingRuntime.stderr || missingRuntime.stdout);
   assert.equal(fs.existsSync(missingHome), false);
 
   // Gozar refuses a group-writable ancestor of its state directory; refuse before any unit or start.

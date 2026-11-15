@@ -9,7 +9,9 @@ import { hostReadiness } from '../src/execution.mjs';
 import { loadSealedResult, runEvidencePlan, verifySealedResult } from '../src/integrator.mjs';
 await import('./require-integrator-host-budget.mjs');
 
-const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'integrator-verifier-'));
+const scratchRoot = path.join(os.homedir(), '.tmp', 'dalan-integrator');
+fs.mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
+const fixture = fs.mkdtempSync(path.join(scratchRoot, 'verifier-'));
 process.on('exit', () => fs.rmSync(fixture, { recursive: true, force: true }));
 const repo = path.join(fixture, 'repo');
 fs.mkdirSync(repo);

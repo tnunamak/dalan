@@ -224,12 +224,14 @@ try {
     });
 
     await check('dot-worker status stays T3-free and an unknown id reports its missing owner receipt', () => {
+      const withoutCheckout = text => text.replaceAll(repo, '<checkout>');
+      assert.match(withoutCheckout(`T3 runtime; ${repo}`), /t3|thread/i, 'checkout masking still detects actual T3 text');
       const status = server.cli(['status']);
       assert.equal(status.code, 0, status.stderr);
-      assert.doesNotMatch(status.stdout, /t3|thread/i, status.stdout);
+      assert.doesNotMatch(withoutCheckout(status.stdout), /t3|thread/i, status.stdout);
       const explain = server.cli(['status', '--explain']);
       assert.equal(explain.code, 0, explain.stderr);
-      assert.doesNotMatch(explain.stdout, /t3|thread/i, explain.stdout);
+      assert.doesNotMatch(withoutCheckout(explain.stdout), /t3|thread/i, explain.stdout);
       const unknownId = 'req_unknown_00000000';
       const bad = server.cli(['get', unknownId, '--json']);
       assert.notEqual(bad.code, 0, 'unknown request unexpectedly succeeded');

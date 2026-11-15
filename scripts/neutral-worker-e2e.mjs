@@ -17,7 +17,10 @@ const WORKER = 'acme';
 // The legacy worker name as a word, or as part of a snake_case field name (worker_break, skipped_by_worker).
 const LEAK = /(?<![a-z0-9])dot(?![a-z0-9])|dot_|_dot/i;
 // Random secrets and IDs (base64, base64url) can spell "Dot" by chance. Mask mixed-case tokens with a digit before the search.
-const maskOpaque = value => value.replace(/[A-Za-z0-9+/_=-]{16,}/g, token => /\d/.test(token) && /[A-Z]/.test(token) && /[a-z]/.test(token) ? '<token>' : token);
+// A checkout path can contain the legacy repository name; treat that exact path as host metadata.
+const maskOpaque = value => value.replaceAll(repo, '<checkout>').replace(/[A-Za-z0-9+/_=-]{16,}/g, token => /\d/.test(token) && /[A-Z]/.test(token) && /[a-z]/.test(token) ? '<token>' : token);
+assert.equal(LEAK.test(maskOpaque(`node '${path.join(repo, 'bin/dalan.mjs')}'`)), false, 'the checkout location is not a worker identity');
+assert.equal(LEAK.test(maskOpaque(`worker: dot; node '${path.join(repo, 'bin/dalan.mjs')}'`)), true, 'masking the checkout still detects a legacy worker name');
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
 fs.mkdirSync(tempRoot, { recursive: true });
 const home = fs.mkdtempSync(path.join(tempRoot, 'neutral-'));
