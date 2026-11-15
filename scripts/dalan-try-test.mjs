@@ -55,6 +55,7 @@ async function startAutoTry(home, options) {
   const run = startTry(['--home', home], options);
   try {
     const match = await run.until(/Bridge up on http:\/\/127\.0\.0\.1:(\d+)\. Loopback only\./);
+    run.home = home;
     return { run, port: Number(match[1]) };
   } catch (error) {
     await run.stop();
@@ -66,6 +67,17 @@ const portClosed = port => new Promise(resolve => {
   const socket = net.connect(port, '127.0.0.1');
   socket.once('connect', () => { socket.destroy(); resolve(false); });
   socket.once('error', () => resolve(true));
+});
+
+// A stopped TCP port may already belong to another suite. This socket belongs
+// only to the trial home, so its closure identifies the bridge being tested.
+const bridgeClosed = home => new Promise((resolve, reject) => {
+  const socket = net.connect({path:defaultPath(home, '.local/share/dot-bridge', 'admin.sock')});
+  socket.once('connect', () => { socket.destroy(); resolve(false); });
+  socket.once('error', error => {
+    if (['ENOENT','ECONNREFUSED'].includes(error.code)) resolve(true);
+    else reject(error);
+  });
 });
 
 const listenOn = port => new Promise((resolve, reject) => {
@@ -396,19 +408,20 @@ test('a port lost to another process between the check and the bind is retried o
 });
 
 test('Ctrl-C during the demo stops try promptly', { timeout: 60_000 }, async () => {
-  const { run, port } = await startAutoTry(path.join(tmp, 'early-stop'));
+  const { run } = await startAutoTry(path.join(tmp, 'early-stop'));
   await run.until(/Bridge up on/);
+  assert.equal(await bridgeClosed(run.home), false, 'this trial bridge is listening before Ctrl-C');
   run.child.kill('SIGINT');
   const exit = await run.exitsWithin(15_000, 'Ctrl-C while the demo was running');
   assert.equal(exit.code, 0, run.stderr);
   assert.doesNotMatch(run.stdout, /Self-check/, 'the demo was cut short');
   assert.match(run.stdout, /Stopped\./);
-  assert.ok(await portClosed(port), 'the bridge stopped with the command');
+  assert.ok(await bridgeClosed(run.home), 'this trial bridge stopped with the command');
 });
 
 test('a second signal during the stop does not cut the cleanup short', { timeout: 90_000 }, async () => {
   // npx forwards the terminal's Ctrl-C to the command it runs, so try can get SIGINT twice in quick succession.
-  const { run, port } = await startAutoTry(path.join(tmp, 'double-signal'));
+  const { run } = await startAutoTry(path.join(tmp, 'double-signal'));
   await run.until(/Waiting for your worker/, 60_000);
   run.child.kill('SIGINT');
   await new Promise(resolve => setTimeout(resolve, 50));
@@ -417,7 +430,7 @@ test('a second signal during the stop does not cut the cleanup short', { timeout
   assert.equal(exit.signal, null, `killed by ${exit.signal}\nstdout:\n${scrub(run.stdout)}`);
   assert.equal(exit.code, 0, run.stderr);
   assert.match(run.stdout, /Stopped\. Trial home kept at .*The demo grant and files are removed\./);
-  assert.ok(await portClosed(port), 'the bridge stopped with the command');
+  assert.ok(await bridgeClosed(run.home), 'this trial bridge stopped with the command');
 });
 
 test('ended input stops try after the demo, reuses the home and port, and keeps a reused home private', { timeout: 90_000 }, async () => {
@@ -526,7 +539,7 @@ test('one command finishes a demo job, then pairs, runs and accepts a second cli
     run.child.kill('SIGKILL');
   }
   assert.match(run.stdout, /Stopped\. Trial home kept at/);
-  assert.ok(await portClosed(port), 'the bridge stopped with the command');
+  assert.ok(await bridgeClosed(run.home), 'this trial bridge stopped with the command');
   assert.ok(!run.stdout.includes('\u001b'), 'plain text output');
 });
 
