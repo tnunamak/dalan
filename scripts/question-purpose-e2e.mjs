@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Node24. Real server, real HTTP/SQLite Store (protocol-v0 profile). Nothing is mocked.
-// A question can be marked purpose:'human_decision'. Then no model can answer it: /answer needs the operator key
+// A question can be marked purpose human_decision, authentication or tool_permission. Then no model can answer it: /answer needs the operator key
 // (the owner capability alone is refused), and the wake sent to the parent carries no answer instruction.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -51,9 +51,13 @@ try {
     return (await r.json()).result.tools;
   })());
   const tool=tools.find(t=>t.name==='ask_question');
-  assert.deepEqual(tool.inputSchema.properties.purpose,{type:'string',enum:['clarification','human_decision']});
+  assert.deepEqual(tool.inputSchema.properties.purpose,{type:'string',enum:['clarification','human_decision','authentication','tool_permission']});
   assert.equal(tool.inputSchema.required.includes('purpose'),false);
-  assert.match(tool.description,/human_decision/);
+  for(const value of ['human_decision','authentication','tool_permission']) assert.match(tool.description,new RegExp(value));
+
+  // The CHECK cannot be widened later without a table rebuild, so the stored column lists all four values now.
+  const columnSql=adapter.q1("SELECT sql FROM sqlite_schema WHERE type='table' AND name='job_questions'").sql;
+  assert.match(columnSql,/purpose TEXT NOT NULL DEFAULT 'clarification' CHECK\(purpose IN \('clarification','human_decision','authentication','tool_permission'\)\)/);
 
   async function protocolJob(name) {
     const id=adapter.requestId(name),token=adapter.ownerToken(name);
@@ -67,47 +71,49 @@ try {
       consume:questionId=>adapter.mcp('W1','consume_answer',{request_id:id,claim_id:grant.claim_id,question_id:questionId,command_key:`consume-${questionId}`,expected_revision:revision(),epoch:grant.epoch})};
   }
 
-  // ---- human_decision on a protocol job ----
-  const h=await protocolJob('human');
-  ok(await h.ask('H1','Which license should we ship under?',{args:{purpose:'human_decision'}}));
-  assert.equal(adapter.q1('SELECT purpose FROM job_questions WHERE request_id=? AND question_id=?',h.id,'H1').purpose,'human_decision');
-  const wake=wakeFor(h.id,'H1');
-  assert.equal(wake.body.purpose,'human_decision');
-  assert.match(wake.text,/needs a human decision/);
-  assert.match(wake.text,/A human must decide this/);
-  assert.match(wake.text,/Which license should we ship under\?/);
-  // The model-facing wrapper has no answer verb and no command to answer with. (The worker's own question text is quoted as asked.)
-  const wrapper=wake.text.replace(wake.marker,'').replace('Which license should we ship under?','').replace('QUESTION:','');
-  assert.doesNotMatch(wrapper,MODEL_ANSWER_VERB,wrapper);
-  assert.doesNotMatch(wake.text,/dalan (answer|note)/);
-  assert.doesNotMatch(wake.text,/Reply with/);
-  // What the parent can read of the question marks it as a human decision.
-  const seen=ok(await adapter.mcp('W1','get',{request_id:h.id}));
-  assert.equal(seen.questions.find(q=>q.question_id==='H1').purpose,'human_decision');
+  for(const [purpose,lead] of [['human_decision','needs a human decision'],['authentication','needs a human to authenticate'],['tool_permission','needs a human to grant a tool permission']]) {
+    // ---- each human-only purpose on a protocol job ----
+    const h=await protocolJob(`human-${purpose}`);
+    ok(await h.ask('H1','Which license should we ship under?',{args:{purpose}}));
+    assert.equal(adapter.q1('SELECT purpose FROM job_questions WHERE request_id=? AND question_id=?',h.id,'H1').purpose,purpose);
+    const wake=wakeFor(h.id,'H1');
+    assert.equal(wake.body.purpose,purpose);
+    assert.ok(wake.text.includes(`Worker question for request ${h.id} ${lead}:`),wake.text);
+    assert.match(wake.text,/A human must decide this/);
+    assert.match(wake.text,/Which license should we ship under\?/);
+    // The model-facing wrapper has no answer verb and no command to answer with. (The worker's own question text is quoted as asked.)
+    const wrapper=wake.text.replace(wake.marker,'').replace('Which license should we ship under?','').replace('QUESTION:','');
+    assert.doesNotMatch(wrapper,MODEL_ANSWER_VERB,wrapper);
+    assert.doesNotMatch(wake.text,/dalan (answer|note)/);
+    assert.doesNotMatch(wake.text,/Reply with/);
+    // What the parent can read of the question marks it as a human decision.
+    const seen=ok(await adapter.mcp('W1','get',{request_id:h.id}));
+    assert.equal(seen.questions.find(q=>q.question_id==='H1').purpose,purpose);
 
-  // The owner capability alone, which a parent model may hold, is refused and nothing is stored.
-  const before=snapshot(h.id);
-  refused(await answer({id:h.id,question_id:'H1',text:'model consent',command_key:'a1',expected_revision:h.revision()},{owner:h.token}),/FORBIDDEN.*human decision.*operator key/);
-  // A wrong operator key is refused too, and so is an operator key without the owner capability.
-  refused(await answer({id:h.id,question_id:'H1',text:'model consent',command_key:'a2',expected_revision:h.revision()},{owner:h.token,operator:'0'.repeat(operatorKey.length)}),/FORBIDDEN/);
-  refused(await answer({id:h.id,question_id:'H1',text:'no capability',command_key:'a3',expected_revision:h.revision()},{operator:operatorKey}),/invalid owner capability/);
-  refused(await answer({id:h.id,question_id:'H1',text:'wrong capability',command_key:'a4',expected_revision:h.revision()},{owner:'wrong',operator:operatorKey}),/invalid owner capability/);
-  assert.equal(snapshot(h.id),before,'a refused answer changed state');
-  refused(await h.consume('H1'),/NO_ANSWER/);
+    // The owner capability alone, which a parent model may hold, is refused and nothing is stored.
+    const before=snapshot(h.id);
+    refused(await answer({id:h.id,question_id:'H1',text:'model consent',command_key:'a1',expected_revision:h.revision()},{owner:h.token}),/FORBIDDEN.*operator key/);
+    // A wrong operator key is refused too, and so is an operator key without the owner capability.
+    refused(await answer({id:h.id,question_id:'H1',text:'model consent',command_key:'a2',expected_revision:h.revision()},{owner:h.token,operator:'0'.repeat(operatorKey.length)}),/FORBIDDEN/);
+    refused(await answer({id:h.id,question_id:'H1',text:'no capability',command_key:'a3',expected_revision:h.revision()},{operator:operatorKey}),/invalid owner capability/);
+    refused(await answer({id:h.id,question_id:'H1',text:'wrong capability',command_key:'a4',expected_revision:h.revision()},{owner:'wrong',operator:operatorKey}),/invalid owner capability/);
+    assert.equal(snapshot(h.id),before,'a refused answer changed state');
+    refused(await h.consume('H1'),/NO_ANSWER/);
 
-  // The operator key with the owner capability is accepted, once; the worker then consumes that answer.
-  const accepted=ok(await answer({id:h.id,question_id:'H1',text:'Apache-2.0',command_key:'a5',expected_revision:h.revision()},{owner:h.token,operator:operatorKey}));
-  assert.equal(accepted.answered,true);
-  assert.equal(ok(await h.consume('H1')).answer,'Apache-2.0');
-  refused(await answer({id:h.id,question_id:'H1',text:'again',command_key:'a6',expected_revision:h.revision()},{owner:h.token,operator:operatorKey}),/ALREADY_ANSWERED/);
+    // The operator key with the owner capability is accepted, once; the worker then consumes that answer.
+    const accepted=ok(await answer({id:h.id,question_id:'H1',text:'Apache-2.0',command_key:'a5',expected_revision:h.revision()},{owner:h.token,operator:operatorKey}));
+    assert.equal(accepted.answered,true);
+    assert.equal(ok(await h.consume('H1')).answer,'Apache-2.0');
+    refused(await answer({id:h.id,question_id:'H1',text:'again',command_key:'a6',expected_revision:h.revision()},{owner:h.token,operator:operatorKey}),/ALREADY_ANSWERED/);
 
-  // Asking the same ID again is refused as before; under another purpose it is a key conflict.
-  ok(await h.ask('H2','Approve the deploy?',{args:{purpose:'human_decision'}}));
-  refused(await h.ask('H2','Approve the deploy?',{args:{purpose:'human_decision'},command_suffix:'-retry'}),/question_exists/);
-  refused(await h.ask('H2','Approve the deploy?',{command_suffix:'-clarify'}),/KEY_CONFLICT.*purpose/);
-  assert.equal(adapter.q1('SELECT purpose FROM job_questions WHERE request_id=? AND question_id=?',h.id,'H2').purpose,'human_decision');
-  refused(await h.ask('H3','bad',{args:{purpose:'consent'}}),/purpose/);
-  assert.equal(adapter.q1('SELECT count(*) n FROM job_questions WHERE request_id=? AND question_id=?',h.id,'H3').n,0);
+    // Asking the same ID again is refused as before; under another purpose it is a key conflict.
+    ok(await h.ask('H2','Approve the deploy?',{args:{purpose}}));
+    refused(await h.ask('H2','Approve the deploy?',{args:{purpose},command_suffix:'-retry'}),/question_exists/);
+    refused(await h.ask('H2','Approve the deploy?',{command_suffix:'-clarify'}),/KEY_CONFLICT.*purpose/);
+    assert.equal(adapter.q1('SELECT purpose FROM job_questions WHERE request_id=? AND question_id=?',h.id,'H2').purpose,purpose);
+    refused(await h.ask('H3','bad',{args:{purpose:'consent'}}),/purpose/);
+    assert.equal(adapter.q1('SELECT count(*) n FROM job_questions WHERE request_id=? AND question_id=?',h.id,'H3').n,0);
+  }
 
   // ---- clarification: unchanged ----
   const c=await protocolJob('clarify');
@@ -149,5 +155,5 @@ try {
   await adapter.control({op:'restart'});
   refused(await answer({id:r.id,question_id:'R1',text:'x',command_key:'r-a1',expected_revision:r.revision()},{owner:r.token}),/FORBIDDEN/);
   ok(await answer({id:r.id,question_id:'R1',text:'signed',command_key:'r-a2',expected_revision:r.revision()},{owner:r.token,operator:operatorKey}));
-  console.log('PASS purpose enum in the catalog; human_decision refused for the owner capability alone, accepted with the operator key, wake text has no answer verb; clarification unchanged (protocol and plain jobs, restart)');
+  console.log('PASS purpose enum in the catalog; human_decision, authentication and tool_permission refused for the owner capability alone, accepted with the operator key, wake text has no answer verb; clarification unchanged (protocol and plain jobs, restart)');
 } finally {await adapter.close();}

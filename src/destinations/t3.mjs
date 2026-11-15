@@ -8,12 +8,13 @@ export function quietReason(row, mainThreadIds=loadMainThreadIds) {
   catch(error) { return `delivery policy unavailable: ${error.message}`; }
   return null;
 }
+const humanOnly={human_decision:'needs a human decision',authentication:'needs a human to authenticate',tool_permission:'needs a human to grant a tool permission'};
 export function messageFor(item,row) {
   const body=item.kind==='blocker'?JSON.parse(item.body):null;
   const questionId=body?.question_id;
   const reply=questionId?`dalan answer ${item.request_id} ${questionId} "your answer"`:`dalan note ${item.request_id} "your answer"`;
-  // A human decision names no command and no verb for answering: nothing in this text tells a model to act on the question.
-  if(body?.purpose==='human_decision') return `${t3.marker(item.id)} Worker question for request ${item.request_id} needs a human decision: ${body.note}\nA human must decide this. It is not for a model to settle. Show it to the human and wait.`;
+  // A human-only question names no command and no verb for answering: nothing in this text tells a model to act on it.
+  if(body?.purpose) return `${t3.marker(item.id)} Worker question for request ${item.request_id} ${humanOnly[body.purpose]??'needs a human'}: ${body.note}\nA human must decide this. It is not for a model to settle. Show it to the human and wait.`;
   return item.kind==='watch'?`${t3.marker(item.id)} Attention: request ${item.request_id} remains ${row.status}. Inspect with dalan get ${item.request_id} --json.`:
     item.kind==='break'?`${t3.marker(item.id)} ${JSON.parse(item.body).note}`:
     item.kind==='blocker'?`${t3.marker(item.id)} Worker question for request ${item.request_id}: ${body.note}\nReply with ${reply} so the assigned worker receives it.`:
