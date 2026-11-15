@@ -29,7 +29,7 @@ export const TOOLS = [
       refuse_defer: { type: 'boolean', description: 'Fail instead of deferring.' } } },
     annotations: { title: 'Submit a job', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
   { name: 'dalan_wait', title: 'Wait for a job',
-    description: `Wait for a job to reach a stop (finished, blocker, question, cancelled, worker_break). Returns after at most timeout_seconds (default ${WAIT_DEFAULT}, maximum ${WAIT_MAX}) with the current state; status "timeout" means it is still running, so call again. Exit 3 or a waiting question means: call dalan_questions, then dalan_answer, then dalan_wait again.`,
+    description: `Wait for a job to reach a stop (finished, blocker, question, cancelled, worker_break). Returns after at most timeout_seconds (default ${WAIT_DEFAULT}, maximum ${WAIT_MAX}) with the current state; status "timeout" means it is still running, so call again. If dalan_wait reports a waiting question: call dalan_questions, then dalan_answer, then dalan_wait again.`,
     inputSchema: { type: 'object', additionalProperties: false, required: ['request_id'], properties: {
       request_id: requestId,
       timeout_seconds: { type: 'integer', minimum: 1, maximum: WAIT_MAX, default: WAIT_DEFAULT, description: `Seconds to wait; values above ${WAIT_MAX} are lowered to ${WAIT_MAX}.` } } },
