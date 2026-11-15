@@ -62,6 +62,10 @@ let ready=false,output='';child.stdout.on('data',b=>{output+=String(b);port=port
 try {
   await waitFor(()=>ready,'service');
   const secret=(await readFile(join(home,'.config','dot-bridge','env'),'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
+  // The pre-existing local owner path has no job scope and retains full authority.
+  const ownerDb=new DatabaseSync(join(home,'.local/share/dot-bridge/bridge.db'),{readOnly:true});
+  assert(ownerDb.prepare('SELECT count(*) n FROM claims').get().n===0,'owner fixture has no claims');
+  ownerDb.close();
   // t3_thread_list returns the compact shape, never the raw t3code payload
   const list=toolResult(await rpc(secret,'t3_thread_list',{status:'all'}));
   assert(JSON.stringify(list.threads.map(t=>t.id))==='["thread_b","thread_a"]'&&list.total===2&&list.shown===2&&list.truncated===false,'compact list: '+JSON.stringify(list));

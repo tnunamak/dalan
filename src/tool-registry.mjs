@@ -67,7 +67,7 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
   const toolClass = row => handlers[JSON.parse(row.handler).kind]?.effectClass ?? row.class;
   const callerHash = (row, worker) => sha256(canonical({
     name: row.name, description: row.description, input_schema: JSON.parse(row.input_schema), class: toolClass(row), handler: JSON.parse(row.handler),
-    caller: worker, grants: db.prepare('SELECT tool FROM tool_grants WHERE worker=? ORDER BY tool').all(worker).map(g => g.tool),
+    caller: worker, grants: db.prepare('SELECT tool,scope FROM tool_grants WHERE worker=? ORDER BY tool').all(worker),
   }));
   // Owner views retain the registration/audit definition hash; only worker views pin caller grants.
   // Never bind an absent owner caller to the worker-specific SQLite query.
@@ -138,18 +138,20 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
       record({ kind: enabled ? 'enable' : 'disable', tool: name, outcome: 'ok', schema_hash: row.schema_hash });
     });
   }
-  function grantChange(kind, name, worker) {
+  function grantChange(kind, name, worker, scope = null) {
     const row = getTool(name);
     if (!row) refuse('unknown_tool', `tool "${String(name).slice(0, 64)}" is not registered`);
     if (typeof worker !== 'string' || !WORKER.test(worker)) refuse('invalid_tool', 'worker must be a worker name');
+    if(scope !== null && (!scope || Object.keys(scope).join() !== 'threads' || !Array.isArray(scope.threads) || scope.threads.some(id=>typeof id!=='string'||!id||id.length>128))) refuse('invalid_tool', 'scope must be {threads: [thread IDs]}');
+    if(scope!==null && JSON.parse(row.handler).kind!=='t3_control') refuse('invalid_tool','thread scope applies only to T3 control grants');
     atomically(() => {
-      if (kind === 'grant') db.prepare('INSERT OR IGNORE INTO tool_grants(tool,worker,granted_at) VALUES(?,?,?)').run(name, worker, iso(now()));
+      if (kind === 'grant') db.prepare('INSERT INTO tool_grants(tool,worker,granted_at,scope) VALUES(?,?,?,?) ON CONFLICT(tool,worker) DO UPDATE SET scope=excluded.scope').run(name, worker, iso(now()), scope===null?null:JSON.stringify(scope));
       else { db.prepare('DELETE FROM tool_grants WHERE tool=? AND worker=?').run(name, worker); dropQueued(name, worker); }
       bump();
       record({ kind, tool: name, worker, outcome: 'ok', schema_hash: row.schema_hash });
     });
   }
-  const grant = (name, worker) => grantChange('grant', name, worker);
+  const grant = (name, worker, scope) => grantChange('grant', name, worker, scope);
   const revoke = (name, worker) => grantChange('revoke', name, worker);
 
   function list() {
@@ -161,7 +163,7 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
   }
   function listTools(worker) {
     const name = workerName(worker);
-    const tools = typeof name !== 'string' ? [] : db.prepare('SELECT t.* FROM registered_tools t JOIN tool_grants g ON g.tool=t.name WHERE g.worker=? AND t.enabled=1 ORDER BY t.name').all(name).map(row => view(row, name));
+    const tools = typeof name !== 'string' ? [] : db.prepare("SELECT t.* FROM registered_tools t JOIN tool_grants g ON g.tool=t.name WHERE g.worker=? AND t.enabled=1 AND json_extract(t.handler,'$.kind')!='t3_control' ORDER BY t.name").all(name).map(row => view(row, name));
     return { registry_version: registryVersion(), tools };
   }
   function lastChange() {
@@ -227,7 +229,7 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
       done('replay_unfinished', new RegistryError('in_progress', `an earlier call with this idempotency_key is in progress; retry later with the same key in about ${seconds} s`));
     };
     const unavailable = outcome => done(outcome, new RegistryError('tool_unavailable', 'tool unavailable'));
-    if (!row) unavailable('unknown_tool');
+    if (!row || JSON.parse(row.handler).kind==='t3_control') unavailable('unknown_tool');
     if (typeof name !== 'string' || !db.prepare('SELECT 1 FROM tool_grants WHERE tool=? AND worker=?').get(row.name, name)) unavailable('not_granted');
     if (row.enabled !== 1) unavailable('disabled');
     if (callClass !== toolClass(row)) done('wrong_class', new RegistryError('wrong_class', 'wrong class for this tool; see list_tools'));
@@ -299,7 +301,43 @@ export function createToolRegistry({ store, now = Date.now, handlers = {}, audit
     return { ok: true, result: capped };
   }
 
-  return { register, remove, grant, revoke, list, listTools, registryVersion, callTool, setEnabled, lastChange };
+  // Internal registrations share the existing grant/revoke/enable policy, but are never dispatch tools.
+  // Provision a worker once: restarting must not restore a revoked grant.
+  function initializeT3Grants(names, workers) {
+    atomically(()=>{
+      for(const name of names) {
+        const definition={name,description:'Job-scoped T3 authority',input_schema:{type:'object',properties:{},additionalProperties:false},
+          class:['t3_thread_list','t3_thread_read','t3_thread_wait'].includes(name)?'read':'write',handler:{kind:'t3_control'}};
+        db.prepare(`INSERT OR IGNORE INTO registered_tools(name,description,input_schema,class,handler,schema_hash,created_at)
+          VALUES(?,?,?,?,?,?,?)`).run(name,definition.description,JSON.stringify(definition.input_schema),definition.class,JSON.stringify(definition.handler),schemaHash(definition),iso(now()));
+      }
+      for(const worker of workers) {
+        const key=`t3_initialized:${worker}`;
+        if(db.prepare('SELECT 1 FROM tool_registry_meta WHERE key=?').get(key)) continue;
+        for(const name of names) grant(name,worker);
+        db.prepare('INSERT INTO tool_registry_meta(key,value) VALUES(?,1)').run(key);
+      }
+    });
+  }
+  function t3Threads(tool, principal) {
+    // Only the pre-existing unauthenticated local owner path has unscoped authority.
+    if(principal.local===true) return null;
+    const row=db.prepare('SELECT g.scope FROM tool_grants g JOIN registered_tools t ON t.name=g.tool WHERE g.tool=? AND g.worker=? AND t.enabled=1').get(tool,principal.worker);
+    if(!row) refuse('tool_unavailable','tool unavailable');
+    const scope=row.scope===null?null:JSON.parse(row.scope);
+    if(scope!==null&&(!Array.isArray(scope.threads)||Object.keys(scope).join()!=='threads')) refuse('tool_unavailable','tool unavailable');
+    const threads=new Set();
+    for(const claim of db.prepare(`SELECT c.*,a.delivery FROM claims c JOIN assignments a USING(request_id)
+      WHERE c.worker=? AND c.subject=? AND c.state='active' AND a.status='claimed'`).all(principal.worker,principal.subject)) {
+      if(store.leaseExpired(claim)||!claim.delivery?.startsWith('t3:')) continue;
+      try { store.assertWorkerConnection(claim.request_id,claim.claim_id,principal.subject,principal.worker,principal.builtin?(principal.connection_id??''):null); }
+      catch { continue; }
+      const thread=claim.delivery.slice(3);
+      if(scope===null||scope.threads.includes(thread)) threads.add(thread);
+    }
+    return threads;
+  }
+  return { register, remove, grant, revoke, list, listTools, registryVersion, callTool, setEnabled, lastChange, initializeT3Grants, t3Threads };
 }
 
 // ---- t3_post: the owner_message handler ----------------------------------------------------------------------------

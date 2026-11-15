@@ -1,15 +1,19 @@
 # Reverse T3 control for workers
 
-With `DALAN_ENABLE_T3_TOOLS=1`, the bridge exposes a small T3 thread wrapper (list, read, create, send, wait and set) through its existing OAuth MCP connection. The wrapper uses `t3code --json --origin http://127.0.0.1:3773` with argument arrays. It can address any T3 project or thread the local CLI can address by an ID of at most 128 bytes; the other tools reject a longer ID from a list result. The bridge does not scope a thread to the worker that calls it: a worker with the `t3` capability has the owner's full authority over every local thread. The tools are off by default, and a fresh `dalan init` worker profile has no `t3` capability. The CLI currently obtains a short-lived administrative T3 session for each operation; the bridge's approved OAuth subject and per-tool scopes remain the remote boundary.
+With `DALAN_ENABLE_T3_TOOLS=1`, the bridge exposes a small T3 thread wrapper (list, read, create, send, wait and set) through its existing OAuth MCP connection. The wrapper uses `t3code --json --origin http://127.0.0.1:3773` with argument arrays. Authenticated workers have job-scoped authority. The tool registry provisions default grants for the six thread tools once per worker. A NULL `tool_grants.scope` derives the allowed threads at call time from the worker's live claimed jobs with T3 destinations. Claims must match the authenticated subject and holding connection, remain active and unexpired, and belong to a claimed assignment. Jobs with delivery `none` grant no thread. An operator may narrow a grant through the admin socket's existing `/tools` grant action with `scope: {"threads":["THREAD_ID"]}`; this intersects live destinations. An empty set denies every thread. Revoke, disable and remove use the existing registry operations. Restart does not restore revoked grants. No token or worker tool schema changes.
 
-These calls use owner-granted, job-independent authority. They require no `request_id` or `claim_id` and have no assignment epoch, so they are outside job-scoped authority checks, and job expiry or cancellation does not revoke them. To advertise the six thread tools, set `DALAN_ENABLE_T3_TOOLS=1`; each call also requires the worker's `capabilities: ["t3"]`, including for the legacy single-worker profile. When the global setting is off, direct calls are rejected as unknown tools. Capability, OAuth scope and audit admission always apply.
+Discovery filters the raw thread list before compaction, totals, project summaries and audit IDs. Read, wait, send and set refuse threads outside the live grant. Scoped workers cannot create arbitrary threads because those threads have no claimed destination. Capability, OAuth scope, input validation and audit admission still apply. `notify_owner` retains its independent notification policy.
+
+The linearization point for send/set is the synchronous registry and live-claim read after module loading and immediately before CLI dispatch, with no intervening await. A revoke committed before this read prevents dispatch; a revoke after dispatch cannot retract an external effect. List, read and wait also recheck authority after their awaited CLI result, so a revoke during a wait refuses its result. The next send/set always checks again and never inherits the wait's authority.
+
+The pre-existing unauthenticated local owner path (`principal.local === true`) retains full authority without a job scope. Authenticated worker calls never acquire that flag from arguments. The tools remain off by default; advertising them requires `DALAN_ENABLE_T3_TOOLS=1` and calling them requires the worker's `t3` capability. The underlying CLI uses its administrative T3 session, so these server-side checks are the worker boundary.
 
 | MCP tool | Scope | Operation |
 | --- | --- | --- |
 | `t3_thread_list` | `dalan.read` | List threads, optionally by project or directory and status. |
-| `t3_thread_read` | `dalan.read` | Read a bounded transcript by exact thread ID. |
-| `t3_thread_create` | `dalan.work` | Create a thread in any project or directory and start its first turn. |
-| `t3_thread_send` | `dalan.work` | Send to any thread; `wakeSettled` wakes a settled one. |
+| `t3_thread_read` | `dalan.read` | Read a bounded transcript by exact granted thread ID. |
+| `t3_thread_create` | `dalan.work` | Local owner only: create a thread and start its first turn. |
+| `t3_thread_send` | `dalan.work` | Send to a granted thread; `wakeSettled` wakes a settled one. |
 | `t3_thread_wait` | `dalan.read` | Wait at most 120 seconds for a turn; returns partial state on timeout. |
 | `t3_thread_set` | `dalan.work` | Change a thread's provider, model, effort, permission or mode. |
 | `notify_owner` | `dalan.work` | Publish a short message through the configured ntfy alerts path. |
@@ -32,7 +36,7 @@ An ambiguous publish leaves a pending key that cannot be sent again automaticall
 
 - `threads`: the newest threads by `updatedAt` (descending; ties by `id`), at most 50 (`THREAD_LIST_LIMIT`) and at most 16000 bytes of serialized entries (`THREAD_LIST_BUDGET`; thread IDs can be 328 characters long). The first thread is always shown.
 - Each entry has `id`, `title` (at most 120 characters, clipped with `…`), `projectId`, `status`, `runStatus`, `updatedAt`, `latestUserMessageAt` and `pendingRuntimeRequest` (boolean). `activityRunStatus` is present only when it is set. `branch` and `worktreePath` are present only when they are at most 80 characters.
-- `total` (all threads that matched the filter), `shown`, `truncated` (`total > shown`).
+- `total` (all granted threads that matched the filter), `shown`, `truncated` (`total > shown`).
 - `projects`: `{id,title,count}` for the projects of all matched threads, most threads first, at most 20; `projects_total` is present when there are more.
 - `hint`: "narrow with projectId or cwd; full paging after a catalog update". Paging needs a new input field, which is a catalog change.
 
@@ -57,7 +61,7 @@ Do not trigger a ChatGPT reconnect from the bridge host. The connector's current
 
 ## Standing instruction for worker
 
-> You can inspect the owner's T3 threads through this connector. Use `t3_thread_list` and `t3_thread_read`. They can reach any project or thread the local T3 CLI can reach by an ID of at most 128 bytes. Use `notify_owner` for a short out-of-band alert that does not start a T3 turn. Send assignment questions to the exact owner thread. Mark blockers with optional `progress.blocker:true` or start the note with `BLOCKED:` / `QUESTION:` so the bridge forwards them once if you forget. The owner can leave a lightweight message with `dalan tell`; it emits an event, but whether that starts a run depends on your client. Find it in `list_pending`, read it with `get`, and call `ack_message` after reading it. It is a message, not an assignment. `run_check` can return `{check_run_id,status:"running"}`; poll `workspace_result` for completion. Upload sealed evidence with `artifact_chunk` in any claimed assignment. Call `list_tools` first to learn the other tools you may use, then run them with `call_tool_read` or `call_tool_write`. All T3 tool calls are audited.
+> You can inspect the owner's T3 threads through this connector. Use `t3_thread_list` and `t3_thread_read`. They show only threads granted by your live claimed jobs; exact IDs are limited to 128 characters. Use `notify_owner` for a short out-of-band alert that does not start a T3 turn. Send assignment questions to the exact owner thread. Mark blockers with optional `progress.blocker:true` or start the note with `BLOCKED:` / `QUESTION:` so the bridge forwards them once if you forget. The owner can leave a lightweight message with `dalan tell`; it emits an event, but whether that starts a run depends on your client. Find it in `list_pending`, read it with `get`, and call `ack_message` after reading it. It is a message, not an assignment. `run_check` can return `{check_run_id,status:"running"}`; poll `workspace_result` for completion. Upload sealed evidence with `artifact_chunk` in any claimed assignment. Call `list_tools` first to learn the other tools you may use, then run them with `call_tool_read` or `call_tool_write`. All T3 tool calls are audited.
 
 ## After adding or changing tools
 
@@ -76,7 +80,7 @@ The workspace install and check phases both run in a sandbox with its own networ
 
 ## Who may hold the t3 capability
 
-The t3 tools act as the owner, with no per-job binding. Pairing a client never grants this capability; the bridge reads it only from the owner's `workers.json`, where it declares that a worker is the owner's own harness. The tools take any thread, project or directory and are not bound to a job, a worker or a repository. Never give `capabilities: ["t3"]` to a worker you do not fully trust with every T3 thread on the computer. Modern catalogs advertise the same names to every worker; a worker without the capability receives a denied and audited result when it calls them. With the tools on, startup prints a notice naming each worker that holds the capability.
+Pairing a client never grants the `t3` capability; the bridge reads it from the owner's `workers.json`. Authenticated workers also require registry grants and a live claimed T3 destination, as described above. Modern catalogs advertise the same names to every worker; a worker without the capability receives a denied and audited result when it calls them. With the tools on, startup prints a notice naming each worker that holds the capability.
 
 ## Adding abilities without a Refresh
 

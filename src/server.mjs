@@ -180,7 +180,7 @@ if(!t3ToolsEnabled)for(const [worker,profile] of workers.workers)if(profile.capa
   log({kind:'t3_tools_disabled',worker,setting:'DALAN_ENABLE_T3_TOOLS=1'});
   console.error(`dalan: startup WARNING: worker "${worker}" has t3 capability but reverse-control tools are off; set DALAN_ENABLE_T3_TOOLS=1`);
 }
-if(t3ToolsEnabled)for(const [worker,profile] of workers.workers)if(profile.capabilities.has('t3')) console.error(`dalan: startup NOTICE: worker "${worker}" holds the t3 capability: it can list, read and send to any T3 thread and project on this computer. Grant it only to your own harness.`);
+if(t3ToolsEnabled)for(const [worker,profile] of workers.workers)if(profile.capabilities.has('t3')) console.error(`dalan: startup NOTICE: worker "${worker}" holds the t3 capability: its T3 authority is limited by live job destinations and tool grants.`);
 const startupPolicy=currentRepoPolicy();
 for(const worker of workers.workers.keys()) if(startupPolicy.repoPolicy(worker)?.repos.length===0) {
   const blocked=store.db.prepare("SELECT count(*) n FROM assignments WHERE target_worker=? AND status='queued' AND json_type(payload,'$.inputs[0].github_repo')='text'").get(worker).n;
@@ -432,6 +432,7 @@ const disabled=new Set(['list_files','read_file','apply_patch','run_check','work
 const readTools=new Set(['list_pending','get','list_files','read_file','workspace_result','list_tools','call_tool_read']);
 const t3ReadTools=new Set(['t3_thread_list','t3_thread_read','t3_thread_wait']);
 const t3Tools=new Set([...t3ReadTools,'t3_thread_create','t3_thread_send','t3_thread_set']);
+if(t3ToolsEnabled)toolRegistry.initializeT3Grants([...t3Tools],workers.workers.keys());
 const notifyTools=new Set(['notify_owner']);
 // T3 tools use the existing scopes to preserve the current grant behavior.
 const scopeFor=name=>t3ReadTools.has(name)||readTools.has(name)?'dalan.read':'dalan.work';
@@ -754,7 +755,30 @@ async function dispatchTool(name,a,principal,notifyMeta) {
         return T3_READ_TOOLS_OFF;
       }
       const t3Arguments=name==='t3_thread_wait'?{...a,timeoutMs:Math.min(a.timeoutMs??90_000,90_000)}:a;
-      const result=notifyTools.has(name) ? await notifyLedger.send(principal.worker,str(a.text,'text',1000),notificationKey,idempotencyKey=>publishAlert('Dalan message',a.text,log,{requirePublisher:true,idempotencyKey})) : await (await import('./t3-control.mjs')).runT3Tool(name,t3Arguments);
+      let result;
+      if(t3Tools.has(name)) {
+        const control=await import('./t3-control.mjs');
+        const t3=await import('./t3.mjs');
+        const authorize=()=>{
+          const threads=toolRegistry.t3Threads(name,principal);
+          if(threads!==null && name!=='t3_thread_list' && !threads.has(a.threadId)) throw new RegistryError('tool_unavailable','tool unavailable');
+          return threads;
+        };
+        // Linearization point: this synchronous live-grant read follows the last await before
+        // send/set invokes the CLI. A revoke committed before it refuses the effect. No claim
+        // is made about revokes after CLI dispatch cancelling an external effect.
+        authorize();
+        if(name==='t3_thread_list') {
+          const data=await t3.callT3(t3.listArgs({cwd:a.cwd,project:a.projectId,status:a.status,workspace_mode:a.workspaceMode}));
+          const threads=authorize();
+          result=control.compactThreadList({...data,threads:(data.threads??[]).filter(t=>threads===null||threads.has(t.id))});
+          result._audit_ids={threadIds:result.threads.map(t=>t.id),projectIds:result.projects.map(p=>p.id)};
+        } else {
+          result=await control.runT3Tool(name,t3Arguments);
+          // Wait/read results also require current authority; never carry a pre-wait grant forward.
+          authorize();
+        }
+      } else result=await notifyLedger.send(principal.worker,str(a.text,'text',1000),notificationKey,idempotencyKey=>publishAlert('Dalan message',a.text,log,{requirePublisher:true,idempotencyKey}));
       t3Audit.appendT3Audit(store.db,audit,principal.subject,'success',result);
       if(result && typeof result==='object' && Object.hasOwn(result,'_audit_ids')) { const {_audit_ids,...publicResult}=result; return publicResult; }
       return result;
@@ -1235,7 +1259,7 @@ const adminServer=http.createServer(async(req,res)=>{
         const action=url.pathname.slice(7);
         if(action==='add') return json(res,200,toolRegistry.register(body.spec));
         if(action==='remove') return json(res,200,toolRegistry.remove(body.name));
-        if(action==='grant') { toolRegistry.grant(body.name,body.worker); return json(res,200,{name:body.name,worker:body.worker,granted:true}); }
+        if(action==='grant') { toolRegistry.grant(body.name,body.worker,body.scope); return json(res,200,{name:body.name,worker:body.worker,granted:true}); }
         if(action==='revoke') { toolRegistry.revoke(body.name,body.worker); return json(res,200,{name:body.name,worker:body.worker,granted:false}); }
       } catch(error) { if(error instanceof RegistryError) throw new Error(`${error.code}: ${error.message}`); throw error; }
     }
