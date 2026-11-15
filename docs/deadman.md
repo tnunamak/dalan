@@ -26,6 +26,10 @@ DOT_DEADMAN_NTFY_TOKEN=<optional provider token>
 
 The service listens on `127.0.0.1:8788`; put an HTTPS reverse proxy in front of it for the bridge host, or use a private authenticated transport. Keep the bearer token only on the bridge host and the receiver host. The configured notification URL must be canonical and must not redirect. The receiver rejects a remote plain-HTTP publisher URL at startup. The unit resolves Node through `/usr/local/bin:/usr/bin:/bin` and the CLI requires Node 24+. Install Node there or set `ExecStart` to its installed absolute path. Then enable `systemd/dot-deadman.service` on the independent host.
 
+The independent alerter is a system unit. It restarts after any process exit, including exit code 0, with a three-second delay. Its start-rate limit is disabled so repeated failures do not permanently park the monitor. An intentional operator stop still stops it; this restart policy does not prove notification delivery or protect against host failure.
+
+The bridge itself is a user unit, separate from the system alerter. An enabled bridge user unit starts at boot without a login only when lingering is enabled with `loginctl enable-linger <user>` for its owning account. Enabling the independent alerter does not enable lingering or start the bridge.
+
 On the bridge host, create `~/.config/dalan/deadman.env` with mode 0600:
 
 ```sh
