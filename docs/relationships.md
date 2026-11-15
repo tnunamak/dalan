@@ -6,4 +6,4 @@ Worker repository enrollment and connection approval create a relationship witho
 
 `dalan grants --json` shows the relationships and the current grants from each enforcer. Each grant has an `enforcer` and an `expires_at` field; null means the enforcer has no recorded deadline, except an external connection explicitly marked `expiry_status: unknown`. Job owner capabilities for protocol jobs expire at their retention deadline. Ending a relationship does not revoke any grant.
 
-Schema 70 is reserved for this migration. Migrations are serialized on merge: if an earlier branch uses this number, renumber the guard and its `PRAGMA user_version` together, along with the supported schema version and schema fixtures.
+Schema 70 is reserved for this migration and stays in its own block after the inherited migrations. Schema 67 is already merged; 68 and 69 remain reserved for the preceding changes. Migrations are serialized on merge: if an earlier branch uses this number, renumber the guard and its `PRAGMA user_version` together, along with the supported schema version and schema fixtures.
