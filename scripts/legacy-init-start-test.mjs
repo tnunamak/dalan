@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
@@ -21,23 +21,38 @@ async function check(name, fn) {
 async function makeHome(name) {
   const home = fs.mkdtempSync(path.join(tempRoot, `lis-${name}-`));
   homes.push(home);
-  const port = await reservedPort();
+  let port = await reservedPort(), pub = `http://127.0.0.1:${port}`, established = false;
   const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_AUTH_MODE: 'builtin', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', NODE_ENV: 'test' };
   delete env.DALAN_LEGACY_PROFILE; delete env.DOT_BRIDGE_LEGACY_PROFILE;
-  const pub = `http://127.0.0.1:${port}`;
   const cli = args => { const r = spawnSync(process.execPath, ['bin/dot-worker.mjs', ...args], { cwd: repo, env, encoding: 'utf8' }); return { code: r.status, stdout: r.stdout, stderr: r.stderr }; };
   // Returns { ready, code, stderr } once the server is listening or has exited.
   const start = async () => {
-    const child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let ready = false, stderr = '';
-    child.stdout.on('data', b => { if (String(b).includes('MCP listening')) ready = true; });
-    child.stderr.on('data', b => { stderr += b; });
-    for (let i = 0; i < 400 && !ready && child.exitCode === null; i++) await sleep(50);
-    const code = child.exitCode;
-    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise(resolve => child.once('exit', resolve)); }
-    return { ready, code, stderr };
+    const launch = candidate => new Promise((resolve, reject) => {
+      port = candidate; pub = `http://127.0.0.1:${candidate}`; env.DOT_BRIDGE_PORT = String(candidate);
+      const asFile = path.join(home, '.config/dalan/as.json');
+      if (fs.existsSync(asFile)) { const config = JSON.parse(fs.readFileSync(asFile, 'utf8')); config.public_url = pub; fs.writeFileSync(asFile, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 }); }
+      const child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '', stderr = '', ready = false;
+      child.stdout.on('data', chunk => { output += String(chunk); ready ||= portFromListeningBanner(output) !== null; });
+      child.stderr.on('data', chunk => { stderr += String(chunk); });
+      child.once('error', reject);
+      child.once('exit', code => {
+        if (ready) { established = true; resolve({ ready, code, stderr }); }
+        else if (!established && /EADDRINUSE/.test(stderr)) reject(Object.assign(new Error(stderr), { code: 'EADDRINUSE' }));
+        else resolve({ ready, code, stderr });
+      });
+      const timer = setInterval(() => {
+        if (ready) { clearInterval(timer); if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); }
+      }, 25);
+      child.once('exit', () => clearInterval(timer));
+      const timeout = setTimeout(() => { clearInterval(timer); if (child.exitCode === null) child.kill('SIGKILL'); }, 20000);
+      child.once('exit', () => clearTimeout(timeout));
+    });
+    if (established) return launch(port);
+    const started = await reservedPort({ start: launch });
+    return started.value;
   };
-  return { home, cli, start, pub, config: path.join(home, '.config/dalan'), data: path.join(home, '.local/share/dalan') };
+  return { home, cli, start, get pub() { return pub; }, config: path.join(home, '.config/dalan'), data: path.join(home, '.local/share/dalan') };
 }
 const dbDir = h => fs.existsSync(h.data) ? h.data : path.join(h.home, '.local/share/dot-bridge');
 

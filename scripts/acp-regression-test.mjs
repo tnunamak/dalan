@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 // Regression coverage for prompt parsing, size refusals, untracked files, and delayed submissions.
 // Pure steps use a temporary git repository; deadline steps run the adapter against a local bridge
 // through a proxy that delays /submit.
@@ -107,12 +107,13 @@ try {
   git('clean', '-fdq');
 
   // ---- F4: submit deadline
-  const home = process.env.HOME, repo = resolve(new URL('..', import.meta.url).pathname), port = Number(process.env.ACP_FIXTURE_PORT || await reservedPort());
-  const env = { ...process.env, HOME: home, DALAN_LEGACY_PROFILE: '1', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_PORT: String(port) };
+  const home = process.env.HOME, repo = resolve(new URL('..', import.meta.url).pathname);
+  let port=null;
+  const env = { ...process.env, HOME: home, DALAN_LEGACY_PROFILE: '1', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_PORT: '0' };
   fs.mkdirSync(join(home, '.config', 'dot-bridge'), { recursive: true });
-  let ready = false;
+  let ready = false, output='';
   service = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  service.stdout.on('data', b => { if (String(b).includes('MCP listening')) ready = true; }); service.stderr.on('data', b => process.stderr.write(b));
+  service.stdout.on('data', b => { output+=String(b);port=portFromListeningBanner(output);if(port)ready=true; }); service.stderr.on('data', b => process.stderr.write(b));
   await waitFor(() => ready, 'bridge');
   const adminSock = join(home, '.local/share/dot-bridge/admin.sock'), proxySock = join(root, 'proxy.sock');
   const secret = fs.readFileSync(join(home, '.config', 'dot-bridge', 'env'), 'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];

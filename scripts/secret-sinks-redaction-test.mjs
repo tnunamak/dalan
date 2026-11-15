@@ -13,6 +13,7 @@ import http from 'node:http';
 import {checkoutWorktreeWithoutFilters} from '../src/integrator.mjs';
 import {prepareT3Audit,initT3Audit,appendT3Audit} from '../src/t3-audit.mjs';
 import {publishAlert,checkAlerts} from '../src/alerts.mjs';
+import {portFromListeningBanner} from '../src/test-support/port.mjs';
 
 // Synthetic, obviously fake credential shapes.
 const HEX='0123456789abcdef'.repeat(4);
@@ -153,14 +154,14 @@ test('stdio MCP stderr never carries a raw secret from an error stack',async() =
 
 test('tool error text returned to an MCP client masks credential fields',async() => {
   const dir=fs.mkdtempSync(path.join(os.homedir(),'.tmp/redaction-sinks-'));
-  const port=await (await import('../src/test-support/port.mjs')).reservedPort();
+let port=null;
   fs.mkdirSync(path.join(dir,'.config/dot-bridge'),{recursive:true});
   const child=spawn(process.execPath,['src/server.mjs'],{cwd:path.join(import.meta.dirname,'..'),stdio:['ignore','pipe','pipe'],
-    env:{...process.env,HOME:dir,DALAN_LEGACY_PROFILE:'1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:String(port),NODE_ENV:'test',DOT_BRIDGE_T3_DRY_RUN:'1'}});
-  let out='';child.stdout.on('data',c=>{out+=c;});child.stderr.on('data',()=>{});
+    env:{...process.env,HOME:dir,DALAN_LEGACY_PROFILE:'1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:'0',NODE_ENV:'test',DOT_BRIDGE_T3_DRY_RUN:'1'}});
+  let out='';child.stdout.on('data',c=>{out+=c;port=portFromListeningBanner(out);});child.stderr.on('data',()=>{});
   try {
-    for(let i=0;i<200&&!out.includes('MCP listening');i++)await new Promise(r=>setTimeout(r,50));
-    assert(out.includes('MCP listening'),'server did not start');
+    for(let i=0;i<200&&port===null;i++)await new Promise(r=>setTimeout(r,50));
+    assert(port!==null,'server did not start');
     const secret=fs.readFileSync(path.join(dir,'.config/dot-bridge/env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     const res=await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json'},
       body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'list_pending',arguments:{[`api_key=${OP24}`]:1}}})});
@@ -175,16 +176,16 @@ test('tool error text returned to an MCP client masks credential fields',async()
 
 test('an HTTP tool crash returns the tool name and an error id; the detail goes to the request log',async() => {
   const dir=fs.mkdtempSync(path.join(os.homedir(),'.tmp/redaction-crash-'));
-  const port=await (await import('../src/test-support/port.mjs')).reservedPort();
+  let port=null;
   fs.mkdirSync(path.join(dir,'.config/dot-bridge'),{recursive:true});
   const child=spawn(process.execPath,['src/server.mjs'],{cwd:path.join(import.meta.dirname,'..'),stdio:['ignore','pipe','pipe'],
-    env:{...process.env,HOME:dir,DALAN_LEGACY_PROFILE:'1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:String(port),NODE_ENV:'test',DOT_BRIDGE_T3_DRY_RUN:'1'}});
-  let out='';child.stdout.on('data',c=>{out+=c;});child.stderr.on('data',()=>{});
+    env:{...process.env,HOME:dir,DALAN_LEGACY_PROFILE:'1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:'0',NODE_ENV:'test',DOT_BRIDGE_T3_DRY_RUN:'1'}});
+  let out='';child.stdout.on('data',c=>{out+=c;port=portFromListeningBanner(out);});child.stderr.on('data',()=>{});
   // An unlabelled value no rule can recognise: only the crash rule keeps it from the client.
   const stored='zQ8vT3pL6nR1xK4wJ7mB2cY5';
   try {
-    for(let i=0;i<200&&!out.includes('MCP listening');i++)await new Promise(r=>setTimeout(r,50));
-    assert(out.includes('MCP listening'),'server did not start');
+    for(let i=0;i<200&&port===null;i++)await new Promise(r=>setTimeout(r,50));
+    assert(port!==null,'server did not start');
     const {Store}=await import('../src/store.mjs');
     const store=new Store(path.join(dir,'.local/share/dot-bridge/bridge.db'));
     store.submit({schema_version:1,request_id:'req-crash-0001',brief:'crash test',inputs:[{revision:'abc'}],expected_output:'one result',execution_scope:'read-only'},'t','e','owner');

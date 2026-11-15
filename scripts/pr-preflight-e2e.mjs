@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -12,8 +12,8 @@ import { DatabaseSync } from 'node:sqlite';
 const repo=path.resolve(new URL('..',import.meta.url).pathname);
 const home=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-pr-preflight-'));
 const fixture=path.join(home,'fixture'),observation=path.join(home,'pr-observation.json');
-const port=await reservedPort();
-const env={...process.env,HOME:home,GH_HOST:'wrong-host.invalid',DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_DRY_RUN:'1',DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE:fixture,PATH:`${path.join(home,'bin')}:${process.env.PATH}`};
+let port=null;
+const env={...process.env,HOME:home,GH_HOST:'wrong-host.invalid',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_DRY_RUN:'1',DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE:fixture,PATH:`${path.join(home,'bin')}:${process.env.PATH}`};
 const owner='pr-preflight-test-owner';
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function git(args) { const result=spawnSync('git',args,{encoding:'utf8',env});assert.equal(result.status,0,result.stderr);return result.stdout.trim(); }
@@ -46,7 +46,7 @@ process.stdout.write(JSON.stringify(observation));
   const open={state:'open',draft:false,merged:false,head:{sha:head}};
   const assignment=(extra={})=>{const now=Date.now();return {schema_version:1,request_id:`req_${randomUUID()}`,brief:'Inspect README.md',inputs:[{github_repo:'test/fixture',base_sha:base,head_sha:head,pr_number:7}],scope_paths:['README.md'],expected_output:'findings',execution_scope:'read-only',prepared_at:new Date(now-1000).toISOString(),valid_until:new Date(now+3600000).toISOString(),...extra};};
   observe(open);
-  service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});let ready=false,stderr='';service.stdout.on('data',b=>{if(String(b).includes('MCP listening'))ready=true;});service.stderr.on('data',b=>stderr+=b);
+  service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});let ready=false,output='',stderr='';service.stdout.on('data',b=>{output+=String(b);port=portFromListeningBanner(output);if(port)ready=true;});service.stderr.on('data',b=>stderr+=b);
   for(let i=0;i<200&&!ready;i++) await sleep(25);assert(ready,stderr);
   const secret=fs.readFileSync(path.join(home,'.config/dalan/env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
   async function rpc(name,args) {const response=await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method:'tools/call',params:{name,arguments:args}})});const envelope=await response.json();if(envelope.error) return {error:envelope.error.message};if(envelope.result.isError)return {error:envelope.result.content?.[0]?.text};return JSON.parse(envelope.result.content[0].text);}

@@ -86,6 +86,19 @@ async function stop() {
   try { await exited; } finally { clearTimeout(kill); }
 }
 
+async function closeForwarder() {
+  if (socketActivator && socketActivator.exitCode === null && socketActivator.signalCode === null) {
+    const exited = new Promise(resolve => socketActivator.once('exit', resolve));
+    socketActivator.kill('SIGTERM');
+    await exited;
+  }
+  for (const socket of forwardedSockets) socket.destroy();
+  if (forwarder) await new Promise(resolve => forwarder.close(resolve));
+  socketActivator=null;
+  forwarder=null;
+  forwardedSockets.clear();
+}
+
 function rawRequest({ host, path: requestPath, method = 'POST', headers = {}, body = '' }) {
   return new Promise((resolve, reject) => {
     const request = http.request({ host: forwardHost, port: forwardPort ?? port, path: requestPath, method, headers: { host, ...headers } }, response => {
@@ -133,44 +146,53 @@ function submit(requestId, worker) {
 
 async function main() {
   try {
-    port = await reservedPort();
-    forwardPort = process.platform === 'linux' ? port : await reservedPort();
-    publicUrl = `http://${forwardHost}:${forwardPort}`;
-    serverEnv.DALAN_PORT = String(port);
-    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(path.join(configDir, 'workers.json'), JSON.stringify({
-      workers: Object.fromEntries(workers.map(worker => [worker, { capabilities: ['t3'], workspaceAllowed: ['dot', 'muse'].includes(worker) }])),
-      default_execution: 'none',
-    }, null, 2) + '\n', { mode: 0o600 });
-
-    const initialized = cli(['as-init', '--public-url', publicUrl]);
-    assert.equal(initialized.code, 0, initialized.stderr + initialized.stdout);
-    const asConfigPath = path.join(configDir, 'as.json');
-    const asConfig = JSON.parse(fs.readFileSync(asConfigPath, 'utf8'));
-    asConfig.limits = { registrations: 20, interactions: 20 };
-    fs.writeFileSync(asConfigPath, JSON.stringify(asConfig, null, 2) + '\n', { mode: 0o600 });
-
-    child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: serverEnv, stdio: ['ignore', 'pipe', 'pipe'] });
-    await waitForReady();
-    // Exercise the installed Linux forwarding program when available; other hosts use a transparent test forwarder.
-    if (process.platform === 'linux' && fs.existsSync('/usr/bin/systemd-socket-activate') && fs.existsSync('/usr/lib/systemd/systemd-socket-proxyd')) {
-      socketActivator = spawn('/usr/bin/systemd-socket-activate', ['-l', `${forwardHost}:${forwardPort}`, '/usr/lib/systemd/systemd-socket-proxyd', `127.0.0.1:${port}`], { stdio: ['ignore', 'ignore', 'pipe'] });
-      let activationLog = '';
-      socketActivator.stderr.on('data', chunk => { activationLog += chunk; });
-      for (let attempt = 0; attempt < 100; attempt++) {
-        if (activationLog.includes('Listening on')) break;
-        assert.equal(socketActivator.exitCode, null, activationLog);
-        await new Promise(resolve => setTimeout(resolve, 20));
+    await reservedPort({attempts: 5, start:async candidate=>{
+      port=candidate;
+      forwardPort=process.platform==='linux'?port:await reservedPort();
+      publicUrl=`http://${forwardHost}:${forwardPort}`;
+      serverEnv.DALAN_PORT=String(port);
+      childExit=null;stderr='';
+      fs.mkdirSync(configDir,{recursive:true,mode:0o700});
+      fs.writeFileSync(path.join(configDir,'workers.json'),JSON.stringify({
+        workers:Object.fromEntries(workers.map(worker=>[worker,{capabilities:['t3'],workspaceAllowed:['dot','muse'].includes(worker)}])),
+        default_execution:'none',
+      },null,2)+'\n',{mode:0o600});
+      const initialized=cli(['as-init','--public-url',publicUrl]);
+      assert.equal(initialized.code,0,initialized.stderr+initialized.stdout);
+      const asConfigPath=path.join(configDir,'as.json');
+      const asConfig=JSON.parse(fs.readFileSync(asConfigPath,'utf8'));
+      asConfig.limits={registrations:20,interactions:20};
+      fs.writeFileSync(asConfigPath,JSON.stringify(asConfig,null,2)+'\n',{mode:0o600});
+      child=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env:serverEnv,stdio:['ignore','pipe','pipe']});
+      try {
+        await waitForReady();
+        // Exercise the installed Linux forwarding program when available; other hosts use a transparent test forwarder.
+        if (process.platform === 'linux' && fs.existsSync('/usr/bin/systemd-socket-activate') && fs.existsSync('/usr/lib/systemd/systemd-socket-proxyd')) {
+          socketActivator = spawn('/usr/bin/systemd-socket-activate', ['-l', `${forwardHost}:${forwardPort}`, '/usr/lib/systemd/systemd-socket-proxyd', `127.0.0.1:${port}`], { stdio: ['ignore', 'ignore', 'pipe'] });
+          let activationLog = '';
+          socketActivator.stderr.on('data', chunk => { activationLog += chunk; });
+          for (let attempt = 0; attempt < 100; attempt++) {
+            if (activationLog.includes('Listening on')) break;
+            assert.equal(socketActivator.exitCode, null, activationLog);
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          assert.match(activationLog, /Listening on/, 'socket activation did not start');
+        } else {
+          forwarder = net.createServer(client => {
+            const upstream = net.connect(port, '127.0.0.1');
+            for (const socket of [client, upstream]) { forwardedSockets.add(socket); socket.on('close', () => forwardedSockets.delete(socket)); socket.on('error', () => { client.destroy(); upstream.destroy(); }); }
+            client.pipe(upstream); upstream.pipe(client);
+          });
+          await new Promise((resolve, reject) => { forwarder.once('error', reject); forwarder.listen(forwardPort, forwardHost, resolve); });
+        }
+      } catch(error) {
+        await closeForwarder();
+        await stop();
+        if(error.code!=='EADDRINUSE'&&!/EADDRINUSE|Address already in use/i.test(stderr+'\n'+error.message))throw error;
+        fs.rmSync(configDir,{recursive:true,force:true});
+        throw Object.assign(error,{code:'EADDRINUSE'});
       }
-      assert.match(activationLog, /Listening on/, 'socket activation did not start');
-    } else {
-      forwarder = net.createServer(client => {
-        const upstream = net.connect(port, '127.0.0.1');
-        for (const socket of [client, upstream]) { forwardedSockets.add(socket); socket.on('close', () => forwardedSockets.delete(socket)); socket.on('error', () => { client.destroy(); upstream.destroy(); }); }
-        client.pipe(upstream); upstream.pipe(client);
-      });
-      await new Promise((resolve, reject) => { forwarder.once('error', reject); forwarder.listen(forwardPort, forwardHost, resolve); });
-    }
+    }});
     const envText = fs.readFileSync(path.join(configDir, 'env'), 'utf8');
     secret = envText.match(/^BRIDGE_PATH_SECRET=(.+)$/m)?.[1];
     assert.match(secret ?? '', /^[a-f0-9]{64}$/);
@@ -292,13 +314,7 @@ async function main() {
     assert.equal((await serviceProbe(nonceA, 'evil.example')).status, 421, 'Gozar verifier ignored the configured public Host');
     console.log('PASS unauthenticated Gozar verifier echoes valid nonces, keeps one instance ID, binds deterministic proofs to nonce, rejects bad nonce, and enforces Host');
   } finally {
-    if (socketActivator && socketActivator.exitCode === null && socketActivator.signalCode === null) {
-      const exited = new Promise(resolve => socketActivator.once('exit', resolve));
-      socketActivator.kill('SIGTERM');
-      await exited;
-    }
-    for (const socket of forwardedSockets) socket.destroy();
-    if (forwarder) await new Promise(resolve => forwarder.close(resolve));
+    await closeForwarder();
     await stop();
     if (process.env.KEEP_TEST_FIXTURES !== '1') fs.rmSync(root, { recursive: true, force: true });
   }

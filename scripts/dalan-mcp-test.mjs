@@ -17,8 +17,8 @@ const WORKER = 'acme';
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
 fs.mkdirSync(tempRoot, { recursive: true });
 const home = fs.mkdtempSync(path.join(tempRoot, 'dalan-mcp-'));
-const port = await reservedPort();
-const env = { PATH: process.env.PATH, HOME: home, DALAN_LOOPBACK: '1', DALAN_AUTH_MODE: 'builtin', DALAN_PORT: String(port) };
+let port = null;
+const env = { PATH: process.env.PATH, HOME: home, DALAN_LOOPBACK: '1', DALAN_AUTH_MODE: 'builtin', DALAN_PORT: '0' };
 const dalan = args => new Promise((resolve, reject) => execFile(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args], { env, cwd: repo, timeout: 30_000 },
   (error, stdout, stderr) => error ? reject(new Error(`dalan ${args.slice(0, 2).join(' ')}: ${(stderr || stdout || error.message).trim()}`)) : resolve(stdout)));
 const log = path.join(home, 'server.log');
@@ -41,13 +41,26 @@ const call = async (name, args) => {
 };
 const textOf = result => JSON.parse(result.content[0].text);
 try {
-  await dalan(['init', '--worker', WORKER, '--public-url', `http://127.0.0.1:${port}`]);
-  const fd = fs.openSync(log, 'w', 0o600);
-  server = spawn(process.execPath, [path.join(repo, 'src/server.mjs')], { env, cwd: repo, stdio: ['ignore', fd, fd] });
-  for (let i = 0; !/MCP listening/.test(fs.readFileSync(log, 'utf8')); i++) {
-    assert.ok(i < 300 && server.exitCode === null, `server did not start:\n${fs.readFileSync(log, 'utf8')}`);
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
+  const started = await reservedPort({ start: async candidate => {
+    port = candidate; env.DALAN_PORT = String(candidate);
+    fs.rmSync(path.join(home, '.config'), { recursive: true, force: true });
+    fs.rmSync(path.join(home, '.local'), { recursive: true, force: true });
+    await dalan(['init', '--worker', WORKER, '--public-url', `http://127.0.0.1:${port}`]);
+    const fd = fs.openSync(log, 'w', 0o600);
+    server = spawn(process.execPath, [path.join(repo, 'src/server.mjs')], { env, cwd: repo, stdio: ['ignore', fd, fd] });
+    fs.closeSync(fd);
+    for (let i = 0; i < 300; i++) {
+      const output = fs.readFileSync(log, 'utf8');
+      if (/MCP listening/.test(output)) return server;
+      if (server.exitCode !== null) {
+        if (/EADDRINUSE/.test(output)) throw Object.assign(new Error(output), { code: 'EADDRINUSE' });
+        throw new Error(`server did not start:\n${output}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error(`server did not start:\n${fs.readFileSync(log, 'utf8')}`);
+  } });
+  port = started.port; server = started.value;
   const configDir = path.join(home, '.config/dalan');
   const secret = /^BRIDGE_PATH_SECRET=(.+)$/m.exec(fs.readFileSync(path.join(configDir, 'env'), 'utf8'))[1];
   const mcpUrl = `http://127.0.0.1:${port}/${secret}/mcp`;

@@ -8,21 +8,22 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { initAsFiles } from '../src/as-files.mjs';
 import { createAs } from '../src/as.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
 
 const root = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'as-code-life-'));
 const realNow = Date.now; let offset = 0;
 Date.now = () => realNow() + offset;
 let server;
 try {
-  const port = await reservedPort();
+  let as;
+  server = http.createServer(async (req, res) => { if (!as.hostOk(req)) { res.writeHead(421); res.end(); return; } if (!(await as.handle(req, res))) { res.writeHead(404); res.end(); } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
   const pub = `http://127.0.0.1:${port}`, resource = `${pub}/secret/mcp`, oauth = `${pub}/secret/oauth`;
   const callback = 'https://vendor.example/oauth/callback', dir = path.join(root, 'cfg');
   initAsFiles(dir, { publicUrl: pub, allowHttp: true });
-  const as = createAs({ dir, resource, allowHttp: true, now: () => Date.now(), workerNames: () => ['lark'] });
+  as = createAs({ dir, resource, allowHttp: true, now: () => Date.now(), workerNames: () => ['lark'] });
   as.ops.allowCallback({ pattern: callback });
-  server = http.createServer(async (req, res) => { if (!as.hostOk(req)) { res.writeHead(421); res.end(); return; } if (!(await as.handle(req, res))) { res.writeHead(404); res.end(); } });
-  await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
+
   const jarHeader = jar => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
   async function hit(url, jar = new Map(), options = {}) {
     const res = await fetch(url, { redirect: 'manual', ...options, headers: { ...(options.headers ?? {}), ...(jar.size ? { cookie: jarHeader(jar) } : {}) } });

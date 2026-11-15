@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 import { defaultPath } from '../src/paths.mjs';
 import { acceptsMcpEventStream, beginMcpEventStream, mcpResponseText } from '../src/mcp-sse.mjs';
 import { createBuiltinHttpServer } from '../src/builtin-http.mjs';
@@ -32,7 +32,7 @@ function launch(args, env, cwd = repo) {
 
 async function waitForReady(instance, label) {
   for (let i = 0; i < 300; i++) {
-    if (/MCP listening on/.test(instance.output())) return;
+    if (portFromListeningBanner(instance.output())) return;
     if (instance.child.exitCode !== null) throw new Error(`${label} exited before listening: ${instance.errors()}`);
     await sleep(25);
   }
@@ -110,23 +110,33 @@ await new Promise(resolve => setTimeout(resolve, 150000));
 process.stdout.write(JSON.stringify({ok:true,data:{thread:{id:'thread_delayed',status:'active',latestRun:{runId:'run_delayed'}},args:process.argv.slice(2)}}));
 `, { mode: 0o755 });
 
+  // A 1:10 scale keeps the production timing ratios while allowing host scheduling jitter.
+  const scale = 0.1;
   const preload = path.join(root, 'scaled-timers.mjs');
   fs.writeFileSync(preload, `
 const realTimeout = globalThis.setTimeout;
-globalThis.setTimeout = (fn, ms, ...args) => realTimeout(fn, ms === 150000 ? 1500 : ms, ...args);
+globalThis.setTimeout = (fn, ms, ...args) => realTimeout(fn, ms === 150000 ? ${150000 * scale} : ms, ...args);
 const realInterval = globalThis.setInterval;
-globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? 200 : ms, ...args);
+globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? ${20000 * scale} : ms, ...args);
 `);
   const nodeOptions = `--import=${pathToFileURL(preload).href}`;
 
   // An authenticated trial endpoint must refuse a negotiated SSE request before it writes any stream bytes.
   const authHome = path.join(root, 'auth-home'); fs.mkdirSync(authHome, { recursive: true });
-  const authPort = await reservedPort();
-  const authEnv = { ...process.env, HOME: authHome, PATH: process.env.PATH, NODE_ENV: 'test', DALAN_AUTH_MODE: 'builtin', DALAN_LOOPBACK: '1', DALAN_TEST_OAUTH: '1', DALAN_PORT: String(authPort) };
-  const init = spawnSync(process.execPath, ['bin/dalan.mjs', 'as-init', '--public-url', `http://127.0.0.1:${authPort}`], { cwd: repo, env: authEnv, encoding: 'utf8', timeout: 30_000 });
-  check(init.status === 0, `as-init failed (${init.status})`);
-  service = launch(['src/server.mjs'], { ...authEnv, DALAN_LEGACY_PROFILE: '1', DALAN_TRIAL_SSE: '1' });
-  await waitForReady(service, 'authenticated server');
+  const {port: authPort} = await reservedPort({attempts: 5, start: async candidate => {
+    const authEnv = { ...process.env, HOME: authHome, PATH: process.env.PATH, NODE_ENV: 'test', DALAN_AUTH_MODE: 'builtin', DALAN_LOOPBACK: '1', DALAN_TEST_OAUTH: '1', DALAN_PORT: String(candidate) };
+    const init = spawnSync(process.execPath, ['bin/dalan.mjs', 'as-init', '--public-url', `http://127.0.0.1:${candidate}`], { cwd: repo, env: authEnv, encoding: 'utf8', timeout: 30_000 });
+    check(init.status === 0, `as-init failed (${init.status})`);
+    service = launch(['src/server.mjs'], { ...authEnv, DALAN_LEGACY_PROFILE: '1', DALAN_TRIAL_SSE: '1' });
+    try { await waitForReady(service, 'authenticated server'); }
+    catch (error) {
+      await stop(service);
+      if (!/EADDRINUSE/.test(service.errors())) throw error;
+      fs.rmSync(authHome, {recursive: true, force: true});
+      fs.mkdirSync(authHome, {recursive: true});
+      throw Object.assign(error, {code: 'EADDRINUSE'});
+    }
+  }});
   const authEnvFile = defaultPath(authHome, '.config/dot-bridge/env');
   check(fs.existsSync(authEnvFile), `auth path secret missing; server: ${service.output()}${service.errors()}`);
   const authSecret = fs.readFileSync(authEnvFile, 'utf8').match(/^BRIDGE_PATH_SECRET=(.+)$/m)?.[1];
@@ -137,14 +147,14 @@ globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? 20
   await stop(service); service = null;
 
   // Scale only the server heartbeat and fake read-only delay. The proxy cuts a stream after 120 scaled seconds.
-  const port = await reservedPort();
   const home = path.join(root, 'trial-home'); fs.mkdirSync(home, { recursive: true });
   const env = { ...process.env, HOME: home, PATH: `${delayBin}${path.delimiter}${process.env.PATH}`, NODE_ENV: 'test', NODE_OPTIONS: nodeOptions,
     DALAN_DEV_ALLOW_UNAUTHENTICATED: '1', DALAN_ENABLE_T3_TOOLS: '1', DALAN_LEGACY_PROFILE: '1', DALAN_T3CODE_BIN: fakeT3,
-    DALAN_TRIAL_SSE: process.env.MCP_SSE_TEST_DISABLE === '1' ? '0' : '1', DALAN_PORT: String(port) };
+    DALAN_TRIAL_SSE: process.env.MCP_SSE_TEST_DISABLE === '1' ? '0' : '1', DALAN_PORT: '0' };
   const inline = "import {main} from './src/server.mjs'; await main({loopbackOnly:true});";
   service = launch(['--input-type=module', '-e', inline], env);
   await waitForReady(service, 'trial server');
+  const port=portFromListeningBanner(service.output());
   const secret = fs.readFileSync(defaultPath(home, '.config/dot-bridge/env'), 'utf8').match(/^BRIDGE_PATH_SECRET=(.+)$/m)?.[1];
   check(secret, 'server path secret missing');
 
@@ -198,13 +208,13 @@ globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? 20
   const waitSchema = JSON.parse(catalog.text).result.tools.find(tool => tool.name === 't3_thread_wait').inputSchema.properties.timeoutMs;
   assert.equal(waitSchema.maximum, 90_000, 't3_thread_wait schema advertises the 90-second cap');
 
-  // The proxy forwards immediately but destroys a downstream response after 1200 ms without upstream bytes.
+  // The proxy cuts after 120 scaled seconds without upstream bytes.
   const proxyState = { idleCuts: 0 };
   proxy = http.createServer((req, res) => {
     let lastByte = performance.now(), closed = false;
     const idleTimer = setInterval(() => {
-      if (!closed && performance.now() - lastByte > 1200) { closed = true; proxyState.idleCuts++; clearInterval(idleTimer); res.destroy(); upstream.destroy(); }
-    }, 2);
+      if (!closed && performance.now() - lastByte > 120000 * scale) { closed = true; proxyState.idleCuts++; clearInterval(idleTimer); res.destroy(); upstream.destroy(); }
+    }, 200 * scale);
     const clear = () => { closed = true; clearInterval(idleTimer); };
     const upstream = http.request({ host: '127.0.0.1', port, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${port}` } }, upstreamRes => {
       lastByte = performance.now();
@@ -245,7 +255,7 @@ globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? 20
   assert.ok(delayed.text.includes(': keepalive'), 'the response has no heartbeat comments');
   const gaps = delayed.arrivals.slice(1).map((at, i) => at - delayed.arrivals[i]);
   assert.ok(gaps.length >= 4, `expected heartbeats during the delayed read, saw ${gaps.length} byte chunks`);
-  assert.ok(Math.max(...gaps) <= 250, `stream byte gap exceeded 25 scaled seconds: ${Math.max(...gaps).toFixed(1)} ms`);
+  assert.ok(Math.max(...gaps) <= 25000 * scale, `stream byte gap exceeded 25 scaled seconds: ${Math.max(...gaps).toFixed(1)} ms`);
 
   // Unnegotiated requests still receive ordinary application/json.
   const plain = await request({ port, pathname: `/${secret}/mcp`, headers: { 'content-type': 'application/json', accept: 'application/json' },

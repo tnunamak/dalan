@@ -40,7 +40,7 @@ try {
   // Survivor that later exits: refused while it lives, released once a fresh scan is empty. Original verdict is kept.
   const later=enroll('req_later');
   let procs=[4242];const scanned=[];
-  const deps={bootId:()=>BOOT,unitInactive:()=>true,scan:dir=>{scanned.push(dir);return procs;}};
+  const deps={bootId:()=>BOOT,unitInactive:unit=>{assert.equal(unit,CGROUP.split('/').at(-1));return true;},scan:dir=>{scanned.push(dir);return procs;}};
   let ws=restart(deps);now+=1000;
   refused('req_later');
   await ws.quiesce('req_later');refused('req_later');
@@ -53,6 +53,13 @@ try {
   assert.deepEqual(bytesOf('stop'),original,'the stop receipt is never overwritten');
   assert.equal(JSON.parse(bytesOf('reverify')).basis,'cgroup_empty');
   assert.equal(JSON.parse(store.db.prepare('SELECT stop_evidence FROM check_jobs WHERE id=?').get('check_req_later').stop_evidence).host.reason,'durable_systemd_control_group_reverified');
+
+  // Unique units are recovered from their own receipt even while other checks run.
+  const uniqueUnit='dot-bridge-host-check-123-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.service';
+  enroll('req_unique',{start:{bootId:BOOT,cgroup:CGROUP.replace('dot-bridge-host-check.service',uniqueUnit)}});
+  ws=restart({bootId:()=>BOOT,unitInactive:unit=>{assert.equal(unit,uniqueUnit);return true;},scan:()=>[]});now+=1000;
+  await ws.quiesce('req_unique');
+  assert.equal(claimsAgain('req_unique'),2);
 
   // Unit still active: an empty scan is not enough.
   enroll('req_active');

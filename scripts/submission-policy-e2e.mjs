@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { reservedPort } from '../src/test-support/port.mjs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -11,7 +10,7 @@ import { Store } from '../src/store.mjs';
 import { validateSubmission,validateOwnerNote,validateOutputPaths } from '../src/submission-policy.mjs';
 const repo=path.resolve(new URL('..',import.meta.url).pathname);
 const home=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-submission-policy-'));
-const env={...process.env,HOME:home,DOT_BRIDGE_PORT:String(await reservedPort()),DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_DRY_RUN:'1',PATH:`${path.join(home,'bin')}:${process.env.PATH}`,DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE:path.join(home,'fixture')};
+const env={...process.env,HOME:home,DALAN_PORT:'0',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_DRY_RUN:'1',PATH:`${path.join(home,'bin')}:${process.env.PATH}`,DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE:path.join(home,'fixture')};
 const assignment=(extra={})=>({schema_version:1,request_id:`req_${randomUUID()}`,brief:'Inspect bounded input',inputs:[],expected_output:'findings',execution_scope:'read-only',...extra});
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function git(args) { const r=spawnSync('git',args,{encoding:'utf8',env});assert.equal(r.status,0,r.stderr);return r.stdout.trim(); }

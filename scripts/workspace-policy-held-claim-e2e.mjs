@@ -7,25 +7,27 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign, randomUUID, createHash } from 'node:crypto';
 import http from 'node:http';
-import net from 'node:net';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const home=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-workspace-policy-'));
 const config=path.join(home,'.config/dot-bridge'),repo=path.join(home,'repo'),dbFile=path.join(home,'.local/share/dot-bridge/bridge.db');
-const freePort=async()=>new Promise((resolve,reject)=>{const server=net.createServer();server.once('error',reject);server.listen(0,'127.0.0.1',()=>{const {port}=server.address();server.close(error=>error?reject(error):resolve(port));});});
-const port=await freePort(),jwksPort=await freePort(),issuer=`http://127.0.0.1:${jwksPort}/realm`,aud='https://dot-bridge.example.test';
+let port;
+let issuer;
+const aud='https://dot-bridge.example.test';
 fs.mkdirSync(config,{recursive:true});fs.mkdirSync(repo,{recursive:true});
 const git=(...args)=>{const result=spawnSync('git',args,{cwd:repo,encoding:'utf8'});assert.equal(result.status,0,result.stderr);return result.stdout.trim();};
 git('init','-q');git('config','user.email','test@example.com');git('config','user.name','Test');fs.writeFileSync(path.join(repo,'hello.txt'),'workspace fixture\n');git('add','.');git('commit','-qm','base');const base=git('rev-parse','HEAD');
-fs.writeFileSync(path.join(config,'oauth.env'),`OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=${aud}\nOAUTH_JWKS_URI=http://127.0.0.1:${jwksPort}/jwks\nOAUTH_ALLOWED_SUBJECTS=dot\n`,{mode:0o600});
 const workersFile=path.join(config,'workers.json');
 const writeWorkers=workspaceAllowed=>fs.writeFileSync(workersFile,JSON.stringify({workers:{dot:{connections:[{issuer,subject:'dot',client_id:'test-client'}],repos:['example-owner/fixture'],workspaceAllowed}}}),{mode:0o600});
-writeWorkers(true);
 const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048}),jwk={...publicKey.export({format:'jwk'}),kid:'test',use:'sig'};
-const jwks=http.createServer((_req,res)=>res.end(JSON.stringify({keys:[jwk]})));await new Promise(resolve=>jwks.listen(jwksPort,'127.0.0.1',resolve));
-const env={...process.env,HOME:home,DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_AUTH_MODE:'oauth',DOT_BRIDGE_TEST_OAUTH:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'1',DOT_BRIDGE_WORKSPACE_ROOT:path.join(home,'work'),DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE:repo};
+const jwks=http.createServer((_req,res)=>res.end(JSON.stringify({keys:[jwk]})));await new Promise(resolve=>jwks.listen(0,'127.0.0.1',resolve));
+const jwksPort=jwks.address().port;issuer=`http://127.0.0.1:${jwksPort}/realm`;
+writeWorkers(true);
+fs.writeFileSync(path.join(config,'oauth.env'),`OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=${aud}\nOAUTH_JWKS_URI=http://127.0.0.1:${jwksPort}/jwks\nOAUTH_ALLOWED_SUBJECTS=dot\n`,{mode:0o600});
+const env={...process.env,HOME:home,DOT_BRIDGE_PORT:'0',DOT_BRIDGE_AUTH_MODE:'oauth',DOT_BRIDGE_TEST_OAUTH:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'1',DOT_BRIDGE_WORKSPACE_ROOT:path.join(home,'work'),DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE:repo};
 const cwd=path.resolve(new URL('..',import.meta.url).pathname),fetch=fetchForPublicHost('dot-bridge.example.test');
 let service,ready=false;
-function launch(enableWorkspace){ready=false;service=spawn(process.execPath,['src/server.mjs'],{cwd,env:{...env,DOT_BRIDGE_ENABLE_WORKSPACE:enableWorkspace?'1':'0'},stdio:['ignore','pipe','pipe']});service.stdout.on('data',chunk=>{if(String(chunk).includes('MCP listening'))ready=true;});service.stderr.on('data',chunk=>process.stderr.write(chunk));return service;}
+function launch(enableWorkspace){ready=false;let output='';service=spawn(process.execPath,['src/server.mjs'],{cwd,env:{...env,DOT_BRIDGE_ENABLE_WORKSPACE:enableWorkspace?'1':'0'},stdio:['ignore','pipe','pipe']});service.stdout.on('data',chunk=>{output+=String(chunk);const actual=portFromListeningBanner(output);if(actual){port=actual;ready=true;}});service.stderr.on('data',chunk=>process.stderr.write(chunk));return service;}
 async function waitReady(){for(let i=0;i<100&&!ready;i++){if(service.exitCode!==null)throw new Error(`server exited ${service.exitCode}`);await new Promise(resolve=>setTimeout(resolve,50));}assert.ok(ready,'server ready');}
 function token(){const header=Buffer.from(JSON.stringify({alg:'RS256',kid:'test'})).toString('base64url'),payload=Buffer.from(JSON.stringify({iss:issuer,aud,exp:Math.floor(Date.now()/1000)+300,sub:'dot',client_id:'test-client',scope:'dot-bridge.read dot-bridge.work'})).toString('base64url'),input=`${header}.${payload}`;return `${input}.${sign('RSA-SHA256',Buffer.from(input),privateKey).toString('base64url')}`;}
 const auth=token();

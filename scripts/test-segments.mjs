@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
@@ -21,6 +22,8 @@ if (!process.env.NODE_OPTIONS?.includes(sqliteWarningFlag)) {
 // Tests make their own commits. A developer's global git config (commit signing with a key that this machine lacks, for
 // example) must not decide whether they pass. A caller can still set GIT_CONFIG_GLOBAL to use another file.
 process.env.GIT_CONFIG_GLOBAL ??= '/dev/null';
+// One host-check reservation per suite, inherited by every segment and bridge.
+process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `suite-${process.pid}-${randomUUID()}`;
 let interrupted = null;
 let activeRun = null;
 

@@ -109,7 +109,7 @@ class Bridge {
     this.secret = null;
     return this;
   }
-  async start(gate) {
+  async start(gate, attempts = 3) {
     this.exited = null; this.stderr = '';
     const child = gate
       ? armStartBarrier(fork('src/server.mjs', [], { cwd: repo, env: { ...this.env, AS_START_GATE: gate }, execArgv: ['--import', barrierPreload], stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }))
@@ -120,7 +120,21 @@ class Bridge {
     child.stderr.on('data', b => { this.stderr += b; });
     child.once('exit', code => { this.exited = code; });
     for (let i = 0; i < 300 && !ready && this.exited === null; i++) await sleep(50);
-    if (!ready) return false;
+    if (!ready) {
+      if (!this.startedOnce && !gate && attempts > 1 && /EADDRINUSE/.test(this.stderr)) {
+        await this.stop();
+        const file = path.join(this.config, 'as.json');
+        const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const publicUrl = new URL(config.public_url);
+        this.port = await freePort();
+        publicUrl.port = String(this.port);
+        this.pub = config.public_url = publicUrl.origin;
+        fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+        return this.start(gate, attempts - 1);
+      }
+      return false;
+    }
+    this.startedOnce = true;
     this.secret = fs.readFileSync(path.join(this.config, 'env'), 'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     this.resource = `${this.pub}/${this.secret}/mcp`;
     this.oauth = `${this.pub}/${this.secret}/oauth`;
@@ -190,7 +204,15 @@ const stopAll = async () => { await main.stop(); await second.stop(); sink.close
 process.on('exit', () => { if (process.env.KEEP_TEST_FIXTURES !== '1') try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 try {
-  assert.equal(await main.start(), true, `main bridge did not start: ${main.stderr}`);
+  // Force a real check-then-bind collision before this home has any tokens.
+  const occupied = net.createServer();
+  await new Promise(resolve => occupied.listen(0, '127.0.0.1', resolve));
+  const occupiedPort = occupied.address().port;
+  main.port = occupiedPort;
+  try {
+    assert.equal(await main.start(), true, `main bridge did not start: ${main.stderr}`);
+    assert.notEqual(main.port, occupiedPort, 'initial OAuth startup retries a lost port');
+  } finally { await new Promise(resolve => occupied.close(resolve)); }
   assert.equal(await second.start(), true, `second bridge did not start: ${second.stderr}`);
   for (const srv of [main, second]) { const r = srv.cli(['connect', 'allow-callback', CALLBACK]); assert.equal(r.code, 0, r.stderr); }
   assert.equal(main.cli(['connect', 'allow-callback', 'https://vendor.example/other/*']).code, 0);
@@ -676,14 +698,18 @@ try {
   });
 
   await check('10b', 'with an https public URL (no test flag) cookies are Secure and every URL is https; plain http needs the explicit flag', async () => {
-    const tls = new Bridge('tls'); tls.port = await freePort(); fs.mkdirSync(tls.config, { recursive: true });
-    fs.writeFileSync(path.join(tls.config, 'workers.json'), tls.rawWorkers, { mode: 0o600 });
-    tls.pub = `https://127.0.0.1:${tls.port}`; // the listener is plain http on loopback; the tunnel in front would speak https
-    tls.noTestFlag = true;
-    const init = tls.cli(['as-init', '--public-url', tls.pub]); assert.equal(init.code, 0, init.stderr);
-    assert.equal(tls.cli(['as-init', '--public-url', `http://127.0.0.1:${tls.port}`]).code === 0 && fs.readFileSync(path.join(tls.config, 'as.json'), 'utf8').includes('http://'), false, 'an http URL must not be accepted without the test flag');
-    assert.equal(await tls.start(), true, tls.stderr);
+    const tls = new Bridge('tls'), occupied = net.createServer();
+    await new Promise(resolve => occupied.listen(0, '127.0.0.1', resolve));
     try {
+      tls.port = occupied.address().port; fs.mkdirSync(tls.config, { recursive: true });
+      fs.writeFileSync(path.join(tls.config, 'workers.json'), tls.rawWorkers, { mode: 0o600 });
+      tls.pub = `https://127.0.0.1:${tls.port}`; // the listener is plain http on loopback; the tunnel in front would speak https
+      tls.noTestFlag = true;
+      const init = tls.cli(['as-init', '--public-url', tls.pub]); assert.equal(init.code, 0, init.stderr);
+      assert.equal(tls.cli(['as-init', '--public-url', `http://127.0.0.1:${tls.port}`]).code === 0 && fs.readFileSync(path.join(tls.config, 'as.json'), 'utf8').includes('http://'), false, 'an http URL must not be accepted without the test flag');
+      assert.equal(await tls.start(), true, tls.stderr);
+      assert.notEqual(tls.port, occupied.address().port, 'HTTPS startup retries the occupied port without enabling test HTTP');
+      await new Promise(resolve => occupied.close(resolve));
       const base = `http://127.0.0.1:${tls.port}`;
       const meta = await (await fetch(`${base}/.well-known/oauth-authorization-server/${tls.secret}/oauth`)).json();
       assert.equal(meta.issuer, `${tls.pub}/${tls.secret}/oauth`); assert.ok(meta.token_endpoint.startsWith('https://'));
@@ -858,7 +884,7 @@ try {
         assert.equal(asked.status, 400, `${redirect} must not borrow another client's registered redirect`);
       }
       globalThis.fetch = realFetch;
-    } finally { await tls.stop(); }
+    } finally { if (occupied.listening) await new Promise(resolve => occupied.close(resolve)); await tls.stop(); }
   });
 
   // ---- 11. two connections, two workers, one subject --------------------------------------------------------------------------

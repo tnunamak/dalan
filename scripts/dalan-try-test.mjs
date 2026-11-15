@@ -50,10 +50,34 @@ function startTry(args, { cwd = runCwd, env = {} } = {}) {
   return run;
 }
 
+// Let the trial's allocator retry bind races; return the port it actually started.
+async function startAutoTry(home, options) {
+  const run = startTry(['--home', home], options);
+  try {
+    const match = await run.until(/Bridge up on http:\/\/127\.0\.0\.1:(\d+)\. Loopback only\./);
+    run.home = home;
+    return { run, port: Number(match[1]) };
+  } catch (error) {
+    await run.stop();
+    throw error;
+  }
+}
+
 const portClosed = port => new Promise(resolve => {
   const socket = net.connect(port, '127.0.0.1');
   socket.once('connect', () => { socket.destroy(); resolve(false); });
   socket.once('error', () => resolve(true));
+});
+
+// A stopped TCP port may already belong to another suite. This socket belongs
+// only to the trial home, so its closure identifies the bridge being tested.
+const bridgeClosed = home => new Promise((resolve, reject) => {
+  const socket = net.connect({path:defaultPath(home, '.local/share/dot-bridge', 'admin.sock')});
+  socket.once('connect', () => { socket.destroy(); resolve(false); });
+  socket.once('error', error => {
+    if (['ENOENT','ECONNREFUSED'].includes(error.code)) resolve(true);
+    else reject(error);
+  });
 });
 
 const listenOn = port => new Promise((resolve, reject) => {
@@ -102,11 +126,10 @@ function bridgePid(port) {
 
 // `runTry` in this process with its input and output captured. `finished` settles with {} or { error }.
 async function liveTry(name, { clock, beforeCommand } = {}) {
-  const port = await reservedPort();
-  const run = { port, out: '', fullOut: '', errorContext: { started: false, shellCli: `'${path.resolve(dalanBin)}'` }, input: new PassThrough(), controller: new AbortController(), home: path.join(tmp, name) };
+  const run = { port: null, out: '', fullOut: '', errorContext: { started: false, shellCli: `'${path.resolve(dalanBin)}'` }, input: new PassThrough(), controller: new AbortController(), home: path.join(tmp, name) };
   run.finished = runTry({
-    argv: ['--home', run.home, '--port', String(port)], env: { PATH: process.env.PATH, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
-    out: { write: text => { run.out += text; run.fullOut += text; } }, input: run.input, signal: run.controller.signal, clock, beforeCommand, errorContext: run.errorContext,
+    argv: ['--home', run.home], env: { PATH: process.env.PATH, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
+    out: { write: text => { run.out += text; run.fullOut += text; const match=run.out.match(/Bridge up on http:\/\/127\.0\.0\.1:(\d+)/);if(match)run.port=Number(match[1]); } }, input: run.input, signal: run.controller.signal, clock, beforeCommand, errorContext: run.errorContext,
   }).then(() => ({}), error => ({ error }));
   run.until = async (pattern, ms = 60_000) => {
     for (let waited = 0; !pattern.test(run.out); waited += 50) {
@@ -385,21 +408,20 @@ test('a port lost to another process between the check and the bind is retried o
 });
 
 test('Ctrl-C during the demo stops try promptly', { timeout: 60_000 }, async () => {
-  const port = await reservedPort();
-  const run = startTry(['--home', path.join(tmp, 'early-stop'), '--port', String(port)]);
+  const { run } = await startAutoTry(path.join(tmp, 'early-stop'));
   await run.until(/Bridge up on/);
+  assert.equal(await bridgeClosed(run.home), false, 'this trial bridge is listening before Ctrl-C');
   run.child.kill('SIGINT');
   const exit = await run.exitsWithin(15_000, 'Ctrl-C while the demo was running');
   assert.equal(exit.code, 0, run.stderr);
   assert.doesNotMatch(run.stdout, /Self-check/, 'the demo was cut short');
   assert.match(run.stdout, /Stopped\./);
-  assert.ok(await portClosed(port), 'the bridge stopped with the command');
+  assert.ok(await bridgeClosed(run.home), 'this trial bridge stopped with the command');
 });
 
 test('a second signal during the stop does not cut the cleanup short', { timeout: 90_000 }, async () => {
   // npx forwards the terminal's Ctrl-C to the command it runs, so try can get SIGINT twice in quick succession.
-  const port = await reservedPort();
-  const run = startTry(['--home', path.join(tmp, 'double-signal'), '--port', String(port)]);
+  const { run } = await startAutoTry(path.join(tmp, 'double-signal'));
   await run.until(/Waiting for your worker/, 60_000);
   run.child.kill('SIGINT');
   await new Promise(resolve => setTimeout(resolve, 50));
@@ -408,7 +430,7 @@ test('a second signal during the stop does not cut the cleanup short', { timeout
   assert.equal(exit.signal, null, `killed by ${exit.signal}\nstdout:\n${scrub(run.stdout)}`);
   assert.equal(exit.code, 0, run.stderr);
   assert.match(run.stdout, /Stopped\. Trial home kept at .*The demo grant and files are removed\./);
-  assert.ok(await portClosed(port), 'the bridge stopped with the command');
+  assert.ok(await bridgeClosed(run.home), 'this trial bridge stopped with the command');
 });
 
 test('ended input stops try after the demo, reuses the home and port, and keeps a reused home private', { timeout: 90_000 }, async () => {
@@ -452,8 +474,7 @@ test('ended input stops try after the demo, reuses the home and port, and keeps 
 
 test('one command finishes a demo job, then pairs, runs and accepts a second client', { timeout: 120_000 }, async () => {
   const home = path.join(tmp, 'trial');
-  const port = await reservedPort();
-  const run = startTry(['--home', home, '--port', String(port)]);
+  const { run, port } = await startAutoTry(home);
   try {
     await run.until(/Self-check passed in [\d.]+ s/);
     assert.ok(run.stdout.startsWith(`Dalan trial. Home: ${home}\n`), 'the heading names the trial home');
@@ -518,7 +539,7 @@ test('one command finishes a demo job, then pairs, runs and accepts a second cli
     run.child.kill('SIGKILL');
   }
   assert.match(run.stdout, /Stopped\. Trial home kept at/);
-  assert.ok(await portClosed(port), 'the bridge stopped with the command');
+  assert.ok(await bridgeClosed(run.home), 'this trial bridge stopped with the command');
   assert.ok(!run.stdout.includes('\u001b'), 'plain text output');
 });
 
@@ -529,8 +550,8 @@ test('a local clone can be granted: DALAN_GITHUB_URL_* given to try reaches the 
   fs.writeFileSync(path.join(clone, 'README.md'), '# My clone\n');
   for (const args of [['init', '-q', '-b', 'main'], ['add', 'README.md'], ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'one']]) assert.equal(spawnSync('git', ['-C', clone, ...args], { env: gitEnv }).status, 0);
   const sha = spawnSync('git', ['-C', clone, 'rev-parse', 'HEAD'], { env: gitEnv, encoding: 'utf8' }).stdout.trim();
-  const home = path.join(tmp, 'local-clone-home'), port = await reservedPort();
-  const run = startTry(['--home', home, '--port', String(port)], { env: { DALAN_GITHUB_URL_LOCAL_MY_CLONE: clone, GITHUB_CLONE_BASE_URL: 'http://127.0.0.1:9' } });
+  const home = path.join(tmp, 'local-clone-home');
+  const { run, port } = await startAutoTry(home, { env: { DALAN_GITHUB_URL_LOCAL_MY_CLONE: clone, GITHUB_CLONE_BASE_URL: 'http://127.0.0.1:9' } });
   try {
     await run.until(/Waiting for your worker/);
     const bridge = { PATH: process.env.PATH, HOME: home, DALAN_LOOPBACK: '1', DALAN_AUTH_MODE: 'builtin', DALAN_PORT: String(port) };
@@ -739,8 +760,7 @@ test('a client that retries after the owner approved is asked again until the wo
 
 test('from the command line, a bridge that dies after the report is accepted ends with the exit code and the recovery commands', { timeout: 120_000, skip: process.platform !== 'linux' && 'finds the bridge process through /proc' }, async () => {
   const home = path.join(tmp, 'death-cli');
-  const port = await reservedPort();
-  const run = startTry(['--home', home, '--port', String(port)]);
+  const { run, port } = await startAutoTry(home);
   try {
     const url = await tryUrl(run);
     const jobId = (await run.until(/Job (req_[-\w]+) is queued for your worker/))[1];
@@ -791,8 +811,7 @@ const assertSecretAbsent = (secret, home, run, label) => {
 
 test('the CLI never prints or logs the path credential, on success or on failure', { timeout: 300_000 }, async () => {
   const okHome = path.join(tmp, 'cli-secret-ok');
-  const okPort = await reservedPort();
-  const ok = startTry(['--home', okHome, '--port', String(okPort)]);
+  const { run: ok } = await startAutoTry(okHome);
   try {
     await ok.until(/Waiting for your worker/, 250_000);
     ok.child.stdin.end();

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import net from 'node:net';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
@@ -10,8 +10,7 @@ import { Store, loadRedeliveryLimits } from '../src/store.mjs';
 import { checkAlerts, redactNote } from '../src/alerts.mjs';
 
 const repo=resolve(new URL('..',import.meta.url).pathname),home=await mkdtemp(join(tmpdir(),'dalan-bridge-liveness-'));
-// Use a free port to avoid fixture collisions unless LIVENESS_PORT pins it.
-const port=Number(process.env.LIVENESS_PORT)||await new Promise((resolve,reject)=>{const probe=net.createServer();probe.once('error',reject);probe.listen(0,'127.0.0.1',()=>{const {port}=probe.address();probe.close(()=>resolve(port));});});
+let port;
 const assert=(ok,message)=>{if(!ok) throw new Error(message);};
 const log=message=>console.log(`PASS ${message}`);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -212,11 +211,11 @@ try {
   log('migration reopens cleanly');
 
   // ---- server level: guidance and attention in tool results, activity recorded
-  const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1',DOT_BRIDGE_T3_DRY_RUN:'1'};
+  const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1',DOT_BRIDGE_T3_DRY_RUN:'1'};
   service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});
   let out='';service.stdout.on('data',b=>out+=b);service.stderr.on('data',b=>process.stderr.write(b));
   for(let i=0;i<100&&!out.includes('MCP listening');i++) await sleep(100);
-  assert(out.includes('MCP listening'),'server did not start');
+  port=portFromListeningBanner(out); assert(port,'server did not start or report its bound port'); env.DOT_BRIDGE_PORT=String(port);
   const secret=(await readFile(join(home,'.config/dot-bridge/env'),'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
   const rpc=async(method,params={})=>(await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method,params})})).json();
   const tool=async(name,args)=>{const r=await rpc('tools/call',{name,arguments:args});if(r.result.isError) throw new Error(r.result.content[0].text);return JSON.parse(r.result.content[0].text);};

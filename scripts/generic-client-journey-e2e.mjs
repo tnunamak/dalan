@@ -41,7 +41,7 @@ class Bridge {
     fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
     return this;
   }
-  async start() {
+  async start(attempts = 3) {
     this.stderr = ''; this.exited = null;
     this.child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let ready = false;
@@ -49,7 +49,14 @@ class Bridge {
     this.child.stderr.on('data', b => { this.stderr += b; });
     this.child.once('exit', code => { this.exited = code; });
     for (let i = 0; i < 300 && !ready && this.exited === null; i++) await sleep(50);
+    if (!ready && !this.startedOnce && attempts > 1 && /EADDRINUSE/.test(this.stderr)) {
+      await this.stop();
+      fs.rmSync(this.config, { recursive: true, force: true });
+      await this.init();
+      return this.start(attempts - 1);
+    }
     assert.ok(ready, `bridge did not start: ${this.stderr}`);
+    this.startedOnce = true;
     this.secret = fs.readFileSync(path.join(this.config, 'env'), 'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     this.resource = `${this.pub}/${this.secret}/mcp`;
     this.oauth = `${this.pub}/${this.secret}/oauth`;

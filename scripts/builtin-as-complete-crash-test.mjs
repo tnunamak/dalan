@@ -10,20 +10,20 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { initAsFiles } from '../src/as-files.mjs';
 import { createAs } from '../src/as.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
 
 const root = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'dbcomplete-'));
 process.on('exit', () => { try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ } });
-const port = await reservedPort();
+let as;
+const server = http.createServer(async (req, res) => { if (!as.hostOk(req)) { res.writeHead(421); res.end(); return; } if (!(await as.handle(req, res))) { res.writeHead(404); res.end(); } });
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+const port = server.address().port;
 const pub = `http://127.0.0.1:${port}`, resource = `${pub}/secret/mcp`, oauth = `${pub}/secret/oauth`, CALLBACK = 'https://vendor.example/oauth/callback';
 const dir = path.join(root, 'cfg');
 initAsFiles(dir, { publicUrl: pub, allowHttp: true });
 let offset = 0;
 const makeAs = () => createAs({ dir, resource, allowHttp: true, now: () => Date.now() + offset, workerNames: () => ['lark', 'duet'] });
-let as = makeAs();
+as = makeAs();
 as.ops.allowCallback({ pattern: CALLBACK });
-const server = http.createServer(async (req, res) => { if (!as.hostOk(req)) { res.writeHead(421); res.end(); return; } if (!(await as.handle(req, res))) { res.writeHead(404); res.end(); } });
-await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
 
 const failures = [];
 async function check(id, name, fn) { try { await fn(); console.log(`PASS ${id} ${name}`); } catch (error) { failures.push(id); console.log(`FAIL ${id} ${name}: ${String(error.message ?? error).split('\n').slice(0, 3).join(' | ')}`); } }

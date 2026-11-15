@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Store } from '../src/store.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const repo=resolve(new URL('..',import.meta.url).pathname),home=await mkdtemp(join(tmpdir(),'dalan-bridge-queue-wake-'));
 const assert=(ok,message)=>{if(!ok) throw new Error(message);};
@@ -30,11 +31,12 @@ try {
     if(data.type==='verification') res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({challenge:data.challenge}));
     else { events.push(data);res.writeHead(204).end(); }});
   await new Promise(r=>webhook.listen(0,'127.0.0.1',r));
-  const reserve=http.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));
-  const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1',DOT_BRIDGE_T3_DRY_RUN:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'0',CONFORMANCE_CLOCK_FILE:clockFile,CONFORMANCE_TICK_ACK_FILE:ackFile,CONFORMANCE_BASE_MS:String(baseMs)};
+  let port;
+  const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1',DOT_BRIDGE_T3_DRY_RUN:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'0',CONFORMANCE_CLOCK_FILE:clockFile,CONFORMANCE_TICK_ACK_FILE:ackFile,CONFORMANCE_BASE_MS:String(baseMs)};
   service=spawn(process.execPath,['--import','./scripts/conformance/clock-preload.mjs','src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});
   let out='';service.stdout.on('data',b=>out+=b);service.stderr.on('data',b=>process.stderr.write(b));
-  await waitFor(()=>out.includes('MCP listening'),'server ready',10000);
+  await waitFor(()=>Boolean(portFromListeningBanner(out)),'server ready',10000);
+  port=portFromListeningBanner(out);
   const secret=(await readFile(join(home,'.config/dot-bridge/env'),'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
   const rpc=async(method,params={})=>(await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method,params})})).json();
   const tool=async(name,args)=>{const r=await rpc('tools/call',{name,arguments:args});if(r.result.isError) throw new Error(r.result.content[0].text);return JSON.parse(r.result.content[0].text);};

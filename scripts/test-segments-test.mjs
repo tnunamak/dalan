@@ -72,6 +72,19 @@ try {
     }
   });
   if(process.platform!=='linux')console.log('SKIP runner process-stat race: Linux /proc is required');
+  await check('one host-check suffix is shared by segments and renewed for each suite', async () => {
+    const command = `${node} -e 'console.log("UNIT_SUFFIX="+process.env.DALAN_HOST_CHECK_UNIT_SUFFIX)'`;
+    const first = await fixture('unit-suffix-first', [command, command], {DALAN_HOST_CHECK_UNIT_SUFFIX:'inherited'});
+    const second = await fixture('unit-suffix-second', [command]);
+    const a = await first.ended, b = await second.ended;
+    assert.equal(a.code, 0, a.output); assert.equal(b.code, 0, b.output);
+    const suffixes = output => [...output.matchAll(/^UNIT_SUFFIX=(.+)$/gm)].map(match => match[1]);
+    const names = suffixes(a.output), other = suffixes(b.output);
+    assert.equal(names.length, 2); assert.equal(other.length, 1);
+    assert.match(names[0], /^suite-[a-zA-Z0-9-]+$/);
+    assert.equal(names[0], names[1], 'segments retain the same reservation');
+    assert.notEqual(names[0], other[0], 'independent suites never inherit a shared reservation');
+  });
   await check('real entry point reports both failures and still executes later commands', async () => {
     const f = await fixture('exits', [`${node} -e 'process.exit(7)'`, `${node} -e 'console.log("LATER_RAN")'`, `${node} -e 'process.exit(9)'`]);
     const result = await f.ended;

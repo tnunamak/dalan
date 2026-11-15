@@ -2,7 +2,7 @@
 // --exclude-sensitive: a directory scope drops the sensitive files it holds (and says why) instead of failing the whole submit.
 // A file the submitter named is never dropped quietly, and without the option the old refusal stands.
 import assert from 'node:assert/strict';
-import net from 'node:net';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 import fs from 'node:fs';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
@@ -130,7 +130,6 @@ console.log('PASS scope narrowing: sensitive files drop from a directory scope w
 // ---- e2e through the server and CLI, on a fixture repository: the flag, the recorded reason, a retry of the same request
 const repo = resolve(new URL('..', import.meta.url).pathname), home = fs.mkdtempSync(join(tmpdir(), 'dalan-bridge-scope-'));
 const root = join(home, '.local/share/dalan'), fixture = join(home, 'fixture');
-const freePort = () => new Promise((done, fail) => { const probe = net.createServer(); probe.once('error', fail); probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => done(port)); }); });
 const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: '0', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_T3_DRY_RUN: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '0', DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE: fixture, PATH: `${join(home, 'bin')}:${process.env.PATH}` };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const git = args => { const r = spawnSync('git', args, { encoding: 'utf8', env }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
@@ -180,10 +179,10 @@ try {
   const base = git(['-C', fixture, 'rev-parse', 'HEAD']);
   let ready = false, stderr = '';
   for (let attempt = 0; attempt < 5 && !ready; attempt++) {
-    env.DOT_BRIDGE_PORT = String(await freePort());
+    env.DOT_BRIDGE_PORT = '0';
     service = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
     const state = trackChild(service); attempted.push(state);
-    stderr = ''; service.stdout.on('data', b => { if (String(b).includes('MCP listening')) ready = true; }); service.stderr.on('data', b => stderr += b);
+    let stdout = ''; stderr = ''; service.stdout.on('data', b => { stdout += String(b); const actual = portFromListeningBanner(stdout); if (actual) { env.DOT_BRIDGE_PORT = String(actual); ready = true; } }); service.stderr.on('data', b => stderr += b);
     for (let i = 0; i < 200 && !ready && service.exitCode === null; i++) await sleep(25);
     if (!ready && service.exitCode !== null) await state.done;
     if (!ready && !stderr.includes('EADDRINUSE')) break;

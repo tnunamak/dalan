@@ -10,11 +10,13 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const repo=fileURLToPath(new URL('..',import.meta.url));
 const home=await mkdtemp(join(tmpdir(),'worker-break-e2e-'));
-const root=join(home,'.local/share/dot-bridge'),port=19007;
-const env={...process.env,DALAN_ENABLE_T3_TOOLS:'1',HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_AUTH_MODE:'',DOT_BRIDGE_ENABLE_WORKSPACE:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_CRASH_AT:'',DOT_BRIDGE_T3_DRY_RUN:'1'};
+const root=join(home,'.local/share/dot-bridge');
+let port=null;
+const env={...process.env,DALAN_ENABLE_T3_TOOLS:'1',HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_AUTH_MODE:'',DOT_BRIDGE_ENABLE_WORKSPACE:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_CRASH_AT:'',DOT_BRIDGE_T3_DRY_RUN:'1'};
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 let service,output='';
 function run(argv,input='') { return new Promise((resolve,reject)=>{const child=spawn(argv[0],argv.slice(1),{cwd:repo,env,stdio:['pipe','pipe','pipe']});let stdout='',stderr='';child.on('error',reject);child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.on('close',code=>resolve({code,stdout,stderr}));child.stdin.end(input);}); }
@@ -24,7 +26,7 @@ async function until(test,label) { for(let i=0;i<200;i++){if(await test())return
 try {
   await mkdir(join(home,'.config/dot-bridge'),{recursive:true});
   await writeFile(join(home,'.config/dot-bridge/limits.json'),JSON.stringify({max_claimed_outer_assignments:10,background_max_in_flight:10,max_claims_per_hour:3,max_tool_calls_per_hour:5}),{mode:0o600});
-  let ready=false;service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});service.stdout.on('data',b=>{output+=b;if(String(b).includes('MCP listening'))ready=true;});service.stderr.on('data',b=>output+=b);
+  let ready=false;service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});service.stdout.on('data',b=>{output+=b;port=portFromListeningBanner(output);if(port)ready=true;});service.stderr.on('data',b=>output+=b);
   await until(()=>ready,'server startup');
   const secret=(await readFile(join(home,'.config/dot-bridge/env'),'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
   const tool=async name=>{const r=await (await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method:'tools/call',params:{name,arguments:{}}})})).json();assert.equal(r.result.isError,false,JSON.stringify(r));return JSON.parse(r.result.content[0].text);};
@@ -104,15 +106,15 @@ try {
   assert.deepEqual((await ok('learned','--json')).over_estimate.map(o=>[o.name,o.limit]),[['tool_calls_per_hour',5]],'learned --json over_estimate');
   // response-byte estimate against a second bridge: max_response_bytes_per_hour 100000, a fake t3code with 60 KB reads
   { const exited=new Promise(resolve=>service.once('exit',resolve));service.kill('SIGTERM');await exited; }
-  const home2=await mkdtemp(join(tmpdir(),'dalan-break-bytes-e2e-')), root2=join(home2,'.local/share/dot-bridge'), port2=port+1;
+  const home2=await mkdtemp(join(tmpdir(),'dalan-break-bytes-e2e-')), root2=join(home2,'.local/share/dot-bridge'); let port2=null;
   try {
-    const env2={...env,HOME:home2, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:String(port2),DOT_BRIDGE_T3CODE_BIN:join(home2,'t3code'),NODE_ENV:'test'};
+    const env2={...env,HOME:home2, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_T3CODE_BIN:join(home2,'t3code'),NODE_ENV:'test'};
     await mkdir(join(home2,'.config/dot-bridge'),{recursive:true});
     await writeFile(join(home2,'.config/dot-bridge/limits.json'),JSON.stringify({max_claimed_outer_assignments:10,background_max_in_flight:10,max_claims_per_hour:1000,max_tool_calls_per_hour:100000,max_response_bytes_per_hour:100000}),{mode:0o600});
     await writeFile(join(home2,'t3code'),`#!/usr/bin/env node\nconsole.log(JSON.stringify({ok:true,data:{thread:{id:'thread_fake',status:'active',messages:[{role:'assistant',text:'x'.repeat(60000)}]}}}));\n`,{mode:0o755});
     const run2=(argv,input='')=>new Promise((resolve,reject)=>{const child=spawn(argv[0],argv.slice(1),{cwd:repo,env:env2,stdio:['pipe','pipe','pipe']});let stdout='',stderr='';child.on('error',reject);child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.on('close',code=>resolve({code,stdout,stderr}));child.stdin.end(input);});
     const status2=async()=>{const r=await run2([process.execPath,'bin/dalan.mjs','status','--json']);assert.equal(r.code,0,r.stderr);return JSON.parse(r.stdout);};
-    let ready2=false;service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env:env2,stdio:['ignore','pipe','pipe']});service.stdout.on('data',b=>{output+=b;if(String(b).includes('MCP listening'))ready2=true;});service.stderr.on('data',b=>output+=b);
+    let ready2=false,output2='';service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env:env2,stdio:['ignore','pipe','pipe']});service.stdout.on('data',b=>{output2+=b;port2=portFromListeningBanner(output2);if(port2)ready2=true;});service.stderr.on('data',b=>{output+=b;output2+=b;});
     await until(()=>ready2,'second server startup');
     const secret2=(await readFile(join(home2,'.config/dot-bridge/env'),'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     let received=0;

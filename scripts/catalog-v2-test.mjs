@@ -6,18 +6,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const tempRoot = path.join(os.homedir(), '.tmp');
 fs.mkdirSync(tempRoot, { recursive: true });
 const home = fs.mkdtempSync(path.join(tempRoot, 'dalan-catalog-v2-'));
 fs.mkdirSync(path.join(home, '.config/dot-bridge'), { recursive: true });
-const port = Number(process.env.E2E_CATALOG_V2_PORT || 8813);
+let port = null, output = '';
 const child = spawn(process.execPath, ['src/server.mjs'], {
-  cwd: root, env: { ...process.env, HOME: home, DALAN_ENABLE_T3_TOOLS: '1', DALAN_LEGACY_PROFILE: '1', DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_AUTH_MODE: '', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'],
+  cwd: root, env: { ...process.env, HOME: home, DALAN_ENABLE_T3_TOOLS: '1', DALAN_LEGACY_PROFILE: '1', DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: '', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'],
 });
 let ready = false;
-child.stdout.on('data', c => { if (String(c).includes('MCP listening')) ready = true; });
+child.stdout.on('data', c => { output += String(c); port = portFromListeningBanner(output); if (port) ready = true; });
 child.stderr.on('data', () => {});
 try {
   for (let i = 0; i < 200 && !ready; i++) await new Promise(r => setTimeout(r, 50));

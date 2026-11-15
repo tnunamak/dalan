@@ -4,6 +4,9 @@ const fetch=fetchForPublicHost('catalog-fixture.invalid');
 // Real loopback HTTP catalogs. All identities, keys and state are disposable fixtures.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import {portFromListeningBanner} from '../src/test-support/port.mjs';
+import {SOCKET_PATH_LIMIT} from '../src/admin-socket.mjs';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
@@ -15,7 +18,10 @@ import addFormats from 'ajv-formats';
 
 const root = path.resolve(import.meta.dirname, '..');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const sandbox = fs.mkdtempSync(path.resolve('fixture-'));
+const temp = fs.realpathSync(os.tmpdir());
+const socketTail = path.join('mcp-schema-xxxxxx', 'oauth', '.local/share/dot-bridge/admin.sock');
+const tempRoot = Buffer.byteLength(path.join(temp, socketTail)) <= SOCKET_PATH_LIMIT ? temp : '/tmp';
+const sandbox = fs.mkdtempSync(path.join(tempRoot, 'mcp-schema-'));
 fs.chmodSync(sandbox, 0o700);
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'catalog-fixture', alg: 'RS256', use: 'sig' };
@@ -69,18 +75,18 @@ async function start(label, profile, oauth = false) {
   child.stdout.on('data', chunk => { output += chunk; });
   child.stderr.on('data', chunk => { errorOutput += chunk; });
   child.on('error', error => { launchError = error; });
-  let match;
+  let port;
   for (let i = 0; i < 400; i++) {
     if (launchError) throw launchError;
-    match = /MCP listening on 127\.0\.0\.1:(\d+)/.exec(output);
-    if (match && output.includes('admin socket')) break;
+    port = portFromListeningBanner(output);
+    if (port && output.includes('admin socket')) break;
     if (child.exitCode !== null) throw new Error('fixture startup failed: ' + errorOutput);
     await sleep(25);
   }
-  assert(match && output.includes('admin socket'), 'fixture startup timeout: ' + errorOutput);
+  assert(port && output.includes('admin socket'), 'fixture startup timeout: ' + errorOutput);
   const secret = fs.readFileSync(path.join(cfg, 'env'), 'utf8').match(/^BRIDGE_PATH_SECRET=(.+)$/m)[1];
   async function rpc(method, params = {}, subject = 'fixture-a', protocolVersion = '2026-07-28') {
-    const response = await fetch('http://127.0.0.1:' + match[1] + '/' + secret + '/mcp', {
+    const response = await fetch('http://127.0.0.1:' + port + '/' + secret + '/mcp', {
       method: 'POST', signal: AbortSignal.timeout(10000),
       headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream', 'mcp-protocol-version': protocolVersion, 'mcp-method': method, ...(oauth ? { authorization: 'Bearer ' + token(subject) } : {}) },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: {...params, _meta: {'io.modelcontextprotocol/protocolVersion':protocolVersion,'io.modelcontextprotocol/clientInfo':{name:'mcpval',version:'1.0.0'},'io.modelcontextprotocol/clientCapabilities':{}}} }),
@@ -96,7 +102,7 @@ async function start(label, profile, oauth = false) {
   // dispatch). There is therefore no JSON reply to schema-check here;
   // the 202 asserts the notifications/initialized step was accepted.
   async function notify(method, protocolVersion = '2026-07-28', subject = 'fixture-a') {
-    const response = await fetch('http://127.0.0.1:' + match[1] + '/' + secret + '/mcp', {
+    const response = await fetch('http://127.0.0.1:' + port + '/' + secret + '/mcp', {
       method: 'POST', signal: AbortSignal.timeout(10000),
       headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream', 'mcp-protocol-version': protocolVersion, 'mcp-method': method, ...(oauth ? { authorization: 'Bearer ' + token(subject) } : {}) },
       body: JSON.stringify({ jsonrpc: '2.0', method }),

@@ -10,7 +10,7 @@ import {spawn,spawnSync} from 'node:child_process';
 import {generateKeyPairSync,sign,randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
-import {reservedPort} from '../src/test-support/port.mjs';
+import {portFromListeningBanner} from '../src/test-support/port.mjs';
 
 const root=fileURLToPath(new URL('..',import.meta.url));
 if(process.argv.includes('--fixture-server')) {
@@ -68,17 +68,17 @@ if(process.argv.includes('--fixture-server')) {
   const jwks=http.createServer((req,res)=>res.end(JSON.stringify({keys:[jwk]})));
   await new Promise(resolve=>jwks.listen(0,'127.0.0.1',resolve));
   const issuer=`http://127.0.0.1:${jwks.address().port}`;
-  const port=await reservedPort();
+  let port=null;
   fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{workspaceAllowed:true,connections:[{issuer,subject:'fixture',client_id:'fixture-client'}],repos:['test/fixture']}}}),{mode:0o600});
   fs.writeFileSync(path.join(config,'oauth.env'),`OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=https://fixture.test\nOAUTH_JWKS_URI=${issuer}/jwks\nOAUTH_ALLOWED_SUBJECTS=fixture\n`,{mode:0o600});
-  const executions=path.join(home,'executions.jsonl'),env={...process.env,HOME:home,DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_AUTH_MODE:'oauth',DOT_BRIDGE_TEST_OAUTH:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'1',DALAN_HOST_CHECKS:'1',DOT_BRIDGE_MIN_FREE_BYTES:'0',DOT_BRIDGE_WORKSPACE_ROOT:path.join(home,'work'),DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE:repo,CHECK_SKIP_EXECUTIONS:executions};
+  const executions=path.join(home,'executions.jsonl'),env={...process.env,HOME:home,DALAN_PORT:'0',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_AUTH_MODE:'oauth',DOT_BRIDGE_TEST_OAUTH:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'1',DALAN_HOST_CHECKS:'1',DOT_BRIDGE_MIN_FREE_BYTES:'0',DOT_BRIDGE_WORKSPACE_ROOT:path.join(home,'work'),DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE:repo,CHECK_SKIP_EXECUTIONS:executions};
   const service=spawn(process.execPath,['--experimental-test-module-mocks',fileURLToPath(import.meta.url),'--fixture-server'],{cwd:root,env,stdio:['ignore','pipe','pipe']});
   let out='',err='';service.stdout.on('data',b=>out+=b);service.stderr.on('data',b=>err+=b);
   let db;
   try {
     await new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>reject(new Error(`fixture server readiness: ${err}`)),10000);
-      service.stdout.on('data',()=>{if(out.includes('MCP listening')&&out.includes('admin socket')){clearTimeout(timer);resolve();}});
+      service.stdout.on('data',()=>{if((port=portFromListeningBanner(out))&&out.includes('admin socket')){clearTimeout(timer);resolve();}});
       service.once('exit',code=>{clearTimeout(timer);reject(new Error(`fixture server exited ${code}: ${err}`));});
     });
     const header=Buffer.from(JSON.stringify({alg:'RS256',kid:'fixture'})).toString('base64url');

@@ -2,12 +2,11 @@ import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {readHostStart,writeHostReverify,readVerifiedHostStop,validBootId} from './host-budget-receipts.mjs';
 import {readCgroupProcesses} from './host-cgroup.mjs';
-import {HOST_UNIT} from './host-budget.mjs';
 
 const currentBootId=()=>fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim();
 // Only "inactive" or "failed" shows the unit is gone. Any other answer, error or timeout counts as still active.
-function hostUnitInactive() {
-  const r=spawnSync('/usr/bin/systemctl',['--user','is-active',HOST_UNIT],{encoding:'utf8',timeout:5000});
+function hostUnitInactive(unit) {
+  const r=spawnSync('/usr/bin/systemctl',['--user','is-active',unit],{encoding:'utf8',timeout:5000});
   return !r.error&&['inactive','failed'].includes((r.stdout??'').trim());
 }
 // A missing cgroup directory means no process remains. Any other read error propagates and keeps the stop unverified.
@@ -32,7 +31,10 @@ export function reverifyHostStop({receiptDir,checkRunId},{bootId=currentBootId,u
     if(!validBootId(now)) return null;
     let basis;
     if(now!==start.boot_id) basis='boot_changed';
-    else if(typeof start.cgroup==='string'&&unitInactive()===true) {
+    else if(typeof start.cgroup==='string') {
+      // The trusted start receipt records the exact unit, including legacy names.
+      const unit=start.cgroup.split('/').at(-1);
+      if(!/^dot-bridge-host-check(?:-[a-zA-Z0-9-]+)?\.service$/.test(unit)||unitInactive(unit)!==true) return null;
       const remaining=scan('/sys/fs/cgroup'+start.cgroup);
       if(Array.isArray(remaining)&&remaining.length===0) basis='cgroup_empty';
     }

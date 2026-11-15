@@ -10,7 +10,7 @@ import {test,after} from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import net from 'node:net';
+import {reservedPort} from '../src/test-support/port.mjs';
 import os from 'node:os';
 import {spawn,execFileSync} from 'node:child_process';
 import {once} from 'node:events';
@@ -43,8 +43,7 @@ function approve(auth,name,replace,resource) {
 
 async function fixture(t,{native=false}={}) {
   const home=fs.mkdtempSync(path.join(root,'http-')),config=path.join(home,'.config/dalan'),data=path.join(home,'.local/share/dalan');
-  const listener=net.createServer();await new Promise(r=>listener.listen(0,'127.0.0.1',r));
-  const port=listener.address().port;await new Promise(r=>listener.close(r));
+  let port;
   const repository=path.join(home,'repository');fs.mkdirSync(repository);
   const git=args=>execFileSync('git',args,{encoding:'utf8',cwd:repository}).trim();
   git(['init','-q']);git(['config','user.name','Fixture']);git(['config','user.email','fixture@example.invalid']);
@@ -81,13 +80,22 @@ childProcess.execFile=fixtureExec;syncBuiltinESMExports();
   fs.writeFileSync(path.join(config,'limits.json'),JSON.stringify({max_claimed_outer_assignments:6}),{mode:0o600});
   const workersFile=path.join(config,'workers.json');
   fs.writeFileSync(workersFile,JSON.stringify({default_execution:'worker',workers:{dot:{destination:declaration,repos:[REPO],workspaceAllowed:true},other:{}}}),{mode:0o600});
-  execFileSync(process.execPath,['bin/dalan.mjs','as-init','--public-url',`http://127.0.0.1:${port}`],{cwd:code,env,stdio:'pipe'});
-  let stdout='',stderr='',auth;
-  const child=spawn(process.execPath,['--import',preload,'src/server.mjs'],{cwd:code,env,stdio:['ignore','pipe','pipe']});
-  child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);
-  t.after(async()=>{if(child.exitCode===null){const stopped=once(child,'exit');child.kill('SIGTERM');await stopped;}auth?.close();fs.rmSync(home,{recursive:true,force:true});});
-  for(let i=0;i<400&&!stdout.includes('MCP listening on')&&child.exitCode===null;i++)await delay(25);
-  assert.match(stdout,/MCP listening on/,stderr);
+
+  let child,auth;
+  t.after(async()=>{if(child&&child.exitCode===null&&child.signalCode===null){const stopped=once(child,'exit');child.kill('SIGTERM');await stopped;}auth?.close();fs.rmSync(home,{recursive:true,force:true});});
+  await reservedPort({start:async candidate=>{
+    port=candidate;env.DALAN_PORT=String(port);
+    let stdout='',stderr='';
+    for(const file of ['as.json','as-jwks.json','as-cookie-keys.json','as.sqlite','as.sqlite-wal','as.sqlite-shm'])fs.rmSync(path.join(config,file),{force:true});
+    execFileSync(process.execPath,['bin/dalan.mjs','as-init','--public-url',`http://127.0.0.1:${port}`],{cwd:code,env,stdio:'pipe'});
+    child=spawn(process.execPath,['--import',preload,'src/server.mjs'],{cwd:code,env,stdio:['ignore','pipe','pipe']});
+    child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);
+    for(let i=0;i<400&&!stdout.includes('MCP listening on')&&child.exitCode===null;i++)await delay(25);
+    if(!stdout.includes('MCP listening on')) {
+      if(child.exitCode===null&&child.signalCode===null){const stopped=once(child,'exit');child.kill('SIGTERM');await stopped;}
+      const error=new Error('bridge did not start: '+stderr);if(/EADDRINUSE/.test(stderr)&&stderr.includes(':'+port))error.code='EADDRINUSE';throw error;
+    }
+  }});
   const secret=fs.readFileSync(path.join(config,'env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1],resource=`http://127.0.0.1:${port}/${secret}/mcp`;
   auth=new AsStore(path.join(config,'as.sqlite'));
   function connect(name,replace=false) {

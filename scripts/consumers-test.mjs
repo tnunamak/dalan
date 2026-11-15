@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Consumers are assigned by code, never claimed: unit rules, admin /submit refusals, and the drainer's manifest check.
-import net from 'node:net';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
@@ -50,10 +50,10 @@ console.log('PASS consumer rules: code assigns agent, fix_pipeline and reserve; 
 // ---- e2e: the server and the drainer enforce them
 const repo = resolve(new URL('..', import.meta.url).pathname), home = fs.mkdtempSync(join(tmpdir(), 'dalan-bridge-consumers-'));
 const root = join(home, '.local/share/dot-bridge'), directory = join(root, 'manifests');
-const port = await new Promise((done, fail) => { const probe = net.createServer(); probe.once('error', fail); probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => done(port)); }); });
+let port;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const fixture = join(home, 'fixture');
-const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_T3_DRY_RUN: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '0', DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE: fixture, PATH: `${join(home, 'bin')}:${process.env.PATH}` };
+const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: '0', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_T3_DRY_RUN: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '0', DOT_BRIDGE_GITHUB_URL_TEST_FIXTURE: fixture, PATH: `${join(home, 'bin')}:${process.env.PATH}` };
 const git = args => { const r = spawnSync('git', args, { encoding: 'utf8', env }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
 let fixtureSha = null;
 const run = (argv, input = '') => new Promise(done => { const c = spawn(argv[0], argv.slice(1), { cwd: repo, env, stdio: ['pipe', 'pipe', 'pipe'] }); let out = '', err = ''; c.stdout.on('data', b => out += b); c.stderr.on('data', b => err += b); c.on('close', code => done({ code, out, err })); c.stdin.end(input); });
@@ -75,7 +75,7 @@ try {
   service = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; service.stdout.on('data', b => out += b); service.stderr.on('data', b => process.stderr.write(b));
   for (let i = 0; i < 100 && !(out.includes('MCP listening') && out.includes('admin socket')); i++) await sleep(100);
-  assert.ok(out.includes('MCP listening') && out.includes('admin socket'), 'server did not start');
+  port = portFromListeningBanner(out); assert.ok(port && out.includes('admin socket'), 'server did not start or report its bound port'); env.DOT_BRIDGE_PORT = String(port);
   const owner = 'o'.repeat(64), submit = (assignment, extra = {}) => admin('/submit', 'POST', { delivery: 'none', assignment, owner_token: owner, ...extra });
 
   // declared fields: refused with the reason, in the assignment, the meta and the request body

@@ -11,10 +11,12 @@ import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { readdirSync } from 'node:fs';
 import { readLines } from '../src/request-log.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const repo=resolve(new URL('..',import.meta.url).pathname),home=await mkdtemp(join(homedir(),'.tmp/dalan-bridge-inbox-'));
-const port=8913,producer='producer-thread-aaaa',other='producer-thread-bbbb';
-const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:String(port),DOT_DRAINED_INTERVAL_MS:'100',PATH:`${join(home,'bin')}:${process.env.PATH}`};
+let port=null;
+const producer='producer-thread-aaaa',other='producer-thread-bbbb';
+const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:'0',DOT_DRAINED_INTERVAL_MS:'100',PATH:`${join(home,'bin')}:${process.env.PATH}`};
 for(const k of ['CLAUDE_CODE_SESSION_ID','CODEX_THREAD_ID']) delete env[k];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function run(argv,input,extra={}) { return new Promise(r=>{const child=spawn(argv[0],argv.slice(1),{cwd:repo,env:{...env,...extra},stdio:['pipe','pipe','pipe']});let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.on('close',code=>r({code,stdout,stderr}));child.stdin.end(input);}); }
@@ -30,8 +32,8 @@ console.log(JSON.stringify({ok:true,data:{}}));
 let service;
 try {
   async function startService() {
-    service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']}); let ready=false;
-    service.stdout.on('data',b=>{if(String(b).includes('MCP listening'))ready=true;}); service.stderr.on('data',b=>process.stderr.write(b));
+    service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']}); let ready=false,output='';
+    service.stdout.on('data',b=>{output+=String(b);port=portFromListeningBanner(output);if(port)ready=true;}); service.stderr.on('data',b=>process.stderr.write(b));
     await waitFor(()=>ready,'service');
   }
   await startService();

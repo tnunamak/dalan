@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const goldenPath = path.join(root, 'scripts/fixtures/catalog.t3-on.tools.golden.json');
@@ -34,12 +34,12 @@ process.stdin.on('end', () => {
   console.log(JSON.stringify({ ok: true, data: { thread: { id: 'thread_x' }, message: { messageId: 'message_1' } } }));
 });
 `, { mode: 0o755 });
-  const port = await reservedPort();
+  let port = null;
   const env = { ...process.env, HOME: home, PATH: `${path.join(home, 'bin')}:${process.env.PATH}`, DALAN_LEGACY_PROFILE: '1', DALAN_CATALOG_PROFILE: 'stable',
-    DALAN_ENABLE_T3_TOOLS: enabled ? '1' : '0', DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_AUTH_MODE: '', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1' };
+    DALAN_ENABLE_T3_TOOLS: enabled ? '1' : '0', DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: '', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1' };
   const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  let ready = false;
-  child.stdout.on('data', c => { if (String(c).includes('MCP listening')) ready = true; });
+  let ready = false, output='';
+  child.stdout.on('data', c => { output+=String(c);port=portFromListeningBanner(output);if(port)ready=true; });
   child.stderr.on('data', () => {});
   for (let i = 0; i < 400 && !ready && child.exitCode === null; i++) await new Promise(r => setTimeout(r, 50));
   assert(ready, 'server startup');

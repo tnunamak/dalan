@@ -1,5 +1,6 @@
 [
   "node scripts/conformance/native-authority-test.mjs",
+  "node --test src/test-support/port.test.mjs",
   "node scripts/conformance/profile-version-test.mjs",
   "node scripts/conformance/runner-full-test.mjs",
   "node scripts/conformance/runner-gate-test.mjs",

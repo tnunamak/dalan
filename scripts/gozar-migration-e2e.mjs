@@ -46,7 +46,7 @@ async function legacyInstall() {
   const root = path.join(tmp, name);
   const home = path.join(root, 'home');
   fs.mkdirSync(home, { recursive: true });
-  const port = await reservedPort();
+  let port = await reservedPort();
   const origin = `https://legacy-${counter}.route.invalid`;
   const host = new URL(origin).host;
   const env = { PATH: process.env.PATH, HOME: home, DALAN_AUTH_MODE: 'builtin', DALAN_GOZAR_SERVICE: '1', DALAN_PORT: String(port) };
@@ -54,13 +54,29 @@ async function legacyInstall() {
   await run('init', '--worker', 'hosted', '--public-url', origin);
   const configDir = defaultPath(home, '.config/dot-bridge');
   const log = path.join(home, 'server.log');
-  let server = null;
-  const start = async () => {
+  let server = null, startedOnce = false;
+  const start = async (attempts = 3) => {
     fs.writeFileSync(log, '');
     server = spawn(process.execPath, [path.join(repo, 'src/server.mjs')], { env, cwd: repo, stdio: ['ignore', 'pipe', 'pipe'] });
+    const closed = new Promise(resolve => server.once('close', resolve));
     children.add(server);
     for (const stream of [server.stdout, server.stderr]) stream.on('data', chunk => fs.appendFileSync(log, chunk));
-    for (let waited = 0; !/MCP listening/.test(fs.readFileSync(log, 'utf8')); waited += 50) { assert.ok(waited < 20_000, 'bridge did not start'); await sleepMs(50); }
+    for (let waited = 0; !/MCP listening/.test(fs.readFileSync(log, 'utf8')); waited += 50) {
+      if (server.exitCode !== null || server.signalCode !== null) {
+        await closed;
+        const logged = fs.readFileSync(log, 'utf8');
+        if (!startedOnce && attempts > 1 && /EADDRINUSE/.test(logged)) {
+          children.delete(server);
+          port = await reservedPort();
+          env.DALAN_PORT = String(port);
+          return start(attempts - 1);
+        }
+        throw new Error(`bridge did not start: ${logged}`);
+      }
+      assert.ok(waited < 20_000, 'bridge did not start');
+      await sleepMs(50);
+    }
+    startedOnce = true;
   };
   // The old route: an https host in front of the bridge. The relay sets the public Host, as a route does.
   const relay = http.createServer((req, res) => {
