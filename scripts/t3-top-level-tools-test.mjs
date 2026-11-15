@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { Store } from '../src/store.mjs';
 import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
@@ -48,7 +49,12 @@ process.stdin.on('end', () => {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })).json()).result;
   const invocations = () => fs.existsSync(record) ? fs.readFileSync(record, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : [];
   const stop = async () => { child.kill('SIGTERM'); if (child.exitCode === null) await new Promise(r => child.once('exit', r)); fs.rmSync(home, { recursive: true, force: true }); };
-  return { rpc, invocations, stop };
+  const grantThread=thread=>{
+    const store=new Store(path.join(home,'.local/share/dot-bridge/bridge.db'));
+    const payload={schema_version:1,request_id:'req_local_scope',brief:'fixture',inputs:[],expected_output:'result',execution_scope:'read-only'};
+    store.submit(payload,thread,null,'owner');store.claim(payload.request_id,'fixture','local-principal',6,null,'dot');store.db.close();
+  };
+  return { rpc, invocations, stop, grantThread };
 };
 
 const on = await start(true);
@@ -66,6 +72,17 @@ try {
   const text = JSON.stringify(tools, null, 1) + '\n';
   if (updating) { fs.writeFileSync(goldenPath, text); console.log('t3-on tools golden updated'); }
   else assert.equal(text, golden, 'T3-on tools list changed: this needs a deliberate catalog release');
+
+  // The unauthenticated legacy principal still resolves to a worker, never an owner bypass.
+  for(const [name,args] of [['t3_thread_wait',{threadId:'thread_x'}],['t3_thread_read',{threadId:'thread_x'}],['t3_thread_send',{threadId:'thread_x',message:'unscoped'}],['t3_thread_set',{threadId:'thread_x',model:'unscoped'}],['t3_thread_create',{prompt:'unscoped'}]]) {
+    assert.equal((await on.rpc('tools/call',{name,arguments:args})).isError,true,`${name}: legacy worker without a claimed destination must be refused`);
+  }
+  assert.equal(on.invocations().length,0,'unscoped calls must not reach CLI');
+  on.grantThread('thread_x');
+  for(const [name,args] of [['t3_thread_read',{threadId:'thread_other'}],['t3_thread_send',{threadId:'thread_other',message:'foreign'}],['t3_thread_set',{threadId:'thread_other',model:'foreign'}]]) {
+    assert.equal((await on.rpc('tools/call',{name,arguments:args})).isError,true,`${name}: foreign destination must be refused`);
+  }
+  assert.equal(on.invocations().length,0,'foreign calls must not reach CLI');
 
   // Both an omitted wait and the advertised maximum reach the CLI as bounded read-only polls.
   for (const args of [{threadId:'thread_x'}, {threadId:'thread_x',timeoutMs:90000}]) {

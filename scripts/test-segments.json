@@ -91,7 +91,7 @@
   "node --test scripts/drained-slot-test.mjs",
   "node scripts/inbox-e2e.mjs",
   "node scripts/message-e2e.mjs",
-  "node scripts/t3-tools-e2e.mjs",
+  "node scripts/t3-grant-migration-test.mjs && node scripts/t3-grant-collision-test.mjs && node scripts/t3-job-scope-e2e.mjs && node scripts/t3-tools-e2e.mjs",
   "node scripts/t3-list-compact-test.mjs",
   "node scripts/durability-e2e.mjs",
   "node scripts/liveness-e2e.mjs",

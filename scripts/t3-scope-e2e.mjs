@@ -7,6 +7,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync, sign, randomUUID, createHash } from 'node:crypto';
+import { Store } from '../src/store.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
@@ -61,6 +62,12 @@ try {
   for (let i=0; i<100 && !ready; i++) await new Promise(resolve => setTimeout(resolve, 50));
   assert(ready, 'server did not start');
   const secret = fs.readFileSync(path.join(configDir, 'env'), 'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
+  const store=new Store(path.join(home,'.local/share/dot-bridge/bridge.db'));
+  for(const [i,thread] of ['thread-1','fail-thread'].entries()) {
+    const payload={schema_version:1,request_id:`req_scope_${i}`,brief:'fixture',inputs:[],expected_output:'result',execution_scope:'read-only'};
+    store.submit(payload,thread,null,'owner');store.claim(payload.request_id,'fixture','fixture-subject',6,null,'dot');
+  }
+  store.db.close();
   const allowed = await call('dot-bridge.read', secret, 't3_thread_list', {});
   assert.equal(allowed.isError, false);
   assert.deepEqual(JSON.parse(allowed.content[0].text), {threads:[],total:0,shown:0,truncated:false,projects:[],hint:'narrow with projectId or cwd; full paging after a catalog update'}, 'compact empty list');
@@ -68,8 +75,7 @@ try {
   assert(read.thread.id === 'thread-1' && read.argv.includes('http://127.0.0.1:3773'));
   const wait = JSON.parse((await call('dot-bridge.read', secret, 't3_thread_wait', {threadId: 'thread-1', timeoutMs: 1000})).content[0].text);
   assert(wait.wait.outcome === 'completed');
-  const created = JSON.parse((await call('dot-bridge.work', secret, 't3_thread_create', {projectId: 'project-1', prompt: 'create prompt', provider: 'claudeAgent', model: 'claude-haiku-4-5', permission: 'full-access'})).content[0].text);
-  assert(created.thread.id === 'thread-created' && created.stdin === 'create prompt' && created.argv.includes('/repo/project-1'));
+  assert.equal((await call('dot-bridge.work',secret,'t3_thread_create',{prompt:'create prompt'})).isError,true);
   const sent = JSON.parse((await call('dot-bridge.work', secret, 't3_thread_send', {threadId: 'thread-1', message: 'send message', mode: 'queue', wakeSettled: true})).content[0].text);
   assert(sent.message.messageId === 'message-1' && sent.stdin === 'send message' && sent.argv.includes('--wake-settled'));
   const set = JSON.parse((await call('dot-bridge.work', secret, 't3_thread_set', {threadId: 'thread-1', model: 'claude-haiku-4-5'})).content[0].text);
@@ -87,7 +93,7 @@ try {
   assert(rows.every(row => row.subject === 'fixture-subject'));
   assert.equal(rows.at(-1).text_preview, null);
   assert.equal(rows.at(-1).text_sha256, createHash('sha256').update('failed text').digest('hex'), 'failure row carries the digest of the exact text');
-  for (const tool of ['t3_thread_list','t3_thread_read','t3_thread_wait','t3_thread_create','t3_thread_send','t3_thread_set']) {
+  for (const tool of ['t3_thread_list','t3_thread_read','t3_thread_wait','t3_thread_send','t3_thread_set']) {
     assert(rows.some(row => row.tool === tool && row.result_status === 'success'), `${tool} success not audited`);
   }
   db.close();

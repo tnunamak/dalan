@@ -50,7 +50,7 @@ function waiterOwnerGone(attemptId) {
   return !!(owner.boot&&owner.start&&current.boot&&current.start&&(owner.boot!==current.boot||owner.start!==current.start));
 }
 
-const SUPPORTED_SCHEMA_VERSION = 68;
+const SUPPORTED_SCHEMA_VERSION = 69;
 const monotonicMs=()=>Number(process.hrtime.bigint())/1e6;
 function systemBootId() {
   if(process.platform!=='linux') return null;
@@ -943,6 +943,10 @@ export class Store {
         // The kind a notification had before a held parent moved it into the wait queue. Set only by holdDelivery.
         if(!this.db.prepare("SELECT 1 FROM pragma_table_info('notifications') WHERE name='held_kind'").get()) this.db.exec('ALTER TABLE notifications ADD COLUMN held_kind TEXT');
         this.db.exec('PRAGMA user_version=68;');
+      }
+      if(version<69) {
+        if(!this.db.prepare("SELECT 1 FROM pragma_table_info('tool_grants') WHERE name='scope'").get()) this.db.exec('ALTER TABLE tool_grants ADD COLUMN scope TEXT');
+        this.db.exec('PRAGMA user_version=69;');
       }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
@@ -1890,8 +1894,11 @@ export class Store {
     return activity<this.startedMs&&this.nowMs()<this.startedMs+this.claimLeaseMs(claim);
   }
   leaseExpired(claim) {
+    // Missing or malformed persisted deadlines carry no authority, even with a same-boot clock.
+    const persistedDeadline=Date.parse(claim.lease_deadline_at);
+    if(!Number.isFinite(persistedDeadline)) return true;
     const deadline=this.leaseMonotonicDeadline(claim);
-    return deadline===null?this.nowMs()>=Date.parse(this.leaseExpiresAt(claim)):this.monotonicNow()>=deadline;
+    return deadline===null?this.nowMs()>=persistedDeadline:this.monotonicNow()>=deadline;
   }
   // A revoked grant cannot authorize a successor until its deadline and all
   // host effect channels have stopped. Unknown stop evidence fails closed.

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { Store } from '../src/store.mjs';
 // Usage break and rolling-usage estimates against the real server and CLI: dot-worker break/breaks, status --json/--explain, auto-end on
 // the worker's next tool call, the request-log backfill, and the status throttle block (counts and over_estimate, no holds) on rolling tool calls and response bytes.
 import assert from 'node:assert/strict';
@@ -117,6 +118,10 @@ try {
     let ready2=false,output2='';service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env:env2,stdio:['ignore','pipe','pipe']});service.stdout.on('data',b=>{output2+=b;port2=portFromListeningBanner(output2);if(port2)ready2=true;});service.stderr.on('data',b=>{output+=b;output2+=b;});
     await until(()=>ready2,'second server startup');
     const secret2=(await readFile(join(home2,'.config/dot-bridge/env'),'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
+    const scopedStore=new Store(join(root2,'bridge.db'));
+    const scopedJob={schema_version:1,request_id:'req_break_scope',brief:'fixture',inputs:[],expected_output:'result',execution_scope:'read-only'};
+    scopedStore.submit(scopedJob,'thread_fake',null,'owner');
+    scopedStore.claim(scopedJob.request_id,'fixture','local-principal',6,null,'dot');scopedStore.db.close();
     let received=0;
     const read=async()=>{const text=await (await fetch(`http://127.0.0.1:${port2}/${secret2}/mcp`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method:'tools/call',params:{name:'t3_thread_read',arguments:{threadId:'thread_fake'}}})})).text();assert.equal(JSON.parse(text).result.isError,false,text.slice(0,300));received+=Buffer.byteLength(text);};
     let t=(await status2()).throttle;assert.deepEqual([t.response_bytes_last_hour,t.max_response_bytes_per_hour,t.submit_throttled],[0,100000,false]);assert.deepEqual(t.over_estimate,[]);

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { Store } from '../src/store.mjs';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
@@ -203,6 +204,10 @@ globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? ${
     await new Promise(resolve => chainBackend.close(resolve));
   }
 
+  const scopedStore=new Store(defaultPath(home, '.local/share/dot-bridge/bridge.db'));
+  const scopedJob={schema_version:1,request_id:'req_sse_scope',brief:'fixture',inputs:[],expected_output:'result',execution_scope:'read-only'};
+  scopedStore.submit(scopedJob,'thread_delayed',null,'owner');
+  scopedStore.claim(scopedJob.request_id,'fixture','local-principal',6,null,'dot');scopedStore.db.close();
   const catalog = await request({ port, pathname: `/${secret}/mcp`, headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 'catalog-1', method: 'tools/list' }) });
   const waitSchema = JSON.parse(catalog.text).result.tools.find(tool => tool.name === 't3_thread_wait').inputSchema.properties.timeoutMs;
