@@ -5,9 +5,8 @@ import path from 'node:path';
 import {prepareHostReceipts,assertHostReceiptIsolation,readVerifiedHostStop} from './host-budget-receipts.mjs';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 
-// Each check owns its unit and control group, including across bridge processes.
+// The fixed production unit reserves one active envelope per Unix user.
 export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 1024 ** 3, processes: 128, disk_write_bytes: 256 * 1024 ** 2, output_bytes: 1024 ** 2 });
 const minima = { cpu_ms: 50, wall_ms: 100, memory_bytes: 128 * 1024 ** 2, processes: 16, disk_write_bytes: 1024 ** 2, output_bytes: 1024 };
 const service = fileURLToPath(new URL('./host-budget-service.mjs', import.meta.url));
@@ -76,7 +75,10 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
     'LimitCORE=0', 'UMask=0077',
     `ExecStopPost=${[process.execPath, stopRecorder,...(receipts?['--check-run-id',receipts.checkRunId,'--receipt-dir',receipts.receiptDir]:[])].map(propertyArg).join(' ')}`,
   ];
-  const unit = `dot-bridge-host-check-${process.pid}-${randomUUID()}.service`;
+  // Test suites isolate their reservation without changing the production default.
+  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  if (suffix && !/^[a-zA-Z0-9-]{1,80}$/.test(suffix)) throw new Error('invalid DALAN_HOST_CHECK_UNIT_SUFFIX');
+  const unit = `dot-bridge-host-check${suffix ? '-' + suffix : ''}.service`;
   const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', `--unit=${unit}`, ...properties.map(p => `--property=${p}`), '--', process.execPath, service];
   const started=performance.now();
   const child = spawn('/usr/bin/systemd-run', args, { stdio: ['pipe', 'pipe', 'pipe'] });

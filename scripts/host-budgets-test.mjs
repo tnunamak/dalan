@@ -158,9 +158,45 @@ test('install and check share storage and one output allowance', { skip: !linux 
   assert.equal(fs.existsSync(path.join(home, 'installed')), false);
 });
 
-test('concurrent checks have separate units and cancellation stops only its own tree', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+test('production default reserves exactly one host-check unit per Unix user', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  let cancel = false, first, start;
+  try {
+    // Other copies of this regression also exercise the production reservation.
+    // Wait for its owner to finish; never stop a unit we did not acquire.
+    const deadline = performance.now() + 30000;
+    while (!start) {
+      let ready;
+      const started = new Promise(resolve => { ready = value => resolve({start:value}); });
+      first = runHostBudget({dir:home,budgets,enabled:true,cancelled:()=>cancel,onOutputStarted:ready,
+        phases:[{name:'check',argv:['/runtime/node','-e','console.log("ready");setInterval(()=>{},1000)']}]});
+      const outcome = await Promise.race([started, first.then(result => ({result}))]);
+      if (outcome.start) { start = outcome.start; break; }
+      assert.match(outcome.result.error, /host budget admission failed:.*(already|exists|loaded)/s);
+      assert(performance.now() < deadline, 'production reservation remained occupied for 30 seconds');
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(start.unit, 'dot-bridge-host-check.service');
+    const second = await runHostBudget({dir:home,budgets,enabled:true,phases:[{name:'check',argv:['/usr/bin/true']}]});
+    assert.equal(second.unit, 'dot-bridge-host-check.service');
+    assert.match(second.error, /host budget admission failed/);
+    assert.deepEqual(second.phases, [], 'the second check never launches a phase');
+    const show = spawnSync('systemctl', ['--user','show',start.unit,'-p','ActiveState','--value'], {encoding:'utf8'});
+    assert.equal(show.stdout.trim(), 'active', 'refusing the second check leaves the reservation holder running');
+  } finally {
+    cancel = true;
+    await first;
+    if (suffix === undefined) delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+    else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = suffix;
+  }
+});
+
+test('separate suite suffixes isolate units and cancellation stops only its own tree', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
   const pending=[];
   const launch=()=>{
+    process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `isolation-${process.pid}-${randomUUID()}`;
     let ready;const started=new Promise(resolve=>{ready=resolve;});
     const check={cancel:false,started};
     check.done=runHostBudget({dir:home,budgets,enabled:true,cancelled:()=>check.cancel,onOutputStarted:ready,
@@ -182,6 +218,8 @@ test('concurrent checks have separate units and cancellation stops only its own 
   } finally {
     for(const check of pending)check.cancel=true;
     await Promise.all(pending.map(check=>check.done));
+    if (suffix === undefined) delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+    else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = suffix;
   }
 });
 
@@ -237,7 +275,7 @@ test('bridge process crash closes its control pipe and releases the service', { 
   const code=`const {runHostBudget}=await import(${JSON.stringify(module)});await runHostBudget({dir:${JSON.stringify(home)},budgets:${JSON.stringify(budgets)},enabled:true,onOutputStarted:({unit})=>console.log(unit),phases:[{name:'check',argv:['/runtime/node','-e','console.log("started");setInterval(()=>{},1000)']}]});`;
   const bridge=spawn(process.execPath,['--input-type=module','-e',code],{stdio:['ignore','pipe','inherit']});
   const unit=(await new Promise((resolve,reject)=>{bridge.stdout.once('data',resolve);bridge.once('exit',()=>reject(new Error('bridge exited before guest readiness')));})).toString().trim();
-  assert.match(unit,/^dot-bridge-host-check-[a-zA-Z0-9-]+\.service$/);
+  assert.equal(unit, `dot-bridge-host-check${process.env.DALAN_HOST_CHECK_UNIT_SUFFIX ? '-' + process.env.DALAN_HOST_CHECK_UNIT_SUFFIX : ''}.service`);
   process.kill(bridge.pid,'SIGKILL');await new Promise(resolve=>bridge.once('close',resolve));
   let active=true;
   for(let i=0;i<100&&active;i++){
