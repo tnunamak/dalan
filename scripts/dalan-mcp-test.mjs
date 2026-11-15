@@ -118,7 +118,7 @@ try {
     [{ id: 'req_unknown_validation', question_id: '../q1', text: 'ok' }, /question_id/],
     [{ id: 'req_unknown_validation', text: 'ok' }, /question_id/],
     [{ id: 'req_unknown_validation', question_id: 'q1', text: 42 }, /text/],
-    [{ id: 'req_unknown_validation', question_id: 'q1', text: '-option' }, /dash/],
+    [{ id: 'req_unknown_validation', question_id: 'q1', text: 'bad\u0000text' }, /NUL/],
   ]) {
     const invalid = await call('dalan_answer', args);
     assert.equal(invalid.isError, true); assert.match(invalid.content[0].text, message);
@@ -162,7 +162,7 @@ try {
   assert.notEqual(questions.isError, true);
   assert.ok(textOf(questions).questions.some(q => q.question_id === questionId));
   // Exactly 4096 UTF-8 bytes is allowed. Preserve the exact text through the CLI journal.
-  const answerText = 'é'.repeat(2048);
+  const answerText = '--force  is fine\n' + 'é'.repeat(2040);
   const answerArgs = { id: requestId, question_id: questionId, text: answerText };
   const answered = await call('dalan_answer', answerArgs);
   assert.notEqual(answered.isError, true, JSON.stringify(answered));

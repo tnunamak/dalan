@@ -17,10 +17,12 @@ import { answerThroughJournal, prepare, send, reconcile, journalPath, AnswerJour
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const adapter = new DotBridgeAdapter();
-const cliHome = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'aj-'));
+const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? os.tmpdir();
+fs.mkdirSync(tempRoot, { recursive: true });
+const cliHome = fs.mkdtempSync(path.join(tempRoot, 'aj-'));
 const cliRoot = path.join(cliHome, '.local/share/dot-bridge'), receiptsDir = path.join(cliRoot, 'receipts'), relayPath = path.join(cliRoot, 'admin.sock');
 fs.mkdirSync(receiptsDir, { recursive: true, mode: 0o700 });
-const unitDir = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'aj-unit-'));
+const unitDir = fs.mkdtempSync(path.join(tempRoot, 'aj-unit-'));
 
 // ---- relay: forwards to the real admin socket; a rule can cut the connection around a request ----------------
 let running = null; // the CLI child that a cut kills
@@ -48,11 +50,13 @@ const relay = http.createServer((req, res) => {
   });
 });
 
-function runCli(args) {
+function runCli(args, input) {
   const before = seen.length;
   return new Promise(resolve => {
-    const child = spawn(process.execPath, ['bin/dot-worker.mjs', 'answer', '--json', ...args], { cwd: repo, env: { PATH: process.env.PATH, HOME: cliHome, LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['bin/dot-worker.mjs', 'answer', '--json', ...args], { cwd: repo, env: { PATH: process.env.PATH, HOME: cliHome, LANG: 'C.UTF-8' }, stdio: ['pipe', 'pipe', 'pipe'] });
     running = child;
+    child.stdin.on('error', () => {});
+    child.stdin.end(input ?? '');
     let stdout = '', stderr = '';
     child.stdout.on('data', b => stdout += b); child.stderr.on('data', b => stderr += b);
     child.on('close', (code, signal) => { running = null; resolve({ code, signal, stdout, stderr, calls: seen.slice(before) }); });
@@ -103,6 +107,29 @@ const sameBytes = (a, b, why) => assert.equal(Buffer.compare(Buffer.from(a), Buf
 try {
   await adapter.init(); await adapter.reset();
   await new Promise(resolve => relay.listen(relayPath, resolve));
+
+  // Stdin is verbatim, bounded, and uses the same journal as argv.
+  {
+    const job = await protocolJob('stdin_verbatim');
+    const text = '-1  is right\n--force\tα\n';
+    const first = await runCli([job.id, 'Q', '--stdin'], text);
+    assert.equal(first.code, 0, first.stderr);
+    assert.equal(answerOf(job.id), text);
+    assert.equal(journal(job.id).text, text);
+    assert.equal(JSON.parse(answerCalls(first)[0].body).text, text);
+    const again = await runCli([job.id, 'Q', '--stdin'], text);
+    assert.equal(again.code, 0, again.stderr);
+    assert.equal(answerCalls(again).length, 0, 'exact stdin retry posts nothing');
+    assert.equal(receipts(job.id), 1);
+    for (const invalid of ['', '  ', 'é'.repeat(2049)]) {
+      const refused = await runCli([job.id, 'Q', '--stdin'], invalid);
+      assert.notEqual(refused.code, 0);
+      assert.equal(refused.calls.length, 0);
+    }
+    const mixed = await runCli([job.id, 'Q', '--stdin', 'argv text'], text);
+    assert.notEqual(mixed.code, 0);
+    assert.equal(mixed.calls.length, 0);
+  }
 
   // 1. Happy path, then the two local rules: same text resumes, different text refuses with no network.
   {

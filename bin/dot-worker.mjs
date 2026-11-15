@@ -37,7 +37,7 @@ import { applyPatch } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError } from '../src/admin-socket.mjs';
-import { answerThroughJournal } from '../src/answer-journal.mjs';
+import { answerThroughJournal, MAX_ANSWER_BYTES } from '../src/answer-journal.mjs';
 // An answer reply that takes longer than this counts as lost; the journaled envelope is sent again.
 const ANSWER_TIMEOUT_MS=30000;
 
@@ -566,7 +566,23 @@ async function main() {
     case 'wait': { refuseUnknownOptions('wait',{flags:['--json','--drained'],values:['--timeout','--producer-thread','--max-claimed','--max-queued']}); if(args.includes('--drained')) { result=await waitDrained(); waitOutput=true; process.exitCode=drainedExitCodes[result.status]; break; } const id=args[0]; if(!id||id.startsWith('-')) throw new Error(`wait needs a request ID: ${cli} wait REQUEST_ID (list your jobs with: ${cli} inbox --all)`); result=await waitForAssignment(id,option('--timeout')); indexArtifacts(id,result); waitOutput=true; process.exitCode=waitExitCode(result.status); if(!json&&process.stdout.isTTY) { result=formatWaitLine(result,{id,cli,seconds:option('--timeout')===null?300:Number(option('--timeout'))}); plainOutput=true; } else if(!json) waitTimeoutNote(id,result); break; }
     case 'note': { if(args.some(a=>a.startsWith('-')&&a!=='--json')) throw new Error('note accepts only --json as an option'); const [id,...parts]=args.filter(a=>a!=='--json'),text=parts.join(' '); if(!id||!text) throw new Error('note requires request id and text'); result=await request('/note','POST',{id,text},{'x-owner-capability':receipt(id).token}); break; }
     case 'questions': { const ids=args.filter(a=>a!=='--json');if(ids.length!==1||ids[0].startsWith('-')) throw new Error('questions requires one request id (optional --json)');result=await request('/questions?id='+encodeURIComponent(ids[0]),'GET',null,{'x-owner-capability':receipt(ids[0]).token});break; }
-    case 'answer': { if(args.some(a=>a.startsWith('-')&&a!=='--json')) throw new Error('answer accepts only --json as an option');const [id,questionId,...parts]=args.filter(a=>a!=='--json'),text=parts.join(' ');if(!id||!questionId||!text) throw new Error('answer requires request id, question id and text');
+    case 'answer': {
+      const stdin=args.includes('--stdin');
+      if(args.some(a=>a.startsWith('-')&&a!=='--json'&&!(stdin&&a==='--stdin'))) throw new Error('answer accepts only --stdin and --json as options');
+      const [id,questionId,...parts]=args.filter(a=>a!=='--json'&&a!=='--stdin');
+      if(!id||!questionId||(stdin&&parts.length)) throw new Error('answer requires request id, question id and either text or --stdin');
+      let text=parts.join(' ');
+      if(stdin) {
+        const chunks=[];let bytes=0;
+        for await(const chunk of process.stdin) {
+          bytes+=chunk.length;
+          if(bytes>MAX_ANSWER_BYTES) throw new Error(`answer text exceeds ${MAX_ANSWER_BYTES} UTF-8 bytes; nothing was sent or saved`);
+          chunks.push(chunk);
+        }
+        text=Buffer.concat(chunks).toString('utf8');
+        if(!text.trim()||text.includes('\u0000')) throw new Error('answer text must be nonblank and contain no NUL');
+      }
+      if(!text) throw new Error('answer requires request id, question id and text');
       // Every answer goes through the journal: the key and expected revision are saved before the first send, so a crash or a lost reply is retried with the same envelope.
       const owner=()=>({'x-owner-capability':receipt(id).token});
       result=await answerThroughJournal({receiptsDir:receipts,job:id,questionId,text,
