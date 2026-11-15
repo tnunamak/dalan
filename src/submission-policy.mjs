@@ -360,6 +360,9 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
     if(!input) throw new Error('output_paths require pinned repository input (inputs: [{github_repo, base_sha}])');
     if(input.input_patch) throw new Error('output_paths cannot be combined with input_patch: the patch is applied to the workspace and would count as a change outside output_paths. Submit the input patch as a separate job, or push it and pin head_sha');
     for(const file of outputs) {
+      if(repositoryImplementation&&isSensitiveRepoPath(file,p.sensitive_paths)) {
+        dropped.push({path:file,reason:sensitiveReason(file)});continue;
+      }
       try { inspectPath(file); }
       catch(error) { throw new Error(`output_paths: ${error.message}. Name the new file so that it does not look like credential, auth or signing material`); }
     }
@@ -391,6 +394,7 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       }
     }
   }
+  const repositoryImplementation=rendered.execution_scope==='implementation'&&scope.includes('.');
   const dropped=[];let narrowedScope=null;
   const firstPass=mentionedPaths(text,scope);
   for(const file of firstPass) {
@@ -516,10 +520,13 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       if(rest.length) error.suggested_scope_paths=rest;
       throw error;
     }
-    // A directory scope can hold a sensitive file the submitter never named. With excludeSensitive those files leave the scope
-    // (it only narrows) and the reason is recorded; without it the whole submit fails, as before. A path the submitter named
-    // (a scope entry, a brief mention, a diff file) is never dropped quietly.
+    // Repository-wide implementation scopes withhold unnamed sensitive files physically.
+    // Other scopes retain the explicit read-only exclusion option. Named paths and patch
+    // paths still refuse above and below; exclusions grant no access to those files.
     for(const file of scan.files.filter(f=>within(f,scope)&&!scope.includes(f))) {
+      if(repositoryImplementation&&isSensitiveRepoPath(file,p.sensitive_paths)) {
+        dropped.push({path:file,reason:sensitiveReason(file)});continue;
+      }
       try { inspectPath(file); }
       catch(error) {
         if(!/^(?:hard sensitive path exclusion|sensitive scope path): /.test(error.message)) throw error;
@@ -535,7 +542,7 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
     for(const file of scan.symlinks||[]) if(within(file,scope)&&!scope.includes(file)&&excludeSensitive&&rendered.execution_scope!=='implementation') dropped.push({path:file,reason:'symlink (the workspace never follows symlinks)'});
     // A scope whose narrowing needs more than maxNarrowedEntries entries is refused (fail closed): keeping the broad scope
     // would rest on an exact-path exclusion that a case or Unicode alias on a case-insensitive filesystem can miss.
-    if(dropped.length) narrowedScope=narrowScope(scope,[...new Set([...scan.files,...scan.diffFiles])],dropped.map(d=>d.path));
+    if(dropped.length) narrowedScope=repositoryImplementation?scope:narrowScope(scope,[...new Set([...scan.files,...scan.diffFiles])],dropped.map(d=>d.path));
     for(const file of scan.symlinks||[]) if(within(file,narrowedScope??scope)&&!dropped.some(d=>d.path===file)) throw new Error(`symlink in repository scope: ${file}`);
     if(input.input_patch) {
       if(/^new (?:file )?mode 120000$/m.test(input.input_patch)) throw new Error('symlink in input patch scope');
