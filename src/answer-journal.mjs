@@ -22,7 +22,7 @@
 //       "none" (no journal) | "committed" | "confirmed" (the server holds our text; the journal is now committed) |
 //       "pending" (the server has no answer; the saved envelope can still be sent) |
 //       "conflict" (the server holds a different answer) | "unknown" (the server cannot be asked).
-//   deps: {receiptsDir, readRevision() -> integer|null, post(envelope) -> reply, readQuestion() -> {answer}|undefined,
+//   deps: {receiptsDir, io (fs, injectable for tests), readRevision() -> integer|null, post(envelope) -> reply, readQuestion() -> {answer}|undefined,
 //          attempts=3, retryDelayMs=200, sleep}. Only the members a function uses are needed.
 //   answerThroughJournal(...) is prepare() then send(), for the CLI.
 //
@@ -51,15 +51,15 @@ export function journalPath(receiptsDir, job, questionId) {
   return path.join(receiptsDir, `${job}.answers`, `${fileStem(questionId)}.json`);
 }
 
-function fsyncDir(dir) {
-  const fd = fs.openSync(dir, 'r');
-  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+function fsyncDir(dir, io = fs) {
+  const fd = io.openSync(dir, 'r');
+  try { io.fsyncSync(fd); } finally { io.closeSync(fd); }
 }
 // Write the bytes to a private temp file in the target directory and fsync it. The caller publishes it.
-function stage(file, entry) {
+function stage(file, entry, io = fs) {
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  const fd = fs.openSync(tmp, 'wx', 0o600);
-  try { fs.writeSync(fd, JSON.stringify(entry) + '\n'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  const fd = io.openSync(tmp, 'wx', 0o600);
+  try { io.writeSync(fd, JSON.stringify(entry) + '\n'); io.fsyncSync(fd); } finally { io.closeSync(fd); }
   return tmp;
 }
 
@@ -76,15 +76,29 @@ export function readJournal(file, job, questionId) {
   return entry;
 }
 
+// Create every missing directory level and fsync each new directory and its parent, so that after a crash no
+// level of the path can be missing while the server already holds the answer.
+function mkdirDurable(dir, io) {
+  const missing = [];
+  for (let d = dir; !io.existsSync(d); d = path.dirname(d)) missing.unshift(d);
+  for (const d of missing) {
+    try { io.mkdirSync(d, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+    fsyncDir(d, io);
+    fsyncDir(path.dirname(d), io);
+  }
+}
+
 // Publish a new journal with no partial file visible. Returns false if another process published first.
-function createJournal(file, entry) {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = stage(file, entry);
+// On return true, the file, its directory, and every directory level this call created are durable.
+function createJournal(file, entry, io) {
+  const dir = path.dirname(file);
+  mkdirDurable(dir, io);
+  const tmp = stage(file, entry, io);
   try {
-    try { fs.linkSync(tmp, file); } catch (error) { if (error.code === 'EEXIST') return false; throw error; }
-    fsyncDir(path.dirname(file));
+    try { io.linkSync(tmp, file); } catch (error) { if (error.code === 'EEXIST') return false; throw error; }
+    fsyncDir(dir, io);
     return true;
-  } finally { fs.rmSync(tmp, { force: true }); }
+  } finally { io.rmSync(tmp, { force: true }); }
 }
 function setState(file, entry, state) {
   if (entry.state === state) return;
@@ -118,14 +132,14 @@ const unknownError = (job, questionId, file, cause) => new AnswerJournalError('a
   `cannot tell whether the answer to ${questionId} on ${job} was applied: ${cause.message}. The saved attempt was kept and nothing new was prepared`,
   ['restore access or retention, then run the same answer command again to resume the saved attempt', `the saved attempt is in ${file}`]);
 
-export async function prepare(job, questionId, text, { receiptsDir, readRevision }) {
+export async function prepare(job, questionId, text, { receiptsDir, readRevision, io = fs }) {
   checkInput(job, questionId, text);
   const file = journalPath(receiptsDir, job, questionId);
   let entry = readJournal(file, job, questionId);
   if (!entry) {
     const expected_revision = await readRevision();
     const fresh = { v: 1, job, question_id: questionId, key: `answer:${questionId}`, text, expected_revision, state: 'prepared' };
-    if (createJournal(file, fresh)) entry = fresh;
+    if (createJournal(file, fresh, io)) entry = fresh;
     else { entry = readJournal(file, job, questionId); if (!entry) throw new AnswerJournalError('answer_journal_corrupt', 'answer journal vanished while it was created'); }
   }
   if (entry.text !== text) throw new AnswerJournalError('answer_text_mismatch',

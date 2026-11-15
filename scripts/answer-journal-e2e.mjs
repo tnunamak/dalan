@@ -385,6 +385,46 @@ try {
     assert.equal((await reconcile(job, 'U', { ...deps, readQuestion: async () => { throw lost; } }).catch(e => e.code)), 'answer_state_unknown');
     console.log('PASS interface: prepare, send and reconcile are exported with the frozen signatures; reconcile reads only and settles none/pending/conflict/confirmed/committed/unknown');
   }
+  // 12. First creation is durable at every level: each new directory is fsynced, and so is its parent, before prepare
+  //     returns. Otherwise a crash could lose a directory name while the server already holds the answer, and the next
+  //     prepare would make a fresh envelope. A spy over fs records the order of mkdir, fsync and link.
+  {
+    const events = [], fdPath = new Map();
+    const spy = {
+      existsSync: p => fs.existsSync(p),
+      mkdirSync: (p, o) => { events.push(['mkdir', p]); return fs.mkdirSync(p, o); },
+      openSync: (p, ...rest) => { const fd = fs.openSync(p, ...rest); fdPath.set(fd, p); return fd; },
+      writeSync: (fd, ...rest) => fs.writeSync(fd, ...rest),
+      fsyncSync: fd => { events.push(['fsync', fdPath.get(fd)]); return fs.fsyncSync(fd); },
+      closeSync: fd => { fdPath.delete(fd); return fs.closeSync(fd); },
+      linkSync: (a, b) => { events.push(['link', b]); return fs.linkSync(a, b); },
+      rmSync: (...a) => fs.rmSync(...a),
+    };
+    const newReceipts = path.join(unitDir, 'durable-receipts'), job = 'req_durable_job_1';
+    const file = journalPath(newReceipts, job, 'Q');
+    const answersDir = path.dirname(file);
+    const at = (kind, target) => events.findIndex(e => e[0] === kind && e[1] === target);
+    const lastAt = (kind, target) => events.findLastIndex(e => e[0] === kind && e[1] === target);
+    const prepared = await prepare(job, 'Q', 'durable text', { receiptsDir: newReceipts, readRevision: async () => 1, io: spy });
+    assert.equal(prepared.entry.state, 'prepared');
+    // Both levels are new: <receipts> (parent: unitDir) and <receipts>/<job>.answers (parent: <receipts>).
+    assert(at('mkdir', newReceipts) >= 0 && at('mkdir', answersDir) >= 0, 'both new levels were created');
+    assert(lastAt('fsync', unitDir) > at('mkdir', newReceipts), 'the parent of the new receipts dir is fsynced after the mkdir');
+    assert(events.slice(at('mkdir', answersDir)).some(e => e[0] === 'fsync' && e[1] === newReceipts), 'the receipts dir (parent of the new answers dir) is fsynced after the mkdir');
+    assert(lastAt('fsync', answersDir) > at('mkdir', answersDir), 'the new answers dir itself is fsynced');
+    const link = at('link', file);
+    assert(events.slice(0, link).some(e => e[0] === 'fsync' && e[1].endsWith('.tmp')), 'the file is fsynced before it is published');
+    assert(link > lastAt('fsync', newReceipts), 'every directory is durable before the journal is published');
+    assert(events.slice(link).some(e => e[0] === 'fsync' && e[1] === answersDir), 'the directory is fsynced again after the file is linked in');
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).state, 'prepared');
+
+    // A second question under the same job creates no directory, and still fsyncs the directory after the link.
+    events.length = 0;
+    await prepare(job, 'Q2', 'second text', { receiptsDir: newReceipts, readRevision: async () => 1, io: spy });
+    assert.equal(events.filter(e => e[0] === 'mkdir').length, 0);
+    assert(events.some(e => e[0] === 'fsync' && e[1] === answersDir));
+    console.log('PASS durable creation: each new directory level and its parent are fsynced before prepare returns, the file is fsynced before it is linked in, and the directory after');
+  }
   console.log('answer-journal-e2e ok');
 } finally {
   relay.closeAllConnections(); await new Promise(resolve => relay.close(resolve));
