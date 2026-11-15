@@ -215,8 +215,14 @@ await row('classifyThread: an unknown latest run status holds the wake and names
   }
   const noStatus=classifyThread({status:'active',latestRun:{runId:'run_x'}});
   assert.equal(noStatus.state,'held'); assert.match(noStatus.reason,/null is not recognized/);
-  for(const latestRun of [{status:'completed'},{status:'running'},null,undefined]) assert.equal(classifyThread({status:'active',latestRun}).state,'active',JSON.stringify(latestRun));
-  for(const status of ['interrupted','cancelled','canceled','failed']) assert.equal(classifyThread({status:'active',latestRun:{status}}).state,'held');
+  for(const latestRun of [{status:'completed'},{status:'running'},{status:'failed'},null,undefined]) assert.equal(classifyThread({status:'active',latestRun}).state,'active',JSON.stringify(latestRun));
+  for(const status of ['interrupted','cancelled','canceled']) assert.equal(classifyThread({status:'active',latestRun:{status}}).state,'held');
+});
+await row('a failed latest run is delivered, not held: the run errored on its own and a send resumes it',async()=>{
+  const failed=classifyThread({status:'active',latestRun:{status:'failed',runId:'run:4',ordinal:4}});
+  assert.equal(failed.state,'active');
+  const woke=await run({kind:'blocker',rows:[baseRow({status:'claimed'})],inspect:[failed]});
+  assert.equal(woke.result.state,'delivered'); assert.equal(woke.seen.sends.length,1); assert.deepEqual(woke.seen.held,[]);
 });
 await row('generation seam: capture writes one opaque string, readGeneration reads it back, canAdmitContinuation is the fence; none records nothing',async()=>{
   const make=(data,inspect)=>createT3Destination({store:{},callT3:async()=>data,inspectThread:inspect,quiet:()=>null,mainThreadIds:()=>[]});
@@ -372,7 +378,6 @@ await row('metadata process: inspect only, fail-closed identity and lifecycle; t
       [{status:'active',deletedAt:'2026-01-01'},'unavailable'],
       // T3 has no 'stopped' run status: both stop and interrupt end a run 'interrupted' (R4). These are the values T3 emits.
       [{status:'active',latestRun:{status:'interrupted'}},'held'],[{status:'active',latestRun:{status:'cancelled'}},'held'],
-      [{status:'active',latestRun:{status:'failed'}},'held'],
       [{status:'unknown'},'uncertain_lifecycle'],[{},'uncertain_lifecycle']]) {
       set({thread:{id:thread,...fields},runtime:active.runtime});
       assert.equal((await inspectThread(thread,environment)).state,state);

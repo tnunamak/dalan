@@ -184,8 +184,9 @@ export async function inspectThread(threadId, environmentId) {
 // T3 has no 'stopped' run status. thread.stop and run.interrupt both leave the latest run 'interrupted', and inspect shows
 // nothing else that tells them apart (measured on T3 4643: docs/t3-wake-fence-r4.md). A wake after either starts a new run.
 // So a latest run in one of these states holds the wake. A held wake over-fences a plain interrupt: it costs a held wake, never a wrong one.
-export const runnableRunStatuses=['completed','running'];
-export const heldRunStatuses=['interrupted','cancelled','canceled','failed'];
+// A 'failed' run errored on its own, and a wake that restarts it is how a crashed or usage-limited parent resumes, so it is runnable.
+export const runnableRunStatuses=['completed','running','failed'];
+export const heldRunStatuses=['interrupted','cancelled','canceled'];
 // The parent generation: the thread, its environment and the latest run seen in one inspect.
 export const threadGeneration=(thread,environmentId)=>({threadId:thread.id,environmentId,runId:thread.latestRun?.runId??null,ordinal:Number.isInteger(thread.latestRun?.ordinal)?thread.latestRun.ordinal:null});
 // Best-effort check of the generation recorded at submit against the one seen now. It catches a different thread or
