@@ -71,7 +71,7 @@ try {
     now+=30*MIN;
     assert(klass(s,'q1')==='at_capacity_healthy','fresh progress on one claim should keep capacity healthy');
     const st=s.status();
-    assert(st.stale_claims.count===1&&st.oldest_claim_age_ms===60*MIN&&st.oldest_claim_progress_age_ms===60*MIN,'stale claim observations wrong');
+    assert(st.stale_claims.count===2&&st.stale_claims.max_idle_ms===60*MIN&&st.oldest_claim_age_ms===60*MIN&&st.oldest_claim_progress_age_ms===60*MIN,'stale claim observations wrong');
     now+=60*MIN;assert(klass(s,'q1')!=='at_capacity_healthy','stale capacity still healthy');
     assert(s.status().stale_claims.count===2,'both claims should be stale');
     s.cancel('q1');
