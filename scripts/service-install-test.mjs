@@ -12,7 +12,7 @@ import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const scratch = process.env.DOT_BRIDGE_SERVICE_INSTALL_TMP ?? path.join(os.homedir(), '.tmp');
 fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-const root = fs.mkdtempSync(path.join(scratch, 'dalan-service-install-'));
+const root = fs.mkdtempSync(path.join(scratch, 'si-'));
 const userHome = path.join(root, 'user');
 fs.mkdirSync(userHome, { mode: 0o700 });
 const gozarHome = path.join(root, 'gozar-state');
