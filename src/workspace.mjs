@@ -412,6 +412,23 @@ function excludedPathsAbsent(dir,assignment) {
   });
   return walk('');
 }
+// The same proof as excludedPathsAbsent, made from the pinned tree for callers with no checkout. Withholding removes exactly the paths in
+// scope_excluded, so the proof holds when no other path in the tree (or any directory above it) is sensitive under the current policy.
+// A sensitive file the record does not list, a malformed record, an unreadable tree or an unreadable policy all give false.
+function excludedPathsAccountedAtBase(mirror,assignment) {
+  if(!assignment.scope_excluded?.length) return false;
+  const policy=sensitivePolicyPaths();
+  if(policy.error) return false;
+  const listed=spawnSync('git',['-C',mirror,'ls-tree','-r','-z','--name-only','--full-tree',assignmentInput(assignment).base_sha],{encoding:'utf8',timeout:10000,maxBuffer:64*1024*1024,env:gitEnv()});
+  if(listed.error||listed.status!==0) return false;
+  let excluded;
+  // A malformed persisted entry is not proof; refuse instead of throwing from claim or get.
+  try { excluded=new Set(assignment.scope_excluded.map(entry=>relative(entry.path))); } catch { return false; }
+  return listed.stdout.split('\0').filter(file=>file&&!excluded.has(file)).every(file=>{
+    const parts=file.split('/');
+    return parts.every((_,i)=>!isSensitiveRepoPath(parts.slice(0,i+1).join('/'),policy.paths));
+  });
+}
 // A list shown in the receipt: the first `shown` names, the true total, and a flag when the preview is shorter than the total.
 const preview=(list,shown)=>list===null?null:({preview:list.slice(0,shown),total:list.length,truncated:list.length>shown});
 // The lists go to one bounded artifact; null when every list is empty. The cap counts the serialized JSON, envelope and separators
@@ -759,8 +776,11 @@ export class Workspace {
       .run(id,requestId,claimId,kind,file,bytes.length,sha(bytes),1,new Date().toISOString(),this.retention(requestId),claimId,requestId);
     return {artifact_id:id,size:bytes.length,sha256:sha(bytes),kind};
   }
+  mirrorFor(input,worker='dot') {
+    return fs.existsSync(mirrorPath(input.github_repo,{worker}))?mirrorPath(input.github_repo,{worker}):prepareGithubRepo(input,{worker});
+  }
   availableChecksFor(assignment,worker='dot') {
-    const input=assignmentInput(assignment),mirror=fs.existsSync(mirrorPath(input.github_repo,{worker}))?mirrorPath(input.github_repo,{worker}):prepareGithubRepo(input,{worker});
+    const input=assignmentInput(assignment),mirror=this.mirrorFor(input,worker);
     return withCheckMetadata(mirror,input.base_sha,dir=>availableChecks(input.github_repo,dir));
   }
   // Catalog data is response enrichment; keep it from discarding a committed claim or finish snapshot.
@@ -770,7 +790,9 @@ export class Workspace {
       const repo=assignment.inputs[0].github_repo;
       const declared=dir?availableChecks(repo,dir):this.availableChecksFor(assignment,worker);
       if(execution!=='host') return {available_checks:declared};
-      const absent=excludedPathsAbsent(dir,assignment);
+      // Without a checkout (claim, get) the persisted exclusion record is checked against the pinned tree. A check still
+      // proves physical absence in its own checkout before it launches.
+      const absent=dir?excludedPathsAbsent(dir,assignment):excludedPathsAccountedAtBase(this.mirrorFor(assignmentInput(assignment),worker),assignment);
       const baseRefusal=hostCheckRefusal(assignment,null,null,null,absent);
       const readiness=hostReadiness();
       const candidates=baseRefusal||!readiness.ready?[]:declared.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
@@ -783,7 +805,7 @@ export class Workspace {
     }
   }
   checkMetadataFor(assignment,worker='dot') {
-    const input=assignmentInput(assignment),mirror=fs.existsSync(mirrorPath(input.github_repo,{worker}))?mirrorPath(input.github_repo,{worker}):prepareGithubRepo(input,{worker});
+    const input=assignmentInput(assignment),mirror=this.mirrorFor(input,worker);
     return checkSpecsAt(input.github_repo,mirror,input.base_sha);
   }
   // What the bridge itself observed about one host check, and nothing more. The receipt identifies the candidate source: git's view of
