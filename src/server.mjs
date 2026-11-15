@@ -817,17 +817,29 @@ async function submitPolicy(body,req,dryRun) {
   for(const worker of routing.allowed_workers)if(!dryRun)admitPolicyWorker(worker,payload,execution,approvals[worker]);
   // Capture each candidate's relationship at the same transaction boundary as admission.
   // Acquisition uses this binding, so ending it later does not revoke accepted work.
+  const excludedWorkers=[];
   const result=store.inTransaction(()=>{
     const existing=store.pullQueue.row(identity.request_id);
     if(existing) {
       const saved=JSON.parse(existing.options);
       if(Object.hasOwn(saved,'relationships')) options.relationships=saved.relationships;
-    } else options.relationships=Object.fromEntries(routing.allowed_workers.map(worker=>[worker,store.relationshipForSubmission(worker)?.relationship_id??null]));
+    } else {
+      const relationships=[];
+      for(const worker of routing.allowed_workers) {
+        try { relationships.push([worker,store.relationshipForSubmission(worker)?.relationship_id??null]); }
+        catch(error) {
+          if(error.message!=='relationship_ended')throw error;
+          excludedWorkers.push(worker);
+        }
+      }
+      if(!relationships.length)throw new Error('relationship_ended');
+      options.relationships=Object.fromEntries(relationships);
+    }
     return store.pullQueue.submit(payload,identity,options,routing,approvals,owner,{dryRun});
   });
-  if(dryRun)return {...result,destination_disclosures:disclosures};
+  if(dryRun)return {...result,destination_disclosures:disclosures,excluded_workers:excludedWorkers};
   log({kind:'policy_work_submitted',request_id:identity.request_id,work_order_id:result.work_order_id});
-  return {...result,execution};
+  return {...result,execution,excluded_workers:excludedWorkers};
 }
 
 // Record the call on the claim it names (one UPDATE); a thrown error or a structured {error} result is kept as the last tool error.
