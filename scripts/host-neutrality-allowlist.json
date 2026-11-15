@@ -1,0 +1,525 @@
+{
+  "src/ack-ledger.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/acp-bridge.mjs": {
+    "imports": [
+      "../integrations/t3/acp-kit/src/capability.mjs",
+      "../integrations/t3/acp-kit/src/t3-envelope.mjs"
+    ],
+    "tokens": null
+  },
+  "src/acp-context.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/admin-socket.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/alerts.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/answer-journal.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/artifact-journal.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/as-files.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/as-store.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/as.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/auth-check.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/auth.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/builtin-http.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/check-coverage.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/check-lint.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/check-readiness.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/check-response.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/child-exit.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/child-registry.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/claim-command-ledger.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/cli-help.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/cli-name.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/client-approval.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/client-convenience.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/connect-cli.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/consumers.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/deadman.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/default-home.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/delivery.mjs": {
+    "imports": [],
+    "tokens": 2
+  },
+  "src/demo-worker.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/destinations/index.mjs": {
+    "imports": [],
+    "tokens": 7
+  },
+  "src/destinations/none.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/diagnostic.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/docs-url.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/drain-runner.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/drained-owner.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/drained-slot.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/drained.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/durable-waiters.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/env.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/execution.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/failure-type.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/follow-current.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/get-summary.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/git-env.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/gozar-routes.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/host-budget-receipts.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/host-budget-service.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/host-budget-stop.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/host-budget.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/host-cgroup.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/host-check-allowlist.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/host-execution-policy.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/host-health.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/host-stop-reverify.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/inbox.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/integrator.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/job-retention.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/legacy-names.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/lifecycle.mjs": {
+    "imports": [],
+    "tokens": 1
+  },
+  "src/limits.mjs": {
+    "imports": [],
+    "tokens": 2
+  },
+  "src/loopback.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/mcp-outcome.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/mcp-sse.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/mcp-stdio.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/mirror-fetch.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/notify-ledger.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/objectives.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/owner-report-artifact.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/patch-apply.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/path-syntax.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/paths.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/pr-head-reviewer.mjs": {
+    "imports": [],
+    "tokens": 11
+  },
+  "src/pr-preflight.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/prepared-node-modules.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/process-inspection.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/projects.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-artifact-commands.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-delivery-driver.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-finish.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-owner-command.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-owner-mutations.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-owner-waiters.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-retention.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-services.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/protocol-stop-observer.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/publish-plan.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/pull-queue.mjs": {
+    "imports": [],
+    "tokens": 2
+  },
+  "src/redaction.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/redirect-policy.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/rejections.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/request-log.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/restore-check.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/result-binding.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/route-setting.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/runtime-check.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/sandbox-supervisor.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/schema-subset.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/scopes.mjs": {
+    "imports": [],
+    "tokens": 2
+  },
+  "src/server.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/service-auto-update.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/service-launchd.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/service-migrate-workers.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/service-update-gate.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/service-update-lock.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/service-update-runtime.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/service-update.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/service.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/setup.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/shutdown-signal.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/signal.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/status-evidence.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/status-summary.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/store-stale-claims.test.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/store.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/submission-policy.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/subscription-storage.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/terminal-safe.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/tool-registry.mjs": {
+    "imports": [],
+    "tokens": 4
+  },
+  "src/try-command.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/try-exposure.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/try-hosted.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/try-selfcheck.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/try.mjs": {
+    "imports": [],
+    "tokens": null
+  },
+  "src/webhooks.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/work-order.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/worker-instructions.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/worker-prompt.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/workers.mjs": {
+    "imports": [],
+    "tokens": 2
+  },
+  "src/workspace.mjs": {
+    "imports": [],
+    "tokens": null
+  }
+}
