@@ -76,7 +76,7 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
     `ExecStopPost=${[process.execPath, stopRecorder,...(receipts?['--check-run-id',receipts.checkRunId,'--receipt-dir',receipts.receiptDir]:[])].map(propertyArg).join(' ')}`,
   ];
   // Test suites isolate their reservation without changing the production default.
-  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  const suffix = process.env.NODE_ENV === 'production' ? undefined : process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
   if (suffix && !/^[a-zA-Z0-9-]{1,80}$/.test(suffix)) throw new Error('invalid DALAN_HOST_CHECK_UNIT_SUFFIX');
   const unit = `dot-bridge-host-check${suffix ? '-' + suffix : ''}.service`;
   const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', `--unit=${unit}`, ...properties.map(p => `--property=${p}`), '--', process.execPath, service];

@@ -186,6 +186,13 @@ test('a later supervisor interruption cannot erase an observed CPU budget violat
   } finally { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
 });
 
+test('a production-mode child ignores an inherited test unit suffix', { skip: !linux && 'Linux systemd/cgroup backend required' }, () => {
+  const module = new URL('../src/host-budget.mjs',import.meta.url).href;
+  const code = `import assert from 'node:assert/strict';import cp from 'node:child_process';import{syncBuiltinESMExports}from'node:module';let unit;const intercepted=new Error('intercepted');cp.spawn=(file,args)=>{unit=args.find(arg=>arg.startsWith('--unit='));throw intercepted;};syncBuiltinESMExports();const{runHostBudget}=await import(${JSON.stringify(module)});await assert.rejects(runHostBudget({dir:${JSON.stringify(home)},budgets:${JSON.stringify(budgets)},enabled:true,phases:[{name:'check',argv:['/usr/bin/true']}]}),error=>error===intercepted);assert.equal(unit,'--unit=dot-bridge-host-check.service');`;
+  const child = spawnSync(process.execPath,['--input-type=module','-e',code], {env:{...process.env,NODE_ENV:'production',DALAN_HOST_CHECK_UNIT_SUFFIX:'inherited-test-run'},encoding:'utf8'});
+  assert.equal(child.status,0,child.stderr || child.stdout);
+});
+
 test('production default names the fixed unit when the test seam is unset', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
   const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX, originalSpawn = childProcess.spawn;
   const intercepted = new Error('host-check spawn intercepted');

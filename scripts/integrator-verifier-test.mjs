@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import childProcess, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { Store } from '../src/store.mjs';
 import { hostReadiness } from '../src/execution.mjs';
 import { loadSealedResult, runEvidencePlan, verifySealedResult } from '../src/integrator.mjs';
@@ -196,6 +197,30 @@ if (hostReadiness().ready) {
 }
 assert.equal(isolated[0].issuer, 'owner');
 assert.equal(isolated[0].trust_profile, 'bridge_verified');
+
+// The restricted runner must distinguish a test invocation from production.
+const priorMode=process.env.NODE_ENV, priorSuffix=process.env.DALAN_HOST_CHECK_UNIT_SUFFIX, originalSpawn=childProcess.spawn;
+try {
+  for (const mode of ['production','test']) {
+    process.env.NODE_ENV=mode;
+    process.env.DALAN_HOST_CHECK_UNIT_SUFFIX='fixture-evidence';
+    let childEnv;
+    childProcess.spawn=(file,args,options)=>{
+      assert(args.includes('--confined-check-runner'));
+      childEnv=options.env;
+      throw new Error('CONTROL_CAPTURE_RUNNER');
+    };
+    syncBuiltinESMExports();
+    const captured=await runEvidencePlan(budgetPlan(['/usr/bin/true']),verified.scratch_dir);
+    assert.match(captured[0].error,/CONTROL_CAPTURE_RUNNER/);
+    assert.equal(childEnv.NODE_ENV,mode);
+    assert.equal(childEnv.DALAN_HOST_CHECK_UNIT_SUFFIX,mode==='test'?'fixture-evidence':undefined);
+  }
+} finally {
+  childProcess.spawn=originalSpawn;syncBuiltinESMExports();
+  if(priorMode===undefined)delete process.env.NODE_ENV;else process.env.NODE_ENV=priorMode;
+  if(priorSuffix===undefined)delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX=priorSuffix;
+}
 
 store.db.close();
 console.log('integrator-verifier-test: sealed artifact loading, candidate lineage, default checks, immutable verification records, conflict handling, digest checks, and sandboxed evidence passed');

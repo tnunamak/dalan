@@ -2,6 +2,7 @@
 // Run the package's ordered test segments to completion and report every exit.
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { readdirSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -24,24 +25,51 @@ if (!process.env.NODE_OPTIONS?.includes(sqliteWarningFlag)) {
 process.env.GIT_CONFIG_GLOBAL ??= '/dev/null';
 // One host-check reservation per suite, inherited by every segment and bridge.
 process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `suite-${process.pid}-${randomUUID()}`;
-// A short suite root isolates home-based fixtures, caches, and setup's per-user lock.
-const suiteRoot = await mkdtemp(path.resolve(os.tmpdir(), 's-'));
-// Prepared dependency caches require non-writable ancestors, including above HOME.
-const homeScratch = path.join(os.homedir(), '.tmp');
-await mkdir(homeScratch, {recursive:true,mode:0o700});
-const suiteHome = await mkdtemp(path.join(homeScratch, 's-'));
-const suiteDirs = {
-  HOME: suiteHome, TMPDIR: path.join(suiteRoot, 't'),
-  DOT_BRIDGE_TEST_TMP: path.join(suiteRoot, 't'),
-  DALAN_SETUP_LOCK_DIR: path.join(suiteRoot, 'l'),
-  npm_config_cache: path.join(suiteRoot, 'npm'),
-};
-await Promise.all([...new Set([...Object.values(suiteDirs), path.join(suiteDirs.HOME, '.tmp')])].map(dir => mkdir(dir, {recursive:true,mode:0o700})));
-Object.assign(process.env, suiteDirs);
-// Let XDG defaults follow each fixture's HOME; retain the real user bus for systemd.
-for (const key of ['XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_CACHE_HOME']) delete process.env[key];
+let suiteRoot = null, suiteHome = null;
 let interrupted = null;
 let activeRun = null;
+
+async function initializeSuite() {
+  // Prepared caches require private ancestors; sockets need a separate short root.
+  suiteRoot = await mkdtemp(path.resolve(os.tmpdir(), 's-'));
+  const homeScratch = path.join(os.homedir(), '.tmp');
+  await mkdir(homeScratch, {recursive:true,mode:0o700});
+  suiteHome = await mkdtemp(path.join(homeScratch, 's-'));
+  const suiteDirs = {
+    HOME: suiteHome, TMPDIR: path.join(suiteRoot, 't'),
+    DOT_BRIDGE_TEST_TMP: path.join(suiteRoot, 't'),
+    DALAN_SETUP_LOCK_DIR: path.join(suiteRoot, 'l'),
+    npm_config_cache: path.join(suiteRoot, 'npm'),
+  };
+  await Promise.all([...new Set([...Object.values(suiteDirs), path.join(suiteHome, '.tmp')])].map(dir => mkdir(dir, {recursive:true,mode:0o700})));
+  Object.assign(process.env, suiteDirs, {NODE_ENV:'test'});
+  // Let XDG defaults follow each fixture HOME; retain the real user bus for systemd.
+  for (const key of ['XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_CACHE_HOME']) delete process.env[key];
+}
+
+function survivingGroupPids(run) {
+  if (process.platform !== 'linux') return null;
+  const found=[];
+  // Best-effort diagnostics must not reuse the async probe that failed to settle.
+  for (const pid of readdirSync('/proc')) {
+    if (!/^\d+$/.test(pid)) continue;
+    try {
+      const stat=readFileSync(`/proc/${pid}/stat`,'utf8'), fields=stat.slice(stat.lastIndexOf(')')+2).split(' ');
+      if (Number(fields[2])===run.child.pid&&!['Z','X'].includes(fields[0])) found.push(Number(pid));
+    } catch {}
+  }
+  return found;
+}
+
+async function finalizeSuite() {
+  if (activeRun) {
+    let survivingPids=null;
+    try { survivingPids=survivingGroupPids(activeRun); } catch {}
+    console.error('SUITE ROOTS RETAINED '+JSON.stringify({home:suiteHome,tmp:suiteRoot,setupLock:process.env.DALAN_SETUP_LOCK_DIR,processGroup:activeRun.child.pid,survivingPids,stopConfirmed:false}));
+    return;
+  }
+  await Promise.all([suiteRoot,suiteHome].filter(Boolean).map(dir => rm(dir, {recursive:true,force:true})));
+}
 
 function signalRun(run, signal) {
   if (!run.child.pid) return false;
@@ -183,7 +211,7 @@ async function runSegment(command) {
     const text = await readFile(report, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
     const skippedChecks = text.split('\n').filter(Boolean).map(line => JSON.parse(line));
     return { ...result, skippedChecks };
-  } finally { await rm(dir, { recursive: true, force: true }); }
+  } finally { if (!activeRun) await rm(dir, { recursive: true, force: true }); }
 }
 
 async function verifyFailureDoesNotShortCircuit() {
@@ -250,7 +278,14 @@ async function main() {
   else if (results.some(result => result.exitCode !== 0 && result.exitCode !== 77)) process.exitCode = 1;
 }
 
-main().catch(error => {
+// Register the finalizer and signal handlers before allocating any suite state.
+try {
+  await initializeSuite();
+  if (interrupted) process.exitCode = signalStatus(interrupted);
+  else await main();
+} catch (error) {
   console.error(error);
   process.exitCode = 1;
-}).finally(() => Promise.all([suiteRoot,suiteHome].map(dir => rm(dir, { recursive: true, force: true }))));
+} finally {
+  await finalizeSuite();
+}
