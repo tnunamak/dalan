@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Pin: 919ed1c8a81b123d6617bb2e8e395e6e142e3769.
-// Contracts: src/answer-journal.mjs#prepare (132-147) freezes the envelope;
-// #send (164-186) owns posting/retries; #reconcile (188-196) never posts.
-// bin/dot-worker.mjs#answer (568-575) supplies readQuestion and post.
+// Base: 481f7a9b6b1b3f9b701d88e35db3cd7c63081e67, plus C7 readback fixes.
+// Contracts: src/answer-journal.mjs#prepare freezes the envelope;
+// #send owns posting/retries; #settle validates identity; #reconcile never posts.
+// bin/dot-worker.mjs#answer supplies readQuestion and post.
 // Fakes inject only these dependencies. Real durable journal files, no server/network.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -42,7 +42,7 @@ try {
         post: async envelope => { posts.push(structuredClone(envelope)); return reply; },
         ...(mode === 'no-reader' ? {} : { readQuestion: async () => {
           reads++;
-          return { answer: mode === 'same' ? text : mode === 'different' ? 'Other answer' : null };
+          return { question_id: questionId, answer: mode === 'same' ? text : mode === 'different' ? 'Other answer' : null };
         } }),
       };
       // #reconcile remains read-only. Open means pending, never silent success.
@@ -77,7 +77,7 @@ try {
   const attempts = [];
   let reads = 0;
   const result = await send(prepared, {
-    readQuestion: async () => { reads++; return { answer: null }; },
+    readQuestion: async () => { reads++; return { question_id: questionId, answer: null }; },
     post: async envelope => {
       attempts.push(structuredClone(envelope));
       if (attempts.length === 1) throw Object.assign(new Error('lost reply'), { kind: 'transport' });
@@ -97,6 +97,59 @@ try {
     post: async () => assert.fail('no post after failed readback'),
   }), error => error === offline);
   assert.equal(fs.readFileSync(prepared.file, 'utf8'), before);
+  // #settle: absent/malformed/wrong-identity readback is unknown, never pending.
+  for (const mode of ['missing', 'null', 'missing-answer', 'undefined-answer', 'wrong-equal', 'wrong-null', 'missing-id', 'invalid-answer']) {
+    for (const operation of ['send', 'reconcile', 'conflict']) {
+      const q = mode + '-' + operation;
+      const p = await prepare(job, q, text, { receiptsDir: root, readRevision: async () => 13 });
+      if (operation !== 'conflict') await send(p, { post: async () => ({ answered: true }) });
+      const beforeEntry = JSON.parse(fs.readFileSync(p.file, 'utf8'));
+      const record = mode === 'missing' ? undefined : mode === 'null' ? null
+        : mode === 'missing-answer' ? { question_id: q }
+        : mode === 'undefined-answer' ? { question_id: q, answer: undefined }
+        : mode === 'wrong-equal' ? { question_id: q + '-other', answer: text }
+        : mode === 'wrong-null' ? { question_id: q + '-other', answer: null }
+        : mode === 'missing-id' ? { answer: text } : { question_id: q, answer: 42 };
+      let posts = 0;
+      const deps = { receiptsDir: root, readQuestion: async () => record,
+        post: async () => {
+          posts++;
+          if (operation !== 'conflict') assert.fail('invalid readback must not POST');
+          throw Object.assign(new Error('revision_conflict'), { kind: 'http', http_status: 409 });
+        } };
+      await assert.rejects(operation === 'reconcile'
+        ? reconcile(job, q, deps) : send(p, deps), { code: 'answer_state_unknown' });
+      assert.equal(posts, operation === 'conflict' ? 1 : 0, 'no POST after invalid readback');
+      const after = JSON.parse(fs.readFileSync(p.file, 'utf8'));
+      assert.equal(after.state, 'unknown', 'unknown persisted, including wrong equal-text identity');
+      assert.deepEqual({ ...after, state: beforeEntry.state }, beforeEntry, 'envelope preserved');
+    }
+  }
+  // #send: transport exhaustion persists uncertainty before rejecting; a later explicit retry
+  // retains the original key, text and revision (not a fresh prepare).
+  for (const kind of ['transport', 'http']) {
+    const q = 'exhaust-' + kind;
+    const p = await prepare(job, q, text, { receiptsDir: root, readRevision: async () => 17 });
+    const beforeEntry = JSON.parse(fs.readFileSync(p.file, 'utf8'));
+    const sent = [];
+    const lost = Object.assign(new Error('reply lost'), { kind, ...(kind === 'http' ? { http_status: 503 } : {}) });
+    await assert.rejects(send(p, { attempts: 3, sleep: async () => {},
+      post: async envelope => { sent.push(structuredClone(envelope)); throw lost; },
+    }), error => error === lost);
+    assert.equal(sent.length, 3);
+    assert(sent.every(e => JSON.stringify(e) === JSON.stringify(sent[0])));
+    const after = JSON.parse(fs.readFileSync(p.file, 'utf8'));
+    assert.equal(after.state, 'unknown');
+    assert.deepEqual({ ...after, state: beforeEntry.state }, beforeEntry);
+    const resumed = await prepare(job, q, text, { receiptsDir: root,
+      readRevision: async () => assert.fail('unknown attempt must not refresh revision') });
+    assert.equal(resumed.entry.state, 'unknown');
+    const reply = await send(resumed, { post: async envelope => {
+      assert.deepEqual(envelope, sent[0]); return { answered: true };
+    } });
+    assert.equal(reply.answered, true);
+    assert.equal(JSON.parse(fs.readFileSync(p.file, 'utf8')).state, 'committed');
+  }
   console.log('answer-journal-restore-replay-test ok');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

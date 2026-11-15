@@ -25,7 +25,10 @@
 //       "none" (no journal) | "committed" | "confirmed" (the server holds our text; the journal is now committed) |
 //       "pending" (the server has no answer; the saved envelope can still be sent) |
 //       "conflict" (the server holds a different answer) | "unknown" (the server cannot be asked).
-//   deps: {receiptsDir, io (fs, injectable for tests), readRevision() -> integer|null, post(envelope) -> reply, readQuestion() -> {answer}|undefined,
+//       Readback must identify the requested question and explicitly contain answer:null to be pending.
+//       Missing/mismatched/malformed readback persists unknown and throws answer_state_unknown.
+//       Exhausted transport retries likewise persist unknown before throwing the transport error.
+//   deps: {receiptsDir, io (fs, injectable for tests), readRevision() -> integer|null, post(envelope) -> reply, readQuestion() -> {question_id, answer}|undefined,
 //          attempts=3, retryDelayMs=200, sleep}. Only the members a function uses are needed.
 //   answerThroughJournal(...) is prepare() then send(), for the CLI.
 //
@@ -159,8 +162,14 @@ async function settle(prepared, readQuestion, cause) {
     if (classify(error) === 'unknown') { setState(file, entry, 'unknown'); throw unknownError(job, questionId, file, error); }
     throw error;
   }
-  if (question && question.answer === entry.text) { setState(file, entry, 'committed'); return { state: 'confirmed' }; }
-  if (question && typeof question.answer === 'string') return { state: 'conflict', cause };
+  if (!question || question.question_id !== questionId
+    || !Object.hasOwn(question, 'answer') || (question.answer !== null && typeof question.answer !== 'string')) {
+    setState(file, entry, 'unknown');
+    throw unknownError(job, questionId, file, new Error('readback did not identify this question with an explicit answer'));
+  }
+  if (question.answer === entry.text) { setState(file, entry, 'committed'); return { state: 'confirmed' }; }
+  if (typeof question.answer === 'string') return { state: 'conflict', cause };
+  // Only an identified question with an explicit null answer is safe to replay.
   return { state: 'pending', cause };
 }
 
@@ -186,7 +195,10 @@ export async function send(prepared, { post, readQuestion, attempts = 3, retryDe
     } catch (error) {
       const kind = classify(error);
       if (kind === 'transport' && attempt < attempts) { await sleep(retryDelayMs * attempt); continue; }
-      if (kind === 'transport') throw Object.assign(error, { fix: [`the answer may or may not have been applied; run the same answer command again to re-send the saved attempt (${file})`] });
+      if (kind === 'transport') {
+        setState(file, entry, 'unknown'); // a lost reply does not prove the POST failed
+        throw Object.assign(error, { fix: [`the answer may or may not have been applied; run the same answer command again to re-send the saved attempt (${file})`] });
+      }
       if (kind === 'unknown') { setState(file, entry, 'unknown'); throw unknownError(job, questionId, file, error); }
       if (kind !== 'readback') throw error;
       const settled = await settle(prepared, readQuestion, error);

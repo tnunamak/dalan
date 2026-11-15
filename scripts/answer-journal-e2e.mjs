@@ -17,10 +17,11 @@ import { answerThroughJournal, prepare, send, reconcile, journalPath, AnswerJour
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const adapter = new DotBridgeAdapter();
-const cliHome = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'aj-'));
+const testTmp = process.env.DOT_BRIDGE_TEST_TMP ?? os.tmpdir();
+const cliHome = fs.mkdtempSync(path.join(testTmp, 'aj-'));
 const cliRoot = path.join(cliHome, '.local/share/dot-bridge'), receiptsDir = path.join(cliRoot, 'receipts'), relayPath = path.join(cliRoot, 'admin.sock');
 fs.mkdirSync(receiptsDir, { recursive: true, mode: 0o700 });
-const unitDir = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'aj-unit-'));
+const unitDir = fs.mkdtempSync(path.join(testTmp, 'aj-unit-'));
 
 // ---- relay: forwards to the real admin socket; a rule can cut the connection around a request ----------------
 let running = null; // the CLI child that a cut kills
@@ -305,7 +306,7 @@ try {
     const down = Object.assign(new Error('socket hang up'), { kind: 'transport' });
     await assert.rejects(answerThroughJournal({ ...base, attempts: 3, readRevision: async () => (reads++, 7), post: async e => { sent.push(JSON.stringify(e)); throw down; }, readQuestion: async () => assert.fail('no read-back for a transport failure') }), /socket hang up/);
     assert.equal(sent.length, 3); assert.equal(new Set(sent).size, 1, 'every attempt carries the identical envelope'); assert.equal(reads, 1);
-    assert.equal(JSON.parse(sent[0]).expected_revision, 7); assert.equal(JSON.parse(fs.readFileSync(journalPath(unitDir, base.job, base.questionId), 'utf8')).state, 'prepared');
+    assert.equal(JSON.parse(sent[0]).expected_revision, 7); assert.equal(JSON.parse(fs.readFileSync(journalPath(unitDir, base.job, base.questionId), 'utf8')).state, 'unknown');
     assert(journalPath(unitDir, base.job, base.questionId).endsWith('req_unit_job_1.answers/Q%3A1%2Ea.json'));
     const timeout = Object.assign(new Error('admin request timed out after 30000 ms'), { kind: 'transport', code: 'ETIMEDOUT' });
     let calls = 0;
@@ -368,15 +369,15 @@ try {
     assert.deepEqual([prepare.length, send.length, reconcile.length], [4, 2, 3]);
     const job = 'req_iface_job_1', dir = unitDir;
     const noPost = { post: async () => assert.fail('reconcile never sends') };
-    const answers = new Map();
+    const answers = new Map([['Q', { question_id: 'Q', answer: null }]]);
     const deps = { receiptsDir: dir, readRevision: async () => 5, readQuestion: async () => answers.get('Q') };
     assert.deepEqual(await reconcile(job, 'Q', { ...deps, ...noPost }), { state: 'none' });
     const prepared = await prepare(job, 'Q', 'iface text', deps);
     assert.equal(prepared.entry.state, 'prepared'); assert.equal(prepared.entry.expected_revision, 5);
     assert.deepEqual((await reconcile(job, 'Q', { ...deps, ...noPost })).state, 'pending');
-    answers.set('Q', { answer: 'someone else' });
+    answers.set('Q', { question_id: 'Q', answer: 'someone else' });
     assert.equal((await reconcile(job, 'Q', deps)).state, 'conflict'); assert.equal(JSON.parse(fs.readFileSync(prepared.file, 'utf8')).state, 'prepared');
-    answers.set('Q', { answer: 'iface text' });
+    answers.set('Q', { question_id: 'Q', answer: 'iface text' });
     assert.equal((await reconcile(job, 'Q', deps)).state, 'confirmed'); assert.equal(JSON.parse(fs.readFileSync(prepared.file, 'utf8')).state, 'committed');
     assert.equal((await reconcile(job, 'Q', deps)).state, 'committed');
     const sendSaved = await send(await prepare(job, 'Q', 'iface text', deps), { post: async () => assert.fail('a committed attempt sends nothing') });
