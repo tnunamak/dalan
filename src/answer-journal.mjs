@@ -45,7 +45,7 @@ export class AnswerJournalError extends Error {
   constructor(code, message, fix = []) { super(message); this.code = code; this.kind = 'local'; this.fix = fix; }
 }
 
-// One file name per question ID, injective, with no path separators and no dot-only names.
+// One file name per question ID, injective, with no path separators and no name made only of periods.
 const fileStem = questionId => questionId.replace(/[^A-Za-z0-9_-]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
 export function journalPath(receiptsDir, job, questionId) {
   return path.join(receiptsDir, `${job}.answers`, `${fileStem(questionId)}.json`);
