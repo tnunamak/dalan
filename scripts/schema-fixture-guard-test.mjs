@@ -72,7 +72,7 @@ try {
   store.db.exec('PRAGMA user_version=55');
   store.db.close();
   store = new Store(file);
-  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,66);
+  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version,67);
   assert.deepEqual({...store.db.prepare('SELECT claim_id,lease_ms,lease_deadline_at FROM claims WHERE request_id=?').get(assignment.request_id)}, {...beforeFixture, lease_deadline_at: new Date(Date.parse(store.db.prepare('SELECT last_claim_activity_at FROM claims WHERE request_id=?').get(assignment.request_id).last_claim_activity_at) + beforeFixture.lease_ms).toISOString()});
   // Opening the store backfills a missing deadline from the claim's last activity and its lease duration.
   assert.equal(store.db.prepare('SELECT claim_id FROM claims WHERE request_id=?').get(assignment.request_id).claim_id, claim.claim_id);

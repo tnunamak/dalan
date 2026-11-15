@@ -9,10 +9,10 @@ const fetch=fetchForPublicHost('dot-bridge.example.test');
 const hashes={
   'stable/t3-0':'6bcc72c368bba25f527267e870c3c1efba46e39cfb5a1b4cda54ab260252ce86',
   'stable/t3-1':'460b0f36d8d9554a9f933e2629b996d8a051514848ef8a9b370674ba936e244e',
-  'questions-v1/t3-0':'21739919c2ab320873720b679bfa47d436a69a09e3f2147c9988a7d7e408fc95',
-  'questions-v1/t3-1':'70bad354761cdfb7350d20dbffd442201479867712db50b528bf93e5988f9d82',
-  'protocol-v0/t3-0':'1669578b4538a82f57ffc3fdca66d543ba02073cf127f1d1d78d6b82a9e48965',
-  'protocol-v0/t3-1':'269e99d914f88aec6e9b8422505b4c461d0fcee56008f5fdd92bdfab01ccb5a3',
+  'questions-v1/t3-0':'85a2cef06394b35249156ccc1bf8c3b07e24e03cf821c3a5115daf681c792a22',
+  'questions-v1/t3-1':'cd9704984318b60ff845a5b38d553191125faf707aca6f4695b4c0c96c45bae5',
+  'protocol-v0/t3-0':'a7dff975bf96b3cb6fb0436ae3c597db5543e6cb4cca5b9874f551f2e88f0b12',
+  'protocol-v0/t3-1':'285a609615b623870c525616456a52c28ab698c7cf1679c1fa3be28dcf680fd8',
   'legacy-v46/t3-0':'0cbbaf9ab90346d0e06fb1413f62f8e834cd6d61010a48b52d3c6e2b2d8d3cbc',
   'legacy-v46/t3-1':'0cbbaf9ab90346d0e06fb1413f62f8e834cd6d61010a48b52d3c6e2b2d8d3cbc',
 };
