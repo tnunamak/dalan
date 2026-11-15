@@ -128,3 +128,39 @@ test('every relative import of a shipped module resolves to a shipped file', () 
 test('every relative link in shipped Markdown targets a packed file', () => {
   assert.deepEqual(packedMarkdownLinks(), []);
 });
+
+function unitSections(source) {
+  const sections = new Map();
+  let section;
+  for (const raw of source.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || /^[#;]/.test(line)) continue;
+    const header = /^\[([^\]]+)\]$/.exec(line);
+    if (header) {
+      section = header[1];
+      if (!sections.has(section)) sections.set(section, new Map());
+      continue;
+    }
+    const directive = /^([^=]+)=(.*)$/.exec(line);
+    assert.ok(section && directive, 'unit fixture uses simple section/key=value syntax');
+    sections.get(section).set(directive[1].trim(), directive[2].trim());
+  }
+  return sections;
+}
+
+function assertDeadmanRestartPolicy(source) {
+  const sections = unitSections(source);
+  assert.equal(sections.get('Service')?.get('Restart'), 'always', 'restart on clean and failed exits');
+  assert.equal(sections.get('Service')?.get('RestartSec'), '3s', 'retain crash-loop backoff');
+  assert.equal(sections.get('Unit')?.get('StartLimitIntervalSec'), '0', 'never park permanently at the start-rate limit');
+}
+
+test('shipped deadman unit restarts on any exit without start-limit parking', () => {
+  const unit = 'systemd/dot-deadman.service';
+  assert.ok(files.has(unit), unit + ' ships');
+  const source = fs.readFileSync(path.join(repo, unit), 'utf8');
+  assertDeadmanRestartPolicy(source);
+  assert.throws(() => assertDeadmanRestartPolicy(source.replace('Restart=always', 'Restart=on-failure')));
+  assert.throws(() => assertDeadmanRestartPolicy(source.replace('StartLimitIntervalSec=0', 'StartLimitIntervalSec=10s')));
+  assert.throws(() => assertDeadmanRestartPolicy(source.replace('StartLimitIntervalSec=0', '# StartLimitIntervalSec=0')));
+});
