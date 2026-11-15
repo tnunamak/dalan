@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Characterization only, tnunamak/dalan cb6b119196f025ac8cbbf93f0ee8bd0a30221654.
+// Characterization only, tnunamak/dalan 4044870094802839f322ff1784f167802588c2ee.
 // Run after landing: node scripts/characterize-native-authority-e2e.mjs
 // Reconciles prior c8635df2 artifact conceptually; its non-applicable preview
 // was not replayed. No HTTP, T3, network, production data or stand-in server.
@@ -23,9 +23,9 @@ const evidence = s => ({
 function rejectOld(s,id,claimId) {
   // store.mjs refuseClaim/assertClaim 2522-2555, assertFinishClaim 2649-2657.
   const saved=evidence(s);
-  assert.throws(()=>s.progress(id,claimId,'old','subject-1'),/claim_superseded|invalid claim/);
+  assert.throws(()=>s.progress(id,claimId,'old','subject-1'),/claim_superseded/);
   assert.deepEqual(evidence(s),saved,'SELECT reports/late_evidence/progress after stale progress');
-  assert.throws(()=>s.finish(id,claimId,'completed','old','old','subject-1'),/claim_superseded|invalid claim/);
+  assert.throws(()=>s.finish(id,claimId,'completed','old','old','subject-1'),/claim_superseded/);
   assert.deepEqual(evidence(s),saved,'SELECT reports/late_evidence/progress after stale finish');
 }
 if(process.argv[2]==='--stale-holder') {
@@ -52,6 +52,7 @@ if(process.argv[2]==='--stale-holder') {
     submit('prior');finish('prior',claim('prior'));
     submit('audit');const audit=claim('audit');s.cancel('audit','fixture');
     assert.throws(()=>finish('audit',audit),/assignment_cancelled/);
+    // control: an unrelated finished report survives cancellation.
     assert.equal(query(s,"SELECT * FROM reports WHERE request_id='prior'").length,1);
     assert.equal(query(s,"SELECT * FROM late_evidence WHERE request_id='audit'").length,1);
     submit('epoch');const old=claim('epoch');progress('epoch',old,'committed');
@@ -63,6 +64,7 @@ if(process.argv[2]==='--stale-holder') {
     const saved=evidence(s);s.db.close();s=null;
     const child=spawnSync(process.execPath,[fileURLToPath(import.meta.url),'--stale-holder',
       file,String(now),'epoch',old.claim_id],{encoding:'utf8',timeout:15000});
+    // control: successful child execution is required before comparing durable evidence.
     assert.equal(child.status,0,child.stderr||child.error?.message);
     s=open();assert.deepEqual(evidence(s),saved,'SELECT persisted evidence after child/reopen');
     asserted++;
@@ -74,6 +76,18 @@ if(process.argv[2]==='--stale-holder') {
     let live=true;
     s.destinationProfile=()=>({legacy:true});
     s.connectionIsLive=id=>live&&['connection-a','connection-b'].includes(id);
+    // src/store.mjs#assertLiveConnection: admission itself must refuse, not only later mutations.
+    submit('admission-dead');live=false;
+    assert.throws(()=>claim('admission-dead','W1','connection-a'),/connection_not_live/);
+    assert.deepEqual(query(s,"SELECT * FROM claims WHERE request_id='admission-dead'"),[]);
+    assert.deepEqual(query(s,"SELECT status FROM assignments WHERE request_id='admission-dead'"),[{status:'queued'}]);
+    live=true;submit('admission-no-profile');
+    s.destinationProfile=()=>null;
+    assert.throws(()=>claim('admission-no-profile','W1','connection-a'),/connection_not_live/);
+    assert.deepEqual(query(s,"SELECT * FROM claims WHERE request_id='admission-no-profile'"),[]);
+    assert.deepEqual(query(s,"SELECT status FROM assignments WHERE request_id='admission-no-profile'"),[{status:'queued'}]);
+    s.destinationProfile=()=>({legacy:true});
+    // control: the same live connection with a profile is admitted.
     submit('connection');const connected=claim('connection','W1','connection-a');
     assert.deepEqual(query(s,"SELECT connection_id FROM claims WHERE request_id='connection'"),
       [{connection_id:'connection-a'}]);
@@ -81,6 +95,7 @@ if(process.argv[2]==='--stale-holder') {
     assert.throws(()=>progress('connection',connected,'wrong','connection-b'),/connection_not_live/);
     assert.throws(()=>finish('connection',connected,'connection-b'),/connection_not_live/);
     assert.deepEqual(evidence(s),before,'SELECT evidence after mismatched live connection');
+    // control: the matching live connection can mutate.
     progress('connection',connected,'right','connection-a');
     assert.deepEqual(query(s,"SELECT note FROM progress WHERE request_id='connection'"),[{note:'right'}]);
     asserted++;
@@ -99,6 +114,7 @@ if(process.argv[2]==='--stale-holder') {
     submit('left');submit('right');claim('left');finish('right',claim('right'));
     const report=query(s,"SELECT * FROM reports WHERE request_id='right'");
     const notices=query(s,"SELECT * FROM notifications WHERE request_id='right' ORDER BY rowid");
+    // setup: establish the unrelated report/notice before request-scoped cancellation.
     assert.equal(report.length,1);assert.ok(notices.some(n=>n.kind==='wait'&&n.state==='pending'));
     s.cancel('left','only left');
     assert.deepEqual(query(s,"SELECT status FROM assignments WHERE request_id='left'"),[{status:'cancelled'}]);
@@ -111,6 +127,7 @@ if(process.argv[2]==='--stale-holder') {
     for(const note of ['QUESTION: first','QUESTION: middle','QUESTION: last'])
       s.progress('feed',feedClaim.claim_id,note,'subject-1',true);
     const feed=query(s,"SELECT rowid AS seq,id FROM notifications WHERE request_id='feed' ORDER BY rowid");
+    // setup: establish three notifications before the explicit interior deletion.
     assert.equal(feed.length,3);
     const cursor=s.deliveryCursor('feed');
     // Explicit corruption fixture, not a public delivery operation.
@@ -133,11 +150,26 @@ if(process.argv[2]==='--stale-holder') {
       assert.deepEqual(query(s,"SELECT state,child_request_id FROM policy_work_orders WHERE request_id='pool'"),
         [{state:'queued',child_request_id:null}]);
     };
+    // control: elapsed time and polling do not turn a work order into an assignment.
     absent();now+=60000;absent();
     assert.ok(q.list('dot',()=>{}).items.some(item=>item.request_id==='pool'));
+    // src/store.mjs#queueEvent/#mayAct: an active subscription must not wake a non-assignment.
+    s.subscribe('authority-subject','http://127.0.0.1/fixture','whsec_'+'x'.repeat(44),
+      new Date(now+100000).toISOString());
+    const subs=s.activeSubscriptions();
+    // setup: an active subscription, not subscription inactivity, is the tested precondition.
+    assert.equal(subs.length,1);const sub=subs[0];
+    assert.equal(s.mayAct(sub.worker,'pool'),false);
+    const beforeSuppression=query(s,'SELECT * FROM notifications ORDER BY rowid');
+    assert.equal(s.queueEvent('pool',sub),null);
+    assert.deepEqual(query(s,'SELECT * FROM notifications ORDER BY rowid'),beforeSuppression);
+    // control: this subscription can enqueue an actual authorized assignment.
+    submit('wake-control');
+    assert.equal(s.mayAct(sub.worker,'wake-control'),true);
+    assert.equal(typeof s.queueEvent('wake-control',sub),'string');
     console.log('F35: poll eligible PullQueue/list_pending backlog; no assignment event is not evidence of host inactivity');
     asserted++;
-    gap('F35','submission absence and polling characterized; active subscription re-wake not exercised: no verified subscription/reannounce fixture in inspected seams');
+    gap('F35','submission absence and polling characterized; active subscription/mayAct suppression characterized; timed reannounce and delivery transport not exercised');
     console.log('PASS characterize '+asserted+' asserted, '+gaps+' gaps');
   } finally {
     try {s?.db.close();} finally {rmSync(dir,{recursive:true,force:true});}
