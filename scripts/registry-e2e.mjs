@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn, execFile } from 'node:child_process';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const tempRoot = path.join(os.homedir(), '.tmp');
@@ -28,13 +28,13 @@ process.stdin.on('end', () => {
   fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), stdin }) + '\\n');
 });
 `, { mode: 0o755 });
-  const port = await reservedPort();
+  let port = null;
   const env = { ...process.env, HOME: home, PATH: `${path.join(home, 'bin')}:${process.env.PATH}`, DALAN_LEGACY_PROFILE: '1',
-    DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_AUTH_MODE: '', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', ...extraEnv };
+    DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: '', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', ...extraEnv };
   const out = [];
   const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let ready = false;
-  child.stdout.on('data', c => { out.push(String(c)); if (String(c).includes('MCP listening')) ready = true; });
+  child.stdout.on('data', c => { const text=String(c); out.push(text); port=portFromListeningBanner(out.join('')); if (port) ready = true; });
   child.stderr.on('data', c => out.push(String(c)));
   for (let i = 0; i < 400 && !ready && child.exitCode === null; i++) await new Promise(r => setTimeout(r, 50));
   assert(ready, `server startup: ${out.join('')}`);

@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const repoRoot = path.resolve(new URL('..', import.meta.url).pathname);
 const base = path.join(process.env.HOME || os.homedir(), '.tmp'); fs.mkdirSync(base, { recursive: true });
@@ -14,13 +15,13 @@ const config = path.join(home, '.config/dot-bridge'); fs.mkdirSync(config, { rec
 fs.writeFileSync(path.join(config, 'oauth.env'), 'OAUTH_ISSUER=http://127.0.0.1:9/realm\nOAUTH_AUDIENCE=https://dot-bridge.example.test\nOAUTH_JWKS_URI=http://127.0.0.1:9/jwks\nOAUTH_ALLOWED_SUBJECTS=dot\n', { mode: 0o600 });
 fs.writeFileSync(path.join(config, 'workers.json'), JSON.stringify({ default_execution: 'host', workers: { dot: { connections: [{ issuer: 'http://127.0.0.1:9/realm', subject: 'dot', client_id: 'fixture-client' }], repos: ['example-owner/fixture'] } } }), { mode: 0o600 });
 
-async function runUntilSignalled(signal, port) {
-  const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_TEST_OAUTH: '1' };
+async function runUntilSignalled(signal) {
+  const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_TEST_OAUTH: '1' };
   const server = spawn(process.execPath, ['src/server.mjs'], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  let out = ''; server.stdout.on('data', b => out += b); server.stderr.on('data', b => out += b);
+  let out = '', port = null; server.stdout.on('data', b => { out += b; port = portFromListeningBanner(out); }); server.stderr.on('data', b => out += b);
   const closed = new Promise(resolve => server.once('close', (code, sig) => resolve({ code, sig })));
-  for (let i = 0; i < 200 && !(out.includes('MCP listening') && out.includes('admin socket')); i++) await new Promise(r => setTimeout(r, 50));
-  assert.ok(out.includes('MCP listening') && out.includes('admin socket'), `server did not start:\n${out}`);
+  for (let i = 0; i < 200 && !(port && out.includes('admin socket')); i++) await new Promise(r => setTimeout(r, 50));
+  assert.ok(port && out.includes('admin socket'), `server did not start:\n${out}`);
   server.kill(signal);
   const result = await Promise.race([closed, new Promise(r => setTimeout(() => r(null), 10000))]);
   if (!result) { server.kill('SIGKILL'); assert.fail(`server ignored ${signal}`); }
@@ -28,9 +29,8 @@ async function runUntilSignalled(signal, port) {
 }
 
 try {
-  let port = Number(process.env.SHUTDOWN_SIGNAL_TEST_PORT || 18861);
   for (const signal of ['SIGTERM', 'SIGINT']) {
-    const { sig, out } = await runUntilSignalled(signal, port++);
+    const { sig, out } = await runUntilSignalled(signal);
     const lines = out.split('\n').filter(l => l.startsWith('{')).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
     const entry = lines.find(l => l.kind === 'shutdown_signal');
     assert.ok(entry, `no shutdown_signal line after ${signal}:\n${out}`);

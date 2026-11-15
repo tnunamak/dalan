@@ -9,23 +9,42 @@ import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 const root = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'as-exposure-'));
 const config = path.join(root, '.config/dot-bridge');
-const port = await reservedPort();
-const pub = `http://127.0.0.1:${port}`;
+let port = await reservedPort(), pub = `http://127.0.0.1:${port}`;
 const env = { ...process.env, HOME: root, DOT_BRIDGE_AUTH_MODE: 'builtin', DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_TEST_OAUTH: '1', NODE_ENV: 'test' };
 fs.mkdirSync(config, { recursive: true });
 fs.writeFileSync(path.join(config, 'workers.json'), JSON.stringify({ workers: { lark: {} } }), { mode: 0o600 });
 const cli = (...args) => spawnSync(process.execPath, ['bin/dot-worker.mjs', 'connect', ...args, '--json'], { cwd: repo, env, encoding: 'utf8' });
 const owner = (...args) => { const r = cli(...args); assert.equal(r.status, 0, 'owner command failed'); return JSON.parse(r.stdout); };
 assert.equal(spawnSync(process.execPath, ['bin/dot-worker.mjs', 'as-init', '--public-url', pub], { cwd: repo, env, stdio: 'ignore' }).status, 0);
-const child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
-let ready = false;
-child.stdout.on('data', b => { if (String(b).includes('MCP listening')) ready = true; });
-child.stderr.resume();
+let child;
+const started = await reservedPort({ start: candidate => new Promise((resolve, reject) => {
+  port = candidate; pub = `http://127.0.0.1:${candidate}`; env.DOT_BRIDGE_PORT = String(candidate);
+  const asFile = path.join(config, 'as.json'), asConfig = JSON.parse(fs.readFileSync(asFile, 'utf8'));
+  asConfig.public_url = pub; fs.writeFileSync(asFile, JSON.stringify(asConfig, null, 2) + '\n', { mode: 0o600 });
+  child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '', stderr = '', settled = false;
+  const timer = setTimeout(() => finish(new Error('bridge startup timed out')), 15000);
+  const finish = error => {
+    if (settled) return;
+    settled = true; clearTimeout(timer);
+    if (error) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      if (/EADDRINUSE/.test(stderr)) error.code = 'EADDRINUSE';
+      reject(error);
+    } else resolve(child);
+  };
+  child.stdout.on('data', chunk => { output += String(chunk); if (portFromListeningBanner(output)) finish(); });
+  child.stderr.on('data', chunk => { stderr += String(chunk); });
+  child.once('error', finish);
+  child.once('exit', code => finish(new Error(`bridge exited ${code}: ${stderr}`)));
+}) });
+port = started.port; child = started.value;
+const ready = true;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failures = [];
 async function check(name, fn) { try { await fn(); console.log(`PASS ${name}`); } catch (e) { failures.push(name); console.log(`FAIL ${name}: ${e.message.split('\n')[0]}`); } }

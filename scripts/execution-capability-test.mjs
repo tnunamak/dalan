@@ -87,7 +87,7 @@ async function withServer({ port, workersFile, hideBwrap }, fn) {
 }
 
 // Legacy profile (no workers.json): host is the default, exactly as before this slice.
-await withServer({ port: 19011 }, async ({ submit, task, row, admin, home }) => {
+await withServer({ port: 0 }, async ({ submit, task, row, admin, home }) => {
   const legacy = task();
   const blocked = await submit(legacy);
   assert.equal(blocked.code, 400, 'owner default is host: the disabled executor blocks admission');
@@ -126,7 +126,7 @@ await withServer({ port: 19011 }, async ({ submit, task, row, admin, home }) => 
 });
 
 // Same fixture, repository fine, but this host models "no executor": a host job is refused with the named reason, never queued.
-await withServer({ port: 19012, hideBwrap: true }, async ({ submit, task, row }) => {
+await withServer({ port: 0, hideBwrap: true }, async ({ submit, task, row }) => {
   const t = task({ scope_paths: ['src/a.js'] });
   const r = await submit(t, { execution: 'host' });
   assert.equal(r.code, 400); assert.equal(r.body.error, `capability_not_available: host_execution (${process.platform === 'linux' ? 'bwrap not found' : 'no host executor on darwin'})`); assert.equal(row(t.request_id), undefined);
@@ -137,12 +137,12 @@ await withServer({ port: 19012, hideBwrap: true }, async ({ submit, task, row })
 
 // Profile mode: default_execution from workers.json; absent means none.
 const dotWorker = { dot: { connections: [{ issuer: 'https://issuer.test', subject: 's', client_id: 'c' }] } };
-await withServer({ port: 19013, workersFile: { workers: dotWorker } }, async ({ submit, task, row }) => {
+await withServer({ port: 0, workersFile: { workers: dotWorker } }, async ({ submit, task, row }) => {
   const t = task(), r = await submit(t); assert.equal(r.code, 200, JSON.stringify(r)); assert.equal(r.body.execution, 'none'); assert.equal(row(t.request_id).execution, 'none');
   assert.equal((await submit(t)).code, 200, 'retry keeps the stored default');
   const host = task(), h = await submit(host, { execution: 'host' }); assert.equal(h.code, 400, 'an explicit host job is refused while execution is disabled'); assert.match(h.body.error, unavailableHost);
 });
-await withServer({ port: 19014, workersFile: { workers: dotWorker, default_execution: 'worker' } }, async ({ submit, task, row }) => {
+await withServer({ port: 0, workersFile: { workers: dotWorker, default_execution: 'worker' } }, async ({ submit, task, row }) => {
   const t = task(), r = await submit(t); assert.equal(r.code, 200, JSON.stringify(r)); assert.equal(row(t.request_id).execution, 'worker');
 });
 

@@ -2,7 +2,7 @@
 // Reproduce and guard against metadata enrichment stranding an OAuth-authenticated claim.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import net from 'node:net';
+import {reservedPort} from '../src/test-support/port.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
@@ -25,15 +25,6 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const must = (value, message) => assert.ok(value, message);
 const cleanText = value => value || '(none)';
 
-async function freePort() {
-  const server = net.createServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const port = server.address().port;
-  await new Promise(resolve => server.close(resolve));
-  return port;
-}
-
 function sql(file, query, ...args) {
   const db = new DatabaseSync(file);
   try {
@@ -55,8 +46,6 @@ class Bridge {
   }
 
   async init() {
-    this.port = await freePort();
-    this.url = `http://127.0.0.1:${this.port}`;
     this.env = fixtureEnv(this.home, {
       DOT_BRIDGE_RESUME_IDLE_MS: '0', // Metadata cases retain the legacy identical-claim retry contract.
       NODE_ENV: 'test',
@@ -65,17 +54,10 @@ class Bridge {
       DOT_BRIDGE_TEST_OAUTH: '1',
       DOT_BRIDGE_ENABLE_WORKSPACE: '1',
       DOT_BRIDGE_MIN_FREE_BYTES: '0',
-      DOT_BRIDGE_PORT: String(this.port),
       DOT_BRIDGE_WORKSPACE_ROOT: path.join(this.home, 'work'),
     });
     fs.mkdirSync(this.config, { recursive: true });
     fs.writeFileSync(path.join(this.config, 'workers.json'), JSON.stringify({ workers: { dot: {workspaceAllowed:true,repos:['test/runtime']}, lark: {workspaceAllowed:true,repos:['test/runtime']} } }), { mode: 0o600 });
-    const initialized = this.cli(['as-init', '--public-url', this.url]);
-    must(initialized.code === 0, 'as-init failed');
-    const secret = randomBytes(32).toString('hex');
-    fs.writeFileSync(path.join(this.config, 'env'), `BRIDGE_PATH_SECRET=${secret}\n`, { mode: 0o600 });
-    this.resource = `${this.url}/${secret}/mcp`;
-    this.oauth = `${this.url}/${secret}/oauth`; // the built-in AS lives under the secret prefix
     return this;
   }
 
@@ -87,17 +69,31 @@ class Bridge {
   }
 
   async start() {
-    let ready = false;
-    this.child = spawn(process.execPath, ['src/server.mjs'], {
-      cwd: repoRoot, env: this.env, stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    this.stderr = '';
-    this.child.stdout.on('data', chunk => {
-      if (String(chunk).includes(`MCP listening on 127.0.0.1:${this.port}`)) ready = true;
-    });
-    this.child.stderr.on('data', chunk => { this.stderr += chunk; });
-    for (let i = 0; i < 200 && !ready && this.child.exitCode === null; i++) await delay(25);
-    return ready;
+    await reservedPort({start: async port => {
+      this.port = port;
+      this.url = `http://127.0.0.1:${port}`;
+      this.env.DOT_BRIDGE_PORT = String(port);
+      for (const file of ['as.json', 'as-jwks.json', 'as-cookie-keys.json', 'as.sqlite', 'as.sqlite-wal', 'as.sqlite-shm']) fs.rmSync(path.join(this.config, file), {force:true});
+      const initialized = this.cli(['as-init', '--public-url', this.url]);
+      must(initialized.code === 0, 'as-init failed');
+      const secret = randomBytes(32).toString('hex');
+      fs.writeFileSync(path.join(this.config, 'env'), `BRIDGE_PATH_SECRET=${secret}\n`, { mode: 0o600 });
+      this.resource = `${this.url}/${secret}/mcp`;
+      this.oauth = `${this.url}/${secret}/oauth`;
+      let ready = false, stdout = '';
+      this.child = spawn(process.execPath, ['src/server.mjs'], {cwd: repoRoot, env: this.env, stdio: ['ignore', 'pipe', 'pipe']});
+      this.stderr = '';
+      this.child.stdout.on('data', chunk => { stdout += chunk; if (stdout.includes(`MCP listening on 127.0.0.1:${port}\n`)) ready = true; });
+      this.child.stderr.on('data', chunk => { this.stderr += chunk; });
+      for (let i = 0; i < 200 && !ready && this.child.exitCode === null && this.child.signalCode === null; i++) await delay(25);
+      if (!ready) {
+        await this.stop();
+        const error = new Error(`bridge did not start: ${this.stderr}`);
+        if (/EADDRINUSE/.test(this.stderr) && this.stderr.includes(':' + port)) error.code = 'EADDRINUSE';
+        throw error;
+      }
+    }});
+    return true;
   }
 
   async stop() {

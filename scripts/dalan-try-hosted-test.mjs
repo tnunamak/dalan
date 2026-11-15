@@ -78,10 +78,22 @@ function fakeRoute({ legacyOnExpose } = {}) {
   return { gozar, record, closeAll };
 }
 
+// Retry a lost initial bind without changing an established trial home's identity.
+async function withTrialPort(home, start) {
+  const established = fs.existsSync(path.join(home, '.config/dot-bridge/as.json')) || fs.existsSync(path.join(home, '.config/dalan/as.json'));
+  return reservedPort({ attempts: 3, start: async port => {
+    try { return await start(port); }
+    catch (error) {
+      if (established || error.tryKind !== 'startup' || !/EADDRINUSE/.test(error.message)) throw error;
+      fs.rmSync(home, { recursive: true, force: true });
+      throw Object.assign(error, { code: 'EADDRINUSE' });
+    }
+  } });
+}
+
 // ---- a hosted run ------------------------------------------------------------------------------------------------------
 async function hostedRun(name, { argv = [], gozar, clock, fetchImpl, route: savedRoute, trialMs, noHome, consentAnswer = 'y\n', watchPublicIdentity: watchIdentity } = {}) {
   const home = path.join(tmp, name);
-  const port = await reservedPort();
   const route = fakeRoute();
   if (savedRoute) writeRouteSetting(savedRoute, { XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`) });
   const run = { out: '', input: new PassThrough(), controller: new AbortController(), home, route: route.record, errorContext: { started: false, shellCli: `'${path.join(repo, 'bin/dalan.mjs')}'` } };
@@ -89,11 +101,11 @@ async function hostedRun(name, { argv = [], gozar, clock, fetchImpl, route: save
     run.out += text;
     if (consentAnswer !== null && /Use this route\? \[y\/N\]/.test(text)) setImmediate(() => run.input.write(consentAnswer));
   } };
-  run.finished = runTry({
+  run.finished = withTrialPort(home, port => runTry({
     argv: ['--public', ...(noHome ? [] : ['--home', home]), '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), XDG_STATE_HOME: path.join(tmp, `state-${name}`) },
     out, input: run.input, signal: run.controller.signal, errorContext: run.errorContext, clock,
     hosted: { interactive: true, gozar: gozar ?? route.gozar, serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, ...(watchIdentity ? { watchPublicIdentity: watchIdentity } : {}), ...(trialMs ? { trialMs } : {}) },
-  }).then(() => ({}), error => ({ error })).finally(() => route.closeAll());
+  })).then(() => ({}), error => ({ error })).finally(() => route.closeAll());
   run.gozar = route.gozar;
   run.until = async (pattern, ms = 60_000) => {
     for (let waited = 0; !pattern.test(run.out); waited += 50) {
@@ -118,9 +130,9 @@ async function directRun(name, { argv = [], env = {} } = {}) {
   const route = fakeRoute();
   const input = new PassThrough(), controller = new AbortController();
   const state = { out: '' };
-  const finished = runTry({ argv: ['--public', '--home', home, '--port', String(await reservedPort()), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), ...env },
+  const finished = withTrialPort(home, port => runTry({ argv: ['--public', '--home', home, '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), ...env },
     out: { write: t => { state.out += t; if (/Use this route\? \[y\/N\]/.test(t)) setImmediate(() => input.write('y\n')); } }, input, signal: controller.signal, errorContext: {},
-    hosted: { interactive: true, gozar: route.gozar, serverEnv: { DALAN_TEST_OAUTH: '1' } } }).catch(error => error).finally(() => route.closeAll());
+    hosted: { interactive: true, gozar: route.gozar, serverEnv: { DALAN_TEST_OAUTH: '1' } } })).catch(error => error).finally(() => route.closeAll());
   for (let i = 0; i < 400 && !URL_LINE.test(state.out); i++) await sleepMs(50);
   return { home, route, input, controller, state, finished, url: URL_LINE.exec(state.out)?.[1] };
 }
@@ -426,7 +438,7 @@ test('a bare `try` with no terminal runs the local self-check and never opens a 
   const input = new PassThrough();
   input.end();
   let out = '';
-  await runTry({ argv: ['--home', path.join(tmp, 'localpipe'), '--port', String(await reservedPort())], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, errorContext: {}, hosted: { gozar: route.gozar } });
+  await runTry({ argv: ['--home', path.join(tmp, 'localpipe')], env: { PATH: process.env.PATH }, out: { write: t => { out += t; } }, input, errorContext: {}, hosted: { gozar: route.gozar } });
   assert.match(out, /Self-check passed/);
   assert.equal(route.record.started, 0);
   assert.deepEqual(route.gozar.fake.state.calls, [], 'Gozar was not asked anything');
@@ -531,8 +543,8 @@ test('a saved durable route reuses one home, so its address and sign-in survive 
       gozar.ensureRoute = async () => { throw new Error('test stops after home selection'); };
       gozar.catalogRoutes = async () => { throw new Error('test stops after home selection'); };
       const run = await hostedRun(name, { noHome: true, route: saved ? savedSetting(name) : undefined, gozar });
-      await run.finished;
-      assert.ok(run.errorContext.home, 'the home is chosen before anything else happens');
+      const result = await run.finished;
+      assert.ok(run.errorContext.home, result.error?.message ?? 'the home is chosen before anything else happens');
       homes.push(run.errorContext.home);
     }
     assert.equal(homes[0], homes[1]);

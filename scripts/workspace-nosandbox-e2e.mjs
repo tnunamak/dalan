@@ -14,7 +14,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { fixtureEnv } from '../src/test-support/fixture-env.mjs';
 import './runtime-loopback-guard.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 
 process.umask(0o077);
 assert.throws(() => net.connect({ host: '198.51.100.1', port: 9 }), /forbids non-loopback network/);
@@ -52,12 +52,30 @@ class Bridge {
   }
   cli(args, input) { const r = spawnSync(process.execPath, ['bin/dot-worker.mjs', ...args], { cwd: repo, env: this.env, input, encoding: 'utf8', timeout: 30000 }); return { code: r.status, stdout: r.stdout, stderr: r.stderr }; }
   async start() {
-    let ready = false; this.stderr = '';
-    this.child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    this.child.stdout.on('data', b => { if (String(b).includes(`MCP listening on 127.0.0.1:${this.port}`)) ready = true; });
-    this.child.stderr.on('data', b => this.stderr += b);
-    for (let i = 0; i < 200 && !ready && this.child.exitCode === null; i++) await delay(25);
-    if (ready) await this.discover();
+    const startAt = candidate => new Promise((resolve, reject) => {
+      this.port = candidate; this.url = `http://127.0.0.1:${candidate}`; this.resource = `${this.url}/${this.secret}/mcp`;
+      this.env.DOT_BRIDGE_PORT = String(candidate);
+      const asFile = path.join(this.config, 'as.json');
+      const config = JSON.parse(fs.readFileSync(asFile, 'utf8')); config.public_url = this.url;
+      fs.writeFileSync(asFile, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+      let output = ''; this.stderr = '';
+      this.child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const timer = setTimeout(() => resolve(false), 5000);
+      this.child.stdout.on('data', b => { output += String(b); if (portFromListeningBanner(output)) { clearTimeout(timer); resolve(true); } });
+      this.child.stderr.on('data', b => this.stderr += b);
+      this.child.once('exit', () => {
+        clearTimeout(timer);
+        if (/EADDRINUSE/.test(this.stderr)) reject(Object.assign(new Error(this.stderr), { code: 'EADDRINUSE' }));
+        else resolve(false);
+      });
+    });
+    let ready;
+    if (this.startedOnce) ready = await startAt(this.port);
+    else {
+      const started = await reservedPort({ start: async candidate => ({ ready: await startAt(candidate) }) });
+      this.port = started.port; ready = started.value.ready;
+    }
+    if (ready) { this.startedOnce = true; await this.discover(); }
     return ready;
   }
   async discover() {

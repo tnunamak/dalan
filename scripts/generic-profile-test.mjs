@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
@@ -24,12 +24,33 @@ class Host {
   cli(args, input) { const r = spawnSync(process.execPath, ['bin/dot-worker.mjs', ...args], { cwd: repo, env: this.env, input, encoding: 'utf8' }); return { code: r.status, stdout: r.stdout, stderr: r.stderr }; }
   async port_() { this.port = await freePort(); this.pub = `http://127.0.0.1:${this.port}`; }
   async start() {
-    this.child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let ready = false;
-    this.child.stdout.on('data', b => { if (String(b).includes('MCP listening')) ready = true; });
-    this.child.stderr.resume();
-    for (let i = 0; i < 300 && !ready && this.child.exitCode === null; i++) await sleep(50);
-    assert.ok(ready, 'bridge startup');
+    const started = await reservedPort({ start: candidate => new Promise((resolve, reject) => {
+      this.port = candidate; this.pub = `http://127.0.0.1:${candidate}`;
+      const asFile = path.join(this.config, 'as.json');
+      if (fs.existsSync(asFile)) {
+        const config = JSON.parse(fs.readFileSync(asFile, 'utf8'));
+        config.public_url = this.pub;
+        fs.writeFileSync(asFile, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+      }
+      const child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '', errors = '', settled = false;
+      const timer = setTimeout(() => finish(new Error('bridge startup timed out')), 15000);
+      const finish = error => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        if (error) {
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+          if (/EADDRINUSE/.test(errors)) error.code = 'EADDRINUSE';
+          reject(error);
+        } else resolve(child);
+      };
+      child.stdout.on('data', chunk => { output += String(chunk); if (portFromListeningBanner(output)) finish(); });
+      child.stderr.on('data', chunk => { errors += String(chunk); });
+      child.once('error', finish);
+      child.once('exit', code => finish(new Error(`bridge exited ${code}: ${errors}`)));
+    }) });
+    this.port = started.port;
+    this.child = started.value;
   }
   async stop() { if (this.child && this.child.exitCode === null && this.child.signalCode === null) { this.child.kill('SIGTERM'); await new Promise(resolve => this.child.once('exit', resolve)); } }
   submit(id, worker) { return this.cli(['submit', '--stdin', '--json', ...(worker ? ['--worker', worker] : [])], JSON.stringify({ schema_version: 1, request_id: id, brief: `profile-test ${id}`, inputs: [{ revision: 'abc' }], expected_output: 'one result', execution_scope: 'read-only' })); }

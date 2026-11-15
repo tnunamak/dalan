@@ -9,14 +9,14 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Store } from '../src/store.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const repo=resolve(new URL('..',import.meta.url).pathname);
 const delegated='thread:delegated-task:command%3Amcp%3A00000000-0000-4000-8000-000000000004%3Adelegate-task%3Afixture-task';
 const provider='thread:provider:codex:native-thread:provider-thread%3Aprovider%3Acodex%3Anative-thread%3Apending%253Arun%253Athread%253A00000000-0000-4000-8000-000000000005%253Aordinal%253A1%3A'+'a'.repeat(17);
 const home=mkdtempSync(join(tmpdir(),'dalan-bridge-delivery-'));
-const port=await reservedPort();
-const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:String(port),PATH:`${join(home,'bin')}:${process.env.PATH}`};
+let port=null;
+const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:'0',PATH:`${join(home,'bin')}:${process.env.PATH}`};
 const sleep=ms=>new Promise(resolveSleep=>setTimeout(resolveSleep,ms));
 const assignment=request_id=>({schema_version:1,request_id,brief:'delivery mode test',inputs:[],expected_output:'result',execution_scope:'read-only'});
 function run(args,input='') { return new Promise(resolveRun=>{const child=spawn(args[0],args.slice(1),{cwd:repo,env,stdio:['pipe','pipe','pipe']});let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.on('close',code=>resolveRun({code,stdout,stderr}));child.stdin.end(input);}); }
@@ -59,7 +59,7 @@ try {
   migrateExistingCopy();
   service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});
   service.once('exit',code=>{serviceExit=code;});
-  let ready=false; service.stdout.on('data',b=>{if(String(b).includes('MCP listening'))ready=true;}); service.stderr.on('data',b=>process.stderr.write(b));
+  let ready=false,output=''; service.stdout.on('data',b=>{output+=String(b);port=portFromListeningBanner(output);if(port)ready=true;}); service.stderr.on('data',b=>process.stderr.write(b));
   await waitFor(()=>ready,'server');
   const secret=readFileSync(join(home,'.config','dot-bridge','env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
   async function rpc(name,arguments_) { const response=await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method:'tools/call',params:{name,arguments:arguments_}})});const body=await response.json();assert(!body.result.isError,body.result.content?.[0]?.text);return JSON.parse(body.result.content[0].text); }

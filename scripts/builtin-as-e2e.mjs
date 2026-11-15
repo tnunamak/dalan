@@ -109,7 +109,7 @@ class Bridge {
     this.secret = null;
     return this;
   }
-  async start(gate) {
+  async start(gate, attempts = 3) {
     this.exited = null; this.stderr = '';
     const child = gate
       ? armStartBarrier(fork('src/server.mjs', [], { cwd: repo, env: { ...this.env, AS_START_GATE: gate }, execArgv: ['--import', barrierPreload], stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }))
@@ -120,7 +120,16 @@ class Bridge {
     child.stderr.on('data', b => { this.stderr += b; });
     child.once('exit', code => { this.exited = code; });
     for (let i = 0; i < 300 && !ready && this.exited === null; i++) await sleep(50);
-    if (!ready) return false;
+    if (!ready) {
+      if (!this.startedOnce && !gate && attempts > 1 && /EADDRINUSE/.test(this.stderr)) {
+        await this.stop();
+        fs.rmSync(this.config, { recursive: true, force: true });
+        await this.init();
+        return this.start(gate, attempts - 1);
+      }
+      return false;
+    }
+    this.startedOnce = true;
     this.secret = fs.readFileSync(path.join(this.config, 'env'), 'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     this.resource = `${this.pub}/${this.secret}/mcp`;
     this.oauth = `${this.pub}/${this.secret}/oauth`;
@@ -190,7 +199,15 @@ const stopAll = async () => { await main.stop(); await second.stop(); sink.close
 process.on('exit', () => { if (process.env.KEEP_TEST_FIXTURES !== '1') try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ } });
 
 try {
-  assert.equal(await main.start(), true, `main bridge did not start: ${main.stderr}`);
+  // Force a real check-then-bind collision before this home has any tokens.
+  const occupied = net.createServer();
+  await new Promise(resolve => occupied.listen(0, '127.0.0.1', resolve));
+  const occupiedPort = occupied.address().port;
+  main.port = occupiedPort;
+  try {
+    assert.equal(await main.start(), true, `main bridge did not start: ${main.stderr}`);
+    assert.notEqual(main.port, occupiedPort, 'initial OAuth startup retries a lost port');
+  } finally { await new Promise(resolve => occupied.close(resolve)); }
   assert.equal(await second.start(), true, `second bridge did not start: ${second.stderr}`);
   for (const srv of [main, second]) { const r = srv.cli(['connect', 'allow-callback', CALLBACK]); assert.equal(r.code, 0, r.stderr); }
   assert.equal(main.cli(['connect', 'allow-callback', 'https://vendor.example/other/*']).code, 0);

@@ -9,9 +9,8 @@ import { hostReadiness } from '../src/execution.mjs';
 import { loadSealedResult, runEvidencePlan, verifySealedResult } from '../src/integrator.mjs';
 await import('./require-integrator-host-budget.mjs');
 
-const root = path.join(os.homedir(), '.tmp/dalan-integrator/m4-pr-a-test');
-fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-const fixture = fs.mkdtempSync(path.join(root, 'case-'));
+const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'integrator-verifier-'));
+process.on('exit', () => fs.rmSync(fixture, { recursive: true, force: true }));
 const repo = path.join(fixture, 'repo');
 fs.mkdirSync(repo);
 const git = (...args) => execFileSync('git', ['-C', repo, '-c', 'user.name=integrator test', '-c', 'user.email=integrator@example.invalid', ...args], { encoding: 'utf8' }).trim();

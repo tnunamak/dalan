@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
-import net from 'node:net';
+import {reservedPort} from '../src/test-support/port.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -32,11 +32,6 @@ async function check(id, name, fn) {
     console.error('bridge state:', { exitCode: bridge.exitCode, signal: bridge.child?.signalCode, stderr: bridge.stderr });
   }
 }
-
-const freePort = () => new Promise(resolve => {
-  const server = net.createServer();
-  server.listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => resolve(port)); });
-});
 
 class Jar {
   constructor() { this.map = new Map(); }
@@ -69,25 +64,37 @@ class Bridge {
       DOT_BRIDGE_TEST_OAUTH:'1', DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1', NODE_ENV:'test' };
   }
   async init() {
-    this.port = await freePort();
-    this.pub = `http://127.0.0.1:${this.port}`;
     fs.mkdirSync(this.config, { recursive: true });
     fs.writeFileSync(path.join(this.config, 'workers.json'), JSON.stringify({ workers: { lark: {} } }), { mode: 0o600 });
-    const result = this.cli(['as-init', '--public-url', this.pub]);
-    assert.equal(result.code, 0, 'as-init failed');
     return this;
   }
   async start() {
-    this.stderr = '';
-    this.exitCode = undefined;
-    const child = spawn(process.execPath, ['src/server.mjs'], { cwd: this.codeRoot, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    this.child = child;
-    let ready = false;
-    child.stdout.on('data', chunk => { if(localJourney) assert.doesNotMatch(String(chunk), /MCP listening on 0\.0\.0\.0/); if (/MCP listening on (?:127\.0\.0\.1|0\.0\.0\.0):\d+/.test(String(chunk))) ready = true; });
-    child.stderr.on('data', chunk => { this.stderr += String(chunk); });
-    child.once('exit', code => { this.exitCode = code; });
-    for (let i = 0; i < 300 && !ready && this.exitCode === undefined; i++) await sleep(50);
-    if (!ready) throw new Error(`bridge did not start: exit=${this.exitCode} signal=${child.signalCode}; ${this.stderr}`);
+    const launch = async () => {
+      this.stderr = '';
+      this.exitCode = undefined;
+      const child = spawn(process.execPath, ['src/server.mjs'], { cwd: this.codeRoot, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      this.child = child;
+      let ready = false, stdout = '';
+      child.stdout.on('data', chunk => { stdout += chunk; if(localJourney) assert.doesNotMatch(stdout, /MCP listening on 0\.0\.0\.0/); if (stdout.includes(`MCP listening on ${localJourney ? '127.0.0.1' : '0.0.0.0'}:${this.port}\n`) || stdout.includes(`MCP listening on 127.0.0.1:${this.port}\n`)) ready = true; });
+      child.stderr.on('data', chunk => { this.stderr += String(chunk); });
+      child.once('exit', code => { this.exitCode = code; });
+      for (let i = 0; i < 300 && !ready && this.exitCode === undefined; i++) await sleep(50);
+      if (!ready) {
+        await this.stop();
+        const error = new Error(`bridge did not start: exit=${this.exitCode} signal=${child.signalCode}; ${this.stderr}`);
+        if (/EADDRINUSE/.test(this.stderr) && this.stderr.includes(':' + this.port)) error.code = 'EADDRINUSE';
+        throw error;
+      }
+    };
+    if (this.startedOnce) await launch();
+    else await reservedPort({start: async port => {
+      this.port = port; this.pub = `http://127.0.0.1:${port}`;
+      for (const file of ['as.json', 'as-jwks.json', 'as-cookie-keys.json', 'as.sqlite', 'as.sqlite-wal', 'as.sqlite-shm']) fs.rmSync(path.join(this.config, file), {force:true});
+      const result = this.cli(['as-init', '--public-url', this.pub]);
+      assert.equal(result.code, 0, 'as-init failed');
+      await launch();
+    }});
+    this.startedOnce = true;
     this.secret = fs.readFileSync(path.join(this.config, 'env'), 'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     this.resource = `${this.pub}/${this.secret}/mcp`;
     const protectedResponse = await fetch(`${this.pub}/.well-known/oauth-protected-resource/${this.secret}/mcp`);

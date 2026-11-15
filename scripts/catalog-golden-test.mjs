@@ -7,18 +7,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const goldenPath = path.join(root, 'scripts/fixtures/catalog.golden.json');
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dot-bridge-catalog-'));
 fs.mkdirSync(path.join(home, '.config/dot-bridge'), { recursive: true });
-const port = await reservedPort();
+let port = null;
 const child = spawn(process.execPath, ['src/server.mjs'], {
-  cwd: root, env: { ...process.env, HOME: home, DALAN_LEGACY_PROFILE: '1', DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_AUTH_MODE: '', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'],
+  cwd: root, env: { ...process.env, HOME: home, DALAN_LEGACY_PROFILE: '1', DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: '', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'],
 });
-let ready = false;
-child.stdout.on('data', c => { if (String(c).includes('MCP listening')) ready = true; });
+let ready = false, output='';
+child.stdout.on('data', c => { output+=String(c);port=portFromListeningBanner(output);if(port)ready=true; });
 child.stderr.on('data', c => process.stderr.write(c));
 try {
   for (let i = 0; i < 100 && !ready; i++) await new Promise(r => setTimeout(r, 50));

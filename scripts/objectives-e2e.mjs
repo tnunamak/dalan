@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Objective meta through the real server and CLI: dot-worker submit flags, admin /submit meta validation and conflicts,
 // receipts, metrics/explain, and dot-worker backfill-objectives (operator key, dry run, verified-only, idempotent).
-import net from 'node:net';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
@@ -14,11 +14,10 @@ import { drainerRequestId, fixLoopRequestId } from '../src/objectives.mjs';
 import { legacyFixLedgerPath } from '../src/legacy-names.mjs';
 
 const repo=resolve(new URL('..',import.meta.url).pathname), home=fs.mkdtempSync(join(tmpdir(),'dalan-bridge-objectives-'));
-// A fixed port collided with other projects' fixtures on this host; take a free one unless OBJECTIVES_E2E_PORT pins it.
-const root=join(home,'.local/share/dalan'), port=Number(process.env.OBJECTIVES_E2E_PORT)||await new Promise((resolve,reject)=>{const probe=net.createServer();probe.once('error',reject);probe.listen(0,'127.0.0.1',()=>{const {port}=probe.address();probe.close(()=>resolve(port));});});
+const root=join(home,'.local/share/dalan'); let port;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)), pass=message=>console.log(`PASS ${message}`), sha=c=>c.repeat(40);
 const payload=(id,extra={})=>({schema_version:1,request_id:id,brief:'objectives e2e',inputs:[],expected_output:'one result',execution_scope:'read-only',...extra});
-const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_DRY_RUN:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'0'};
+const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_DRY_RUN:'1',DOT_BRIDGE_ENABLE_WORKSPACE:'0'};
 const cli=(args,input='')=>new Promise(done=>{const c=spawn(process.execPath,['bin/dalan.mjs',...args],{cwd:repo,env,stdio:['pipe','pipe','pipe']});let out='',err='';c.stdout.on('data',b=>out+=b);c.stderr.on('data',b=>err+=b);const parse=t=>{try{return JSON.parse(t);}catch{return t.trim();}};c.on('close',code=>done({code,out,err,value:out.trim()?parse(out):parse(err)}));c.stdin.end(input);});
 const admin=(route,method='GET',body=null,headers={})=>new Promise((done,fail)=>{const bytes=body?JSON.stringify(body):'';const req=http.request({socketPath:join(root,'admin.sock'),path:route,method,headers:{'content-type':'application/json','content-length':Buffer.byteLength(bytes),...headers}},res=>{let t='';res.on('data',b=>t+=b);res.on('end',()=>done({status:res.statusCode,value:JSON.parse(t)}));});req.on('error',fail);req.end(bytes);});
 const meta=id=>{const db=new DatabaseSync(join(root,'bridge.db'),{readOnly:true});try{return {...db.prepare('SELECT objective_key,revision,task_kind,source FROM assignments WHERE request_id=?').get(id)};}finally{db.close();}};
@@ -28,7 +27,7 @@ try {
   service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});
   let out='';service.stdout.on('data',b=>out+=b);service.stderr.on('data',b=>process.stderr.write(b));
   for(let i=0;i<100&&!(out.includes('MCP listening')&&out.includes('admin socket'));i++) await sleep(100);
-  assert.ok(out.includes('MCP listening')&&out.includes('admin socket'),'server did not start');
+  port=portFromListeningBanner(out); assert.ok(port&&out.includes('admin socket'),'server did not start or report its bound port'); env.DOT_BRIDGE_PORT=String(port);
   const key=fs.readFileSync(join(home,'.config/dalan/operator.key'),'utf8').trim();
 
   // ---- dot-worker submit: flags, default source, receipt, conflicts

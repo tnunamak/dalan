@@ -6,7 +6,7 @@ import {test,after} from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import net from 'node:net';
+import {reservedPort} from '../src/test-support/port.mjs';
 import os from 'node:os';
 import {spawn,execFileSync} from 'node:child_process';
 import {once} from 'node:events';
@@ -43,8 +43,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
 // workers: the workers.json object written at 0600, or null for a legacy profile with no file.
 async function fixture(t,{workers,native=false}) {
   const home=fs.mkdtempSync(path.join(root,'http-')),config=path.join(home,'.config/dalan'),data=path.join(home,'.local/share/dalan');
-  const listener=net.createServer();await new Promise(r=>listener.listen(0,'127.0.0.1',r));
-  const port=listener.address().port;await new Promise(r=>listener.close(r));
+  let port;
   const repository=path.join(home,'repository');fs.mkdirSync(repository);
   const git=args=>execFileSync('git',args,{encoding:'utf8',cwd:repository}).trim();
   git(['init','-q']);git(['config','user.name','Fixture']);git(['config','user.email','fixture@example.invalid']);
@@ -93,20 +92,30 @@ childProcess.execFile=fixtureExec;syncBuiltinESMExports();
   const writeWorkers=(value,mode=0o600)=>{fs.writeFileSync(workersFile,typeof value==='string'?value:JSON.stringify(value),{mode});fs.chmodSync(workersFile,mode);};
   if(workers)writeWorkers(workers);
   else { fs.mkdirSync(path.join(home,'.local/share/dalan'),{recursive:true});{const fixture=new DatabaseSync(path.join(home,'.local/share/dalan/bridge.db'));fixture.exec('PRAGMA user_version=1');fixture.close();} } // an install that predates workers.json already has a database
-  execFileSync(process.execPath,['bin/dalan.mjs','as-init','--public-url',`http://127.0.0.1:${port}`],{cwd:code,env,stdio:'pipe'});
+
   let child=null,stdout='',stderr='',auth;
   async function stop() {
-    if(child&&child.exitCode===null){const stopped=once(child,'exit');child.kill('SIGTERM');await stopped;}
+    if(child&&child.exitCode===null&&child.signalCode===null){const stopped=once(child,'exit');child.kill('SIGTERM');await stopped;}
   }
   async function start(extraEnv={}) {
     stdout='';stderr='';
     child=spawn(process.execPath,['--import',stub,'src/server.mjs'],{cwd:code,env:{...env,...extraEnv},stdio:['ignore','pipe','pipe']});
     child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);
     for(let i=0;i<400&&!stdout.includes('MCP listening on')&&child.exitCode===null;i++)await delay(25);
-    assert.match(stdout,/MCP listening on/,stderr);
+    if(!stdout.includes('MCP listening on')) {
+      await stop();
+      const error=new Error('bridge did not start: '+stderr);
+      if(/EADDRINUSE/.test(stderr)&&stderr.includes(':'+port))error.code='EADDRINUSE';
+      throw error;
+    }
   }
-  await start();
   t.after(async()=>{await stop();auth?.close();fs.rmSync(home,{recursive:true,force:true});});
+  await reservedPort({start:async candidate=>{
+    port=candidate;env.DALAN_PORT=String(port);
+    for(const file of ['as.json','as-jwks.json','as-cookie-keys.json','as.sqlite','as.sqlite-wal','as.sqlite-shm'])fs.rmSync(path.join(config,file),{force:true});
+    execFileSync(process.execPath,['bin/dalan.mjs','as-init','--public-url',`http://127.0.0.1:${port}`],{cwd:code,env,stdio:'pipe'});
+    await start();
+  }});
   const secret=fs.readFileSync(path.join(config,'env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1],resource=`http://127.0.0.1:${port}/${secret}/mcp`;
   auth=new AsStore(path.join(config,'as.sqlite'));
   function connect(name,worker='dot',replace=false) {

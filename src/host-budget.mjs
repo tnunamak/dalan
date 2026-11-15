@@ -5,10 +5,9 @@ import path from 'node:path';
 import {prepareHostReceipts,assertHostReceiptIsolation,readVerifiedHostStop} from './host-budget-receipts.mjs';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
-// One active envelope per Unix user, shared by every bridge process. The systemd
-// unit name is an atomic reservation; it disappears only after its tree stops.
-export const HOST_UNIT = 'dot-bridge-host-check.service';
+// Each check owns its unit and control group, including across bridge processes.
 export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 1024 ** 3, processes: 128, disk_write_bytes: 256 * 1024 ** 2, output_bytes: 1024 ** 2 });
 const minima = { cpu_ms: 50, wall_ms: 100, memory_bytes: 128 * 1024 ** 2, processes: 16, disk_write_bytes: 1024 ** 2, output_bytes: 1024 };
 const service = fileURLToPath(new URL('./host-budget-service.mjs', import.meta.url));
@@ -77,7 +76,8 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
     'LimitCORE=0', 'UMask=0077',
     `ExecStopPost=${[process.execPath, stopRecorder,...(receipts?['--check-run-id',receipts.checkRunId,'--receipt-dir',receipts.receiptDir]:[])].map(propertyArg).join(' ')}`,
   ];
-  const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', `--unit=${HOST_UNIT}`, ...properties.map(p => `--property=${p}`), '--', process.execPath, service];
+  const unit = `dot-bridge-host-check-${process.pid}-${randomUUID()}.service`;
+  const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', `--unit=${unit}`, ...properties.map(p => `--property=${p}`), '--', process.execPath, service];
   const started=performance.now();
   const child = spawn('/usr/bin/systemd-run', args, { stdio: ['pipe', 'pipe', 'pipe'] });
   onSpawned();
@@ -106,9 +106,9 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
         if (event.event === 'pid') pid = event.pid;
         if (event.event === 'started' && phases.some(p => p.name === event.phase)) {
           launched.push(event.phase);
-          if (onStarted) Promise.resolve(onStarted({ pid, phase: event.phase })).catch(e => { callbackError = e; cancel(); });
+          if (onStarted) Promise.resolve(onStarted({ pid, unit, phase: event.phase })).catch(e => { callbackError = e; cancel(); });
         }
-        if (event.event === 'output_started' && onOutputStarted) Promise.resolve(onOutputStarted({ pid, phase: event.phase })).catch(e => { callbackError = e; cancel(); });
+        if (event.event === 'output_started' && onOutputStarted) Promise.resolve(onOutputStarted({ pid, unit, phase: event.phase })).catch(e => { callbackError = e; cancel(); });
         if (event.event === 'partial' && launched.includes(event.phase)) {
           const chunks = partial.get(event.phase) ?? [];
           chunks.push(Buffer.from(event.output, 'base64'));
@@ -129,7 +129,7 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   if (callbackError) throw callbackError;
   // ExecStopPost runs after systemd has killed/reaped every process in the unit,
   // even on OOM, RuntimeMaxSec, or loss of the main supervisor. No PID sweep or
-  // application TTL can release a still-running reservation.
+  // application TTL can certify a still-running tree as stopped.
   const stopEvidence=resolveHostStopEvidence(receipts,stopped);
   const stop = { verified: stopEvidence?.verified === true, reason: stopEvidence?.verified ? 'systemd_control_group_stopped' : 'service_stop_not_observed', service_result: stopped?.result ?? null, invocation_id: stopEvidence?.invocationId ?? stopped?.invocation_id ?? null, remaining_pids: stopEvidence?.remaining_pids ?? stopped?.remaining_pids ?? null, oom_kill: stopped?.oom_kill ?? null };
   let error = message?.error ?? null;
@@ -145,5 +145,5 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const bytes = Buffer.concat(phaseResults.map(p => p.bytes)).subarray(0, budgets.output_bytes);
   const notStarted=provesHostNotStarted({spawnError:exit.error,pid,stopped}); // stderr is not trusted for this decision.
   const usage = message?.usage ? { ...partialUsage, ...message.usage } : partialUsage;
-  return { dependencies: dependencies ? {lock_sha256:dependencies.lock_sha256,manifest_sha256:dependencies.manifest_sha256,runtime:dependencies.runtime} : null, exit: error ? { code: 125 } : message?.exit ?? { code: 125 }, error, budgets, usage, usage_complete: !!message?.usage && !!message?.phases?.length && stopped?.result !== 'timeout' && !stopped?.oom_kill, bytes, phases: phaseResults, stop, notStarted, timedOut: error === 'budget exceeded: wall', cancelled: !!message?.cancelled, truncated: error === 'budget exceeded: output', duration_ms: Math.round(performance.now()-started) };
+  return { unit, dependencies: dependencies ? {lock_sha256:dependencies.lock_sha256,manifest_sha256:dependencies.manifest_sha256,runtime:dependencies.runtime} : null, exit: error ? { code: 125 } : message?.exit ?? { code: 125 }, error, budgets, usage, usage_complete: !!message?.usage && !!message?.phases?.length && stopped?.result !== 'timeout' && !stopped?.oom_kill, bytes, phases: phaseResults, stop, notStarted, timedOut: error === 'budget exceeded: wall', cancelled: !!message?.cancelled, truncated: error === 'budget exceeded: output', duration_ms: Math.round(performance.now()-started) };
 }

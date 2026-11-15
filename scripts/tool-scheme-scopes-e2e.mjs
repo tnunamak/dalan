@@ -11,7 +11,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
-import { reservedPort } from '../src/test-support/port.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
@@ -21,10 +20,10 @@ const subject = 'fixture-subject';
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'test', alg: 'RS256', use: 'sig' };
 
-const jwksPort = await reservedPort();
-const issuer = `http://127.0.0.1:${jwksPort}/realms/fake`;
 const jwks = http.createServer((req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ keys: [jwk] })); });
-await new Promise(resolve => jwks.listen(jwksPort, '127.0.0.1', resolve));
+await new Promise(resolve => jwks.listen(0, '127.0.0.1', resolve));
+const jwksPort = jwks.address().port;
+const issuer = `http://127.0.0.1:${jwksPort}/realms/fake`;
 
 function mintToken() {
   const head = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'test' })).toString('base64url');

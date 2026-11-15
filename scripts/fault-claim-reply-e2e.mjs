@@ -13,6 +13,7 @@ import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const seed = Number(process.env.CLAIM_REPLY_SEED ?? 20261007);
@@ -50,14 +51,17 @@ async function stop(signal = 'SIGKILL') {
 async function start() {
   output = '';
   service = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  service.stdout.on('data', data => { output += data; });
+  service.stdout.on('data', data => { output += data; const actual = portFromListeningBanner(output); if (actual) port = actual; });
   service.stderr.on('data', data => { output += data; });
   let spawnError;
   service.on('error', error => { spawnError = error; });
   const deadline = Date.now() + 10000;
   while (!output.includes('MCP listening')) {
     if (spawnError) throw spawnError;
-    assert(service.exitCode === null && service.signalCode === null, 'server exited: ' + output);
+    if (service.exitCode !== null || service.signalCode !== null) {
+      if (/EADDRINUSE/.test(output)) { const error = new Error('server bind collision'); error.code = 'EADDRINUSE'; throw error; }
+      assert.fail('server exited: ' + output);
+    }
     assert(Date.now() < deadline, 'server readiness timeout: ' + output);
     await sleep(10);
   }
@@ -189,12 +193,13 @@ try {
   await mkdir(join(home, '.config/dot-bridge'), { recursive: true });
   await writeFile(join(home, '.config/dot-bridge/limits.json'),
     JSON.stringify({ max_claimed_outer_assignments: 1, assignment_reannounce_max_count: 0 }), { mode: 0o600 });
-  const reserve = http.createServer();
-  await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
-  port = reserve.address().port;
-  await new Promise(resolve => reserve.close(resolve));
-  env.DOT_BRIDGE_PORT = String(port);
-  await start();
+  const started = await reservedPort({ start: async candidate => {
+    port = candidate;
+    env.DOT_BRIDGE_PORT = String(candidate);
+    await start();
+    return service;
+  }});
+  port = started.port;
 
   // Require committed evidence from the DB, never from a claim response.
   for (let round = 0; round < 3; round++) {

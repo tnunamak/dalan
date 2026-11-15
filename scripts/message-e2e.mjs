@@ -9,11 +9,11 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { completeJsonLines } from './jsonl.mjs';
 import { startT3ResultFixture } from '../src/test-support/t3-result-fixture.mjs';
 
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 const repo = resolve(new URL('..', import.meta.url).pathname);
 const home = mkdtempSync(join(os.homedir(), '.tmp/dalan-bridge-message-'));
 process.once('exit', () => rmSync(home, {recursive: true, force: true}));
-const port = Number(process.env.MESSAGE_E2E_PORT) || await reservedPort();
+let port = null;
 const threadId = 'thread_active';
 let t3Fixture;
 const env = {
@@ -21,7 +21,7 @@ const env = {
   HOME: home,
   DALAN_LEGACY_PROFILE: '1',
   DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1',
-  DOT_BRIDGE_PORT: String(port),
+  DOT_BRIDGE_PORT: '0',
   NODE_ENV: 'test',
   DOT_BRIDGE_T3_DRY_RUN: '0',
   DOT_BRIDGE_T3CODE_BIN: join(home, 'bin', 't3code'),
@@ -71,9 +71,9 @@ if(args.includes('send')) {
 async function startService() {
   const child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   process.once('exit', () => child.kill('SIGTERM'));
-  let ready = false;
+  let ready = false, output='';
   child.stdout.setEncoding('utf8').on('data', chunk => {
-    if (chunk.includes('MCP listening')) ready = true;
+    output+=chunk;port=portFromListeningBanner(output);if(port)ready=true;
   });
   child.stderr.setEncoding('utf8').on('data', chunk => process.stderr.write(chunk));
   await waitFor(() => ready, 'service');

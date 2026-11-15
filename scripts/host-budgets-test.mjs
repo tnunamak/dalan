@@ -8,9 +8,10 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { parseHostBudget, runHostBudget, HOST_UNIT } from '../src/host-budget.mjs';
+import { parseHostBudget, runHostBudget } from '../src/host-budget.mjs';
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'host-budget-'));
+process.on('exit',()=>fs.rmSync(home,{recursive:true,force:true}));
 const budgets = { cpu_ms: 3000, wall_ms: 8000, memory_bytes: 192 * 1024 * 1024, processes: 32, disk_write_bytes: 8 * 1024 * 1024, output_bytes: 16384 };
 const linux = process.platform === 'linux';
 const deniedCallProbe='import ctypes,errno,os; c=ctypes.CDLL(None,use_errno=True); s=ctypes.CDLL("libseccomp.so.2"); s.seccomp_syscall_resolve_name.argtypes=[ctypes.c_char_p];\nfor name in (b"inotify_init",b"inotify_init1",b"fanotify_init",b"mq_open",b"add_key",b"request_key",b"keyctl"):\n n=s.seccomp_syscall_resolve_name(name); r=c.syscall(n,0,0,0,0,0,0);\n if r>=0: raise SystemExit(9)\n if ctypes.get_errno()!=errno.EPERM: raise SystemExit(10)';
@@ -90,15 +91,15 @@ test('seccomp installation failure refuses to launch', { skip: !linux && 'Linux 
 });
 
 for (const [which, code] of Object.entries(payloads)) {
-  test(`budget exceeded: ${which}; entire tree stopped and reservation reusable`, { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  test(`budget exceeded: ${which}; entire tree stopped and its unit inactive`, { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
     // Import inside the test: the initial red run fails without launching any payload.
-    const { runHostBudget, HOST_UNIT } = await import('../src/host-budget.mjs');
+    const { runHostBudget } = await import('../src/host-budget.mjs');
     const result = await runHostBudget({ dir: home, budgets: { ...budgets, ...(which === 'wall' ? { wall_ms: 1000 } : {}), ...(which === 'cpu' ? { cpu_ms: 250 } : {}) }, phases: [{ name: 'check', argv: ['/runtime/node', '-e', code] }], enabled: true });
     assert.equal(result.error, `budget exceeded: ${which}`, JSON.stringify(result));
     assert.equal(result.stop.verified, true, JSON.stringify(result.stop));
     assert(result.bytes.length <= budgets.output_bytes);
-    const show = spawnSync('systemctl', ['--user', 'show', HOST_UNIT, '-p', 'ActiveState', '--value'], { encoding: 'utf8' });
-    assert(!['active', 'activating', 'deactivating'].includes(show.stdout.trim()), 'no active service or reservation remains');
+    const show = spawnSync('systemctl', ['--user', 'show', result.unit, '-p', 'ActiveState', '--value'], { encoding: 'utf8' });
+    assert(!['active', 'activating', 'deactivating'].includes(show.stdout.trim()), 'this check leaves no active unit');
     const good = await runHostBudget({ dir: home, budgets, phases: [{ name: 'check', argv: ['/usr/bin/true'] }], enabled: true });
     assert.equal(good.exit.code, 0, JSON.stringify(good));
   });
@@ -115,7 +116,7 @@ test('kernel memory kill reports the budget and reaps the whole service', { skip
   assert.deepEqual(result.stop.remaining_pids, []);
 });
 
-test('supervisor killed mid-check stops detached descendants and releases reservation', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+test('supervisor killed mid-check stops detached descendants and collects its unit', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
   const { runHostBudget } = await import('../src/host-budget.mjs');
   const marker='hb_'+randomUUID();
   const marked=(needle=marker)=>fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p)).filter(p=>{try{return fs.readFileSync('/proc/'+p+'/cmdline','utf8').includes(needle);}catch{return false;}});
@@ -157,16 +158,31 @@ test('install and check share storage and one output allowance', { skip: !linux 
   assert.equal(fs.existsSync(path.join(home, 'installed')), false);
 });
 
-test('concurrent admission refuses a second envelope and cancellation frees the slot', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
-  let ready; const started = new Promise(resolve => { ready = resolve; }); let cancel = false;
-  const first = runHostBudget({ dir: home, budgets, enabled: true, cancelled: () => cancel, onOutputStarted: ready, phases: [{ name: 'check', argv: ['/runtime/node', '-e', 'console.log("ready");setInterval(()=>{},1000)'] }] });
-  await started;
-  const second = await runHostBudget({ dir: home, budgets, enabled: true, phases: [{ name: 'check', argv: ['/usr/bin/true'] }] });
-  assert.match(second.error, /host budget admission failed/); assert.equal(second.stop.verified, false);
-  cancel = true;
-  const stopped = await first; assert.equal(stopped.error, 'cancelled'); assert.equal(stopped.stop.verified, true);
-  const third = await runHostBudget({ dir: home, budgets, enabled: true, phases: [{ name: 'check', argv: ['/usr/bin/true'] }] });
-  assert.equal(third.exit.code, 0, JSON.stringify(third));
+test('concurrent checks have separate units and cancellation stops only its own tree', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  const pending=[];
+  const launch=()=>{
+    let ready;const started=new Promise(resolve=>{ready=resolve;});
+    const check={cancel:false,started};
+    check.done=runHostBudget({dir:home,budgets,enabled:true,cancelled:()=>check.cancel,onOutputStarted:ready,
+      phases:[{name:'check',argv:['/runtime/node','-e','console.log("ready");setInterval(()=>{},1000)']}]});
+    pending.push(check);
+    return check;
+  };
+  try {
+    const first=launch();
+    const firstStart=await Promise.race([first.started,first.done.then(r=>{throw new Error(JSON.stringify(r));})]);
+    const second=launch();
+    const secondStart=await Promise.race([second.started,second.done.then(r=>{throw new Error(JSON.stringify(r));})]);
+    assert.notEqual(firstStart.unit,secondStart.unit);
+    first.cancel=true;
+    const stopped=await first.done;
+    assert.equal(stopped.error,'cancelled');assert.equal(stopped.stop.verified,true);
+    const show=spawnSync('systemctl',['--user','show',secondStart.unit,'-p','ActiveState','--value'],{encoding:'utf8'});
+    assert.equal(show.stdout.trim(),'active','cancelling the first check leaves the second running');
+  } finally {
+    for(const check of pending)check.cancel=true;
+    await Promise.all(pending.map(check=>check.done));
+  }
 });
 
 test('sensitive masks hide original bytes and source overlays remain read-only', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
@@ -218,13 +234,14 @@ test('systemd wall deadline still fires with the main supervisor stopped', { ski
 
 test('bridge process crash closes its control pipe and releases the service', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
   const module=new URL('../src/host-budget.mjs',import.meta.url).href;
-  const code=`const {runHostBudget}=await import(${JSON.stringify(module)});await runHostBudget({dir:${JSON.stringify(home)},budgets:${JSON.stringify(budgets)},enabled:true,onOutputStarted:()=>console.log('ready'),phases:[{name:'check',argv:['/runtime/node','-e','console.log("started");setInterval(()=>{},1000)']}]});`;
+  const code=`const {runHostBudget}=await import(${JSON.stringify(module)});await runHostBudget({dir:${JSON.stringify(home)},budgets:${JSON.stringify(budgets)},enabled:true,onOutputStarted:({unit})=>console.log(unit),phases:[{name:'check',argv:['/runtime/node','-e','console.log("started");setInterval(()=>{},1000)']}]});`;
   const bridge=spawn(process.execPath,['--input-type=module','-e',code],{stdio:['ignore','pipe','inherit']});
-  await new Promise((resolve,reject)=>{bridge.stdout.once('data',resolve);bridge.once('exit',()=>reject(new Error('bridge exited before guest readiness')));});
+  const unit=(await new Promise((resolve,reject)=>{bridge.stdout.once('data',resolve);bridge.once('exit',()=>reject(new Error('bridge exited before guest readiness')));})).toString().trim();
+  assert.match(unit,/^dot-bridge-host-check-[a-zA-Z0-9-]+\.service$/);
   process.kill(bridge.pid,'SIGKILL');await new Promise(resolve=>bridge.once('close',resolve));
   let active=true;
   for(let i=0;i<100&&active;i++){
-    const s=spawnSync('systemctl',['--user','show',HOST_UNIT,'-p','ActiveState','--value'],{encoding:'utf8'});
+    const s=spawnSync('systemctl',['--user','show',unit,'-p','ActiveState','--value'],{encoding:'utf8'});
     active=['active','activating','deactivating'].includes(s.stdout.trim());if(active)await new Promise(r=>setTimeout(r,20));
   }
   assert.equal(active,false,'the bridge crash must not leave an active unit');

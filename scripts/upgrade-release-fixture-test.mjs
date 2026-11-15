@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import net from 'node:net';
+import {portFromListeningBanner,reservedPort} from '../src/test-support/port.mjs';
 import {spawn,spawnSync} from 'node:child_process';
 import {once} from 'node:events';
 import {randomUUID} from 'node:crypto';
@@ -36,13 +36,9 @@ const run=(command,args,options={})=>{
   assert.equal(result.status,0,result.stderr||result.stdout||result.error?.message);
   return result.stdout;
 };
-async function freePort(){
-  const server=net.createServer();await new Promise((resolve,reject)=>server.listen(0,'127.0.0.1',resolve).once('error',reject));
-  const port=server.address().port;await new Promise(resolve=>server.close(resolve));return port;
-}
 function waitReady(child,label){return new Promise((resolve,reject)=>{
   let out='',err='';const timer=setTimeout(()=>reject(new Error(`${label} server did not start: ${err}`)),15000);
-  child.stdout.on('data',chunk=>{out+=chunk;const port=out.match(/MCP listening on (?:127\.0\.0\.1|0\.0\.0\.0):(\d+)/)?.[1];if(port)child.port=Number(port);if(out.includes('MCP listening')&&out.includes('admin socket')){clearTimeout(timer);resolve(out);}});
+  child.stdout.on('data',chunk=>{out+=chunk;const port=portFromListeningBanner(out);if(port)child.port=port;if(port&&out.includes('admin socket')){clearTimeout(timer);resolve(out);}});
   child.stderr.on('data',chunk=>{err+=chunk;child.capturedStderr=err;});
   child.once('exit',(code,signal)=>{clearTimeout(timer);reject(new Error(`${label} server exited (${code??signal}): ${err}`));});
 });}
@@ -87,8 +83,8 @@ test('repository migration boots the v0.3.0 release fixture and preserves its li
   const poisonKeys=['DALAN_WORKERS_FILE','DALAN_OAUTH_FILE','DALAN_HOME','XDG_CONFIG_HOME','XDG_CACHE_HOME','XDG_DATA_HOME','XDG_STATE_HOME','XDG_RUNTIME_DIR','DOT_BRIDGE_DATA_DIR'];
   const originalEnv=Object.fromEntries(poisonKeys.map(key=>[key,process.env[key]]));
   try {
-    const home=path.join(root,'home'),port=await freePort();
-    env=fixtureEnv(home,port);
+    const home=path.join(root,'home');
+    env=fixtureEnv(home,0);
     const release=path.join(root,'release');
     // The archive holds the v0.3.0 source without its tests or optional reviewer tool, so this test needs no git tag.
     const archive=readPrepublicFixture(RELEASE_FIXTURE);
@@ -113,8 +109,17 @@ test('repository migration boots the v0.3.0 release fixture and preserves its li
     run(process.execPath,['bin/dot-worker.mjs','init','--legacy','--public-url','https://fixture.invalid','--json'],
       {cwd:release,env,timeout:30000});
 
-    oldServer=spawn(process.execPath,['src/server.mjs'],{cwd:release,env,stdio:['ignore','pipe','pipe']});
-    const startup=await waitReady(oldServer,'v0.3.0');assert.match(startup,/MCP listening/);
+    await reservedPort({start:async port=>{
+      env.DOT_BRIDGE_PORT=String(port);
+      oldServer=spawn(process.execPath,['src/server.mjs'],{cwd:release,env,stdio:['ignore','pipe','pipe']});
+      try {
+        const startup=await waitReady(oldServer,'v0.3.0');assert.match(startup,/MCP listening/);assert.equal(oldServer.port,port);
+      } catch(error) {
+        if(oldServer.exitCode===null&&oldServer.signalCode===null)await stop(oldServer);
+        if(/EADDRINUSE/.test(oldServer.capturedStderr||'')&&(oldServer.capturedStderr||'').includes(':'+port))error.code='EADDRINUSE';
+        throw error;
+      }
+    }});
     const oldSecret=fs.readFileSync(path.join(home,'.config/dot-bridge/env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     const requestId=`req_${randomUUID()}`,queuedRepo='fixture/queued-repository';
     const assignment={schema_version:1,request_id:requestId,brief:'Read the queued fixture repository',

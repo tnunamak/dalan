@@ -9,18 +9,19 @@ import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { Store } from '../src/store.mjs';
 import { checkAlerts } from '../src/alerts.mjs';
 import { startT3ResultFixture } from '../src/test-support/t3-result-fixture.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const repo=resolve(new URL('..',import.meta.url).pathname),home=await mkdtemp(join(tmpdir(),'dalan-bridge-durability-'));
-const port=Number(process.env.DURABILITY_PORT)||await reservedPort(),thread='00000000-0000-4000-8000-000000000001';
-const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_AUTH_RETRY_MAX:'3',PATH:`${join(home,'bin')}:${process.env.PATH}`};
+let port=null;
+const thread='00000000-0000-4000-8000-000000000001';
+const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_T3_AUTH_RETRY_MAX:'3',PATH:`${join(home,'bin')}:${process.env.PATH}`};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const assert=(ok,message)=>{if(!ok) throw new Error(message);};
 const log=message=>console.log(`PASS ${message}`);
 let service=null,webhook=null,ntfy=null,t3Fixture=null;
 function run(argv,input) { return new Promise(resolveRun=>{const child=spawn(argv[0],argv.slice(1),{cwd:repo,env,stdio:['pipe','pipe','pipe']});let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.on('close',code=>resolveRun({code,stdout,stderr}));child.stdin.end(input);}); }
 async function waitFor(fn,label,timeout=7000) { const start=Date.now();while(Date.now()-start<timeout){if(await fn()) return;await sleep(50);}throw new Error(`timeout: ${label}`); }
-async function start(crash,requestId) { env.DOT_BRIDGE_CRASH_AT=crash||''; env.DOT_BRIDGE_CRASH_REQUEST_ID=requestId||''; service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});let output='';service.stdout.on('data',b=>output+=b);service.stderr.on('data',b=>process.stderr.write(b));await waitFor(()=>output.includes('MCP listening'),'server ready');return service; }
+async function start(crash,requestId) { env.DOT_BRIDGE_CRASH_AT=crash||''; env.DOT_BRIDGE_CRASH_REQUEST_ID=requestId||'';port=null;service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});let output='';service.stdout.on('data',b=>{output+=String(b);port=portFromListeningBanner(output);});service.stderr.on('data',b=>process.stderr.write(b));await waitFor(()=>port!==null,'server ready');return service; }
 async function stop() { if(!service||service.exitCode!==null) return;const child=service;child.kill('SIGTERM');await new Promise(r=>child.once('exit',r));service=null; }
 async function cli(...args) {const r=await run([process.execPath,'bin/dalan.mjs',...args,'--json']);return {...r,value:r.stdout?JSON.parse(r.stdout):null};}
 async function admin(route,headers={},method='GET',payload) {return new Promise((resolve,reject)=>{const body=payload?JSON.stringify(payload):'';const req=http.request({socketPath:join(home,'.local/share/dalan/admin.sock'),path:route,method,headers:{...headers,'content-length':Buffer.byteLength(body)}},res=>{let text='';res.on('data',x=>text+=x);res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(text)}));});req.on('error',reject);req.end(body);});}

@@ -10,21 +10,22 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { Store } from '../src/store.mjs';
 import { readLines } from '../src/request-log.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const repo=resolve(new URL('..',import.meta.url).pathname),home=await mkdtemp(join(tmpdir(),'dalan-bridge-claims-admin-'));
-const port=Number(process.env.CLAIMS_ADMIN_PORT||18831);
+let port=null;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const pass=message=>console.log(`PASS ${message}`);
 const payload=id=>({schema_version:1,request_id:id,brief:'claims admin test',inputs:[{revision:'abc'}],expected_output:'one result',execution_scope:'read-only'});
-const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1',DOT_BRIDGE_T3_DRY_RUN:'1'};
+const env={...process.env,HOME:home, DALAN_LEGACY_PROFILE: '1',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS:'1',DOT_BRIDGE_T3_DRY_RUN:'1'};
 const cli=(...args)=>new Promise(done=>{const c=spawn(process.execPath,['bin/dalan.mjs',...args],{cwd:repo,env,stdio:['ignore','pipe','pipe']});let out='',err='';c.stdout.on('data',b=>out+=b);c.stderr.on('data',b=>err+=b);const parse=t=>{try{return JSON.parse(t);}catch{return t.trim();}};c.on('close',code=>done({code,out,err,value:out.trim()?parse(out):parse(err)}));});
 const admin=(route,method='GET',body=null,headers={})=>new Promise((done,fail)=>{const bytes=body?JSON.stringify(body):'';const req=http.request({socketPath:join(home,'.local/share/dalan/admin.sock'),path:route,method,headers:{'content-type':'application/json','content-length':Buffer.byteLength(bytes),...headers}},res=>{let t='';res.on('data',b=>t+=b);res.on('end',()=>done({status:res.statusCode,value:JSON.parse(t)}));});req.on('error',fail);req.end(bytes);});
 let service=null,side=null;
 try {
   service=spawn(process.execPath,['src/server.mjs'],{cwd:repo,env,stdio:['ignore','pipe','pipe']});
-  let out='';service.stdout.on('data',b=>out+=b);service.stderr.on('data',b=>process.stderr.write(b));
-  for(let i=0;i<100&&!(out.includes('MCP listening')&&out.includes('admin socket'));i++) await sleep(100);
-  assert.ok(out.includes('MCP listening')&&out.includes('admin socket'),'server did not start');
+  let out='';service.stdout.on('data',b=>{out+=b;port=portFromListeningBanner(out);});service.stderr.on('data',b=>process.stderr.write(b));
+  for(let i=0;i<100&&!(port&&out.includes('admin socket'));i++) await sleep(100);
+  assert.ok(port&&out.includes('admin socket'),'server did not start');
   const secret=(await readFile(join(home,'.config/dalan/env'),'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
   const rpc=async(method,params={})=>(await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method,params})})).json();
   const tool=async(name,args)=>{const r=await rpc('tools/call',{name,arguments:args});return r.result.isError?{error:r.result.content[0].text}:JSON.parse(r.result.content[0].text);};

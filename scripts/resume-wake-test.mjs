@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const home=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-bridge-resume-'));
 process.env.HOME=home; // src/workspace.mjs reads HOME at import
@@ -163,17 +163,13 @@ async function mcpAcquisitions() {
   fs.mkdirSync(data,{recursive:true});
   const store=new Store(path.join(data,'bridge.db'));
   store.submit(payload('req_00000000-0000-4000-8000-000000000001'),{mode:'none'},'','owner');
-  const listener=createServer();
-  await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));
-  const port=listener.address().port;
-  await new Promise(resolve=>listener.close(resolve));
-  const child=spawn(process.execPath,['src/server.mjs'],{env:{...process.env,HOME:serverHome,NODE_ENV:'test',DOT_BRIDGE_AUTH_MODE:'',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:String(port),DOT_BRIDGE_RESUME_IDLE_MS:String(IDLE)},stdio:['ignore','pipe','pipe']});
+  const child=spawn(process.execPath,['src/server.mjs'],{env:{...process.env,HOME:serverHome,NODE_ENV:'test',DOT_BRIDGE_AUTH_MODE:'',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:'0',DOT_BRIDGE_RESUME_IDLE_MS:String(IDLE)},stdio:['ignore','pipe','pipe']});
   const exited=new Promise(resolve=>child.once('exit',resolve));
-  let ready=false; child.stdout.on('data',chunk=>{ if(String(chunk).includes('MCP listening')) ready=true; });
+  let output='',port=null; child.stdout.on('data',chunk=>{ output+=String(chunk); port=portFromListeningBanner(output); });
   child.stderr.resume();
   try {
-    for(let i=0;i<100&&!ready&&child.exitCode===null;i++) await new Promise(resolve=>setTimeout(resolve,50));
-    assert.ok(ready,'temporary MCP server startup');
+    for(let i=0;i<100&&!port&&child.exitCode===null;i++) await new Promise(resolve=>setTimeout(resolve,50));
+    assert.ok(port,'temporary MCP server startup or bound-port banner');
     const secret=fs.readFileSync(path.join(serverHome,'.config/dot-bridge/env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     const rpc=async(method,params)=>{
       const response=await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});

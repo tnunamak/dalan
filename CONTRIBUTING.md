@@ -15,6 +15,10 @@ DALAN_HOST_CHECKS=0 npm test
 
 `DALAN_HOST_CHECKS=0` turns host checks off by default; tests that exercise host checks may still turn them on.
 
+For concurrent runs, use a separate Git worktree and a separate short `TMPDIR` for each run (for example `/tmp/s-a-$$` and `/tmp/s-b-$$`). The temporary directory must exist before the run starts. Unix socket paths must fit within 107 bytes. Each test owns its temporary homes, databases, listeners, and host-check systemd units; installed dependencies and the toolchain may be shared read-only. Host-check resource ceilings apply per check, so concurrent runs add their resource use together.
+
+New HTTP fixtures should bind port `0` and read the listening port. A fixture that must write its URL before starting a child should use `reservedPort({ start })` from `src/test-support/port.mjs` and report an actual bind failure with `error.code = 'EADDRINUSE'`; the helper then retries setup on another port. Calling `reservedPort()` without a startup callback only supplies a candidate, which can be taken before the listener binds. Tests that deliberately exercise a named or occupied port must retain that behavior rather than silently changing ports.
+
 Some upgrade tests also run against the source of releases from before Dalan was public. Maintainers keep those archives outside the repository and set `DALAN_PREPUBLIC_FIXTURES` to their directory; without it, those tests skip with the reason "pre-public release fixtures not present".
 
 ## Changes

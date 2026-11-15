@@ -12,6 +12,7 @@ import {generateKeyPairSync} from 'node:crypto';
 import {registerSecret,redactLogEntry} from '../src/redaction.mjs';
 import {createLineMasker} from '../src/diagnostic.mjs';
 import {callTool} from '../src/mcp-stdio.mjs';
+import {portFromListeningBanner} from '../src/test-support/port.mjs';
 import {validateSubmissionAsync} from '../src/submission-policy.mjs';
 
 // Synthetic values only.
@@ -87,14 +88,14 @@ const stdio=async body=>{adminBody=JSON.stringify(body);const prev=process.env.H
 let server,port,pathSecret;
 async function startServer() {
   const dir=path.join(home,'bridge');fs.mkdirSync(path.join(dir,'.config/dot-bridge'),{recursive:true});
-  port=await (await import('../src/test-support/port.mjs')).reservedPort();
+  port=null;
   server=spawn(process.execPath,['src/server.mjs'],{cwd:path.join(import.meta.dirname,'..'),stdio:['ignore','pipe','pipe'],
-    env:{...process.env,HOME:dir,DALAN_LEGACY_PROFILE:'1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DOT_BRIDGE_PORT:String(port),NODE_ENV:'test',DOT_BRIDGE_T3_DRY_RUN:'1',
+    env:{...process.env,HOME:dir,DALAN_LEGACY_PROFILE:'1',DOT_BRIDGE_ALLOW_INSECURE_PUBLIC:'1',DOT_BRIDGE_BIND_HOST:'127.0.0.1',DALAN_PORT:'0',DOT_BRIDGE_PORT:'0',NODE_ENV:'test',DOT_BRIDGE_T3_DRY_RUN:'1',
       // The server registers credential-named environment values at startup, as the bridge does for its own.
       MATRIX_CANARY_TOKEN:CANARY}});
   let out='';server.stdout.on('data',c=>{out+=c;});server.stderr.on('data',()=>{});
-  for(let i=0;i<200&&!out.includes('MCP listening');i++)await new Promise(r=>setTimeout(r,50));
-  assert(out.includes('MCP listening'),'server did not start');
+  for(let i=0;i<200&&!(port=portFromListeningBanner(out));i++)await new Promise(r=>setTimeout(r,50));
+  assert(port,'server did not start');
   pathSecret=fs.readFileSync(path.join(dir,'.config/dot-bridge/env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
 }
 const httpReply=async name=>{

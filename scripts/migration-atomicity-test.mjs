@@ -12,9 +12,7 @@ import { dropEmptyPost54FixtureState, preWorkerFixture } from '../src/test-suppo
 import { skipCheck } from '../src/test-support/skipped-check.mjs';
 import { prepublicSkip, readPrepublicFixture } from '../src/test-support/prepublic-fixtures.mjs';
 
-const temp = path.join(os.homedir(), '.tmp/.tmp');
-fs.mkdirSync(temp, { recursive: true });
-const home = fs.mkdtempSync(path.join(temp, 'migration-atomicity-'));
+const home = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-atomicity-'));
 const snapshot = db => ({
   version: db.prepare('PRAGMA user_version').get().user_version,
   // Store bootstraps this empty table before migrate(); the worker migration must roll back all other schema writes.

@@ -7,14 +7,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { Vendor } from './live-trial/fake-vendor.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 // A short root: the admin socket path must stay under the platform limit.
 const scratchBase = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
 fs.mkdirSync(scratchBase, { recursive: true });
 const root = fs.mkdtempSync(path.join(scratchBase, 'a-'));
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failures = [];
 async function check(id, name, fn) {
   try { await fn(); console.log(`PASS ${id} ${name}`); }
@@ -34,12 +33,31 @@ class Bridge {
     return this;
   }
   async start() {
-    let ready = false, stderr = '';
-    this.child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    this.child.stdout.on('data', b => { if (/MCP listening on/.test(String(b))) ready = true; });
-    this.child.stderr.on('data', b => { stderr += b; });
-    for (let i = 0; i < 300 && !ready; i++) await sleep(50);
-    assert.ok(ready, `bridge did not start: ${stderr}`);
+    const started = await reservedPort({ start: candidate => new Promise((resolve, reject) => {
+      this.port = candidate; this.pub = `http://127.0.0.1:${candidate}`;
+      const asFile = path.join(this.config, 'as.json');
+      const config = JSON.parse(fs.readFileSync(asFile, 'utf8'));
+      config.public_url = this.pub;
+      fs.writeFileSync(asFile, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+      const child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '', stderr = '', settled = false;
+      const timer = setTimeout(() => finish(new Error('bridge startup timed out')), 15000);
+      const finish = error => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        if (error) {
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+          if (/EADDRINUSE/.test(stderr)) error.code = 'EADDRINUSE';
+          reject(error);
+        } else resolve(child);
+      };
+      child.stdout.on('data', chunk => { output += String(chunk); if (portFromListeningBanner(output)) finish(); });
+      child.stderr.on('data', chunk => { stderr += String(chunk); });
+      child.once('error', finish);
+      child.once('exit', code => finish(new Error(`bridge exited ${code}: ${stderr}`)));
+    }) });
+    this.port = started.port;
+    this.child = started.value;
     this.secret = fs.readFileSync(path.join(this.config, 'env'), 'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     this.resource = `${this.pub}/${this.secret}/mcp`;
     this.oauth = `${this.pub}/${this.secret}/oauth`;

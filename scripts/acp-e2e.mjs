@@ -12,12 +12,13 @@ import { randomUUID } from 'node:crypto';
 import { startAdapter } from './acp-client.mjs';
 import { runtimeBlock, envelope } from './acp-t3-fixtures.mjs';
 import { buildIneligible, buildResultText, runBuildProseCheck, isBuild, buildScope, adminRequest, githubRepoOf, buildAssignment, parsePrompt, attemptId, ownerToken, readOrCreateSecret, unwrapUserRequest, withoutNote, sha256, NO_REPO_NOTE } from '../src/acp-bridge.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const repo = resolve(new URL('..', import.meta.url).pathname), home = await mkdtemp(join(tmpdir(), 'dalan-acp-e2e-'));
-const port = Number(process.env.ACP_E2E_PORT) || await reservedPort(), threadId = '00000000-0000-4000-8000-000000000001';
+let port = null;
+const threadId = '00000000-0000-4000-8000-000000000001';
 const socket = join(home, '.local/share/dot-bridge/admin.sock');
-const env = { ...process.env, HOME: home, DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_PORT: String(port), PATH: `${join(home, 'bin')}:${process.env.PATH}` };
+const env = { ...process.env, HOME: home, DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_PORT: '0', PATH: `${join(home, 'bin')}:${process.env.PATH}` };
 const adapterEnv = { HOME: home, DOT_ACP_HEARTBEAT_MS: '1000', DOT_ACP_VALID_MINUTES: '30', DOT_ACP_BUILD_OWNERS: 'acme' };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function waitFor(test, label, ms = 10000) { for (let t = 0; t < ms; t += 25) { if (await test()) return; await sleep(25); } throw new Error(`timed out waiting for ${label}`); }
@@ -115,10 +116,10 @@ if(args.includes('inspect')) console.log(JSON.stringify({ok:true,data:{runtime:{
 else if(args.includes('send')) { process.stdin.on('data',()=>{}); process.stdin.on('end',()=>console.log(JSON.stringify({ok:true,data:{}}))); }
 else console.log(JSON.stringify({ok:true,data:{}}));
 `, { mode: 0o755 });
-  let ready = false;
+  let ready = false, output='';
   service = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   process.once('exit', () => service.kill('SIGTERM'));
-  service.stdout.on('data', b => { if (String(b).includes('MCP listening')) ready = true; }); service.stderr.on('data', b => process.stderr.write(b));
+  service.stdout.on('data', b => { output+=String(b);port=portFromListeningBanner(output);if(port)ready=true; }); service.stderr.on('data', b => process.stderr.write(b));
   await waitFor(() => ready, 'bridge');
   const bridgeSecret = (await readFile(join(home, '.config', 'dot-bridge', 'env'), 'utf8')).match(/BRIDGE_PATH_SECRET=(.+)/)[1];
   const rpc = async (name, args) => { const r = await fetch(`http://127.0.0.1:${port}/${bridgeSecret}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method: 'tools/call', params: { name, arguments: args } }) }); const b = await r.json(); return JSON.parse(b.result.content[0].text); };

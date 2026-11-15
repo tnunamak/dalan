@@ -9,7 +9,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { CALLBACK, Vendor } from './live-trial/fake-vendor.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 import { fetchForPublicHost } from '../src/test-support/public-host-fetch.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
@@ -35,13 +35,32 @@ class Bridge {
     return this;
   }
   async start() {
-    this.log = '';
-    this.child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let ready = false;
-    this.child.stdout.on('data', b => { if (String(b).includes('MCP listening')) ready = true; });
-    this.child.stderr.resume();
-    for (let i = 0; i < 300 && !ready && this.child.exitCode === null; i++) await sleep(50);
+    const startAt = candidate => new Promise((resolve, reject) => {
+      this.port = candidate; this.pub = `http://127.0.0.1:${candidate}`;
+      if (this.authMode === 'builtin') {
+        const config = JSON.parse(fs.readFileSync(path.join(this.config, 'as.json'), 'utf8'));
+        config.public_url = this.pub;
+        fs.writeFileSync(path.join(this.config, 'as.json'), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+      }
+      let output = '', errors = '';
+      this.child = spawn(process.execPath, ['src/server.mjs'], { cwd: repo, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const timer = setTimeout(() => resolve(false), 15000);
+      this.child.stdout.on('data', b => { output += String(b); if (portFromListeningBanner(output)) { clearTimeout(timer); resolve(true); } });
+      this.child.stderr.on('data', b => { errors += String(b); });
+      this.child.once('exit', () => {
+        clearTimeout(timer);
+        if (/EADDRINUSE/.test(errors)) reject(Object.assign(new Error(errors), { code: 'EADDRINUSE' }));
+        else resolve(false);
+      });
+    });
+    let ready;
+    if (this.startedOnce) ready = await startAt(this.port);
+    else {
+      const started = await reservedPort({ start: async candidate => ({ ready: await startAt(candidate) }) });
+      this.port = started.port; ready = started.value.ready;
+    }
     assert.ok(ready, 'bridge startup');
+    this.startedOnce = true;
     this.secret = fs.readFileSync(path.join(this.config, 'env'), 'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
     this.resource = `${this.pub}/${this.secret}/mcp`; this.oauth = `${this.pub}/${this.secret}/oauth`;
   }

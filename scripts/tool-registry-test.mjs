@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { Store } from '../src/store.mjs';
 import { createToolRegistry, createT3PostHandler, RegistryError, LIMITS } from '../src/tool-registry.mjs';
-import { reservedPort } from '../src/test-support/port.mjs';
+import { portFromListeningBanner } from '../src/test-support/port.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const scratchBase = path.join(os.homedir(), '.tmp');
@@ -310,15 +310,15 @@ test('owner_message: kinds, length, fixed thread, sender label, one per 10 minut
 test('registering or removing a tool leaves the served tools/list byte for byte identical', { timeout: 60000 }, async () => {
   const home = path.join(scratch, 'server-home');
   fs.mkdirSync(path.join(home, '.config/dot-bridge'), { recursive: true, mode: 0o700 });
-  const port = await reservedPort();
   // The advertised list is fixed per modern catalog profile and global T3 setting. Registry changes never alter it.
-  const env = { HOME: home, DALAN_HOME: home, DALAN_LEGACY_PROFILE: '1', DALAN_CATALOG_PROFILE: 'stable', PATH: process.env.PATH, NODE_ENV: 'test', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_PORT: String(port) };
+  const env = { HOME: home, DALAN_HOME: home, DALAN_LEGACY_PROFILE: '1', DALAN_CATALOG_PROFILE: 'stable', PATH: process.env.PATH, NODE_ENV: 'test', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DALAN_PORT: '0', DOT_BRIDGE_PORT: '0' };
   const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '', errors = '';
   child.stdout.on('data', d => output += d); child.stderr.on('data', d => errors += d);
   try {
-    for (let i = 0; i < 400 && !/MCP listening/.test(output) && child.exitCode === null; i++) await new Promise(r => setTimeout(r, 50));
-    assert(/MCP listening/.test(output), 'server started: ' + errors);
+    for (let i = 0; i < 400 && !portFromListeningBanner(output) && child.exitCode === null; i++) await new Promise(r => setTimeout(r, 50));
+    const port=portFromListeningBanner(output);
+    assert(port, 'server started: ' + errors);
     const secret = /BRIDGE_PATH_SECRET=(.+)/.exec(fs.readFileSync(path.join(home, '.config/dot-bridge/env'), 'utf8'))[1];
     const listBytes = async () => (await fetch(`http://127.0.0.1:${port}/${secret}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) })).text();
     const cli = (...args) => spawnSync(process.execPath, ['bin/dalan.mjs', 'tool', ...args], { cwd: root, env, encoding: 'utf8' });
