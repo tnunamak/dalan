@@ -14,6 +14,44 @@ import {checkoutWorktreeWithoutFilters} from '../src/integrator.mjs';
 import {prepareT3Audit,initT3Audit,appendT3Audit} from '../src/t3-audit.mjs';
 import {publishAlert,checkAlerts} from '../src/alerts.mjs';
 
+
+test('structured output preserves armor-like prose across object boundaries', () => {
+  const dash = String.fromCharCode(45);
+  for (const words of [['end', 'to', 'end'], ['back', 'end']]) {
+    const status = 'neither proves ' + words.join(dash) + ' success.';
+    const detail = 'Track durable private certificate storage and cryptographic material.';
+    for (const entry of [{ detail: status + ' ' + detail }, { status, detail }]) {
+      const out = redactOutput(entry);
+      for (const [field, value] of Object.entries(entry)) assert.equal(out[field], value, field);
+    }
+  }
+});
+test('structured output masks complete and truncated armor across object boundaries', async () => {
+  const { generateKeyPairSync } = await import('node:crypto');
+  const key = generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey.export({ type: 'pkcs1', format: 'pem' });
+  const newline = String.fromCharCode(10);
+  const lines = key.trim().split(newline);
+  const banner = lines[0];
+  assert(lines.length > 3, 'fixture must contain body lines and footer');
+  for (const text of [key, banner, banner + newline + lines[1]]) {
+    const split = text.indexOf(newline);
+    const entries = [{ detail: text }];
+    if (split !== -1) entries.push({ status: text.slice(0, split), detail: text.slice(split) });
+    for (const entry of entries) {
+      const out = JSON.stringify(redactOutput(entry));
+      assert(out.includes('[redacted secret]'), 'armor must produce a mask');
+      assert(!out.includes(banner), 'armor banner must not survive');
+      for (const line of lines.slice(1, -1)) assert(!out.includes(line), 'key body must not survive');
+    }
+  }
+  // A complete key does not poison unrelated neighbouring fields.
+  const entry = { detail: key, status: 'ordinary readable diagnostic' };
+  assert.equal((redactOutput(entry)).status, entry.status);
+  // Nor should an isolated banner absorb a prose diagnostic.
+  const prose = { status: banner, detail: 'ordinary readable diagnostic' };
+  const cleanProse = redactOutput(prose);
+  assert.equal(cleanProse.detail, prose.detail);
+});
 // Synthetic, obviously fake credential shapes.
 const HEX='0123456789abcdef'.repeat(4);
 const RESOURCE=`https://bridge.example.invalid/${HEX}/mcp`;
