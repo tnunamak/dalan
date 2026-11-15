@@ -4,7 +4,7 @@
   "adapter_id": "mcp",
   "observed_on": "2026-11-15",
   "pins": {
-    "dalan_commit": "4d2abf19a1d534c6ec1d85ce67c19f3d405a69ad",
+    "dalan_commit": "404554c53c4ed2e5c5d0ce751aef760b1e69fc83",
     "requester_ref": "private admin HTTP",
     "worker_host_ref": "local OAuth protocol fixture; not a live hosted worker",
     "protocol": "mcp",
