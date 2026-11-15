@@ -27,7 +27,7 @@ function unknownSends(receiptsDir) {
       // Validate the complete envelope, but never expose answer text or command envelopes.
       const entry = readJournal(filename, job, questionId);
       if (!entry) throw new Error('answer journal disappeared during inventory; retry with writers stopped');
-      if (entry.state === 'prepared' || entry.state === 'unknown') {
+      if (entry.state !== 'committed') {
         sends.push({ job: entry.job, question_id: entry.question_id, state: entry.state });
       }
     }
@@ -47,9 +47,13 @@ export function inventory({ dataRoot, receiptsDir = path.join(dataRoot, 'receipt
     // src/store.mjs#Store.answerQuestionInTransaction saves answer/answered_at together.
     // Include unanswered audit questions on finished jobs; do not silently discard them.
     const open_questions = db.prepare('SELECT request_id AS job,question_id FROM job_questions WHERE answer IS NULL ORDER BY request_id,question_id').all().map(row => ({ ...row }));
+    // src/store.mjs#Store.assertRegrantReady: terminal jobs can still own host effects.
+    const open_checks = db.prepare("SELECT id,request_id AS job,check_id,status,stop_verified FROM check_jobs WHERE status='running' OR stop_verified IS NOT 1 ORDER BY request_id,id").all().map(row => ({ ...row }));
+    // src/store.mjs#Store.finishOnce enqueues result delivery after marking a job finished.
+    const pending_deliveries = db.prepare("SELECT id,request_id AS job,kind,state FROM notifications WHERE state IN ('pending','sending','failed','uncertain','uncertain_terminal') AND kind IN ('t3','blocker','watch') ORDER BY request_id,id").all().map(row => ({ ...row }));
     const unknown_sends = unknownSends(receiptsDir);
     db.exec('COMMIT');
-    return { open_jobs, open_questions, unknown_sends, safe_to_switch: !open_jobs.length && !open_questions.length && !unknown_sends.length };
+    return { open_jobs, open_questions, open_checks, pending_deliveries, unknown_sends, safe_to_switch: !open_jobs.length && !open_questions.length && !open_checks.length && !pending_deliveries.length && !unknown_sends.length };
   } finally { db.close(); }
 }
 
