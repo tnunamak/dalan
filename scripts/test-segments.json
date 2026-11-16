@@ -224,6 +224,7 @@
   "node scripts/scope-case-alias-test.mjs",
   "node scripts/scope-case-fs-test.mjs",
   "node --test scripts/terminal-safe-test.mjs",
+  "node --test scripts/terminal-safe-invisible-test.mjs",
   "node --test scripts/dalan-get-human-test.mjs",
   "node --test scripts/connect-approve-miss-test.mjs",
   "node --test scripts/admin-socket-path-test.mjs",
