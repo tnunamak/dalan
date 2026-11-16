@@ -79,9 +79,22 @@ function copyTree(src, dst) {
     fs.chmodSync(dst, st.mode & 0o777);
   } else { fs.copyFileSync(src, dst); fs.chmodSync(dst, st.mode & 0o777); }
 }
-function replaceTree(src, dst) {
+export function replaceTree(src, dst, { copy = copyTree } = {}) {
+  if (!fs.existsSync(src)) {
+    fs.rmSync(dst, { recursive: true, force: true });
+    return;
+  }
+  const staging = dst + '.restore-' + process.pid;
+  fs.rmSync(staging, { recursive: true, force: true });
+  try {
+    copy(src, staging);
+  } catch (error) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+  // Keep the existing destination until the replacement tree is complete.
   fs.rmSync(dst, { recursive: true, force: true });
-  if (fs.existsSync(src)) copyTree(src, dst);
+  fs.renameSync(staging, dst);
 }
 function snapshot(home, txn) {
   const target = path.join(txn, 'snapshot.pending'); fs.rmSync(target, { recursive: true, force: true }); privateDir(target);
