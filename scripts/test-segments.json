@@ -43,6 +43,7 @@
   "node --test scripts/dalan-first-run-output-test.mjs",
   "timeout --kill-after=5s 180s nice -n 10 node scripts/dalan-mcp-test.mjs",
   "node --test scripts/schema-subset-test.mjs",
+  "node scripts/schema-subset-length-test.mjs",
   "node --test scripts/tool-registry-test.mjs",
   "node --test scripts/tool-registry-admission-test.mjs",
   "timeout --kill-after=5s 360s nice -n 10 node --test scripts/dalan-try-test.mjs",
