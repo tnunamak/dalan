@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { acquireUpdateLock } from '../src/service-update-lock.mjs';
 import { spawnSync } from 'node:child_process';
-import { updateService, serviceStatus, recoverService } from '../src/service-update.mjs';
+import { updateService, serviceStatus, recoverService, replaceTree } from '../src/service-update.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-update-test-'));
 const release = { name: '@tnunamak/dalan', version: '0.7.0', dist: { integrity: 'sha512-test' } };
@@ -51,7 +51,44 @@ function interruptedSwitch(f, { config = 'present', receiptCommitted = false } =
   return { candidate, oldReceipt };
 }
 
+function testReplaceTree() {
+  const home = fs.mkdtempSync(path.join(tmp, 'restore-tree-'));
+  const src = path.join(home, 'source'), dst = path.join(home, 'destination');
+  const staging = dst + '.restore-' + process.pid;
+  fs.mkdirSync(src); fs.mkdirSync(dst);
+  fs.writeFileSync(path.join(src, 'a.txt'), 'new');
+  fs.writeFileSync(path.join(src, 'b.txt'), 'second');
+  fs.writeFileSync(path.join(dst, 'a.txt'), 'old');
+  fs.writeFileSync(path.join(dst, 'old-only.txt'), 'keep until copied');
+  for (const code of ['ENOSPC', 'EIO']) {
+    const failure = Object.assign(new Error('synthetic copy failure'), { code });
+    let calls = 0;
+    assert.throws(() => replaceTree(src, dst, { copy: (from, to) => {
+      calls++;
+      assert.equal(from, src); assert.equal(to, staging);
+      fs.mkdirSync(to);
+      fs.copyFileSync(path.join(from, 'a.txt'), path.join(to, 'a.txt'));
+      assert.equal(fs.readFileSync(path.join(to, 'a.txt'), 'utf8'), 'new');
+      throw failure;
+    } }), error => error === failure);
+    assert.equal(calls, 1);
+    assert.equal(fs.readFileSync(path.join(dst, 'a.txt'), 'utf8'), 'old');
+    assert.equal(fs.readFileSync(path.join(dst, 'old-only.txt'), 'utf8'), 'keep until copied');
+    assert.equal(fs.existsSync(staging), false);
+  }
+  replaceTree(src, dst);
+  assert.deepEqual(fs.readdirSync(dst).sort(), ['a.txt', 'b.txt']);
+  assert.equal(fs.readFileSync(path.join(dst, 'a.txt'), 'utf8'), 'new');
+  assert.equal(fs.readFileSync(path.join(dst, 'b.txt'), 'utf8'), 'second');
+  assert.equal(fs.existsSync(staging), false);
+  assert.equal(fs.readFileSync(path.join(src, 'a.txt'), 'utf8'), 'new');
+  replaceTree(path.join(home, 'absent'), dst, { copy: () => assert.fail('missing source must not copy') });
+  assert.equal(fs.existsSync(dst), false);
+  assert.equal(fs.existsSync(staging), false);
+}
+
 try {
+  testReplaceTree();
   {
     const f = fixture(); const r = await updateService({ home: f.home, check: true }, f.seams);
     assert.equal(r.outcome, 'update_available'); assert.deepEqual(f.events, []);
