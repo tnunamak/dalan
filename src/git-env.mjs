@@ -6,10 +6,11 @@
 // every config file. Mirror-local config is bridge-owned: the bridge creates it, and neither a worker nor the check sandbox can reach it.
 // Git reads $XDG_CONFIG_HOME/git/ignore and git/attributes (default <config>/git/) even with no global config file, so both are
 // pointed at /dev/null: a host ignore pattern such as CLAUDE.md must not drop a worker-written file from the patch.
+// The pager and editor are fixed to cat and : so host environment and repository config cannot select them.
 const kept=new Set(['GIT_ASKPASS','GIT_TERMINAL_PROMPT']);
 export function gitEnv(base=process.env) {
   const env=Object.fromEntries(Object.entries(base).filter(([key])=>!key.startsWith('GIT_')||kept.has(key)));
-  return {...env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_ATTR_NOSYSTEM:'1',
+  return {...env,GIT_PAGER:'cat',GIT_EDITOR:':',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_ATTR_NOSYSTEM:'1',
     GIT_CONFIG_COUNT:'4',GIT_CONFIG_KEY_0:'core.hooksPath',GIT_CONFIG_VALUE_0:'/dev/null',GIT_CONFIG_KEY_1:'core.fsmonitor',GIT_CONFIG_VALUE_1:'false',
     GIT_CONFIG_KEY_2:'core.excludesFile',GIT_CONFIG_VALUE_2:'/dev/null',GIT_CONFIG_KEY_3:'core.attributesFile',GIT_CONFIG_VALUE_3:'/dev/null'};
 }
