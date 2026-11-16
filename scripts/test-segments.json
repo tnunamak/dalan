@@ -1,4 +1,5 @@
 [
+  "node --test scripts/full-snapshot-oracle-test.mjs",
   "node scripts/relationship-lifecycle-e2e.mjs",
   "node scripts/relationship-routing-e2e.mjs",
   "node scripts/relationship-enrollment-test.mjs",

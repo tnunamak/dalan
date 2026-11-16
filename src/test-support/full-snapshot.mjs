@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
+import {isDeepStrictEqual} from 'node:util';
 
 // Not scoped to one assignment, and written by background timers or by call accounting that runs before any claim
 // check (worker_calls and worker_activity count every authenticated call, refused or not).
@@ -17,12 +18,17 @@ const unscopedCompared=new Set(['relationships','messages','subscriptions','t3_a
 
 export function fullSnapshot(db,id) {
   const out={};
-  const tables=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
-  for(const {name} of tables) {
-    const columns=db.prepare(`PRAGMA table_info(${name})`).all().map(column=>column.name);
+  const quote=name=>'"'+name.replaceAll('"','""')+'"';
+  const tables=db.prepare("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
+  for(const {name,sql} of tables) {
+    const info=db.prepare(`PRAGMA table_info(${quote(name)})`).all();
+    const columns=info.map(column=>column.name);
+    const order=/WITHOUT\s+ROWID/i.test(sql??'')
+      ?info.filter(column=>column.pk>0).sort((a,b)=>a.pk-b.pk).map(column=>quote(column.name)).join(',')
+      :'rowid';
     const key=columns.includes('request_id')?'request_id':columns.includes('job')?'job':null;
-    if(key) { out[name]=db.prepare(`SELECT * FROM ${name} WHERE ${key}=? ORDER BY rowid`).all(id); continue; }
-    if(unscopedCompared.has(name)) { out[name]=db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all(); continue; }
+    if(key) { out[name]=db.prepare(`SELECT * FROM ${quote(name)} WHERE ${key}=? ORDER BY ${order}`).all(id); continue; }
+    if(unscopedCompared.has(name)) { out[name]=db.prepare(`SELECT * FROM ${quote(name)} ORDER BY ${order}`).all(); continue; }
     if(!unscopedIgnored.has(name)) throw new Error(`full snapshot cannot scope table ${name}: add a request_id/job column or list it`);
   }
   return out;
@@ -47,5 +53,5 @@ export function fileSnapshot(root,id) {
 
 // Names of the columns that differ between two rows (or [] when equal).
 export function changedColumns(before,after) {
-  return Object.keys({...before,...after}).filter(key=>JSON.stringify(before?.[key])!==JSON.stringify(after?.[key]));
+  return Object.keys({...before,...after}).filter(key=>!isDeepStrictEqual(before?.[key],after?.[key]));
 }
