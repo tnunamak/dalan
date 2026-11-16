@@ -71,6 +71,7 @@
   "node scripts/check-skip-e2e.mjs",
   "node --test integrations/t3/acp-kit/test/*.test.mjs",
   "node src/test-support/check-response-test.mjs",
+  "node --test scripts/drain-runner-log-test.mjs",
   "node scripts/mcp-schema-conformance-test.mjs",
   "node scripts/catalog-golden-test.mjs",
   "node scripts/catalog-v2-test.mjs",
