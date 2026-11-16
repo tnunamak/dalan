@@ -15,7 +15,9 @@ export function formatGetSummary(job, { id, cli }) {
   const count = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const artifacts = (job.artifacts?.length ?? 0) || (job.artifact_ids?.length ?? 0), checks = job.checks?.length ?? 0;
   if (artifacts || checks) lines.push('', `Evidence: ${[artifacts && count(artifacts, 'artifact'), checks && count(checks, 'check')].filter(Boolean).join(', ')}`);
-  const next = state === 'finished' ? `${cli} decide ${id} accepted`
+  const next = state === 'finished' ? (report?.outcome && report.outcome !== 'done'
+    ? `read the report, then ${cli} decide ${id} useful_negative (or not_useful)`
+    : `${cli} decide ${id} accepted`)
     : state === 'cancelled' ? null
     : `${cli} wait ${id} --timeout 3600, then ${cli} get ${id}`;
   if (next) lines.push('', `Next: ${next}`);

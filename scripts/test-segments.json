@@ -220,6 +220,7 @@
   "node scripts/scope-case-fs-test.mjs",
   "node --test scripts/terminal-safe-test.mjs",
   "node --test scripts/dalan-get-human-test.mjs",
+  "node --test scripts/get-summary-next-test.mjs",
   "node --test scripts/connect-approve-miss-test.mjs",
   "node --test scripts/admin-socket-path-test.mjs",
   "node --test scripts/owner-report-credential-mask-test.mjs",
