@@ -358,6 +358,7 @@
   "node scripts/adapter-native-receipt-test.mjs",
   "node scripts/protocol-rejection-boundaries-http-test.mjs",
   "node --test scripts/publish-plan-test.mjs",
+  "node scripts/publish-plan-separator-test.mjs",
   "node scripts/operator-duties-test.mjs",
   "node --test packages/job-core/test/*.test.mjs",
   "node scripts/t3-top-level-tools-test.mjs",
