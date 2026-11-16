@@ -63,9 +63,9 @@ function stage(file, entry, io = fs) {
   return tmp;
 }
 
-export function readJournal(file, job, questionId) {
+export function readJournal(file, job, questionId, io = fs) {
   let text;
-  try { text = fs.readFileSync(file, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  try { text = io.readFileSync(file, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   let entry;
   try { entry = JSON.parse(text); } catch { entry = null; }
   const ok = entry && entry.v === 1 && entry.job === job && entry.question_id === questionId && entry.key === `answer:${questionId}`
@@ -100,12 +100,12 @@ function createJournal(file, entry, io) {
     return true;
   } finally { io.rmSync(tmp, { force: true }); }
 }
-function setState(file, entry, state) {
+function setState(file, entry, state, io = fs) {
   if (entry.state === state) return;
   entry.state = state;
-  const tmp = stage(file, entry);
-  fs.renameSync(tmp, file);
-  fsyncDir(path.dirname(file));
+  const tmp = stage(file, entry, io);
+  io.renameSync(tmp, file);
+  fsyncDir(path.dirname(file), io);
 }
 
 function classify(error) {
@@ -135,12 +135,12 @@ const unknownError = (job, questionId, file, cause) => new AnswerJournalError('a
 export async function prepare(job, questionId, text, { receiptsDir, readRevision, io = fs }) {
   checkInput(job, questionId, text);
   const file = journalPath(receiptsDir, job, questionId);
-  let entry = readJournal(file, job, questionId);
+  let entry = readJournal(file, job, questionId, io);
   if (!entry) {
     const expected_revision = await readRevision();
     const fresh = { v: 1, job, question_id: questionId, key: `answer:${questionId}`, text, expected_revision, state: 'prepared' };
     if (createJournal(file, fresh, io)) entry = fresh;
-    else { entry = readJournal(file, job, questionId); if (!entry) throw new AnswerJournalError('answer_journal_corrupt', 'answer journal vanished while it was created'); }
+    else { entry = readJournal(file, job, questionId, io); if (!entry) throw new AnswerJournalError('answer_journal_corrupt', 'answer journal vanished while it was created'); }
   }
   if (entry.text !== text) throw new AnswerJournalError('answer_text_mismatch',
     `question ${questionId} on ${job} already has a saved answer attempt with different text. Nothing was sent. Run the same command with the saved text to finish that attempt`,
@@ -149,19 +149,19 @@ export async function prepare(job, questionId, text, { receiptsDir, readRevision
 }
 
 // Read the question back and settle the saved attempt. Used by send() after a conflict and by reconcile().
-async function settle(prepared, readQuestion, cause) {
+async function settle(prepared, readQuestion, cause, io = fs) {
   const { job, questionId, file, entry } = prepared;
   let question;
   try { question = await readQuestion(); } catch (error) {
-    if (classify(error) === 'unknown') { setState(file, entry, 'unknown'); throw unknownError(job, questionId, file, error); }
+    if (classify(error) === 'unknown') { setState(file, entry, 'unknown', io); throw unknownError(job, questionId, file, error); }
     throw error;
   }
-  if (question && question.answer === entry.text) { setState(file, entry, 'committed'); return { state: 'confirmed' }; }
+  if (question && question.answer === entry.text) { setState(file, entry, 'committed', io); return { state: 'confirmed' }; }
   if (question && typeof question.answer === 'string') return { state: 'conflict', cause };
   return { state: 'pending', cause };
 }
 
-export async function send(prepared, { post, readQuestion, attempts = 3, retryDelayMs = 200, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
+export async function send(prepared, { post, readQuestion, io = fs, attempts = 3, retryDelayMs = 200, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
   const { job, questionId, file, entry } = prepared;
   if (entry.state === 'committed') return answered(job, questionId, { journal: 'committed' });
   // The envelope is frozen here. A retry sends these exact fields: same key, same expected revision, same text.
@@ -169,15 +169,15 @@ export async function send(prepared, { post, readQuestion, attempts = 3, retryDe
   for (let attempt = 1; ; attempt++) {
     try {
       const reply = await post(envelope);
-      setState(file, entry, 'committed');
+      setState(file, entry, 'committed', io);
       return reply;
     } catch (error) {
       const kind = classify(error);
       if (kind === 'transport' && attempt < attempts) { await sleep(retryDelayMs * attempt); continue; }
       if (kind === 'transport') throw Object.assign(error, { fix: [`the answer may or may not have been applied; run the same answer command again to re-send the saved attempt (${file})`] });
-      if (kind === 'unknown') { setState(file, entry, 'unknown'); throw unknownError(job, questionId, file, error); }
+      if (kind === 'unknown') { setState(file, entry, 'unknown', io); throw unknownError(job, questionId, file, error); }
       if (kind !== 'readback') throw error;
-      const settled = await settle(prepared, readQuestion, error);
+      const settled = await settle(prepared, readQuestion, error, io);
       if (settled.state === 'confirmed') return answered(job, questionId, { confirmed: true });
       const holder = settled.state === 'conflict' ? 'a different answer is already recorded for this question' : 'the server did not apply this answer and its state has moved on';
       throw new AnswerJournalError('answer_conflict', `answer to ${questionId} on ${job} was refused (${error.message}): ${holder}. The saved attempt was left unchanged`, [`the saved attempt is in ${file}`]);
@@ -185,13 +185,13 @@ export async function send(prepared, { post, readQuestion, attempts = 3, retryDe
   }
 }
 
-export async function reconcile(job, questionId, { receiptsDir, readQuestion }) {
+export async function reconcile(job, questionId, { receiptsDir, readQuestion, io = fs }) {
   checkIds(job, questionId);
   const file = journalPath(receiptsDir, job, questionId);
-  const entry = readJournal(file, job, questionId);
+  const entry = readJournal(file, job, questionId, io);
   if (!entry) return { state: 'none' };
   if (entry.state === 'committed') return { state: 'committed' };
-  const settled = await settle({ job, questionId, file, entry }, readQuestion);
+  const settled = await settle({ job, questionId, file, entry }, readQuestion, undefined, io);
   return { state: settled.state };
 }
 
