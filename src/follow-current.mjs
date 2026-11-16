@@ -11,7 +11,9 @@ const real = file => { try { return fs.realpathSync(file); } catch { return null
 // command line after the script. An explicit --home names a home other than the default one, so this package runs it.
 export function followTarget({ ownBin, env = process.env, argv = [] }) {
   if (env.DALAN_NO_FOLLOW === '1' || env.DALAN_FOLLOWED === '1') return null;
-  if (argv.some(arg => arg === '--home' || arg.startsWith('--home='))) return null;
+  const separator = argv.indexOf('--');
+  const options = separator === -1 ? argv : argv.slice(0, separator);
+  if (options.some(arg => arg === '--home' || arg.startsWith('--home='))) return null;
   const home = env.DALAN_HOME ? path.resolve(env.DALAN_HOME) : readDefaultHome(env);
   if (!home) return null;
   const target = real(path.join(home, 'current', 'bin', 'dalan.mjs')), own = real(ownBin);
