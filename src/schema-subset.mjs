@@ -161,12 +161,14 @@ function check(schema, value, path, errors) {
       for (const [key, sub] of Object.entries(schema.properties)) if (Object.hasOwn(value, key)) check(sub, value[key], `${path}.${key}`, errors);
       return;
     }
-    case 'string':
+    case 'string': {
       if (typeof value !== 'string') return fail('must be a string');
-      if (value.length > schema.maxLength) return fail(`longer than ${schema.maxLength}`);
-      if (schema.minLength !== undefined && value.length < schema.minLength) fail(`shorter than ${schema.minLength}`);
+      const length = [...value].length;
+      if (length > schema.maxLength) return fail(`longer than ${schema.maxLength}`);
+      if (schema.minLength !== undefined && length < schema.minLength) fail(`shorter than ${schema.minLength}`);
       if (schema.pattern !== undefined && !compiledRegex(schema.pattern).test(value)) fail('does not match the required pattern');
       break;
+    }
     case 'integer': case 'number':
       if (typeof value !== 'number' || !Number.isFinite(value) || (schema.type === 'integer' && !Number.isInteger(value))) return fail(`must be ${schema.type === 'integer' ? 'an integer' : 'a number'}`);
       if (schema.minimum !== undefined && value < schema.minimum) fail(`below ${schema.minimum}`);
