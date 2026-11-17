@@ -37,7 +37,9 @@ export function addControlColumns(db) {
   const table=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='lifecycle_events'").get();
   if(!table) return;
   const has=name=>!!db.prepare("SELECT 1 FROM pragma_table_info('lifecycle_events') WHERE name=?").get(name);
-  if(table.sql.includes("'wake_held'")) {
+  // A table is current only when its CHECK lists every type this release writes. Naming one type is not enough: a table
+  // built part-way through this change can list wake_held and still lack another.
+  if(lifecycleTypes.every(t=>table.sql.includes(`'${t}'`))) {
     for(const name of ['scope','outcome']) if(!has(name)) db.exec(`ALTER TABLE lifecycle_events ADD COLUMN ${name} TEXT`);
     return;
   }
@@ -46,11 +48,25 @@ export function addControlColumns(db) {
   const wanted=['id','request_id','claim_id','epoch','type','at','actor','source','reason','worker'];
   const missing=wanted.filter(c=>!columns.includes(c));
   if(missing.length) throw new Error(`lifecycle_events is missing ${missing.join(', ')}; cannot widen its type list`);
+  // The rebuild copies a fixed list of columns. A column it does not know would be dropped with its data, so refuse
+  // before any DDL runs and leave the database as it was.
+  const known=[...wanted,'scope','outcome'];
+  const unknown=columns.filter(c=>!known.includes(c));
+  if(unknown.length) throw new Error(`lifecycle_events has columns this release does not know: ${unknown.join(', ')}; refusing to rebuild it because that would drop their data`);
+  const copied=known.filter(c=>columns.includes(c));
   for(const a of attached) db.exec(`DROP ${a.type.toUpperCase()} ${a.name}`);
   db.exec('ALTER TABLE lifecycle_events RENAME TO lifecycle_events_pre71');
   db.exec(`CREATE TABLE lifecycle_events (${lifecycleTableBody}, worker TEXT NOT NULL DEFAULT 'unknown', scope TEXT, outcome TEXT)`);
-  db.exec(`INSERT INTO lifecycle_events(${wanted.join(',')}) SELECT ${wanted.join(',')} FROM lifecycle_events_pre71 ORDER BY id`);
+  db.exec(`INSERT INTO lifecycle_events(${copied.join(',')}) SELECT ${copied.join(',')} FROM lifecycle_events_pre71 ORDER BY id`);
+  // AUTOINCREMENT remembers the highest id ever issued, which can be above the highest id still stored once retention
+  // has removed old events. Copying explicit ids restarts it at the copied max, so carry the old mark over or ids repeat.
+  const issued=db.prepare("SELECT seq FROM sqlite_sequence WHERE name='lifecycle_events_pre71'").get()?.seq??0;
   db.exec('DROP TABLE lifecycle_events_pre71');
+  const kept=db.prepare("SELECT seq FROM sqlite_sequence WHERE name='lifecycle_events'").get()?.seq??0;
+  if(Math.max(issued,kept)>0) {
+    if(db.prepare("SELECT 1 FROM sqlite_sequence WHERE name='lifecycle_events'").get()) db.prepare("UPDATE sqlite_sequence SET seq=? WHERE name='lifecycle_events'").run(Math.max(issued,kept));
+    else db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES('lifecycle_events',?)").run(Math.max(issued,kept));
+  }
   for(const a of attached) db.exec(a.sql);
 }
 

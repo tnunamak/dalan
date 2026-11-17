@@ -5,6 +5,7 @@
 //   2. cancel and abandon write `withdraw_work` / `detach` with the scope they controlled, and say what they did not control.
 //   3. A denied stop (F23) records the requested scope and an unknown outcome, never success.
 //   4. A database from before this step keeps its events and accepts the new types after the migration.
+//   5. The migration refuses unknown columns, keeps the AUTOINCREMENT high-water mark, and rebuilds a partial CHECK list.
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -190,6 +191,77 @@ try {
     assert.equal(nextId, before.length + 1, 'ids continue after the rebuilt rows');
     upgraded.db.close();
     pass('a database from before this step keeps its events, gets the new types, and matches a fresh schema');
+  }
+  // ---- 5. migration edge cases found in review: unknown columns, AUTOINCREMENT high-water mark, partial CHECK lists
+  {
+    // A database file as the previous release left it: a table with the given type list, plus whatever the caller adds.
+    const oldShape = (name, { types, extraColumn = '', rows = 3 }) => {
+      const path = join(dir, `${name}.db`);
+      const s = new Store(path);
+      const version = s.db.prepare('PRAGMA user_version').get().user_version;
+      s.db.close();
+      const raw = new DatabaseSync(path);
+      raw.exec('DROP TABLE lifecycle_events');
+      raw.exec(`CREATE TABLE lifecycle_events (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, claim_id TEXT, epoch INTEGER, type TEXT NOT NULL CHECK(type IN (${types.map(t => `'${t}'`).join(',')})), at TEXT NOT NULL, actor TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('live','backfill')), reason TEXT, worker TEXT NOT NULL DEFAULT 'unknown'${extraColumn});
+        CREATE INDEX lifecycle_events_request ON lifecycle_events(request_id,id);
+        CREATE INDEX lifecycle_events_type_at ON lifecycle_events(type,at);
+        CREATE TRIGGER lifecycle_events_no_update BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT,'lifecycle events are append-only'); END;
+        CREATE TRIGGER lifecycle_events_no_delete BEFORE DELETE ON lifecycle_events WHEN NOT EXISTS (SELECT 1 FROM lifecycle_retention WHERE id=1 AND cutoff IS NOT NULL AND old.at<cutoff) BEGIN SELECT RAISE(ABORT, 'lifecycle events are append-only'); END;`);
+      for (let i = 0; i < rows; i++) raw.prepare("INSERT INTO lifecycle_events(request_id,type,at,actor,source) VALUES('req_edge','queued',?, 'owner','live')").run(`2026-01-0${i + 1}T00:00:00.000Z`);
+      raw.exec(`PRAGMA user_version=${version - 1}`);
+      return { path, raw, version };
+    };
+    const noControl = lifecycleTypes.filter(t => !controlTypes.includes(t) && t !== 'wake_held');
+    const snapshot = db => ({
+      schema: db.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").all().map(r => ({ ...r })),
+      rows: db.prepare('SELECT * FROM lifecycle_events ORDER BY id').all().map(r => ({ ...r })),
+      seq: db.prepare("SELECT seq FROM sqlite_sequence WHERE name='lifecycle_events'").get()?.seq,
+      version: db.prepare('PRAGMA user_version').get().user_version,
+    });
+
+    // (1) A column this release does not know is never dropped: the migration refuses, names it, and changes nothing.
+    {
+      const { path, raw } = oldShape('unknown-col', { types: noControl, extraColumn: ', audit_tag TEXT' });
+      raw.exec("PRAGMA foreign_keys=OFF");
+      raw.exec('DROP TRIGGER lifecycle_events_no_update');
+      raw.exec("UPDATE lifecycle_events SET audit_tag='keep-me'");
+      raw.exec("CREATE TRIGGER lifecycle_events_no_update BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT,'lifecycle events are append-only'); END");
+      const before = snapshot(raw);
+      raw.close();
+      assert.throws(() => new Store(path), /audit_tag/, 'the refusal names the unexpected column');
+      const after = new DatabaseSync(path);
+      assert.deepEqual(snapshot(after), before, 'nothing changed: schema, rows (audit_tag included), sequence and version');
+      assert.equal(after.prepare("SELECT 1 FROM sqlite_master WHERE name='lifecycle_events_pre71'").get(), undefined, 'no half-renamed table is left');
+      after.close();
+      pass('migration refuses unknown columns without changing data');
+    }
+
+    // (2) Ids are never reused: the new table's sequence is the larger of the old high-water mark and the copied max id.
+    {
+      const { path, raw } = oldShape('sequence', { types: noControl });
+      raw.exec("UPDATE sqlite_sequence SET seq=100 WHERE name='lifecycle_events'"); // ids 4..100 were retained away
+      raw.close();
+      const s = new Store(path);
+      s.submit(payload('req_seq'), { mode: 'none' }, null, 'owner');
+      const ids = s.db.prepare('SELECT id FROM lifecycle_events ORDER BY id').all().map(r => r.id);
+      assert.deepEqual(ids.slice(0, 3), [1, 2, 3], 'old rows keep their ids');
+      assert.ok(ids.slice(3).every(id => id > 100), `new events continue past the old high-water mark, got ${ids}`);
+      s.db.close();
+      pass('migration preserves AUTOINCREMENT after the high ids were retained away');
+    }
+
+    // (3) A CHECK that lists wake_held but lacks another current type is still rebuilt.
+    {
+      const { path, raw } = oldShape('partial', { types: [...noControl, 'wake_held'] });
+      assert.throws(() => raw.exec("INSERT INTO lifecycle_events(request_id,type,at,actor,source) VALUES('x','revoke_grant','t','a','live')"), /CHECK constraint failed/);
+      raw.close();
+      const s = new Store(path);
+      const insert = s.db.prepare("INSERT INTO lifecycle_events(request_id,type,at,actor,source) VALUES('req_edge',?,'2026-02-01T00:00:00.000Z','owner','live')");
+      for (const type of lifecycleTypes) insert.run(type);
+      assert.equal(s.db.prepare("SELECT count(*) n FROM lifecycle_events WHERE at='2026-02-01T00:00:00.000Z'").get().n, lifecycleTypes.length);
+      s.db.close();
+      pass('partial CHECK upgrades accept every lifecycleTypes member');
+    }
   }
 } finally {
   rmSync(dir, { recursive: true, force: true });
