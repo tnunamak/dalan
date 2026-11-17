@@ -184,6 +184,8 @@
   "node scripts/metrics-e2e.mjs",
   "node scripts/objectives-test.mjs",
   "node scripts/objectives-e2e.mjs",
+  "node scripts/revises-stale-guard-test.mjs",
+  "node scripts/revises-e2e.mjs",
   "node scripts/jsonl-test.mjs",
   "node scripts/wake-test.mjs",
   "node scripts/dispatch-gap-test.mjs",

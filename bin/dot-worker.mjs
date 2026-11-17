@@ -33,7 +33,7 @@ import { workerPrompt } from '../src/worker-prompt.mjs';
 import { stoppedTrialFix } from '../src/try-command.mjs';
 import { formatGetSummary, formatWaitLine } from '../src/get-summary.mjs';
 import { cliCommand } from '../src/cli-name.mjs';
-import { applyPatch } from '../src/patch-apply.mjs';
+import { applyPatch, listPatchFiles, patchMatchesWorktree, worktreeRoot } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, ensureWorkerRelationship, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError } from '../src/admin-socket.mjs';
@@ -66,7 +66,7 @@ const FIRST_JOB_URL=docsUrl('docs/manual-setup.md','submit-finish-and-read-the-r
 const cli=json?'dalan':cliCommand(process.argv[1]);
 // Every option a command reads. An option it does not know is refused, so a typo is not ignored in silence.
 const SUBMIT_FLAGS=['--stdin','--json','--review','--wait','--dry-run','--queue-anyway','--refuse-defer','--allow-scope-prune','--fix-scope','--background','--allow-main','--exclude-sensitive'];
-const SUBMIT_VALUES=['--eligible','--policy','--file','--brief','--worker','--thread','--deliver','--timeout','--execution','--require-capability','--objective-key','--revision','--task-kind','--source','--sensitive-scope-override','--defer-if-queued','--producer-thread'];
+const SUBMIT_VALUES=['--eligible','--policy','--file','--brief','--worker','--thread','--deliver','--timeout','--execution','--require-capability','--objective-key','--revision','--task-kind','--source','--revises','--sensitive-scope-override','--defer-if-queued','--producer-thread'];
 const SUBMIT_OPTIONS=[...SUBMIT_FLAGS,...SUBMIT_VALUES];
 function refuseUnknownOptions(name,{flags=[],values=[]}) {
   for(let i=0;i<args.length;i++) {
@@ -134,12 +134,12 @@ function acpReceipt(id) {
   if(secret.length<32) return null;
   return {request_id:id,token:createHmac('sha256',secret).update(id).digest('hex'),acp:true};
 }
-function writeReceipt(id, token, body, delivery, review=false, background=false, meta=null, producer=null, routing=null, destinationRevisions=null) {
+function writeReceipt(id, token, body, delivery, review=false, background=false, meta=null, producer=null, routing=null, destinationRevisions=null, revises=null) {
   fs.mkdirSync(receipts,{recursive:true,mode:0o700});
   const file=receiptPath(id);
   try {
     const fd=fs.openSync(file,'wx',0o600);
-    try { fs.writeSync(fd,JSON.stringify({request_id:id,token,body,delivery,...(delivery.startsWith('t3:')?{thread:delivery.slice(3)}:{}),...(review?{review:true}:{}),...(background?{background:true}:{}),...(meta?{meta}:{}),...(producer?{producer}:{}),...(routing?{routing,destination_revisions:destinationRevisions??{}}:{})})+'\n'); fs.fsyncSync(fd); }
+    try { fs.writeSync(fd,JSON.stringify({request_id:id,token,body,delivery,...(delivery.startsWith('t3:')?{thread:delivery.slice(3)}:{}),...(review?{review:true}:{}),...(background?{background:true}:{}),...(meta?{meta}:{}),...(producer?{producer}:{}),...(routing?{routing,destination_revisions:destinationRevisions??{}}:{}),...(revises?{revises}:{})})+'\n'); fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
   } catch(e) { if(e.code!=='EEXIST') throw e; }
   const dir=fs.openSync(receipts,'r'); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
@@ -460,6 +460,10 @@ async function main() {
       for(const flag of ['--objective-key','--revision','--task-kind','--source']) if(args.includes(flag)&&(!option(flag)||option(flag).startsWith('--'))) throw new Error(`${flag} requires a value`);
       // Objective identity travels beside the assignment, never inside it; a plain dalan submit is an agent's.
       const given=normalizeMeta({objective_key:option('--objective-key'),revision:option('--revision'),task_kind:option('--task-kind'),source:option('--source')});
+      // --revises PRIOR_ID: this job corrects a job this home submitted. It cancels nothing; the prior job's result can no longer be accepted.
+      if(args.includes('--revises')&&(!option('--revises')||option('--revises').startsWith('--'))) throw new Error('--revises requires the request ID of the job this one corrects');
+      const revisesGiven=option('--revises')??null;
+      if(revisesGiven&&routing) throw new Error('--revises needs one worker: it cannot be combined with --eligible or --policy');
       const dryRun=args.includes('--dry-run'), queueAnyway=args.includes('--queue-anyway'), refuseDefer=args.includes('--refuse-defer');
       if(dryRun&&queueAnyway) throw new Error('--dry-run stores nothing; it cannot be combined with --queue-anyway');
       if(dryRun&&args.includes('--wait')) throw new Error('--dry-run stores nothing; it cannot be combined with --wait');
@@ -479,7 +483,7 @@ async function main() {
         }
       }
       const token=randomBytes(32).toString('hex');
-      const write=()=>writeReceipt(id,token,JSON.stringify(body),delivery,review,background,{...given,source:given.source??'agent'},producerId(),routing,destinationRevisions);
+      const write=()=>writeReceipt(id,token,JSON.stringify(body),delivery,review,background,{...given,source:given.source??'agent'},producerId(),routing,destinationRevisions,revisesGiven);
       let saved;
       if(dryRun) {
         try { saved=receipt(id); }
@@ -490,7 +494,7 @@ async function main() {
       // Receipts written by earlier releases may carry the old spelling of a source; compare the normalized form.
       const savedMeta=()=>{ try { return normalizeMeta(saved.meta); } catch { return {}; } };
       const conflicts=()=>{ const savedDelivery=saved.delivery ?? (saved.thread ? `t3:${saved.thread}` : null);
-        return JSON.stringify(canonical(saved.routing??null))!==JSON.stringify(canonical(routing))||JSON.stringify(canonical(saved.destination_revisions??{}))!==JSON.stringify(canonical(destinationRevisions))||JSON.stringify(canonical(JSON.parse(saved.body)))!==JSON.stringify(canonical(body))||savedDelivery!==delivery||!!saved.review!==review||!!saved.background!==background||metaFields.some(k=>savedMeta()[k]!=null&&given[k]!==null&&savedMeta()[k]!==given[k]); };
+        return JSON.stringify(canonical(saved.routing??null))!==JSON.stringify(canonical(routing))||JSON.stringify(canonical(saved.destination_revisions??{}))!==JSON.stringify(canonical(destinationRevisions))||JSON.stringify(canonical(JSON.parse(saved.body)))!==JSON.stringify(canonical(body))||savedDelivery!==delivery||!!saved.review!==review||!!saved.background!==background||metaFields.some(k=>savedMeta()[k]!=null&&given[k]!==null&&savedMeta()[k]!==given[k])||saved.revises!=null&&revisesGiven!==null&&saved.revises!==revisesGiven; };
       const conflict=()=>Object.assign(new Error('request_id conflict with local receipt'),{local_code:'receipt_conflict'});
       // A refused submit stores no assignment, so its receipt guards nothing. Replace it instead of refusing a corrected retry.
       if(dryRun&&conflicts()) throw conflict();
@@ -502,7 +506,8 @@ async function main() {
       }
       // A retry inherits what the receipt recorded for any flag it omits, so replaying a drainer request by hand stays one request.
       const meta=Object.fromEntries(metaFields.map(k=>[k,given[k]??savedMeta()[k]??(k==='source'?'agent':null)]));
-      const send=()=>request(dryRun?'/submit-preview':'/submit', 'POST', { ...(worker?{worker}:{}), ...(routing?{routing,destination_revisions:destinationRevisions}:{}), delivery, assignment: body, owner_token:saved.token, review, ...(background?{background:true}:{}), meta, ...(args.includes('--sensitive-scope-override')?{sensitive_scope_override:option('--sensitive-scope-override')}:{}), ...(args.includes('--allow-main')?{allow_main:true}:{}), ...(args.includes('--exclude-sensitive')?{exclude_sensitive:true}:{}), ...(execution?{execution}:{}), ...(requiredCapabilities?{required_capabilities:requiredCapabilities}:{}), ...(dryRun?{dry_run:true}:{...(refuseDefer?{refuse_defer:true}:{}),...(queueAnyway?{queue_anyway:true}:{})}), ...(args.includes('--defer-if-queued')?{defer_queued:Number(option('--defer-if-queued'))}:{}) },args.includes('--allow-main')?{'x-operator-key':operator()}:{});
+      const revisesId=revisesGiven??saved.revises??null;
+      const send=()=>request(dryRun?'/submit-preview':'/submit', 'POST', { ...(worker?{worker}:{}), ...(routing?{routing,destination_revisions:destinationRevisions}:{}), delivery, assignment: body, owner_token:saved.token, review, ...(background?{background:true}:{}), meta, ...(revisesId?{revises:{prior_id:revisesId,prior_token:receipt(revisesId).token}}:{}), ...(args.includes('--sensitive-scope-override')?{sensitive_scope_override:option('--sensitive-scope-override')}:{}), ...(args.includes('--allow-main')?{allow_main:true}:{}), ...(args.includes('--exclude-sensitive')?{exclude_sensitive:true}:{}), ...(execution?{execution}:{}), ...(requiredCapabilities?{required_capabilities:requiredCapabilities}:{}), ...(dryRun?{dry_run:true}:{...(refuseDefer?{refuse_defer:true}:{}),...(queueAnyway?{queue_anyway:true}:{})}), ...(args.includes('--defer-if-queued')?{defer_queued:Number(option('--defer-if-queued'))}:{}) },args.includes('--allow-main')?{'x-operator-key':operator()}:{});
       try {
         try { result=await send(); }
         catch(error) {
@@ -635,20 +640,82 @@ async function main() {
       break;
     }
     case 'apply': {
-      const id=args[0]; if(!id||id.startsWith('-')) throw new Error('apply requires request id (optional --dir PATH, default the current directory)');
+      const id=args[0]; if(!id||id.startsWith('-')) throw new Error('apply requires request id (optional --dir PATH, default the current directory; --release gives up an uncertain apply)');
       if(args.includes('--dir')&&!option('--dir')) throw new Error('--dir requires a path');
-      const dir=path.resolve(option('--dir')??process.cwd()), headers={'x-owner-capability':receipt(id).token};
+      const headers={'x-owner-capability':receipt(id).token};
       const got=await request('/get?id='+encodeURIComponent(id),'GET',null,headers); indexArtifacts(id,got);
+      const open=got.apply?.state==='applying';
+      if(args.includes('--release')) {
+        // Gives up an uncertain apply on purpose, without writing or restoring any file. The job stays not applied.
+        if(!open) throw new Error(`no apply in progress for ${id}; nothing to release`);
+        await request('/decide','POST',{id,decision:'applied',phase:'release',force:true,reason:'released by the owner (dalan apply --release)',via:'apply'},headers);
+        result={request_id:id,released:true};
+        if(!json) { result=`released the apply in progress for ${id}; it is not applied and no file was changed`; plainOutput=true; }
+        break;
+      }
+      const dir=path.resolve(option('--dir')??process.cwd());
+      // A job revised before any reservation is refused here, and again by the bridge when the apply is reserved. An open
+      // reservation is not trusted from this read: it may have been released or taken over since, so every run reserves.
+      if(got.revised_by&&!open) throw Object.assign(new Error(`${id} was revised by ${got.revised_by.request_id}; its patch is not applied. Apply the patch of ${got.revised_by.request_id} instead (dalan get ${got.revised_by.request_id}).`),{local_code:'stale_revision'});
       const ev=got.report?.workspace_evidence, art=ev?.patch_artifact;
       if(!art?.artifact_id||!art.size) throw new Error('this result has no patch artifact (nothing to apply)');
       const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'dot-apply-')), file=path.join(tmp,'patch.diff');
+      const phase=(name,extra={})=>request('/decide','POST',{id,decision:'applied',phase:name,via:'apply',...extra},headers);
+      const reserve=async()=>{ try { return await phase('reserve'); } catch(e) { if(e.http_status===400&&/^stale_revision/.test(e.message)) throw e; throw new Error(`not applied: the bridge did not reserve the apply (${e.message}), so ${dir} is unchanged`); } };
+      const confirm=async attempt=>{ try { return await phase('confirm',{attempt}); } catch(e) { throw new Error(`the patch is in ${dir}, but the bridge did not confirm it (${e.message}). ${id} still shows an apply in progress. Run dalan apply ${id} again: if the tree still holds the patch it confirms without writing.`); } };
       try {
         await download(art.artifact_id,file);
-        const files=applyPatch({dir,patch:fs.readFileSync(file),sha256:art.sha256,baseSha:ev.base_sha??got.assignment?.inputs?.[0]?.base_sha});
-        let decided; try { decided=await request('/decide','POST',{id,decision:'applied',via:'apply'},headers); } catch(e) { throw new Error(`patch applied in ${dir}, but recording the decision failed: ${e.message}; run dalan decide ${id} applied`); }
-        result={request_id:id,applied:true,dir,files,decision:decided.decision};
+        const patch=fs.readFileSync(file), patchArgs={dir,patch,sha256:art.sha256,baseSha:ev.base_sha??got.assignment?.inputs?.[0]?.base_sha};
+        // Two phases, so the bridge never records an effect before it happens, and a fencing token so that only the run that
+        // reserved last can write or confirm. Every run reserves, fresh or resumed: the bridge's stale check and the new token
+        // share one transaction, so a correction that landed since any earlier read makes it refuse and nothing is written. The
+        // patch is written only with a token from this run (every touched file is restored if the write fails), then confirmed.
+        // If the tree already holds the patch (a run died after the write), only the confirm is missing.
+        let files=[], written=false;
+        if(open&&patchMatchesWorktree(dir,patch)) {
+          // The tree already holds the patch. The bridge still checks for a correction: a revised job's result is never recorded.
+          let reserved;
+          try { reserved=await reserve(); }
+          catch(e) {
+            if(!/^stale_revision/.test(e.message)) throw e;
+            const correction=got.revised_by?.request_id??/revised by (\S+?);/.exec(e.message)?.[1]??'(see dalan get '+id+')';
+            const keep=path.join(os.tmpdir(),`dalan-revised-${id}.diff`); fs.writeFileSync(keep,patch,{mode:0o600});
+            throw Object.assign(new Error(`${e.message}\nThe working tree contains the superseded patch from request ${id}; the correction is ${correction}. Nothing was recorded and the reservation is still open.\n`
+              +`To undo it: git -C ${worktreeRoot(dir)??dir} apply -R ${keep}\n`
+              +`Or run dalan apply ${id} --release (it changes no file), then revert the files by hand.`),{local_code:'stale_revision'});
+          }
+          if(reserved.state!=='applied') { const decided=await confirm(reserved.attempt); result={request_id:id,applied:true,dir,files,already_present:true,decision:decided.decision}; }
+          else result={request_id:id,applied:true,dir,files,already_present:true,decision:'applied'};
+        } else {
+          try { applyPatch({...patchArgs,checkOnly:true}); }
+          catch(e) {
+            // An open reservation and a tree that fits neither the base nor the patch: a run may have died mid-write.
+            if(!open||!/git apply --check failed/.test(e.message)) throw e;
+            let names; try { names=listPatchFiles(dir,patch); } catch { names=[]; }
+            const top=worktreeRoot(dir)??dir;
+            const list=names.map(n=>/^[\w@%+=:,./-]+$/.test(n)?n:`'${n.replace(/'/g,"'\\''")}'`).join(' ');
+            throw new Error(`${id} has an apply in progress from an earlier run, and ${dir} matches neither the patch nor the base it applies to: the checkout may be partly changed (${e.message.replace(/^not applied: /,'')}).\n`
+              +`Files the patch touches: ${names.join(', ')||'(not listed)'}.\n`
+              +`To recover: (1) inspect them: git -C ${top} diff -- ${list}\n`
+              +`  (2) restore them: git -C ${top} checkout -- ${list}  (this discards edits to those files only; delete any of them that the patch created, and keep unrelated edits)\n`
+              +`  (3) run: dalan apply ${id} --dir ${dir}\n`
+              +`To give up without applying: dalan apply ${id} --release (it changes no file).`);
+          }
+          const reserved=await reserve();
+          if(reserved.state==='applied') { files=applyPatch(patchArgs); written=true; result={request_id:id,applied:true,dir,files,decision:'applied'}; }
+          else {
+            try { files=applyPatch(patchArgs); written=true; }
+            catch(e) {
+              let released=true; try { await phase('release',{attempt:reserved.attempt,reason:`apply_failed: ${e.message}`.slice(0,500)}); } catch { released=false; }
+              throw Object.assign(new Error(`apply_failed: ${e.message}${released?`. ${id} is not applied and can be applied again.`:`. The bridge could not be told; ${id} still shows an apply in progress: run dalan apply ${id} --release, or run it again.`}`),{local_code:'apply_failed'});
+            }
+            const decided=await confirm(reserved.attempt);
+            result={request_id:id,applied:true,dir,files,already_present:false,decision:decided.decision};
+          }
+        }
       } finally { fs.rmSync(tmp,{recursive:true,force:true}); }
-      if(!json) { const {files}=result; result=`applied ${files.length} file${files.length===1?'':'s'} in ${dir}; recorded decision applied for ${id}\n${files.map(f=>'  '+f).join('\n')}`; plainOutput=true; }
+      if(!json&&result.already_present) { result=`the patch was already in ${dir}; recorded decision applied for ${id} without writing`; plainOutput=true; }
+      else if(!json) { const {files}=result; result=`applied ${files.length} file${files.length===1?'':'s'} in ${dir}; recorded decision applied for ${id}\n${files.map(f=>'  '+f).join('\n')}`; plainOutput=true; }
       break;
     }
     case 'integrate': { const id=args[0]; if(!id||id.startsWith('-')) throw new Error('integrate requires request id'); result=await request('/lifecycle','POST',{id,type:'integrated',...(option('--reason')?{reason:option('--reason')}:{})},{'x-operator-key':operator()}); break; }

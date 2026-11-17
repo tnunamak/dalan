@@ -13,7 +13,7 @@ import { TRUST } from './execution.mjs';
 import { inferWorkerReport, observeTransition } from './failure-type.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { acquireSubscriptionStorage, SubscriptionCodec } from './subscription-storage.mjs';
-import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import { randomUUID, randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import {migrateClaimCommands,createClaimCommands} from './claim-command-ledger.mjs';
 import {migrateArtifactJournal} from './artifact-journal.mjs';
@@ -50,7 +50,7 @@ function waiterOwnerGone(attemptId) {
   return !!(owner.boot&&owner.start&&current.boot&&current.start&&(owner.boot!==current.boot||owner.start!==current.start));
 }
 
-const SUPPORTED_SCHEMA_VERSION = 70;
+const SUPPORTED_SCHEMA_VERSION = 71;
 const monotonicMs=()=>Number(process.hrtime.bigint())/1e6;
 function systemBootId() {
   if(process.platform!=='linux') return null;
@@ -80,6 +80,7 @@ function unsupportedSchemaVersion(found) {
 }
 
 // Owner decisions on a finished result, in the words the CLI takes. 'stale' is only ever written by the sweep.
+export const staleRevisionError=({request_id,revised_by,at,recorded})=>Object.assign(new Error(`stale_revision: ${request_id} was revised by ${revised_by}; its result is kept as evidence and cannot be accepted or applied. Decide ${revised_by} instead.`),{code:'STALE_REVISION',stale:{request_id,revised_by,at,recorded}});
 export const decisionTypes=['accepted','applied','useful_no_change','useful_negative','not_useful','stale'];
 export const MAX_INTEGRATION_PATCH_BYTES=262144;
 import os from 'node:os';
@@ -953,6 +954,31 @@ export class Store {
         if(!this.db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='relationship_id'").get()) this.db.exec('ALTER TABLE assignments ADD COLUMN relationship_id TEXT REFERENCES relationships(relationship_id)');
         this.db.exec('PRAGMA user_version=70;');
       }
+      if(version<71) {
+        // A correction links to the job it revises (C1). The link cancels nothing: the prior job runs to its own terminal state,
+        // and its result is judged against this table when the owner decides. input_revision copies meta.revision of the
+        // correction when it sent one. 71 follows C3 (69) and C2 (70) on main; renumbering at merge changes this
+        // line, the user_version below and SUPPORTED_SCHEMA_VERSION.
+        this.db.exec(`CREATE TABLE IF NOT EXISTS job_revisions(
+          request_id TEXT PRIMARY KEY REFERENCES assignments(request_id),
+          prior_id TEXT NOT NULL REFERENCES assignments(request_id),
+          input_revision TEXT,
+          at TEXT NOT NULL,
+          CHECK(request_id<>prior_id));
+          CREATE INDEX IF NOT EXISTS job_revisions_prior ON job_revisions(prior_id);
+          -- A patch is applied in two phases so that no decision is recorded before the effect: 'applying' reserves it (the
+          -- stale check is made here), the CLI writes the patch, then 'confirmed' records the decision or 'released' gives it up.
+          -- A row left in 'applying' is an apply that may or may not have happened. attempt is the fencing token of the run that
+          -- holds the reservation: every reserve mints a new one, and a confirm or release must present the current one.
+          CREATE TABLE IF NOT EXISTS apply_reservations(
+            request_id TEXT PRIMARY KEY REFERENCES assignments(request_id),
+            state TEXT NOT NULL CHECK(state IN ('applying','confirmed','released')),
+            reserved_at TEXT NOT NULL,
+            resolved_at TEXT,
+            reason TEXT,
+            attempt TEXT);
+          PRAGMA user_version=71;`);
+      }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
       this.legacyFixNames=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assignments' AND instr(sql,?)>0").get(`'${legacyFixLoopName}'`);
@@ -1219,7 +1245,7 @@ export class Store {
     if(result?.destination_refusal)throw destinationError(result.destination_refusal);
     return result;
   }
-  checkRetry(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, priority='normal', meta=null, identity=payload, targetWorker=undefined, execution=null, requiredCapabilities=null, commandKey=null, supersedes=null, destinationRevision=null) {
+  checkRetry(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, priority='normal', meta=null, identity=payload, targetWorker=undefined, execution=null, requiredCapabilities=null, commandKey=null, supersedes=null, destinationRevision=null, revises=null) {
     validateSubmitKey(commandKey);
     const m=normalizeMeta(meta);
     const delivery=typeof deliveryOrThreadId==='string'?{mode:'t3',threadId:deliveryOrThreadId}:deliveryOrThreadId;
@@ -1233,8 +1259,22 @@ export class Store {
     const targetId=supersedes?.target_id??null;
     const previous=this.db.prepare('SELECT target_id FROM submit_supersedes WHERE request_id=?').get(payload.request_id);
     if(targetId===payload.request_id) throw new Error('supersede_cycle');
+    // A correction names the job it revises and proves the owner capability of that job, as a supersede does. It cancels nothing.
+    if(revises!==null) {
+      if(!revises||typeof revises!=='object'||Array.isArray(revises)||Object.keys(revises).some(k=>!['prior_id','prior_token'].includes(k))||
+        typeof revises.prior_id!=='string'||!/^[-\w]{8,128}$/.test(revises.prior_id)||typeof revises.prior_token!=='string') throw new Error('invalid revises: use {prior_id, prior_token}');
+      if(supersedes) throw new Error('revises_and_supersedes: a correction does not cancel its prior job; send one of them');
+      if(revises.prior_id===payload.request_id) throw new Error('revises_cycle');
+      const prior=this.db.prepare('SELECT revision FROM assignments WHERE request_id=?').get(revises.prior_id);
+      if(!prior) throw new Error('revises_prior_not_found');
+      this.owner(revises.prior_id,revises.prior_token);
+      // The same revision under another request_id is a duplicate in the metrics, not a correction.
+      if(m.revision!==null&&prior.revision!==null&&canonicalMetaValue('revision',prior.revision)===canonicalMetaValue('revision',m.revision)) throw new Error('revises_same_revision: a correction must carry a different --revision (meta.revision) from the job it revises');
+    }
+    const priorId=revises?.prior_id??null;
+    const previousRevision=this.db.prepare('SELECT prior_id FROM job_revisions WHERE request_id=?').get(payload.request_id);
     // Both capabilities are required even when returning an already-committed receipt.
-    if(old&&(supersedes||previous)) this.owner(payload.request_id,ownerToken);
+    if(old&&(supersedes||previous||revises||previousRevision)) this.owner(payload.request_id,ownerToken);
     let target;
     if(supersedes) {
       target=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(targetId);
@@ -1266,11 +1306,11 @@ export class Store {
     if(commandKey!==null) {
       if(!command||command.key_digest!==hash(commandKey)) throw new Error('EXISTS: assignment already submitted under another command');
       const intent=submitIntentDigest(identity,deliveryValue,environmentId,review,priority,m,targetWorker??old.target_worker,execution??old.execution,requiredCapabilities,destinationRevision,this.legacyFixNames);
-      if((previous?.target_id??null)!==targetId||command.owner_hash!==ownerHash||command.intent_digest!==intent) throw new Error('KEY_CONFLICT: command intent changed');
+      if((previous?.target_id??null)!==targetId||(previousRevision?.prior_id??null)!==priorId||command.owner_hash!==ownerHash||command.intent_digest!==intent) throw new Error('KEY_CONFLICT: command intent changed');
       return {...JSON.parse(command.receipt),duplicate:true,...(approval?{destination_approval:approval}:{})};
     }
     if(command) throw new Error('EXISTS: command_key required to retry this assignment');
-    if ((previous?.target_id??null)!==targetId || (targetWorker!==undefined&&old.target_worker!==targetWorker) || (execution!==null&&old.execution!==execution) || (requiredCapabilities!==null&&old.required_capabilities!==JSON.stringify(requiredCapabilities)) || old.payload_hash!==payloadHash || old.delivery!==deliveryValue || old.environment_id!==(environmentId??'') || old.owner_hash!==ownerHash || !!old.review!==!!review || old.priority!==priority || metaFields.some(k=>old[k]!=null&&m[k]!=null&&canonicalMetaValue(k,old[k])!==canonicalMetaValue(k,m[k]))) throw new Error('request_id conflict');
+    if ((previous?.target_id??null)!==targetId || (previousRevision?.prior_id??null)!==priorId || (targetWorker!==undefined&&old.target_worker!==targetWorker) || (execution!==null&&old.execution!==execution) || (requiredCapabilities!==null&&old.required_capabilities!==JSON.stringify(requiredCapabilities)) || old.payload_hash!==payloadHash || old.delivery!==deliveryValue || old.environment_id!==(environmentId??'') || old.owner_hash!==ownerHash || !!old.review!==!!review || old.priority!==priority || metaFields.some(k=>old[k]!=null&&m[k]!=null&&canonicalMetaValue(k,old[k])!==canonicalMetaValue(k,m[k]))) throw new Error('request_id conflict');
     return {request_id:payload.request_id,status:old.status,duplicate:true,...(approval?{destination_approval:approval}:{})};
   }
   // identity: the assignment as the submitter sent it, when the stored payload differs (scope narrowing); a retry then still matches.
@@ -1281,7 +1321,7 @@ export class Store {
     return relationship;
   }
   submit(...args) { return this.transaction(()=>this.submitInTransaction(...args)); }
-  submitInTransaction(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, preflight=null, priority='normal', meta=null, identity=payload, maxQueued=null, targetWorker=undefined, execution=null, defaultExecution='host', requiredCapabilities=null, defaultValidUntil=null, commandKey=null, supersedes=null, destinationRevision=null, inheritedOwnerHash=null, parentGeneration=null, relationshipId=null) {
+  submitInTransaction(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, preflight=null, priority='normal', meta=null, identity=payload, maxQueued=null, targetWorker=undefined, execution=null, defaultExecution='host', requiredCapabilities=null, defaultValidUntil=null, commandKey=null, supersedes=null, destinationRevision=null, inheritedOwnerHash=null, parentGeneration=null, relationshipId=null, revises=null) {
     if(!this.db.isTransaction) throw new Error('transaction_required');
     if(payload.request_id.startsWith(PULL_PAGE_PREFIX)||!inheritedOwnerHash&&this.pullQueue.row(payload.request_id)) throw new Error('request_id reserved for policy work');
     const protocol=!this.hasAssignment(payload.request_id)&&Object.hasOwn(payload,'protocol')?validateProtocol(payload.protocol):null;
@@ -1291,7 +1331,7 @@ export class Store {
     if(!delivery||!['t3','none'].includes(delivery.mode)||delivery.mode==='t3'&&!delivery.threadId) throw new Error('invalid delivery');
     const m=normalizeMeta(meta),threadId=delivery.threadId??'',deliveryValue=delivery.mode==='t3'?`t3:${threadId}`:'none';
     if(!['normal','background'].includes(priority)) throw new Error('invalid priority');
-    const retry=this.checkRetry(payload,delivery,environmentId,ownerToken,review,priority,meta,identity,targetWorker,execution,requiredCapabilities,commandKey,supersedes,destinationRevision);
+    const retry=this.checkRetry(payload,delivery,environmentId,ownerToken,review,priority,meta,identity,targetWorker,execution,requiredCapabilities,commandKey,supersedes,destinationRevision,revises);
     if(retry) return retry;
     let relationship;
     if(inheritedOwnerHash) {
@@ -1362,6 +1402,11 @@ export class Store {
       // Source, immutable reference, cancellation facts and command receipt share this write transaction.
       this.db.prepare('INSERT INTO submit_supersedes(request_id,target_id,created_at) VALUES(?,?,?)').run(id,supersedes.target_id,this.stamp());
       this.cancelInTransaction(supersedes.target_id,'superseded');
+    }
+    if(revises) {
+      // The link and the note commit with the correction. A retry returned above, so neither is written twice.
+      this.db.prepare('INSERT INTO job_revisions(request_id,prior_id,input_revision,at) VALUES(?,?,?,?)').run(id,revises.prior_id,m.revision,this.stamp());
+      this.announceRevisionInTransaction(revises.prior_id,id,m.revision);
     }
     for (const sub of this.activeSubscriptions()) this.submitWake(id,sub);
     const receipt={request_id:id,status:'queued',duplicate:false,...(protocol?{revision:1}:{}),...this.destinationFields(id)};
@@ -2102,8 +2147,9 @@ export class Store {
     const watch=this.db.prepare('SELECT deadline,state,updated_at,notification_id FROM watches WHERE request_id=?').get(id) || null;
     const supersedes=this.db.prepare('SELECT target_id AS request_id,created_at FROM submit_supersedes WHERE request_id=?').get(id)??null;
     const superseded_by=this.db.prepare('SELECT request_id,created_at FROM submit_supersedes WHERE target_id=?').get(id)??null;
+    const link=this.db.prepare('SELECT prior_id AS request_id,input_revision,at FROM job_revisions WHERE request_id=?').get(id),revises=link?{...link}:null;
     const authorityRevoked=!!a.cancelled_at||this.isProtocolJob(id)&&a.status==='finished';
-    return {...this.destinationFields(id),...(this.pullQueue.row(id)?{work_order_id:this.pullQueue.row(id).work_order_id,child_request_id:id}:{}),request_id:id,supersedes,superseded_by,target_worker:a.target_worker,assignment:JSON.parse(a.payload),delivery_mode:a.delivery,t3_muted:this.deliveryMuted(id),thread_id:a.thread_id||null,environment_id:a.environment_id||null,parent_generation:a.parent_generation??null,status:a.status,execution:a.execution,required_capabilities:a.required_capabilities?JSON.parse(a.required_capabilities):[],review:!!a.review,created_at:a.created_at,valid_until:a.valid_until??null,valid_until_source:a.valid_until_source??null,expiry_requeues:a.expiry_requeues??0,...this.failureFields(id),cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancellation_requested:!!a.cancelled_at,authority_revoked:authorityRevoked,...this.sandboxStop(id,authorityRevoked),claim,progress,lifecycle_events:this.db.prepare("SELECT type,at,actor,reason FROM lifecycle_events WHERE request_id=? ORDER BY id").all(id),report:report??null,late_evidence,delivery,watch,owner_notes:this.ownerNotes(id),worker_break_notices:this.breakNotices(id),claim_denied:this.claimDenial(id),skipped_by_worker:a.skipped_at?{at:a.skipped_at,listed_count:a.listed_count,passed_over:a.passed_over}:null,pr_preflights:this.db.prepare("SELECT phase,evidence FROM pr_preflights WHERE request_id=? ORDER BY CASE phase WHEN 'submit' THEN 0 ELSE 1 END").all(id).map(row=>({phase:row.phase,...JSON.parse(row.evidence)}))};
+    return {...this.destinationFields(id),...(this.pullQueue.row(id)?{work_order_id:this.pullQueue.row(id).work_order_id,child_request_id:id}:{}),request_id:id,supersedes,superseded_by,revises,revised_by:this.newerRevision(id),apply:this.applyState(id),target_worker:a.target_worker,assignment:JSON.parse(a.payload),delivery_mode:a.delivery,t3_muted:this.deliveryMuted(id),thread_id:a.thread_id||null,environment_id:a.environment_id||null,parent_generation:a.parent_generation??null,status:a.status,execution:a.execution,required_capabilities:a.required_capabilities?JSON.parse(a.required_capabilities):[],review:!!a.review,created_at:a.created_at,valid_until:a.valid_until??null,valid_until_source:a.valid_until_source??null,expiry_requeues:a.expiry_requeues??0,...this.failureFields(id),cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancellation_requested:!!a.cancelled_at,authority_revoked:authorityRevoked,...this.sandboxStop(id,authorityRevoked),claim,progress,lifecycle_events:this.db.prepare("SELECT type,at,actor,reason FROM lifecycle_events WHERE request_id=? ORDER BY id").all(id),report:report??null,late_evidence,delivery,watch,owner_notes:this.ownerNotes(id),worker_break_notices:this.breakNotices(id),claim_denied:this.claimDenial(id),skipped_by_worker:a.skipped_at?{at:a.skipped_at,listed_count:a.listed_count,passed_over:a.passed_over}:null,pr_preflights:this.db.prepare("SELECT phase,evidence FROM pr_preflights WHERE request_id=? ORDER BY CASE phase WHEN 'submit' THEN 0 ELSE 1 END").all(id).map(row=>({phase:row.phase,...JSON.parse(row.evidence)}))};
   }
   recordPrPreflight(id,phase,assignment,evidence,replace=false) {
     assertPreflight(assignment,evidence,this.nowMs());
@@ -2204,7 +2250,8 @@ export class Store {
     if(!question||question.answered_at===null||question.consumed_at!==null||question.epoch!==wake.epoch) return false;
     try { this.assertQuestionGrant(row.request_id,question);return true; } catch { return false; }
   }
-  note(id,text) { return this.transaction(() => {
+  note(id,text) { return this.transaction(() => this.noteInTransaction(id,text)); }
+  noteInTransaction(id,text) {
     this.assertProtocolAvailable(id);
     validateOwnerNote(text,this.ownerNotes(id));
     const assignment=this.db.prepare('SELECT payload FROM assignments WHERE request_id=?').get(id);
@@ -2217,7 +2264,15 @@ export class Store {
       this.db.prepare("INSERT INTO notifications(id,kind,request_id,subscription_id,body,created_at,wake_kind) VALUES(?,?,?,?,?,?,'owner_note')").run(eventId,'event',id,sub.id,body,this.stamp());
     }
     return {request_id:id,...note};
-  }); }
+  }
+  // Tell a worker that may still be running the prior job. A job that already ended has no worker to tell, and its rows stay
+  // as they were. An exhausted note budget skips only the note: the link alone makes the result stale.
+  announceRevisionInTransaction(priorId,successorId,inputRevision) {
+    if(!['queued','claimed'].includes(this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(priorId).status)) return;
+    const text=`This job was revised by ${successorId}, a corrected revision of the same work${inputRevision?` (input revision ${inputRevision})`:''}. Stop work on it and finish with a short report of where you stopped. The report is kept as evidence and cannot be accepted or applied.`;
+    try { validateOwnerNote(text,this.ownerNotes(priorId)); } catch { return; }
+    this.noteInTransaction(priorId,text);
+  }
   tell(text,worker='dot') { return this.transaction(() => {
     if(worker==='pool') throw new Error('worker \"pool\" is not supported');
     const messageId=`msg_${randomUUID()}`, preview=text.slice(0,200), createdAt=this.stamp();
@@ -2983,16 +3038,95 @@ export class Store {
   // Record a decision on a finished report. Append-only: a different decision is added and the latest wins; the same decision
   // again is a no-op. accepted and applied also write the 'accepted' event, not_useful the legacy reject event, so readers of
   // those events keep working; an owner decision also counts as the owner read.
-  decide(id,decision,opts={}) { return this.transaction(() => this.recordDecision(id,decision,opts)); }
-  recordDecision(id,decision,{note=null,actor='owner',via='cli'}={}) {
+  // The refusal is thrown after the transaction committed, so the stale row it wrote stays.
+  decide(id,decision,opts={}) {
+    const result=this.transaction(() => this.recordDecision(id,decision,opts));
+    if(result.stale_refusal) throw staleRevisionError(result.stale_refusal);
+    return result;
+  }
+  // The first correction of a job that was not withdrawn. A cancelled correction never carried the work, so it supersedes nothing.
+  newerRevision(id) {
+    const row=this.db.prepare("SELECT r.request_id,r.input_revision,r.at FROM job_revisions r JOIN assignments a ON a.request_id=r.request_id WHERE r.prior_id=? AND a.status<>'cancelled' ORDER BY r.rowid LIMIT 1").get(id);
+    return row?{...row}:null;
+  }
+  // The refusal for a result whose job has a newer revision, or null. Records stale on an undecided result. Run it inside a transaction.
+  staleRefusal(id,{record=true}={}) {
+    const newer=this.newerRevision(id); if(!newer) return null;
+    const recorded=record&&!this.latestDecision(id);
+    if(recorded) this.db.prepare("INSERT INTO decisions(request_id,decision,note,actor,via,at) VALUES(?,'stale',?,'system','revises',?)").run(id,`revised by ${newer.request_id}`,this.stamp());
+    return {request_id:id,revised_by:newer.request_id,at:newer.at,recorded};
+  }
+  // Applying a patch is two phases, so that no decision is recorded before the patch is written. reserveApply is the fence: it
+  // refuses when a newer revision exists. The caller then writes the patch, and calls confirmApply (records applied) or
+  // releaseApply (the write failed; nothing is recorded). A reservation with neither is an apply that may or may not have
+  // happened; it shows as uncertain in get, and a re-run resumes it. A correction after the reservation is new work.
+  applyState(id) {
+    const r=this.db.prepare('SELECT state,reserved_at,resolved_at,reason FROM apply_reservations WHERE request_id=?').get(id);
+    if(!r) return null;
+    if(r.state==='applying') return {state:'applying',uncertain:true,since:r.reserved_at};
+    return r.state==='confirmed'?{state:'applied',at:r.resolved_at}:{state:'released',reason:r.reason,at:r.resolved_at};
+  }
+  // Every attempt, a first one or a resumed one, calls this and gets a new attempt token in the same transaction as the stale
+  // check. An open reservation is taken over: the previous token is superseded and its confirm or release is refused. The stale
+  // check always runs, before the already-applied shortcut and even when the caller found the patch already in its tree: a
+  // revised job's result is never recorded accepted or applied. A refused takeover of an open reservation records nothing.
+  reserveApply(id) {
+    const result=this.transaction(() => {
+      const a=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
+      if(a.status!=='finished') throw new Error('only a finished assignment can be decided');
+      const open=this.db.prepare("SELECT reserved_at FROM apply_reservations WHERE request_id=? AND state='applying'").get(id);
+      const refusal=this.staleRefusal(id,{record:!open}); if(refusal) return {request_id:id,stale_refusal:refusal};
+      if(!open&&this.latestDecision(id)?.decision==='applied') return {request_id:id,state:'applied',resumed:false};
+      const at=this.stamp(), attempt=randomBytes(16).toString('hex');
+      this.db.prepare("INSERT INTO apply_reservations(request_id,state,reserved_at,attempt) VALUES(?,'applying',?,?) ON CONFLICT(request_id) DO UPDATE SET state='applying',reserved_at=excluded.reserved_at,resolved_at=NULL,reason=NULL,attempt=excluded.attempt").run(id,at,attempt);
+      return {request_id:id,state:'applying',resumed:!!open,since:at,attempt};
+    });
+    if(result.stale_refusal) throw staleRevisionError(result.stale_refusal);
+    return result;
+  }
+  // The row the caller's token is checked against. A token that is not the current one is superseded: a later attempt took over,
+  // the owner released the reservation, or the apply already finished.
+  currentAttempt(id,attempt) {
+    if(typeof attempt!=='string'||!attempt) throw new Error(`apply attempt token required for ${id}: reserve first`);
+    const row=this.db.prepare('SELECT state,attempt FROM apply_reservations WHERE request_id=?').get(id);
+    if(!row) throw new Error(`no open apply reservation for ${id}`);
+    return {row,current:row.attempt===attempt};
+  }
+  confirmApply(id,{attempt,note=null,via='apply'}={}) { return this.transaction(() => {
+    const {row,current}=this.currentAttempt(id,attempt);
+    if(row.state==='confirmed'&&current) return {request_id:id,decision:'applied',duplicate:true,at:this.stamp()};
+    if(row.state!=='applying') throw new Error(`no open apply reservation for ${id}`);
+    if(!current) throw new Error(`superseded apply attempt for ${id}: not the current attempt; reserve again`);
+    return this.recordDecision(id,'applied',{note,via,fenced:true});
+  }); }
+  // force is the owner giving up an uncertain reservation on purpose (the token may be lost); otherwise the current token is required.
+  releaseApply(id,{attempt,reason=null,force=false}={}) { return this.transaction(() => {
+    const row=this.db.prepare('SELECT state,attempt FROM apply_reservations WHERE request_id=?').get(id);
+    if(!row) throw new Error(`no apply reservation for ${id}`);
+    if(row.state==='confirmed') throw new Error(`${id} is already applied; a confirmed apply is not released`);
+    if(row.state==='applying') {
+      if(!force) { const {current}=this.currentAttempt(id,attempt); if(!current) throw new Error(`superseded apply attempt for ${id}: not the current attempt`); }
+      this.db.prepare("UPDATE apply_reservations SET state='released',resolved_at=?,reason=? WHERE request_id=?").run(this.stamp(),reason===null?null:String(reason).slice(0,512),id);
+    } else if(!force&&row.attempt!==attempt) throw new Error(`superseded apply attempt for ${id}: not the current attempt`);
+    return {request_id:id,state:'released'};
+  }); }
+  recordDecision(id,decision,{note=null,actor='owner',via='cli',fenced=false}={}) {
     if(!decisionTypes.includes(decision)) throw new Error(`decision must be one of ${decisionTypes.join(', ')}`);
     const a=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
     if(a.status!=='finished') throw new Error('only a finished assignment can be decided');
     const latest=this.db.prepare('SELECT decision,actor FROM decisions WHERE request_id=? ORDER BY id DESC LIMIT 1').get(id);
     if(decision==='stale'&&(actor!=='system'||this.latestDecision(id))) return {request_id:id,decision:latest?.decision??null,duplicate:true};
+    // An owner cannot accept or apply a result whose job has a newer revision. The check and the write share this transaction,
+    // so a correction that commits first is always seen. It runs before the duplicate shortcut: accepting or applying again after a
+    // correction is refused too. An undecided result is recorded stale; a decided one is left alone. A confirmed apply (fenced) was
+    // checked when it was reserved, so a correction after the reservation is new work and does not block it.
+    if(actor==='owner'&&!fenced&&(decision==='accepted'||decision==='applied')) {
+      const refusal=this.staleRefusal(id); if(refusal) return {request_id:id,stale_refusal:refusal};
+    }
     if(latest&&latest.decision===decision&&latest.actor===actor) return {request_id:id,decision,duplicate:true,at:this.stamp()};
     const at=this.stamp();
     this.db.prepare('INSERT INTO decisions(request_id,decision,note,actor,via,at) VALUES(?,?,?,?,?,?)').run(id,decision,note,actor,via,at);
+    if(actor==='owner'&&decision==='applied') this.db.prepare("UPDATE apply_reservations SET state='confirmed',resolved_at=? WHERE request_id=? AND state='applying'").run(at,id);
     if(actor==='owner') {
       this.consumeOnce(id,'decide');
       if(decision==='accepted'||decision==='applied') this.lifecycle(id,'accepted','owner',decision==='applied'?(note?`applied: ${note}`:'applied'):note);
