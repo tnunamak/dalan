@@ -3044,9 +3044,9 @@ export class Store {
     if(a.status!=='finished') throw new Error('only a finished assignment can be decided');
     const latest=this.db.prepare('SELECT decision,actor FROM decisions WHERE request_id=? ORDER BY id DESC LIMIT 1').get(id);
     if(decision==='stale'&&(actor!=='system'||this.latestDecision(id))) return {request_id:id,decision:latest?.decision??null,duplicate:true};
-    if(latest&&latest.decision===decision&&latest.actor===actor) return {request_id:id,decision,duplicate:true,at:this.stamp()};
     // An owner cannot accept or apply a result whose job has a newer revision. The check and the write share this transaction,
-    // so a correction that commits first is always seen. An undecided result is recorded stale; a decided one is left alone.
+    // so a correction that commits first is always seen. It runs before the duplicate shortcut: accepting or applying again after a
+    // correction is refused too. An undecided result is recorded stale; a decided one is left alone.
     if(actor==='owner'&&(decision==='accepted'||decision==='applied')) {
       const newer=this.newerRevision(id);
       if(newer) {
@@ -3055,6 +3055,7 @@ export class Store {
         return {request_id:id,stale_refusal:{request_id:id,revised_by:newer.request_id,at:newer.at,recorded}};
       }
     }
+    if(latest&&latest.decision===decision&&latest.actor===actor) return {request_id:id,decision,duplicate:true,at:this.stamp()};
     const at=this.stamp();
     this.db.prepare('INSERT INTO decisions(request_id,decision,note,actor,via,at) VALUES(?,?,?,?,?,?)').run(id,decision,note,actor,via,at);
     if(actor==='owner') {

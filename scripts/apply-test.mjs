@@ -88,12 +88,12 @@ const home = path.join(base, 'home'), root = path.join(home, '.local/share/dot-b
 fs.mkdirSync(receipts, { recursive: true, mode: 0o700 });
 const RID = 'req_applycli0001', ART = 'art_applycli0001';
 fs.writeFileSync(path.join(receipts, createHash('sha256').update(RID).digest('hex') + '.json'), JSON.stringify({ request_id: RID, token: 't'.repeat(32), body: 'x', delivery: 'none' }) + '\n');
-let evidenceSha = sha(PATCH), served = PATCH, decided = [], getStatus = 'finished';
+let evidenceSha = sha(PATCH), served = PATCH, decided = [], getStatus = 'finished', correctionLandsDuringDownload = false, corrected = false;
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/get') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ request_id: RID, status: getStatus, assignment: { inputs: [{ base_sha: 'f'.repeat(40) }] }, report: { workspace_evidence: { base_sha: CLI_BASE, patch_artifact: { artifact_id: ART, size: PATCH.length, sha256: evidenceSha } } } })); }
-  if (url.pathname === '/artifact') { res.setHeader('x-artifact-sha256', sha(served)); res.setHeader('content-type', 'application/octet-stream'); return res.end(served); }
-  if (url.pathname === '/decide') { let b = ''; req.on('data', c => b += c); req.on('end', () => { decided.push({ ...JSON.parse(b), token: req.headers['x-owner-capability'] }); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ request_id: RID, decision: JSON.parse(b).decision })); }); return; }
+  if (url.pathname === '/artifact') { if (correctionLandsDuringDownload) corrected = true; res.setHeader('x-artifact-sha256', sha(served)); res.setHeader('content-type', 'application/octet-stream'); return res.end(served); }
+  if (url.pathname === '/decide') { let b = ''; req.on('data', c => b += c); req.on('end', () => { if (corrected) { res.statusCode = 400; res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ error: 'stale_revision: ' + RID + ' was revised by req_correction1; its result is kept as evidence and cannot be accepted or applied.', stale: { request_id: RID, revised_by: 'req_correction1', recorded: true } })); } decided.push({ ...JSON.parse(b), token: req.headers['x-owner-capability'] }); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ request_id: RID, decision: JSON.parse(b).decision })); }); return; }
   res.statusCode = 404; res.end('{"error":"nope"}');
 });
 await new Promise(r => server.listen(path.join(root, 'admin.sock'), r));
@@ -118,6 +118,17 @@ try {
   assert.equal(out.applied, true); assert.deepEqual(out.files.sort(), ['a.txt', 'new.txt']); assert.equal(out.decision, 'applied');
   assert.equal(fs.readFileSync(path.join(cli, 'a.txt'), 'utf8'), 'uno\ntwo\n');
   assert.deepEqual(decided.map(d => [d.id, d.decision, d.via, d.token]), [[RID, 'applied', 'apply', 't'.repeat(32)]]);
+  // A correction that commits after the initial get, while the artifact is still downloading, must stop the apply before the
+  // patch touches the directory. The bridge records the decision first (its stale check shares that transaction) and the
+  // patch is written only after the bridge accepts it.
+  git(cli, 'reset', '--hard'); git(cli, 'clean', '-fdq');
+  const decidedBefore = decided.length; correctionLandsDuringDownload = true;
+  r = await run('apply', RID, '--dir', cli);
+  correctionLandsDuringDownload = false; corrected = false;
+  assert.notEqual(r.code, 0); assert.match(r.stderr, /stale_revision.*revised by req_correction1/);
+  assert.equal(fs.readFileSync(path.join(cli, 'a.txt'), 'utf8'), 'one\ntwo\n', 'a correction that lands during the download leaves the directory unchanged');
+  assert.equal(fs.existsSync(path.join(cli, 'new.txt')), false, 'no file of the stale patch was written');
+  assert.equal(decided.length, decidedBefore, 'the refused decision is not recorded by the fake bridge');
   // Human output must succeed after the mutation, just as JSON output does.
   git(cli, 'reset', '--hard'); git(cli, 'clean', '-fdq');
   r = await run('apply', RID, '--dir', cli);

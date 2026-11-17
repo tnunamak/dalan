@@ -46,7 +46,7 @@ if(process.argv[2]==='--decide-child') {
   const decisions=id=>s.db.prepare('SELECT decision,actor,via,note FROM decisions WHERE request_id=? ORDER BY id').all(id).map(r=>({...r}));
   const accepted=id=>s.db.prepare("SELECT count(*) n FROM lifecycle_events WHERE request_id=? AND type='accepted'").get(id).n;
   const links=()=>s.db.prepare('SELECT request_id,prior_id,input_revision FROM job_revisions ORDER BY rowid').all().map(r=>({...r}));
-  const stale=fn=>assert.throws(fn,error=>error.code==='STALE_REVISION'&&/revised by/.test(error.message)&&!!error.stale?.revised_by);
+  const stale=(fn,why)=>assert.throws(fn,error=>error.code==='STALE_REVISION'&&/revised by/.test(error.message)&&!!error.stale?.revised_by,why);
   try {
     // ---- Step 0: meta carries context and revision, with no conflict. A correction is a new revision of the same objective.
     submit(s,'s0_first_aaaa','o',{m:meta('rev1')}); submit(s,'s0_second_bbb','o',{m:meta('rev2')});
@@ -135,11 +135,21 @@ if(process.argv[2]==='--decide-child') {
     s.decide('job_b2_old_001','accepted');
     submit(s,'job_b2_new_001','nb2',{m:meta('r2','ctx:b2'),revises:revises('job_b2_old_001','ob2')});
     const decided=rowsOf('job_b2_old_001');
-    assert.equal(s.decide('job_b2_old_001','accepted').duplicate,true,'repeating the recorded decision is still a no-op');
+    stale(()=>s.decide('job_b2_old_001','accepted'),'accepting again after the correction is refused, not a duplicate no-op');
     stale(()=>s.decide('job_b2_old_001','applied'));
     assert.equal(rowsOf('job_b2_old_001'),decided,'no row is written over an earlier decision');
     assert.equal(s.latestDecision('job_b2_old_001').decision,'accepted');
-    pass('(b2) an accepted result stays accepted; a later apply is refused with no new row');
+    // The same holds for apply: applied, then a correction, then applied again.
+    submit(s,'job_b3_old_001','ob3',{m:meta('r1','ctx:b3')});
+    const b3Grant=claim('job_b3_old_001');
+    s.finish('job_b3_old_001',b3Grant.claim_id,'completed','s','r');
+    s.decide('job_b3_old_001','applied');
+    submit(s,'job_b3_new_001','nb3',{m:meta('r2','ctx:b3'),revises:revises('job_b3_old_001','ob3')});
+    const applied=rowsOf('job_b3_old_001');
+    stale(()=>s.decide('job_b3_old_001','applied'),'applying again after the correction is refused, not a duplicate no-op');
+    assert.equal(rowsOf('job_b3_old_001'),applied,'the earlier applied decision is preserved and no row is added');
+    assert.equal(s.latestDecision('job_b3_old_001').decision,'applied');
+    pass('(b2) an accepted or applied result stays so; deciding it again after the correction is refused with no new row');
 
     // ---- (c) An open question survives a correction, and a restart.
     submit(s,'job_c_old_0001','oc',{m:meta('r1','ctx:c')});

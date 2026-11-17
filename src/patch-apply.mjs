@@ -25,8 +25,9 @@ export function baseProblem(dir, baseSha, env) {
 }
 
 // Checks the digest, the base and `git apply --check`, then applies. Preflight failures touch nothing; a failed apply
-// process may have partially changed the checkout. Returns Git's NUL-delimited list of touched file names.
-export function applyPatch({ dir, patch, sha256, baseSha, env }) {
+// process may have partially changed the checkout. Returns the list of touched file names. With checkOnly, it stops after
+// the checks and the file list and writes nothing, so a caller can take an authorization between the check and the write.
+export function applyPatch({ dir, patch, sha256, baseSha, env, checkOnly = false }) {
   const body = Buffer.from(patch);
   if (sha256 && createHash('sha256').update(body).digest('hex') !== sha256) throw new Error('patch sha256 does not match the recorded evidence; not applied');
   const problem = baseProblem(dir, baseSha, env);
@@ -53,6 +54,7 @@ export function applyPatch({ dir, patch, sha256, baseSha, env }) {
       index += 2;
     }
   }
+  if (checkOnly) return files;
   const run = git(dir, ['apply', '-'], body, env);
   if (run.status !== 0) throw new Error(`git apply failed after a clean check; the checkout may be partially changed: ${(run.stderr || '').trim().slice(0, 300)}`);
   return files;

@@ -651,8 +651,13 @@ async function main() {
       const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'dot-apply-')), file=path.join(tmp,'patch.diff');
       try {
         await download(art.artifact_id,file);
-        const files=applyPatch({dir,patch:fs.readFileSync(file),sha256:art.sha256,baseSha:ev.base_sha??got.assignment?.inputs?.[0]?.base_sha});
-        let decided; try { decided=await request('/decide','POST',{id,decision:'applied',via:'apply'},headers); } catch(e) { throw new Error(`patch applied in ${dir}, but recording the decision failed: ${e.message}; run dalan decide ${id} applied`); }
+        const patch=fs.readFileSync(file), patchArgs={dir,patch,sha256:art.sha256,baseSha:ev.base_sha??got.assignment?.inputs?.[0]?.base_sha};
+        // Check the patch, then take the bridge's authorization, then write. The bridge checks for a correction and records the
+        // decision in one transaction, so a correction that lands during the download makes /decide refuse and the directory is
+        // never touched. A correction that commits after the decision finds the job already applied and is new work.
+        applyPatch({...patchArgs,checkOnly:true});
+        let decided; try { decided=await request('/decide','POST',{id,decision:'applied',via:'apply'},headers); } catch(e) { if(e.http_status===400&&/^stale_revision/.test(e.message)) throw e; throw new Error(`not applied: the decision was not confirmed by the bridge (${e.message}), so ${dir} is unchanged`); }
+        let files; try { files=applyPatch(patchArgs); } catch(e) { throw new Error(`the bridge recorded ${id} as applied, but writing the patch in ${dir} failed: ${e.message}`); }
         result={request_id:id,applied:true,dir,files,decision:decided.decision};
       } finally { fs.rmSync(tmp,{recursive:true,force:true}); }
       if(!json) { const {files}=result; result=`applied ${files.length} file${files.length===1?'':'s'} in ${dir}; recorded decision applied for ${id}\n${files.map(f=>'  '+f).join('\n')}`; plainOutput=true; }
