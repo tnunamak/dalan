@@ -35,7 +35,7 @@ try {
 
   store=new Store(file);
   const upgraded=snapshot(store.db);
-  assert.equal(upgraded.version,71,'schema 69 must advance to 71 in one open');
+  assert.equal(upgraded.version,72,'schema 69 must advance to 72 in one open');
   assert.deepEqual(upgraded.tables.relationships,[],'new relationships table must be empty');
   assert.ok(upgraded.schema.find(row=>row.type==='table'&&row.name==='relationships'));
   assert.ok(store.db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='relationship_id'").get());
@@ -58,6 +58,6 @@ try {
 
   store.db.close();store=null;
   store=new Store(file);
-  assert.deepEqual(snapshot(store.db),upgraded,'reopening schema 71 must change nothing');
-  console.log('MIGRATION: 69 -> 71; 1 C3-scoped grant preserved; reopen 71 unchanged');
+  assert.deepEqual(snapshot(store.db),upgraded,'reopening schema 72 must change nothing');
+  console.log('MIGRATION: 69 -> 72; 1 C3-scoped grant preserved; reopen 72 unchanged');
 } finally {store?.db.close();fs.rmSync(home,{recursive:true,force:true});}
