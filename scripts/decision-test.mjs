@@ -25,7 +25,7 @@ function add(n, { kind = 'review', finishedAt = new Date(t0).toISOString() } = {
 const events = (n, type) => db.prepare('SELECT reason FROM lifecycle_events WHERE request_id=? AND type=? ORDER BY id').all(rid(n), type).map(e => e.reason);
 const rowsOf = n => db.prepare('SELECT decision,actor,via FROM decisions WHERE request_id=? ORDER BY id').all(rid(n)).map(r => ({ ...r }));
 
-assert.equal(db.prepare('PRAGMA user_version').get().user_version,71);
+assert.equal(db.prepare('PRAGMA user_version').get().user_version,72);
 assert.deepEqual(decisionTypes, ['accepted', 'applied', 'useful_no_change', 'useful_negative', 'not_useful', 'stale']);
 for (let n = 1; n <= 12; n++) add(n, { kind: n <= 6 ? 'review' : 'build' });
 
@@ -69,7 +69,7 @@ db.prepare("INSERT INTO notifications(id,request_id,kind,state,created_at) VALUE
 assert.equal(inboxItem(state(12)).group, 'undecided', 'delivered to T3 and unread by the owner still needs a decision');
 assert.equal(inboxItem({ ...state(10), inbox: { ...state(10).inbox, decision: undefined } }), null, 'an older bridge without the field is not asked');
 const box = buildInbox([state(10), state(11), state(12), state(1)], 'all');
-assert.deepEqual(box.counts, { finished_unread: 1, question: 0, undecided: 2, cancelled_unread: 0 });
+assert.deepEqual(box.counts, { finished_unread: 1, question: 0, undecided: 2, cancelled_unread: 0, held_wake: 0 });
 assert.match(formatInbox(box), /undecided  req_10_aaaaaaaa.*dalan decide req_10_aaaaaaaa accepted\|applied/);
 assert.ok(formatInbox(box).indexOf('finished_unread') < formatInbox(box).indexOf('undecided'));
 
@@ -141,7 +141,7 @@ for (const version of [42, 43]) {
   assert.deepEqual(s.db.prepare('PRAGMA foreign_key_check').all(), []);
   assert.equal(s.latestDecision('orphan').decision, 'accepted', 'read-only legacy projection remains unchanged');
   assert.deepEqual(projectionRows(s.db), expectedHistory, 'upgrade must persist the existing legacy projection');
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,71);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,72);
   assert.equal(s.latestDecision('history').decision, 'not_useful', 'source ID order, not timestamp order, determines latest');
   assert.equal(s.latestDecision('unknown'), null, 'read/completion/integration do not imply a decision');
   assert.equal(s.ownerInbox('history').decision, 'not_useful');

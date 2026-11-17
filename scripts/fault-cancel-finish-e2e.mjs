@@ -137,6 +137,9 @@ async function main() {
         assert.equal(row.authority_revoked,true);assert.ok(row.cancelled_at);assert.equal(notices.length,0);
         const retry=await h.tool('finish',args);assert.equal(JSON.parse(retry.error).error,'assignment_cancelled');
         const different=await h.tool('finish',{...args,result:'contradiction'});assert.equal(JSON.parse(different.error).error,'assignment_cancelled');
+        // C4: the answer says which scope the cancel controlled and which it did not, and the log holds one typed event for it.
+        assert.equal(cancelled.body.scope.ref,'job:'+f.id);assert.match(cancelled.body.scope.controlled,/^the job/);assert.match(cancelled.body.scope.not_controlled,/worker compute.*may still run/);
+        h.inspect(s=>assert.deepEqual(s.db.prepare("SELECT scope,outcome,actor FROM lifecycle_events WHERE request_id=? AND type='withdraw_work'").all(f.id).map(e=>({...e})),[{scope:'job:'+f.id,outcome:'done',actor:'owner'}]));
         h.inspect(s=>{assert.equal(s.db.prepare('SELECT count(*) n FROM late_evidence WHERE request_id=?').get(f.id).n,1);assert.equal(s.db.prepare('SELECT count(*) n FROM reports WHERE request_id=?').get(f.id).n,0);});
       } else {
         counts.finished++;finishedIds.add(f.id);

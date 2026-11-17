@@ -2,14 +2,23 @@
 // bin/dot-worker.mjs does the reads. Nothing here, or in the batch read behind it, records an owner read.
 
 import { terminalSafeLine } from './terminal-safe.mjs';
-export const inboxGroups=['finished_unread','question','undecided','cancelled_unread'];
+export const inboxGroups=['finished_unread','question','undecided','cancelled_unread','held_wake'];
 export const decideWords='accepted|applied|useful_no_change|useful_negative|not_useful';
 const firstLine=text=>{ const line=String(text).split('\n').find(l=>l.trim())?.trim()??''; return line.length>100?line.slice(0,97)+'...':line; };
 
-// One owner-states row to an inbox item, or null when the owner has nothing to do for it.
+// One owner-states row to an inbox item, or null when the owner has nothing to do for it. A wake held because the parent
+// stopped is not owner work: it marks the item the request already has, and only a request with no other item gets its own
+// held_wake line, so the owner can see why a result or question did not reach the parent.
 export function inboxItem(state) {
   const v=state.inbox;
   if(!v||state.error) return null;
+  const item=ownerItem(state,v), held=v.held_wake;
+  if(!held) return item;
+  const wake_held={kind:held.kind,reason:held.reason,detail:held.detail,since:held.since};
+  if(item) return {...item,wake_held};
+  return {group:'held_wake',request_id:state.request_id,worker:v.target_worker,title:firstLine(v.brief),status:state.status,wake_held,updated_at:held.since,next:[`dalan get ${state.request_id}`]};
+}
+function ownerItem(state,v) {
   const base={request_id:state.request_id,worker:v.target_worker,title:firstLine(v.brief)};
   const failure=v.failure_type?{failure_type:v.failure_type,failure_type_source:v.failure_type_source}:{};
   const get=`dalan get ${state.request_id}`;
@@ -47,7 +56,8 @@ export function formatInbox(inbox) {
   if(!inbox.total) return hidden?`inbox empty\n${hidden}`:'inbox empty';
   const lines=[];
   for(const g of inboxGroups) for(const i of inbox.items.filter(x=>x.group===g)) {
-    const why=i.group==='cancelled_unread'?` (${i.reason??'cancelled'})`:i.group==='question'?` ${i.text}`:'';
+    const held=i.wake_held?` [wake held: ${i.wake_held.reason}${i.wake_held.detail?`, ${i.wake_held.detail}`:''}; it sends when the parent runs again]`:'';
+    const why=(i.group==='cancelled_unread'?` (${i.reason??'cancelled'})`:i.group==='question'?` ${i.text}`:'')+held;
     lines.push(terminalSafeLine(`${g}  ${i.request_id}  ${i.worker}  ${i.status}  ${i.updated_at??''}  ${i.title}${why}  -> ${i.next.join(' | ')}`));
   }
   lines.push(`${inbox.total} item${inbox.total===1?'':'s'}: ${inboxGroups.map(g=>`${inbox.counts[g]} ${g}`).join(', ')}${hidden?`; ${hidden}`:''}`);

@@ -96,6 +96,11 @@ try {
   const abandoned=await cli('abandon',id,'--reason','worker lost','--json');
   assert.equal(abandoned.code,0,abandoned.err);
   assert.deepEqual([abandoned.value.status,abandoned.value.abandoned.claim_id,abandoned.value.abandoned.epoch,abandoned.value.abandoned.reason,abandoned.value.abandoned.actor],['queued',taken.claim_id,2,'worker lost','operator']);
+  // C4: the answer states the scope abandon controlled and what it left alone, and the log holds one typed detach event for it.
+  assert.equal(abandoned.value.scope.ref,`claim:${taken.claim_id}@2`);
+  assert.match(abandoned.value.scope.controlled,/^the claim/);
+  assert.match(abandoned.value.scope.not_controlled,/worker session.*not stopped/);
+  assert.deepEqual(side.db.prepare("SELECT scope,outcome,actor,reason FROM lifecycle_events WHERE request_id=? AND type='detach'").all(id).map(e=>({...e})),[{scope:`claim:${taken.claim_id}@2`,outcome:'done',actor:'operator',reason:'worker lost'}]);
   assert.deepEqual((await cli('claims','--json')).value.claims,[]);
   assert.ok((await tool('list_pending',{})).assignments.some(x=>x.request_id===id),'abandoned assignment not pending');
   assert.equal((await tool('progress',{request_id:id,claim_id:taken.claim_id,note:'stale'})).error,'invalid claim');

@@ -41,6 +41,9 @@ export function formatStatusSummary(status, { home, url = null, trial = false, n
   const paused = status?.paused === true;
   const lines = [`Bridge: ${paused ? 'running, paused' : 'running'}${url ? ` on ${url}` : ''} (${trial ? 'trial home' : 'home'} ${home})${paused && status.pause_reason ? `. Pause reason: ${status.pause_reason}` : ''}`,
     ...(workers.length ? workers.map(w => w.text) : ['Workers: none yet'])];
+  // A wake held because its parent stopped is invisible in the queue counts: it left the send queue and waits for the parent.
+  const held = Number.isInteger(status?.held_wakes) ? status.held_wakes : 0;
+  if (held > 0) lines.push(`${held} held wake${held === 1 ? '' : 's'}: the parent thread stopped, so the wake waits until it runs again (see: ${cli} inbox --all)`);
   const total = workers.reduce((n, w) => n + w.total, 0) || (status?.counts ?? []).reduce((n, c) => n + c.count, 0);
   const next = paused ? `resume handing out jobs: ${cli} resume`
     : workers.some(w => w.queued) ? `send your worker the queued job (to connect a worker first, see ${CONNECT_URL}); list your jobs: ${cli} inbox --all`

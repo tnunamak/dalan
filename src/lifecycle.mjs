@@ -1,7 +1,12 @@
 // Append-only lifecycle events: one row per state change, written in the same transaction as the change.
 // Metrics derive from these rows only; anything the rows cannot show is reported as unknown with a reason, never as zero.
 import { fromStoredSource, canonicalObjectiveKey, canonicalKindSql, canonicalKindLabel } from './objectives.mjs';
-export const lifecycleTypes=['queued','claimed','working','waiting','blocked','completed','consumed','accepted','integrated','abandoned','cancelled','delivery_sent','delivery_uncertain','reconciled','check_started','check_passed','check_failed','check_skipped'];
+// The control vocabulary: what an owner or operator asked to stop, release or withdraw. Each event names the scope it
+// acted on (scope) and whether that effect is known (outcome). A request to something outside the store is 'unknown'
+// until an observation says otherwise; 'done' means the store itself made the change in the same transaction.
+export const controlTypes=['detach','interrupt_foreground','withdraw_work','revoke_grant'];
+export const controlOutcomes=['done','confirmed','unknown'];
+export const lifecycleTypes=['queued','claimed','working','waiting','blocked','completed','consumed','accepted','integrated','abandoned','cancelled','delivery_sent','delivery_uncertain','reconciled','check_started','check_passed','check_failed','check_skipped','wake_held',...controlTypes];
 export const retentionDays=90;
 // Two consecutive claim activity events no more than this far apart count as working time (see docs/usage.md, "Metrics").
 export const activeGapMs=20*60000;
@@ -14,7 +19,8 @@ export const progressType=(note,blocker=false)=>blocker||/^\s*BLOCKED:/im.test(n
 // Retention deletes go through one guarded path: the trigger admits a DELETE only for rows older than the cutoff that
 // retainLifecycle sets and clears inside its own transaction. This guards against accidental writes, not against a
 // process that can rewrite the schema.
-export const lifecycleSchema=`CREATE TABLE IF NOT EXISTS lifecycle_events (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, claim_id TEXT, epoch INTEGER, type TEXT NOT NULL CHECK(type IN (${lifecycleTypes.map(t=>`'${t}'`).join(',')})), at TEXT NOT NULL, actor TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('live','backfill')), reason TEXT);
+const lifecycleTableBody=`id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, claim_id TEXT, epoch INTEGER, type TEXT NOT NULL CHECK(type IN (${lifecycleTypes.map(t=>`'${t}'`).join(',')})), at TEXT NOT NULL, actor TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('live','backfill')), reason TEXT`;
+export const lifecycleSchema=`CREATE TABLE IF NOT EXISTS lifecycle_events (${lifecycleTableBody});
   CREATE INDEX IF NOT EXISTS lifecycle_events_request ON lifecycle_events(request_id,id);
   CREATE INDEX IF NOT EXISTS lifecycle_events_type_at ON lifecycle_events(type,at);
   CREATE TABLE IF NOT EXISTS lifecycle_daily (day TEXT NOT NULL, type TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day,type,kind));
@@ -22,6 +28,58 @@ export const lifecycleSchema=`CREATE TABLE IF NOT EXISTS lifecycle_events (id IN
   INSERT OR IGNORE INTO lifecycle_retention(id) VALUES(1);
   CREATE TRIGGER IF NOT EXISTS lifecycle_events_no_update BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'lifecycle events are append-only'); END;
   CREATE TRIGGER IF NOT EXISTS lifecycle_events_no_delete BEFORE DELETE ON lifecycle_events WHEN NOT EXISTS (SELECT 1 FROM lifecycle_retention WHERE id=1 AND cutoff IS NOT NULL AND old.at<cutoff) BEGIN SELECT RAISE(ABORT, 'lifecycle events are append-only'); END;`;
+
+// Migration 72. Control events carry the scope they acted on and an outcome. A table made by an earlier release also
+// lists the old types in its CHECK, and SQLite cannot widen a CHECK in place, so that table is rebuilt: same rows, same
+// ids, and the stored text of its indexes and triggers is carried over unchanged. A table made by this release
+// (a fresh database) already lists every type and only gains the two columns.
+export function addControlColumns(db) {
+  const table=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='lifecycle_events'").get();
+  if(!table) return;
+  const has=name=>!!db.prepare("SELECT 1 FROM pragma_table_info('lifecycle_events') WHERE name=?").get(name);
+  // A table is current only when its CHECK lists every type this release writes. Naming one type is not enough: a table
+  // built part-way through this change can list wake_held and still lack another.
+  if(lifecycleTypes.every(t=>table.sql.includes(`'${t}'`))) {
+    for(const name of ['scope','outcome']) if(!has(name)) db.exec(`ALTER TABLE lifecycle_events ADD COLUMN ${name} TEXT`);
+    return;
+  }
+  const attached=db.prepare("SELECT type,name,sql FROM sqlite_master WHERE tbl_name='lifecycle_events' AND type IN ('index','trigger') AND sql IS NOT NULL").all();
+  const columns=db.prepare("SELECT name FROM pragma_table_info('lifecycle_events')").all().map(c=>c.name);
+  const wanted=['id','request_id','claim_id','epoch','type','at','actor','source','reason','worker'];
+  const missing=wanted.filter(c=>!columns.includes(c));
+  if(missing.length) throw new Error(`lifecycle_events is missing ${missing.join(', ')}; cannot widen its type list`);
+  // The rebuild copies a fixed list of columns. A column it does not know would be dropped with its data, so refuse
+  // before any DDL runs and leave the database as it was.
+  const known=[...wanted,'scope','outcome'];
+  const unknown=columns.filter(c=>!known.includes(c));
+  if(unknown.length) throw new Error(`lifecycle_events has columns this release does not know: ${unknown.join(', ')}; refusing to rebuild it because that would drop their data`);
+  const copied=known.filter(c=>columns.includes(c));
+  for(const a of attached) db.exec(`DROP ${a.type.toUpperCase()} ${a.name}`);
+  db.exec('ALTER TABLE lifecycle_events RENAME TO lifecycle_events_pre71');
+  db.exec(`CREATE TABLE lifecycle_events (${lifecycleTableBody}, worker TEXT NOT NULL DEFAULT 'unknown', scope TEXT, outcome TEXT)`);
+  db.exec(`INSERT INTO lifecycle_events(${copied.join(',')}) SELECT ${copied.join(',')} FROM lifecycle_events_pre71 ORDER BY id`);
+  // AUTOINCREMENT remembers the highest id ever issued, which can be above the highest id still stored once retention
+  // has removed old events. Copying explicit ids restarts it at the copied max, so carry the old mark over or ids repeat.
+  const issued=db.prepare("SELECT seq FROM sqlite_sequence WHERE name='lifecycle_events_pre71'").get()?.seq??0;
+  db.exec('DROP TABLE lifecycle_events_pre71');
+  const kept=db.prepare("SELECT seq FROM sqlite_sequence WHERE name='lifecycle_events'").get()?.seq??0;
+  if(Math.max(issued,kept)>0) {
+    if(db.prepare("SELECT 1 FROM sqlite_sequence WHERE name='lifecycle_events'").get()) db.prepare("UPDATE sqlite_sequence SET seq=? WHERE name='lifecycle_events'").run(Math.max(issued,kept));
+    else db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES('lifecycle_events',?)").run(Math.max(issued,kept));
+  }
+  for(const a of attached) db.exec(a.sql);
+}
+
+// What a control verb controlled and what it left alone, as text for the owner. ref is the stored scope.
+export function controlScopeText(type,{ref,claimed=false}={}) {
+  if(type==='withdraw_work') return {ref,controlled:'the job: its authority is withdrawn, so a result sent after this is kept as audit evidence and not accepted',
+    not_controlled:claimed?'worker compute: the worker may still run and report late; nothing here proves it stopped':'nothing was running, so there was no worker compute to stop'};
+  if(type==='detach') return {ref,controlled:'the claim: it is released and the job goes back to the queue, and the old claim id stops working',
+    not_controlled:'the worker session: it is not stopped, and it may still run until it sees the claim is gone'};
+  if(type==='interrupt_foreground') return {ref,controlled:'a request to interrupt the foreground run',not_controlled:'whether the run stopped: the outcome stays unknown until an observation confirms it'};
+  if(type==='revoke_grant') return {ref,controlled:'the grant: no new call is admitted under it',not_controlled:'a call already in flight under the grant'};
+  throw new Error(`unknown control type ${type}`);
+}
 
 export const checkOutcome=(job,run)=>{
   const base=`check_id=${job.check_id};check_run_id=${job.id}`;

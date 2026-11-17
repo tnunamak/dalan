@@ -77,7 +77,7 @@ try {
   box=await inbox('--producer',other); assert.deepEqual(ids(box,'finished_unread'),[foreign.request_id]);
   box=await inbox('--all'); assert.deepEqual(ids(box,'finished_unread'),[a.request_id,b.request_id,foreign.request_id].sort());
   const freshShell=await cli('inbox','--json'); assert.equal(freshShell.code,0,freshShell.stderr); assert.deepEqual(ids(json(freshShell),'finished_unread'),[a.request_id,b.request_id,foreign.request_id].sort());
-  const human=await cli('inbox','--producer',producer); assert.match(human.stdout,/finished_unread {2}req_/); assert.match(human.stdout,/2 items: 2 finished_unread, 0 question, 0 undecided, 0 cancelled_unread/);
+  const human=await cli('inbox','--producer',producer); assert.match(human.stdout,/finished_unread {2}req_/); assert.match(human.stdout,/2 items: 2 finished_unread, 0 question, 0 undecided, 0 cancelled_unread, 0 held_wake/);
   assert.equal(consumed(),0,'inbox recorded a consumed event');
   // 2. A get consumes: the item leaves the inbox, the others stay.
   assert.equal((await cli('get',a.request_id,'--json')).code,0);

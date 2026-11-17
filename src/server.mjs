@@ -38,7 +38,7 @@ import { parseExecution, parseRequiredCapabilities, admitHostExecution, admitAda
 import { loadCapacity } from './projects.mjs';
 import { authConfig, assertPublicRouteAuth, isLoopbackBindHost, protectedResource, challenge, verifyBearer, needScope } from './auth.mjs';
 import { beginMcpOutcome, recordMcpResponse, pathShape, uaToken } from './mcp-outcome.mjs';
-import { lifecycleMetrics, retainLifecycle } from './lifecycle.mjs';
+import { lifecycleMetrics, retainLifecycle, controlScopeText } from './lifecycle.mjs';
 import { normalizeMeta } from './objectives.mjs';
 import { createRequestLog } from './request-log.mjs';
 import { logShutdownSignals } from './shutdown-signal.mjs';
@@ -1378,17 +1378,19 @@ const adminServer=http.createServer(async(req,res)=>{
       const requestId=id(body.id),result=store.abandon(requestId,{actor:'operator',reason:body.reason===undefined||body.reason===null?'operator_abandon':str(body.reason,'reason',512)});
       log({kind:'claim_abandoned',request_id:requestId,epoch:result.abandoned.epoch,actor:'operator'});
       runDrain();
-      return json(res,200,result);
+      return json(res,200,{...result,scope:controlScopeText('detach',{ref:`claim:${result.abandoned.claim_id}@${result.abandoned.epoch}`})});
     }
     if(url.pathname==='/cancel') {
       const requestId=id(body.id); adminOwner(req,requestId);
-      const result=store.cancel(requestId,body.reason===undefined||body.reason===null?null:str(body.reason,'reason',64),{key:body.command_key,revision:body.expected_revision},req.headers['x-owner-capability']); const waiter=waiters.get(requestId); if(waiter) { waiters.delete(requestId); clearTimeout(waiter.timer); json(waiter.res,200,waitSummary(requestId)); } return json(res,200,result);
+      // Read before the cancel: the scope text depends on whether a worker held the job.
+      const wasClaimed=store.db.prepare("SELECT 1 FROM assignments WHERE request_id=? AND status='claimed'").get(requestId)!==undefined;
+      const result=store.cancel(requestId,body.reason===undefined||body.reason===null?null:str(body.reason,'reason',64),{key:body.command_key,revision:body.expected_revision},req.headers['x-owner-capability']); const waiter=waiters.get(requestId); if(waiter) { waiters.delete(requestId); clearTimeout(waiter.timer); json(waiter.res,200,waitSummary(requestId)); } return json(res,200,{...result,scope:controlScopeText('withdraw_work',{ref:`job:${requestId}`,claimed:wasClaimed})});
     }
     if(url.pathname==='/cancel-if-queued'&&req.method==='POST') {
       const requestId=id(body.id); adminOwner(req,requestId);
       const result=store.cancelIfQueued(requestId);
       if(result.cancelled) { const waiter=waiters.get(requestId); if(waiter) { waiters.delete(requestId); clearTimeout(waiter.timer); json(waiter.res,200,waitSummary(requestId)); } }
-      return json(res,200,result);
+      return json(res,200,result.cancelled?{...result,scope:controlScopeText('withdraw_work',{ref:`job:${requestId}`,claimed:false})}:result);
     }
     if(url.pathname==='/break'&&req.method==='POST') {
       adminOperator(req);

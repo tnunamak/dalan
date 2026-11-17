@@ -179,6 +179,7 @@
   "node scripts/claims-admin-e2e.mjs",
   "node scripts/claim-capacity-test.mjs",
   "node scripts/destination-adapter-test.mjs",
+  "node scripts/typed-control-events-test.mjs",
   "node scripts/t3-process-bound-test.mjs",
   "node scripts/lifecycle-events-test.mjs",
   "node scripts/metrics-e2e.mjs",
