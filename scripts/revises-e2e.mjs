@@ -119,14 +119,20 @@ try {
   await whileStopped(s=>{const g=s.claim('req_old_fffffff1','W1','local-principal',100);s.finish('req_old_fffffff1',g.claim_id,'completed','f summary','f result');});
   assert.equal((await phase('req_old_fffffff1','bogus')).status,400);
   assert.equal((await phase('req_old_fffffff1','confirm')).status,400,'a confirm with no reservation is refused');
-  const reserved=await phase('req_old_fffffff1','reserve'); assert.equal(reserved.status,200); assert.equal(reserved.value.state,'applying');
+  const reserved=await phase('req_old_fffffff1','reserve'); assert.equal(reserved.status,200); assert.equal(reserved.value.state,'applying'); assert.match(reserved.value.attempt,/^[0-9a-f]{32}$/);
   assert.deepEqual(read('SELECT decision FROM decisions WHERE request_id=?','req_old_fffffff1'),[],'a reservation records no decision');
   assert.deepEqual(read("SELECT type FROM lifecycle_events WHERE request_id=? AND type='accepted'",'req_old_fffffff1'),[],'and no accepted event');
   assert.equal((await submit('req_new_fffffff1',['--revision','r2','--revises','req_old_fffffff1'])).code,0);
   await stop(); await start();
   const uncertain=(await cli(['get','req_old_fffffff1','--json'])).value;
+  assert.equal(JSON.stringify(uncertain.apply).includes(reserved.value.attempt),false,'get does not show the attempt token');
+  // a takeover after the correction is refused; a confirm needs the current token
+  const lateTake=await phase('req_old_fffffff1','reserve'); assert.equal(lateTake.status,400); assert.match(lateTake.value.error,/stale_revision/);
+  assert.equal((await phase('req_old_fffffff1','confirm')).status,400,'a confirm without a token is refused');
+  const wrong=await phase('req_old_fffffff1','confirm',{attempt:'0'.repeat(32)}); assert.equal(wrong.status,400); assert.match(wrong.value.error,/superseded/);
+  assert.deepEqual(read('SELECT decision FROM decisions WHERE request_id=?','req_old_fffffff1'),[]);
   assert.equal(uncertain.apply.state,'applying'); assert.equal(uncertain.apply.uncertain,true); assert.equal(uncertain.revised_by.request_id,'req_new_fffffff1');
-  const confirm=await phase('req_old_fffffff1','confirm'); assert.equal(confirm.status,200,JSON.stringify(confirm.value)); assert.equal(confirm.value.decision,'applied');
+  const confirm=await phase('req_old_fffffff1','confirm',{attempt:reserved.value.attempt}); assert.equal(confirm.status,200,JSON.stringify(confirm.value)); assert.equal(confirm.value.decision,'applied');
   assert.deepEqual(read('SELECT decision,actor,via FROM decisions WHERE request_id=?','req_old_fffffff1'),[{decision:'applied',actor:'owner',via:'apply'}]);
   assert.equal((await cli(['get','req_old_fffffff1','--json'])).value.apply.state,'applied');
   assert.equal((await cli(['get','req_new_fffffff1','--json'])).value.status,'queued','the correction after the reservation is new work');
@@ -135,10 +141,15 @@ try {
   assert.equal(read('SELECT count(*) n FROM apply_reservations WHERE request_id=?','req_old_ccccccc1')[0].n,0);
   assert.equal((await submit('req_old_ggggggg1',['--revision','r1'])).code,0);
   await whileStopped(s=>{const g=s.claim('req_old_ggggggg1','W1','local-principal',100);s.finish('req_old_ggggggg1',g.claim_id,'completed','g','g');});
-  assert.equal((await phase('req_old_ggggggg1','reserve')).status,200);
-  const rel=await phase('req_old_ggggggg1','release',{reason:'apply_failed: disk full'}); assert.equal(rel.status,200); assert.equal(rel.value.state,'released');
+  const gRes=await phase('req_old_ggggggg1','reserve'); assert.equal(gRes.status,200);
+  assert.equal((await phase('req_old_ggggggg1','release',{reason:'no token'})).status,400,'a release without the token is refused');
+  const rel=await phase('req_old_ggggggg1','release',{attempt:gRes.value.attempt,reason:'apply_failed: disk full'}); assert.equal(rel.status,200); assert.equal(rel.value.state,'released');
   assert.deepEqual(read('SELECT decision FROM decisions WHERE request_id=?','req_old_ggggggg1'),[]);
-  assert.deepEqual((await cli(['get','req_old_ggggggg1','--json'])).value.apply,{state:'released',reason:'apply_failed: disk full',at:read('SELECT resolved_at FROM apply_reservations WHERE request_id=?','req_old_ggggggg1')[0].resolved_at});
+  assert.equal((await phase('req_old_ggggggg1','confirm',{attempt:gRes.value.attempt})).status,400,'a confirm after the release is refused');
+  // the owner gives up an uncertain reservation on purpose, without the token
+  await phase('req_old_ggggggg1','reserve'); const forced=await phase('req_old_ggggggg1','release',{force:true,reason:'released by the owner'}); assert.equal(forced.status,200);
+  assert.equal(read('SELECT state,reason FROM apply_reservations WHERE request_id=?','req_old_ggggggg1')[0].reason,'released by the owner');
+  assert.deepEqual((await cli(['get','req_old_ggggggg1','--json'])).value.apply,{state:'released',reason:'released by the owner',at:read('SELECT resolved_at FROM apply_reservations WHERE request_id=?','req_old_ggggggg1')[0].resolved_at});
   pass('two-phase apply over the real server: reserve records nothing, a correction after it is new work and the confirm applies, a revised job cannot be reserved, a release leaves the job unapplied, a restart keeps the open reservation');
 
   // ---- an open question survives a correction (c), across a restart

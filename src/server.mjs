@@ -1292,9 +1292,12 @@ const adminServer=http.createServer(async(req,res)=>{
       // The two-phase apply: reserve (the stale check), then confirm or release once the patch is written or has failed.
       if(body.phase!==undefined) {
         if(body.decision!=='applied'||!['reserve','confirm','release'].includes(body.phase)) throw new Error('phase is reserve, confirm or release, and goes with decision applied');
-        if(body.phase==='reserve') return json(res,200,store.reserveApply(requestId));
-        if(body.phase==='release') return json(res,200,store.releaseApply(requestId,body.reason===undefined||body.reason===null?null:str(body.reason,'reason',512)));
-        return json(res,200,store.confirmApply(requestId,{note:body.note===undefined||body.note===null?null:str(body.note,'note',4096),via}));
+        // Every attempt reserves and gets a token; confirm and release must present the current one. force releases an
+        // uncertain reservation on purpose (the owner's own capability, no token).
+        if(body.phase==='reserve') return json(res,200,store.reserveApply(requestId,{present:body.present===true}));
+        const attempt=body.attempt===undefined||body.attempt===null?undefined:str(body.attempt,'attempt',128);
+        if(body.phase==='release') return json(res,200,store.releaseApply(requestId,{attempt,force:body.force===true,reason:body.reason===undefined||body.reason===null?null:str(body.reason,'reason',512)}));
+        return json(res,200,store.confirmApply(requestId,{attempt,note:body.note===undefined||body.note===null?null:str(body.note,'note',4096),via}));
       }
       return json(res,200,store.decide(requestId,String(body.decision),{note:body.note===undefined||body.note===null?null:str(body.note,'note',4096),via}));
     }

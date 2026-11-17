@@ -13,7 +13,7 @@ import { TRUST } from './execution.mjs';
 import { inferWorkerReport, observeTransition } from './failure-type.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { acquireSubscriptionStorage, SubscriptionCodec } from './subscription-storage.mjs';
-import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import { randomUUID, randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import {migrateClaimCommands,createClaimCommands} from './claim-command-ledger.mjs';
 import {migrateArtifactJournal} from './artifact-journal.mjs';
@@ -968,13 +968,15 @@ export class Store {
           CREATE INDEX IF NOT EXISTS job_revisions_prior ON job_revisions(prior_id);
           -- A patch is applied in two phases so that no decision is recorded before the effect: 'applying' reserves it (the
           -- stale check is made here), the CLI writes the patch, then 'confirmed' records the decision or 'released' gives it up.
-          -- A row left in 'applying' is an apply that may or may not have happened.
+          -- A row left in 'applying' is an apply that may or may not have happened. attempt is the fencing token of the run that
+          -- holds the reservation: every reserve mints a new one, and a confirm or release must present the current one.
           CREATE TABLE IF NOT EXISTS apply_reservations(
             request_id TEXT PRIMARY KEY REFERENCES assignments(request_id),
             state TEXT NOT NULL CHECK(state IN ('applying','confirmed','released')),
             reserved_at TEXT NOT NULL,
             resolved_at TEXT,
-            reason TEXT);
+            reason TEXT,
+            attempt TEXT);
           PRAGMA user_version=71;`);
       }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
@@ -3048,9 +3050,9 @@ export class Store {
     return row?{...row}:null;
   }
   // The refusal for a result whose job has a newer revision, or null. Records stale on an undecided result. Run it inside a transaction.
-  staleRefusal(id) {
+  staleRefusal(id,{record=true}={}) {
     const newer=this.newerRevision(id); if(!newer) return null;
-    const recorded=!this.latestDecision(id);
+    const recorded=record&&!this.latestDecision(id);
     if(recorded) this.db.prepare("INSERT INTO decisions(request_id,decision,note,actor,via,at) VALUES(?,'stale',?,'system','revises',?)").run(id,`revised by ${newer.request_id}`,this.stamp());
     return {request_id:id,revised_by:newer.request_id,at:newer.at,recorded};
   }
@@ -3064,32 +3066,49 @@ export class Store {
     if(r.state==='applying') return {state:'applying',uncertain:true,since:r.reserved_at};
     return r.state==='confirmed'?{state:'applied',at:r.resolved_at}:{state:'released',reason:r.reason,at:r.resolved_at};
   }
-  reserveApply(id) {
+  // Every attempt, a first one or a resumed one, calls this and gets a new attempt token in the same transaction as the stale
+  // check. An open reservation is taken over: the previous token is superseded and its confirm or release is refused. The
+  // takeover is refused when a newer revision exists (the correction may have landed after the first reservation), and that
+  // refusal records nothing. With present=true the caller found the patch already in the tree and will not write, so the
+  // effect has happened and only the record is missing; that takeover of an open reservation skips the stale check.
+  reserveApply(id,{present=false}={}) {
     const result=this.transaction(() => {
       const a=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
       if(a.status!=='finished') throw new Error('only a finished assignment can be decided');
       const open=this.db.prepare("SELECT reserved_at FROM apply_reservations WHERE request_id=? AND state='applying'").get(id);
-      if(open) return {request_id:id,state:'applying',resumed:true,since:open.reserved_at};
-      if(this.latestDecision(id)?.decision==='applied') return {request_id:id,state:'applied',resumed:false};
-      const refusal=this.staleRefusal(id); if(refusal) return {request_id:id,stale_refusal:refusal};
-      const at=this.stamp();
-      this.db.prepare("INSERT INTO apply_reservations(request_id,state,reserved_at) VALUES(?,'applying',?) ON CONFLICT(request_id) DO UPDATE SET state='applying',reserved_at=excluded.reserved_at,resolved_at=NULL,reason=NULL").run(id,at);
-      return {request_id:id,state:'applying',resumed:false,since:at};
+      if(!open&&this.latestDecision(id)?.decision==='applied') return {request_id:id,state:'applied',resumed:false};
+      if(!(open&&present)) { const refusal=this.staleRefusal(id,{record:!open}); if(refusal) return {request_id:id,stale_refusal:refusal}; }
+      const at=this.stamp(), attempt=randomBytes(16).toString('hex');
+      this.db.prepare("INSERT INTO apply_reservations(request_id,state,reserved_at,attempt) VALUES(?,'applying',?,?) ON CONFLICT(request_id) DO UPDATE SET state='applying',reserved_at=excluded.reserved_at,resolved_at=NULL,reason=NULL,attempt=excluded.attempt").run(id,at,attempt);
+      return {request_id:id,state:'applying',resumed:!!open,since:at,attempt};
     });
     if(result.stale_refusal) throw staleRevisionError(result.stale_refusal);
     return result;
   }
-  confirmApply(id,{note=null,via='apply'}={}) { return this.transaction(() => {
-    const row=this.db.prepare('SELECT state FROM apply_reservations WHERE request_id=?').get(id);
-    if(row?.state==='confirmed') return {request_id:id,decision:'applied',duplicate:true,at:this.stamp()};
-    if(row?.state!=='applying') throw new Error(`no open apply reservation for ${id}`);
+  // The row the caller's token is checked against. A token that is not the current one is superseded: a later attempt took over,
+  // the owner released the reservation, or the apply already finished.
+  currentAttempt(id,attempt) {
+    if(typeof attempt!=='string'||!attempt) throw new Error(`apply attempt token required for ${id}: reserve first`);
+    const row=this.db.prepare('SELECT state,attempt FROM apply_reservations WHERE request_id=?').get(id);
+    if(!row) throw new Error(`no open apply reservation for ${id}`);
+    return {row,current:row.attempt===attempt};
+  }
+  confirmApply(id,{attempt,note=null,via='apply'}={}) { return this.transaction(() => {
+    const {row,current}=this.currentAttempt(id,attempt);
+    if(row.state==='confirmed'&&current) return {request_id:id,decision:'applied',duplicate:true,at:this.stamp()};
+    if(row.state!=='applying') throw new Error(`no open apply reservation for ${id}`);
+    if(!current) throw new Error(`superseded apply attempt for ${id}: not the current attempt; reserve again`);
     return this.recordDecision(id,'applied',{note,via,fenced:true});
   }); }
-  releaseApply(id,reason=null) { return this.transaction(() => {
-    const row=this.db.prepare('SELECT state FROM apply_reservations WHERE request_id=?').get(id);
+  // force is the owner giving up an uncertain reservation on purpose (the token may be lost); otherwise the current token is required.
+  releaseApply(id,{attempt,reason=null,force=false}={}) { return this.transaction(() => {
+    const row=this.db.prepare('SELECT state,attempt FROM apply_reservations WHERE request_id=?').get(id);
     if(!row) throw new Error(`no apply reservation for ${id}`);
     if(row.state==='confirmed') throw new Error(`${id} is already applied; a confirmed apply is not released`);
-    if(row.state==='applying') this.db.prepare("UPDATE apply_reservations SET state='released',resolved_at=?,reason=? WHERE request_id=?").run(this.stamp(),reason===null?null:String(reason).slice(0,512),id);
+    if(row.state==='applying') {
+      if(!force) { const {current}=this.currentAttempt(id,attempt); if(!current) throw new Error(`superseded apply attempt for ${id}: not the current attempt`); }
+      this.db.prepare("UPDATE apply_reservations SET state='released',resolved_at=?,reason=? WHERE request_id=?").run(this.stamp(),reason===null?null:String(reason).slice(0,512),id);
+    } else if(!force&&row.attempt!==attempt) throw new Error(`superseded apply attempt for ${id}: not the current attempt`);
     return {request_id:id,state:'released'};
   }); }
   recordDecision(id,decision,{note=null,actor='owner',via='cli',fenced=false}={}) {

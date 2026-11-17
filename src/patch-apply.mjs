@@ -8,7 +8,7 @@ import path from 'node:path';
 const git = (dir, args, input, env) => spawnSync('git', ['-C', dir, ...args], { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env });
 
 // git apply from a subdirectory can silently skip root-relative paths.
-function worktreeRoot(dir, env) {
+export function worktreeRoot(dir, env) {
   const root = git(dir, ['rev-parse', '--show-toplevel'], undefined, env);
   return root.status === 0 ? root.stdout.replace(/\r?\n$/, '') : null;
 }
@@ -69,18 +69,8 @@ export function baseProblem(dir, baseSha, env) {
   return anc.status === 0 ? null : `could not compare base and HEAD: ${anc.stderr.trim()}`;
 }
 
-// Checks the digest, the base and `git apply --check`, then applies. Preflight failures touch nothing; a failed apply
-// process restores the files it touched (a restore that itself fails is named in the error). Returns the list of touched file names. With checkOnly, it stops after
-// the checks and the file list and writes nothing, so a caller can take an authorization between the check and the write.
-export function applyPatch({ dir, patch, sha256, baseSha, env, checkOnly = false }) {
-  const body = Buffer.from(patch);
-  if (sha256 && createHash('sha256').update(body).digest('hex') !== sha256) throw new Error('patch sha256 does not match the recorded evidence; not applied');
-  const problem = baseProblem(dir, baseSha, env);
-  if (problem) throw new Error(`not applied: ${problem}`);
-  dir = worktreeRoot(dir, env);
-  if (!dir) throw new Error('not applied: could not resolve the repository worktree top level');
-  const check = git(dir, ['apply', '--check', '-'], body, env);
-  if (check.status !== 0) throw new Error(`not applied: git apply --check failed: ${(check.stderr || '').trim().slice(0, 300)}`);
+// The files a patch names, renames as old and new, read from the patch alone (no check against the tree).
+export function listPatchFiles(dir, body, env) {
   const numstat = git(dir, ['apply', '--numstat', '-z', '-'], body, env);
   if (numstat.error || numstat.status !== 0) throw new Error(`git apply --numstat failed: ${(numstat.stderr || numstat.error?.message || '').trim().slice(0, 300)}`);
   const records = numstat.stdout.split('\0');
@@ -99,6 +89,22 @@ export function applyPatch({ dir, patch, sha256, baseSha, env, checkOnly = false
       index += 2;
     }
   }
+  return files;
+}
+
+// Checks the digest, the base and `git apply --check`, then applies. Preflight failures touch nothing; a failed apply
+// process restores the files it touched (a restore that itself fails is named in the error). Returns the list of touched file names. With checkOnly, it stops after
+// the checks and the file list and writes nothing, so a caller can take an authorization between the check and the write.
+export function applyPatch({ dir, patch, sha256, baseSha, env, checkOnly = false }) {
+  const body = Buffer.from(patch);
+  if (sha256 && createHash('sha256').update(body).digest('hex') !== sha256) throw new Error('patch sha256 does not match the recorded evidence; not applied');
+  const problem = baseProblem(dir, baseSha, env);
+  if (problem) throw new Error(`not applied: ${problem}`);
+  dir = worktreeRoot(dir, env);
+  if (!dir) throw new Error('not applied: could not resolve the repository worktree top level');
+  const check = git(dir, ['apply', '--check', '-'], body, env);
+  if (check.status !== 0) throw new Error(`not applied: git apply --check failed: ${(check.stderr || '').trim().slice(0, 300)}`);
+  const files = listPatchFiles(dir, body, env);
   if (checkOnly) return files;
   // git apply checks everything first but writes file by file, so a write error can leave some files changed. Keep what it
   // may touch and put it back on any failure: the tree is the one it was, or the error names what could not be restored.

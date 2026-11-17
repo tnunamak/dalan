@@ -33,7 +33,7 @@ import { workerPrompt } from '../src/worker-prompt.mjs';
 import { stoppedTrialFix } from '../src/try-command.mjs';
 import { formatGetSummary, formatWaitLine } from '../src/get-summary.mjs';
 import { cliCommand } from '../src/cli-name.mjs';
-import { applyPatch, patchMatchesWorktree } from '../src/patch-apply.mjs';
+import { applyPatch, listPatchFiles, patchMatchesWorktree, worktreeRoot } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, ensureWorkerRelationship, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError } from '../src/admin-socket.mjs';
@@ -640,39 +640,68 @@ async function main() {
       break;
     }
     case 'apply': {
-      const id=args[0]; if(!id||id.startsWith('-')) throw new Error('apply requires request id (optional --dir PATH, default the current directory)');
+      const id=args[0]; if(!id||id.startsWith('-')) throw new Error('apply requires request id (optional --dir PATH, default the current directory; --release gives up an uncertain apply)');
       if(args.includes('--dir')&&!option('--dir')) throw new Error('--dir requires a path');
-      const dir=path.resolve(option('--dir')??process.cwd()), headers={'x-owner-capability':receipt(id).token};
+      const headers={'x-owner-capability':receipt(id).token};
       const got=await request('/get?id='+encodeURIComponent(id),'GET',null,headers); indexArtifacts(id,got);
-      // The stale fence is at the reservation: an open reservation was made before any correction, so it may finish; a job
-      // revised before it was reserved is refused here, and again by the bridge at the reservation.
       const open=got.apply?.state==='applying';
+      if(args.includes('--release')) {
+        // Gives up an uncertain apply on purpose, without writing or restoring any file. The job stays not applied.
+        if(!open) throw new Error(`no apply in progress for ${id}; nothing to release`);
+        await request('/decide','POST',{id,decision:'applied',phase:'release',force:true,reason:'released by the owner (dalan apply --release)',via:'apply'},headers);
+        result={request_id:id,released:true};
+        if(!json) { result=`released the apply in progress for ${id}; it is not applied and no file was changed`; plainOutput=true; }
+        break;
+      }
+      const dir=path.resolve(option('--dir')??process.cwd());
+      // A job revised before any reservation is refused here, and again by the bridge when the apply is reserved. An open
+      // reservation is not trusted from this read: it may have been released or taken over since, so every run reserves.
       if(got.revised_by&&!open) throw Object.assign(new Error(`${id} was revised by ${got.revised_by.request_id}; its patch is not applied. Apply the patch of ${got.revised_by.request_id} instead (dalan get ${got.revised_by.request_id}).`),{local_code:'stale_revision'});
       const ev=got.report?.workspace_evidence, art=ev?.patch_artifact;
       if(!art?.artifact_id||!art.size) throw new Error('this result has no patch artifact (nothing to apply)');
       const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'dot-apply-')), file=path.join(tmp,'patch.diff');
       const phase=(name,extra={})=>request('/decide','POST',{id,decision:'applied',phase:name,via:'apply',...extra},headers);
+      const reserve=async extra=>{ try { return await phase('reserve',extra); } catch(e) { if(e.http_status===400&&/^stale_revision/.test(e.message)) throw e; throw new Error(`not applied: the bridge did not reserve the apply (${e.message}), so ${dir} is unchanged`); } };
+      const confirm=async attempt=>{ try { return await phase('confirm',{attempt}); } catch(e) { throw new Error(`the patch is in ${dir}, but the bridge did not confirm it (${e.message}). ${id} still shows an apply in progress. Run dalan apply ${id} again: if the tree still holds the patch it confirms without writing.`); } };
       try {
         await download(art.artifact_id,file);
         const patch=fs.readFileSync(file), patchArgs={dir,patch,sha256:art.sha256,baseSha:ev.base_sha??got.assignment?.inputs?.[0]?.base_sha};
-        // Two phases, so the bridge never records an effect before it happens. Reserve (the bridge's stale check and the
-        // reservation share one transaction, so a correction that lands during the download makes it refuse and the directory is
-        // never touched), write (every touched file is restored if the write fails), then confirm. A reservation left open by an
-        // earlier run that died is resumed: if the tree already holds the patch, only the confirm is missing.
-        let files, written=false;
-        if(!(open&&patchMatchesWorktree(dir,patch))) {
-          applyPatch({...patchArgs,checkOnly:true});
-          let reserved={state:'applying'}; try { if(!open) reserved=await phase('reserve'); } catch(e) { if(e.http_status===400&&/^stale_revision/.test(e.message)) throw e; throw new Error(`not applied: the bridge did not reserve the apply (${e.message}), so ${dir} is unchanged`); }
-          try { files=applyPatch(patchArgs); written=true; }
+        // Two phases, so the bridge never records an effect before it happens, and a fencing token so that only the run that
+        // reserved last can write or confirm. Every run reserves, fresh or resumed: the bridge's stale check and the new token
+        // share one transaction, so a correction that landed since any earlier read makes it refuse and nothing is written. The
+        // patch is written only with a token from this run (every touched file is restored if the write fails), then confirmed.
+        // If the tree already holds the patch (a run died after the write), only the confirm is missing.
+        let files=[], written=false;
+        if(open&&patchMatchesWorktree(dir,patch)) {
+          const reserved=await reserve({present:true});
+          if(reserved.state!=='applied') { const decided=await confirm(reserved.attempt); result={request_id:id,applied:true,dir,files,already_present:true,decision:decided.decision}; }
+          else result={request_id:id,applied:true,dir,files,already_present:true,decision:'applied'};
+        } else {
+          try { applyPatch({...patchArgs,checkOnly:true}); }
           catch(e) {
-            let released=true; try { await phase('release',{reason:`apply_failed: ${e.message}`.slice(0,500)}); } catch { released=false; }
-            throw Object.assign(new Error(`apply_failed: ${e.message}${released?`. ${id} is not applied and can be applied again.`:`. The bridge could not be told; ${id} still shows an apply in progress, and a re-run of dalan apply resolves it.`}`),{local_code:'apply_failed'});
+            // An open reservation and a tree that fits neither the base nor the patch: a run may have died mid-write.
+            if(!open||!/git apply --check failed/.test(e.message)) throw e;
+            let names; try { names=listPatchFiles(dir,patch); } catch { names=[]; }
+            const top=worktreeRoot(dir)??dir;
+            const list=names.map(n=>/^[\w@%+=:,./-]+$/.test(n)?n:`'${n.replace(/'/g,"'\\''")}'`).join(' ');
+            throw new Error(`${id} has an apply in progress from an earlier run, and ${dir} matches neither the patch nor the base it applies to: the checkout may be partly changed (${e.message.replace(/^not applied: /,'')}).\n`
+              +`Files the patch touches: ${names.join(', ')||'(not listed)'}.\n`
+              +`To recover: (1) inspect them: git -C ${top} diff -- ${list}\n`
+              +`  (2) restore them: git -C ${top} checkout -- ${list}  (this discards edits to those files only; delete any of them that the patch created, and keep unrelated edits)\n`
+              +`  (3) run: dalan apply ${id} --dir ${dir}\n`
+              +`To give up without applying: dalan apply ${id} --release (it changes no file).`);
           }
-          if(reserved.state==='applied') { result={request_id:id,applied:true,dir,files,decision:'applied'}; }
-        }
-        if(!result) {
-          let decided; try { decided=await phase('confirm'); } catch(e) { throw new Error(`the patch is written in ${dir}, but the bridge did not confirm it (${e.message}). ${id} still shows an apply in progress. Run dalan apply ${id} again: it sees the patch in the tree and confirms without writing.`); }
-          result={request_id:id,applied:true,dir,files:files??[],already_present:!written,decision:decided.decision};
+          const reserved=await reserve();
+          if(reserved.state==='applied') { files=applyPatch(patchArgs); written=true; result={request_id:id,applied:true,dir,files,decision:'applied'}; }
+          else {
+            try { files=applyPatch(patchArgs); written=true; }
+            catch(e) {
+              let released=true; try { await phase('release',{attempt:reserved.attempt,reason:`apply_failed: ${e.message}`.slice(0,500)}); } catch { released=false; }
+              throw Object.assign(new Error(`apply_failed: ${e.message}${released?`. ${id} is not applied and can be applied again.`:`. The bridge could not be told; ${id} still shows an apply in progress: run dalan apply ${id} --release, or run it again.`}`),{local_code:'apply_failed'});
+            }
+            const decided=await confirm(reserved.attempt);
+            result={request_id:id,applied:true,dir,files,already_present:false,decision:decided.decision};
+          }
         }
       } finally { fs.rmSync(tmp,{recursive:true,force:true}); }
       if(!json&&result.already_present) { result=`the patch was already in ${dir}; recorded decision applied for ${id} without writing`; plainOutput=true; }

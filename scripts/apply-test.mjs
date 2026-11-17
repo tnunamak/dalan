@@ -108,17 +108,35 @@ const RID = 'req_applycli0001', ART = 'art_applycli0001';
 fs.writeFileSync(path.join(receipts, createHash('sha256').update(RID).digest('hex') + '.json'), JSON.stringify({ request_id: RID, token: 't'.repeat(32), body: 'x', delivery: 'none' }) + '\n');
 let evidenceSha = sha(PATCH), served = PATCH, decided = [], getStatus = 'finished', correctionLandsDuringDownload = false, corrected = false;
 // The fake bridge's apply reservation: null, 'applying', 'applied' or 'released'. dropConfirm loses the confirm; the other flags break one step.
-let reservation = null, dropConfirm = false, correctionAfterReserve = false, releaseReasons = [];
+let reservation = null, dropConfirm = false, correctionAfterReserve = false, releaseReasons = [], attemptNo = 0, currentAttempt = null, takeoverAfterReserve = false, artifactGate = null, artifactSeen = null;
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/get') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ request_id: RID, status: getStatus, assignment: { inputs: [{ base_sha: 'f'.repeat(40) }] }, ...(reservation ? { apply: { state: reservation === 'applying' ? 'applying' : reservation, uncertain: reservation === 'applying' } } : {}), ...(corrected && reservation !== 'applying' ? { revised_by: { request_id: 'req_correction1' } } : {}), report: { workspace_evidence: { base_sha: CLI_BASE, patch_artifact: { artifact_id: ART, size: PATCH.length, sha256: evidenceSha } } } })); }
-  if (url.pathname === '/artifact') { if (correctionLandsDuringDownload) corrected = true; res.setHeader('x-artifact-sha256', sha(served)); res.setHeader('content-type', 'application/octet-stream'); return res.end(served); }
+  if (url.pathname === '/artifact') { if (artifactSeen) artifactSeen(); if (artifactGate) return artifactGate.then(() => { if (correctionLandsDuringDownload) corrected = true; res.setHeader('x-artifact-sha256', sha(served)); res.setHeader('content-type', 'application/octet-stream'); res.end(served); }); if (correctionLandsDuringDownload) corrected = true; res.setHeader('x-artifact-sha256', sha(served)); res.setHeader('content-type', 'application/octet-stream'); return res.end(served); }
   if (url.pathname === '/decide') { let b = ''; req.on('data', c => b += c); req.on('end', () => {
     const body = JSON.parse(b), json = (code, value) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
     const refuse = () => json(400, { error: 'stale_revision: ' + RID + ' was revised by req_correction1; its result is kept as evidence and cannot be accepted or applied.', stale: { request_id: RID, revised_by: 'req_correction1', recorded: true } });
-    if (body.phase === 'reserve') { if (reservation === 'applied') return json(200, { request_id: RID, state: 'applied' }); if (corrected && reservation !== 'applying') return refuse(); decided.push({ ...body, token: req.headers['x-owner-capability'] }); reservation = 'applying'; if (correctionAfterReserve) corrected = true; return json(200, { request_id: RID, state: 'applying', resumed: false }); }
-    if (body.phase === 'confirm') { if (dropConfirm) return req.socket.destroy(); if (reservation !== 'applying') return json(400, { error: 'no open apply reservation for ' + RID }); decided.push({ ...body, token: req.headers['x-owner-capability'] }); reservation = 'applied'; return json(200, { request_id: RID, decision: 'applied' }); }
-    if (body.phase === 'release') { decided.push({ ...body, token: req.headers['x-owner-capability'] }); releaseReasons.push(body.reason); reservation = 'released'; return json(200, { request_id: RID, state: 'released' }); }
+    const log = () => decided.push({ ...body, token: req.headers['x-owner-capability'] });
+    // Like the real bridge: every reserve mints a token and does the stale check (an open reservation is taken over unless a
+    // correction exists; present=true skips the check because the effect is already in the tree); confirm and release need it.
+    if (body.phase === 'reserve') {
+      if (reservation === 'applied') return json(200, { request_id: RID, state: 'applied' });
+      const open = reservation === 'applying';
+      if (corrected && !(open && body.present)) return refuse();
+      log(); reservation = 'applying'; currentAttempt = 'tok' + (++attemptNo); if (correctionAfterReserve) corrected = true;
+      const mine = currentAttempt; if (takeoverAfterReserve) currentAttempt = 'tok-other-run';
+      return json(200, { request_id: RID, state: 'applying', resumed: open, attempt: mine });
+    }
+    if (body.phase === 'confirm') {
+      if (dropConfirm) return req.socket.destroy();
+      if (reservation !== 'applying') return json(400, { error: 'no open apply reservation for ' + RID });
+      if (body.attempt !== currentAttempt) return json(400, { error: 'superseded apply attempt for ' + RID + ': not the current attempt; reserve again' });
+      log(); reservation = 'applied'; return json(200, { request_id: RID, decision: 'applied' });
+    }
+    if (body.phase === 'release') {
+      if (!body.force && body.attempt !== currentAttempt) return json(400, { error: 'superseded apply attempt for ' + RID + ': not the current attempt' });
+      log(); releaseReasons.push(body.reason); reservation = 'released'; return json(200, { request_id: RID, state: 'released' });
+    }
     if (corrected) return refuse();
     decided.push({ ...body, token: req.headers['x-owner-capability'] }); json(200, { request_id: RID, decision: body.decision });
   }); return; }
@@ -195,17 +213,37 @@ try {
   // A re-run sees the patch in the tree, does not write again, and confirms.
   const crashed = clone('crash-after-write'); reservation = null; at = decided.length; dropConfirm = true;
   r = await run('apply', RID, '--dir', crashed); dropConfirm = false;
-  assert.notEqual(r.code, 0); assert.match(r.stderr, /patch is written in .*did not confirm/); assert.match(r.stderr, /dalan apply/);
+  assert.notEqual(r.code, 0); assert.match(r.stderr, /patch is in .*did not confirm/); assert.match(r.stderr, /dalan apply/);
   assert.equal(fs.readFileSync(path.join(crashed, 'a.txt'), 'utf8'), 'uno\ntwo\n'); assert.equal(reservation, 'applying'); assert.deepEqual(phases(at), ['reserve']);
   r = await run('apply', RID, '--dir', crashed); assert.equal(r.code, 0, r.stderr); assert.match(r.stdout, /already in|already present/);
-  assert.deepEqual(phases(at), ['reserve', 'confirm'], 'the re-run confirms and does not reserve or write again'); assert.equal(reservation, 'applied');
+  assert.deepEqual(phases(at), ['reserve', 'reserve', 'confirm'], 'the re-run reserves again (a new token, the present patch needs no stale check), confirms and writes nothing'); assert.equal(reservation, 'applied');
   // A crash after the reservation and before the write: a re-run resumes the reservation, writes and confirms.
-  const early = clone('crash-before-write'); reservation = 'applying'; at = decided.length;
+  const early = clone('crash-before-write'); reservation = 'applying'; currentAttempt = 'crashed-run'; at = decided.length;
   r = await run('apply', RID, '--dir', early); assert.equal(r.code, 0, r.stderr);
-  assert.deepEqual(phases(at), ['confirm'], 'an open reservation is resumed, not taken again'); assert.equal(fs.readFileSync(path.join(early, 'a.txt'), 'utf8'), 'uno\ntwo\n');
-  // An open reservation and a tree that has neither the patch nor a clean base: refused, still reserved.
-  const dirty = clone('dirty'); write(dirty, 'a.txt', 'changed\ntwo\n'); reservation = 'applying'; at = decided.length;
-  r = await run('apply', RID, '--dir', dirty); assert.notEqual(r.code, 0); assert.match(r.stderr, /git apply --check failed/); assert.deepEqual(phases(at), []); assert.equal(reservation, 'applying');
+  assert.deepEqual(phases(at), ['reserve', 'confirm'], 'an open reservation is taken over with a new token, never written without one'); assert.equal(fs.readFileSync(path.join(early, 'a.txt'), 'utf8'), 'uno\ntwo\n');
+  // A stale GET: run A saw an open reservation, then waits in the download. Meanwhile B fails and releases and a correction lands.
+  // A must still reserve (the stale check), which is refused, so A writes nothing.
+  const stalled = clone('stale-get'); reservation = 'applying'; currentAttempt = 'crashed-run'; at = decided.length;
+  let openGate; artifactGate = new Promise(r => { openGate = r; }); const seen = new Promise(r => { artifactSeen = r; });
+  const runA = run('apply', RID, '--dir', stalled); await seen;
+  reservation = 'released'; corrected = true; openGate(); r = await runA; artifactGate = null; artifactSeen = null; corrected = false;
+  assert.notEqual(r.code, 0); assert.match(r.stderr, /stale_revision.*revised by req_correction1/);
+  assert.equal(fs.readFileSync(path.join(stalled, 'a.txt'), 'utf8'), 'one\ntwo\n', 'a run that read a stale open reservation writes nothing after the correction');
+  assert.deepEqual(phases(at), [], 'and records nothing');
+  // A takeover during the write: another run took the reservation, so this run\'s confirm is refused and says so.
+  const taken = clone('taken-over'); reservation = null; at = decided.length; takeoverAfterReserve = true;
+  r = await run('apply', RID, '--dir', taken); takeoverAfterReserve = false;
+  assert.notEqual(r.code, 0); assert.match(r.stderr, /superseded/); assert.deepEqual(phases(at), ['reserve']); assert.equal(reservation, 'applying');
+  // Half-written tree: an open reservation, and the checkout matches neither the patch nor the base. The reservation stays
+  // uncertain; the message names the request and the files, and gives the recovery steps. --release gives it up on purpose.
+  const dirty = clone('dirty'); write(dirty, 'a.txt', 'changed\ntwo\n'); reservation = 'applying'; currentAttempt = 'crashed-run'; at = decided.length;
+  r = await run('apply', RID, '--dir', dirty); assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /may be partly changed/); assert.ok(r.stderr.includes(RID)); assert.match(r.stderr, /a\.txt/); assert.match(r.stderr, /new\.txt/);
+  assert.match(r.stderr, /git -C .*diff -- a\.txt new\.txt/); assert.match(r.stderr, /git -C .*checkout -- a\.txt new\.txt/); assert.match(r.stderr, /dalan apply .*--release/); assert.match(r.stderr, /git apply --check failed/);
+  assert.deepEqual(phases(at), []); assert.equal(reservation, 'applying');
+  r = await run('apply', RID, '--release', '--json'); assert.equal(r.code, 0, r.stderr); assert.equal(JSON.parse(r.stdout).released, true);
+  assert.deepEqual(phases(at), ['release']); assert.equal(decided.at(-1).force, true); assert.equal(reservation, 'released'); assert.equal(fs.readFileSync(path.join(dirty, 'a.txt'), 'utf8'), 'changed\ntwo\n', '--release touches no file');
+  r = await run('apply', RID, '--release'); assert.notEqual(r.code, 0); assert.match(r.stderr, /no apply in progress/);
   reservation = 'applied';
   // A prior build can match the working tree even though the owner rejected it.
   // Drive the real next-prompt path with persisted session state and a fake bridge.
