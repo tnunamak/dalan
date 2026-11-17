@@ -69,7 +69,7 @@ try {
   const olderView=(await cli(['get','req_old_aaaaaaa1','--json'])).value;
   assert.equal(olderView.status,'claimed','the prior job keeps running');
   assert.equal(olderView.revised_by.request_id,'req_new_bbbbbbb1');
-  assert.equal(olderView.owner_notes.length,1); assert.match(olderView.owner_notes[0].text,/superseded by req_new_bbbbbbb1/);
+  assert.equal(olderView.owner_notes.length,1); assert.match(olderView.owner_notes[0].text,/revised by req_new_bbbbbbb1/);
   const newerView=(await cli(['get','req_new_bbbbbbb1','--json'])).value;
   assert.equal(newerView.revises.request_id,'req_old_aaaaaaa1'); assert.equal(newerView.revises.input_revision,'r2'); assert.equal(newerView.status,'queued');
   const retried=await submit('req_new_bbbbbbb1',['--revision','r2','--revises','req_old_aaaaaaa1']);

@@ -661,7 +661,7 @@ async function main() {
       if(!art?.artifact_id||!art.size) throw new Error('this result has no patch artifact (nothing to apply)');
       const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'dot-apply-')), file=path.join(tmp,'patch.diff');
       const phase=(name,extra={})=>request('/decide','POST',{id,decision:'applied',phase:name,via:'apply',...extra},headers);
-      const reserve=async extra=>{ try { return await phase('reserve',extra); } catch(e) { if(e.http_status===400&&/^stale_revision/.test(e.message)) throw e; throw new Error(`not applied: the bridge did not reserve the apply (${e.message}), so ${dir} is unchanged`); } };
+      const reserve=async()=>{ try { return await phase('reserve'); } catch(e) { if(e.http_status===400&&/^stale_revision/.test(e.message)) throw e; throw new Error(`not applied: the bridge did not reserve the apply (${e.message}), so ${dir} is unchanged`); } };
       const confirm=async attempt=>{ try { return await phase('confirm',{attempt}); } catch(e) { throw new Error(`the patch is in ${dir}, but the bridge did not confirm it (${e.message}). ${id} still shows an apply in progress. Run dalan apply ${id} again: if the tree still holds the patch it confirms without writing.`); } };
       try {
         await download(art.artifact_id,file);
@@ -673,7 +673,17 @@ async function main() {
         // If the tree already holds the patch (a run died after the write), only the confirm is missing.
         let files=[], written=false;
         if(open&&patchMatchesWorktree(dir,patch)) {
-          const reserved=await reserve({present:true});
+          // The tree already holds the patch. The bridge still checks for a correction: a revised job's result is never recorded.
+          let reserved;
+          try { reserved=await reserve(); }
+          catch(e) {
+            if(!/^stale_revision/.test(e.message)) throw e;
+            const correction=got.revised_by?.request_id??/revised by (\S+?);/.exec(e.message)?.[1]??'(see dalan get '+id+')';
+            const keep=path.join(os.tmpdir(),`dalan-revised-${id}.diff`); fs.writeFileSync(keep,patch,{mode:0o600});
+            throw Object.assign(new Error(`${e.message}\nThe working tree contains the superseded patch from request ${id}; the correction is ${correction}. Nothing was recorded and the reservation is still open.\n`
+              +`To undo it: git -C ${worktreeRoot(dir)??dir} apply -R ${keep}\n`
+              +`Or run dalan apply ${id} --release (it changes no file), then revert the files by hand.`),{local_code:'stale_revision'});
+          }
           if(reserved.state!=='applied') { const decided=await confirm(reserved.attempt); result={request_id:id,applied:true,dir,files,already_present:true,decision:decided.decision}; }
           else result={request_id:id,applied:true,dir,files,already_present:true,decision:'applied'};
         } else {

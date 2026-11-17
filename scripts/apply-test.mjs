@@ -118,11 +118,12 @@ const server = http.createServer((req, res) => {
     const refuse = () => json(400, { error: 'stale_revision: ' + RID + ' was revised by req_correction1; its result is kept as evidence and cannot be accepted or applied.', stale: { request_id: RID, revised_by: 'req_correction1', recorded: true } });
     const log = () => decided.push({ ...body, token: req.headers['x-owner-capability'] });
     // Like the real bridge: every reserve mints a token and does the stale check (an open reservation is taken over unless a
-    // correction exists; present=true skips the check because the effect is already in the tree); confirm and release need it.
+    // correction exists, even when the tree already holds the patch); confirm and release need it.
     if (body.phase === 'reserve') {
+      if (corrected) return refuse();
       if (reservation === 'applied') return json(200, { request_id: RID, state: 'applied' });
       const open = reservation === 'applying';
-      if (corrected && !(open && body.present)) return refuse();
+      if (corrected) return refuse();
       log(); reservation = 'applying'; currentAttempt = 'tok' + (++attemptNo); if (correctionAfterReserve) corrected = true;
       const mine = currentAttempt; if (takeoverAfterReserve) currentAttempt = 'tok-other-run';
       return json(200, { request_id: RID, state: 'applying', resumed: open, attempt: mine });
@@ -216,11 +217,27 @@ try {
   assert.notEqual(r.code, 0); assert.match(r.stderr, /patch is in .*did not confirm/); assert.match(r.stderr, /dalan apply/);
   assert.equal(fs.readFileSync(path.join(crashed, 'a.txt'), 'utf8'), 'uno\ntwo\n'); assert.equal(reservation, 'applying'); assert.deepEqual(phases(at), ['reserve']);
   r = await run('apply', RID, '--dir', crashed); assert.equal(r.code, 0, r.stderr); assert.match(r.stdout, /already in|already present/);
-  assert.deepEqual(phases(at), ['reserve', 'reserve', 'confirm'], 'the re-run reserves again (a new token, the present patch needs no stale check), confirms and writes nothing'); assert.equal(reservation, 'applied');
+  assert.deepEqual(phases(at), ['reserve', 'reserve', 'confirm'], 'the re-run reserves again (a new token and a stale check), confirms and writes nothing'); assert.equal(reservation, 'applied');
   // A crash after the reservation and before the write: a re-run resumes the reservation, writes and confirms.
   const early = clone('crash-before-write'); reservation = 'applying'; currentAttempt = 'crashed-run'; at = decided.length;
   r = await run('apply', RID, '--dir', early); assert.equal(r.code, 0, r.stderr);
   assert.deepEqual(phases(at), ['reserve', 'confirm'], 'an open reservation is taken over with a new token, never written without one'); assert.equal(fs.readFileSync(path.join(early, 'a.txt'), 'utf8'), 'uno\ntwo\n');
+  // Crash after the write, then a correction, then a re-run: the tree holds the patch of a job that is now revised. The re-run is
+  // refused, records nothing, leaves the reservation open, and says what the tree contains and how to undo it.
+  const superseded = clone('superseded-in-tree'); write(superseded, 'a.txt', 'uno\ntwo\n'); write(superseded, 'new.txt', 'hello\n'); reservation = 'applying'; currentAttempt = 'crashed-run'; at = decided.length; corrected = true;
+  r = await run('apply', RID, '--dir', superseded); corrected = false;
+  assert.notEqual(r.code, 0); assert.match(r.stderr, /stale_revision/);
+  assert.match(r.stderr, new RegExp('working tree contains the superseded patch from request ' + RID)); assert.match(r.stderr, /the correction is req_correction1/);
+  assert.match(r.stderr, /git -C .* apply -R /); assert.match(r.stderr, /dalan apply .*--release/);
+  const undo = /apply -R (\S+)/.exec(r.stderr)?.[1]; assert.ok(undo && fs.existsSync(undo), 'the undo patch file exists: ' + undo);
+  assert.deepEqual(phases(at), [], 'nothing is recorded'); assert.equal(reservation, 'applying');
+  assert.equal(spawnSync('git', ['-C', superseded, 'apply', '-R', undo]).status, 0, 'the printed command undoes the patch'); assert.equal(git(superseded, 'status', '--porcelain'), '');
+  fs.rmSync(undo, { force: true });
+  // An already applied job: a correction lands between the get (which showed no correction) and the reserve. The stale check comes
+  // before the already-applied shortcut, so the run is refused and writes nothing.
+  const appliedBefore = clone('applied-then-corrected'); reservation = 'applied'; at = decided.length; correctionLandsDuringDownload = true;
+  r = await run('apply', RID, '--dir', appliedBefore); correctionLandsDuringDownload = false; corrected = false;
+  assert.notEqual(r.code, 0); assert.match(r.stderr, /stale_revision/); assert.equal(fs.readFileSync(path.join(appliedBefore, 'a.txt'), 'utf8'), 'one\ntwo\n'); assert.deepEqual(phases(at), []);
   // A stale GET: run A saw an open reservation, then waits in the download. Meanwhile B fails and releases and a correction lands.
   // A must still reserve (the stale check), which is refused, so A writes nothing.
   const stalled = clone('stale-get'); reservation = 'applying'; currentAttempt = 'crashed-run'; at = decided.length;

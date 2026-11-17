@@ -2269,7 +2269,7 @@ export class Store {
   // as they were. An exhausted note budget skips only the note: the link alone makes the result stale.
   announceRevisionInTransaction(priorId,successorId,inputRevision) {
     if(!['queued','claimed'].includes(this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(priorId).status)) return;
-    const text=`This job was superseded by ${successorId}, a corrected revision of the same work${inputRevision?` (input revision ${inputRevision})`:''}. Stop work on it and finish with a short report of where you stopped. The report is kept as evidence and cannot be accepted or applied.`;
+    const text=`This job was revised by ${successorId}, a corrected revision of the same work${inputRevision?` (input revision ${inputRevision})`:''}. Stop work on it and finish with a short report of where you stopped. The report is kept as evidence and cannot be accepted or applied.`;
     try { validateOwnerNote(text,this.ownerNotes(priorId)); } catch { return; }
     this.noteInTransaction(priorId,text);
   }
@@ -3067,17 +3067,16 @@ export class Store {
     return r.state==='confirmed'?{state:'applied',at:r.resolved_at}:{state:'released',reason:r.reason,at:r.resolved_at};
   }
   // Every attempt, a first one or a resumed one, calls this and gets a new attempt token in the same transaction as the stale
-  // check. An open reservation is taken over: the previous token is superseded and its confirm or release is refused. The
-  // takeover is refused when a newer revision exists (the correction may have landed after the first reservation), and that
-  // refusal records nothing. With present=true the caller found the patch already in the tree and will not write, so the
-  // effect has happened and only the record is missing; that takeover of an open reservation skips the stale check.
-  reserveApply(id,{present=false}={}) {
+  // check. An open reservation is taken over: the previous token is superseded and its confirm or release is refused. The stale
+  // check always runs, before the already-applied shortcut and even when the caller found the patch already in its tree: a
+  // revised job's result is never recorded accepted or applied. A refused takeover of an open reservation records nothing.
+  reserveApply(id) {
     const result=this.transaction(() => {
       const a=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
       if(a.status!=='finished') throw new Error('only a finished assignment can be decided');
       const open=this.db.prepare("SELECT reserved_at FROM apply_reservations WHERE request_id=? AND state='applying'").get(id);
+      const refusal=this.staleRefusal(id,{record:!open}); if(refusal) return {request_id:id,stale_refusal:refusal};
       if(!open&&this.latestDecision(id)?.decision==='applied') return {request_id:id,state:'applied',resumed:false};
-      if(!(open&&present)) { const refusal=this.staleRefusal(id,{record:!open}); if(refusal) return {request_id:id,stale_refusal:refusal}; }
       const at=this.stamp(), attempt=randomBytes(16).toString('hex');
       this.db.prepare("INSERT INTO apply_reservations(request_id,state,reserved_at,attempt) VALUES(?,'applying',?,?) ON CONFLICT(request_id) DO UPDATE SET state='applying',reserved_at=excluded.reserved_at,resolved_at=NULL,reason=NULL,attempt=excluded.attempt").run(id,at,attempt);
       return {request_id:id,state:'applying',resumed:!!open,since:at,attempt};

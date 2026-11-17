@@ -87,7 +87,7 @@ if(process.argv[2]==='--decide-child') {
     assert.deepEqual(links(),[{request_id:'job_a_new_0001',prior_id:'job_a_old_0001',input_revision:'r2'}]);
     const notes=s.get('job_a_old_0001').owner_notes;
     assert.equal(notes.length,1,'one owner note tells the running worker');
-    assert.match(notes[0].text,/superseded by job_a_new_0001/);
+    assert.match(notes[0].text,/revised by job_a_new_0001/);
     assert.match(notes[0].text,/cannot be accepted or applied/);
     assert.deepEqual(s.get('job_a_new_0001').revises,{request_id:'job_a_old_0001',input_revision:'r2',at:s.get('job_a_new_0001').revises.at});
     assert.equal(s.get('job_a_old_0001').revised_by.request_id,'job_a_new_0001');
@@ -287,20 +287,24 @@ if(process.argv[2]==='--decide-child') {
     assert.equal(s.releaseApply('job_f_old_0001',{force:true,reason:'released by the owner'}).state,'released');
     assert.throws(()=>s.confirmApply('job_f_old_0001',{attempt:f.attempt}),/no open apply reservation/);
     assert.equal(applying('job_f_old_0001').reason,'released by the owner');
-    // Resume without a write: the tree already holds the patch, so the reserve may take over an open reservation even after a
-    // correction, because the effect already happened and the confirm only records it. It never applies to a job with no open one.
+    // Crash after the write, then a correction: the tree holds the patch, the reservation is open. A re-run must not record it as
+    // applied: a revised job's result is never recorded accepted or applied, so the takeover runs the stale check too, and
+    // the refusal records nothing and leaves the reservation as it was.
     submit(s,'job_g_old_0001','og',{m:meta('r1','ctx:g')}); s.finish('job_g_old_0001',claim('job_g_old_0001').claim_id,'completed','s','r');
     const g=s.reserveApply('job_g_old_0001');
     submit(s,'job_g_new_0001','ng',{m:meta('r2','ctx:g'),revises:revises('job_g_old_0001','og')});
     stale(()=>s.reserveApply('job_g_old_0001'));
-    const g2=s.reserveApply('job_g_old_0001',{present:true});
-    assert.deepEqual([g2.resumed,g2.attempt===g.attempt],[true,false]);
-    assert.equal(s.confirmApply('job_g_old_0001',{attempt:g2.attempt}).decision,'applied');
-    submit(s,'job_h_old_0001','oh',{m:meta('r1','ctx:h')}); s.finish('job_h_old_0001',claim('job_h_old_0001').claim_id,'completed','s','r');
-    submit(s,'job_h_new_0001','nh',{m:meta('r2','ctx:h'),revises:revises('job_h_old_0001','oh')});
-    stale(()=>s.reserveApply('job_h_old_0001',{present:true}));
-    // A job already applied is not reserved again; a reservation needs a finished job.
-    assert.equal(s.reserveApply('job_p2_old_0001').state,'applied');
+    assert.deepEqual([decisions('job_g_old_0001'),accepted('job_g_old_0001'),applying('job_g_old_0001').state],[[],0,'applying'],'nothing is recorded and the reservation stays uncertain');
+    assert.throws(()=>s.confirmApply('job_g_old_0001',{attempt:'not-the-token'}),/superseded|not the current attempt/);
+    assert.equal(s.confirmApply('job_g_old_0001',{attempt:g.attempt}).decision,'applied','only the holder that reserved before the correction can confirm');
+    // The stale check comes before the already-applied shortcut: a correction between a get that showed the job applied and a
+    // reserve is refused, and an applied job with no correction still answers applied.
+    submit(s,'job_k2_old_0001','ok2',{m:meta('r1','ctx:k2')}); s.finish('job_k2_old_0001',claim('job_k2_old_0001').claim_id,'completed','s','r');
+    const k2=s.reserveApply('job_k2_old_0001'); s.confirmApply('job_k2_old_0001',{attempt:k2.attempt});
+    assert.equal(s.reserveApply('job_k2_old_0001').state,'applied','an applied job with no correction is not reserved again');
+    submit(s,'job_k2_new_0001','nk2',{m:meta('r2','ctx:k2'),revises:revises('job_k2_old_0001','ok2')});
+    stale(()=>s.reserveApply('job_k2_old_0001'));
+    assert.deepEqual(decisions('job_k2_old_0001').map(d=>d.decision),['applied'],'the earlier decision is kept and no row is added');
     submit(s,'job_p4_old_0001','op4',{m:meta('r1','ctx:p4')});
     assert.throws(()=>s.reserveApply('job_p4_old_0001'),/only a finished assignment/);
     pass('(e) apply is two-phase: the fence is at the reserve, a correction after it is new work, a release leaves the job unapplied, a reservation survives a restart');
