@@ -31,7 +31,7 @@ import { initAsFiles, rotateKeys } from '../src/as-files.mjs';
 import { docsUrl } from '../src/docs-url.mjs';
 import { workerPrompt } from '../src/worker-prompt.mjs';
 import { stoppedTrialFix } from '../src/try-command.mjs';
-import { formatGetSummary, formatWaitLine } from '../src/get-summary.mjs';
+import { formatGetSummary, formatGetEndNote, formatWaitLine } from '../src/get-summary.mjs';
 import { cliCommand } from '../src/cli-name.mjs';
 import { applyPatch, listPatchFiles, patchMatchesWorktree, worktreeRoot } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
@@ -559,7 +559,7 @@ async function main() {
         console.error(`worker activity: ${a.tool_calls} call${a.tool_calls===1?'':'s'}${a.last_tool?`, last ${a.last_tool} at ${a.last_tool_at.slice(11,19)}Z (${age<90?age+'s':age<5400?Math.round(age/60)+'m':Math.round(age/3600)+'h'} ago)`:''}${a.first_workspace_tool_at?'':', no workspace tool'}${a.last_tool_error?`, last error: ${a.last_tool_error}`:''}`); }
       // On a terminal, a person reads the output: show the short human view. Piped output stays the JSON document.
       if(!json&&!id.startsWith('msg_')&&process.stdout.isTTY) { result=formatGetSummary(result,{id,cli}); plainOutput=true; }
-      else if(!json&&!id.startsWith('msg_')&&result?.status==='finished') endNote=`decide: ${cli} decide ${id} ${decideWords}`;
+      else if(!json&&!id.startsWith('msg_')) endNote=formatGetEndNote(result,{id,cli,decideWords});
       break; }
     case 'cancel-if-queued': { const id=args[0]; if(!id||id.startsWith('-')) throw new Error('cancel-if-queued requires request id'); result=await request('/cancel-if-queued','POST',{id},{'x-owner-capability':receipt(id).token}); break; }
     case 'artifact': { const artifactId=args[0],output=option('--output');if(!artifactId||!output) throw new Error('artifact requires ID --output PATH');result=await download(artifactId,output);break; }
