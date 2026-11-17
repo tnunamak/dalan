@@ -29,7 +29,7 @@ export const lifecycleSchema=`CREATE TABLE IF NOT EXISTS lifecycle_events (${lif
   CREATE TRIGGER IF NOT EXISTS lifecycle_events_no_update BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT, 'lifecycle events are append-only'); END;
   CREATE TRIGGER IF NOT EXISTS lifecycle_events_no_delete BEFORE DELETE ON lifecycle_events WHEN NOT EXISTS (SELECT 1 FROM lifecycle_retention WHERE id=1 AND cutoff IS NOT NULL AND old.at<cutoff) BEGIN SELECT RAISE(ABORT, 'lifecycle events are append-only'); END;`;
 
-// Migration 71. Control events carry the scope they acted on and an outcome. A table made by an earlier release also
+// Migration 72. Control events carry the scope they acted on and an outcome. A table made by an earlier release also
 // lists the old types in its CHECK, and SQLite cannot widen a CHECK in place, so that table is rebuilt: same rows, same
 // ids, and the stored text of its indexes and triggers is carried over unchanged. A table made by this release
 // (a fresh database) already lists every type and only gains the two columns.
