@@ -92,7 +92,7 @@ try {
   assert.deepEqual(read('SELECT decision,actor,via,note FROM decisions WHERE request_id=?','req_old_aaaaaaa1'),[{decision:'stale',actor:'system',via:'revises',note:'revised by req_new_bbbbbbb1'}],'stale is recorded once');
   assert.deepEqual(read("SELECT type FROM lifecycle_events WHERE request_id=? AND type='accepted'",'req_old_aaaaaaa1'),[]);
   const apply=await cli(['apply','req_old_aaaaaaa1','--dir',home]); assert.equal(apply.code,1); assert.match(JSON.stringify(apply.value),/was revised by req_new_bbbbbbb1; its patch is not applied/);
-  assert.equal((await cli(['decide','req_old_aaaaaaa1','not_useful','--json'])).code,0,'the owner can still reject it');
+  {const rj=await cli(['decide','req_old_aaaaaaa1','not_useful','--json']);assert.equal(rj.code,0,'the owner can still reject it '+rj.out+rj.err);}
   pass('(a)+(d) correction first, restart, then the old job finishes: the report is kept, decide/accept/apply are refused, stale is recorded once');
 
   // the successor is ordinary work
@@ -112,6 +112,35 @@ try {
   const staleC=await cli(['decide','req_old_ccccccc1','accepted','--json']); assert.equal(staleC.code,1); assert.match(JSON.stringify(staleC.value),/stale_revision/);
   pass('(b) the finish commits first: the finished job is byte-identical after the correction, the successor is queued new work, accept is refused');
 
+  // ---- two-phase apply through the real server: the fence is at the reservation
+  const capability=id=>{ const dir=join(root,'receipts'); return {'x-owner-capability':JSON.parse(fs.readFileSync(join(dir,fs.readdirSync(dir).find(f=>JSON.parse(fs.readFileSync(join(dir,f),'utf8')).request_id===id)),'utf8')).token}; };
+  const phase=(id,name,extra={})=>admin('/decide',{id,decision:'applied',phase:name,via:'apply',...extra},capability(id));
+  assert.equal((await submit('req_old_fffffff1',['--revision','r1'])).code,0);
+  await whileStopped(s=>{const g=s.claim('req_old_fffffff1','W1','local-principal',100);s.finish('req_old_fffffff1',g.claim_id,'completed','f summary','f result');});
+  assert.equal((await phase('req_old_fffffff1','bogus')).status,400);
+  assert.equal((await phase('req_old_fffffff1','confirm')).status,400,'a confirm with no reservation is refused');
+  const reserved=await phase('req_old_fffffff1','reserve'); assert.equal(reserved.status,200); assert.equal(reserved.value.state,'applying');
+  assert.deepEqual(read('SELECT decision FROM decisions WHERE request_id=?','req_old_fffffff1'),[],'a reservation records no decision');
+  assert.deepEqual(read("SELECT type FROM lifecycle_events WHERE request_id=? AND type='accepted'",'req_old_fffffff1'),[],'and no accepted event');
+  assert.equal((await submit('req_new_fffffff1',['--revision','r2','--revises','req_old_fffffff1'])).code,0);
+  await stop(); await start();
+  const uncertain=(await cli(['get','req_old_fffffff1','--json'])).value;
+  assert.equal(uncertain.apply.state,'applying'); assert.equal(uncertain.apply.uncertain,true); assert.equal(uncertain.revised_by.request_id,'req_new_fffffff1');
+  const confirm=await phase('req_old_fffffff1','confirm'); assert.equal(confirm.status,200,JSON.stringify(confirm.value)); assert.equal(confirm.value.decision,'applied');
+  assert.deepEqual(read('SELECT decision,actor,via FROM decisions WHERE request_id=?','req_old_fffffff1'),[{decision:'applied',actor:'owner',via:'apply'}]);
+  assert.equal((await cli(['get','req_old_fffffff1','--json'])).value.apply.state,'applied');
+  assert.equal((await cli(['get','req_new_fffffff1','--json'])).value.status,'queued','the correction after the reservation is new work');
+  // a job revised before the reservation cannot be reserved; a release after a failed write leaves it undecided
+  const lateReserve=await phase('req_old_ccccccc1','reserve'); assert.equal(lateReserve.status,400); assert.match(lateReserve.value.error,/stale_revision/);
+  assert.equal(read('SELECT count(*) n FROM apply_reservations WHERE request_id=?','req_old_ccccccc1')[0].n,0);
+  assert.equal((await submit('req_old_ggggggg1',['--revision','r1'])).code,0);
+  await whileStopped(s=>{const g=s.claim('req_old_ggggggg1','W1','local-principal',100);s.finish('req_old_ggggggg1',g.claim_id,'completed','g','g');});
+  assert.equal((await phase('req_old_ggggggg1','reserve')).status,200);
+  const rel=await phase('req_old_ggggggg1','release',{reason:'apply_failed: disk full'}); assert.equal(rel.status,200); assert.equal(rel.value.state,'released');
+  assert.deepEqual(read('SELECT decision FROM decisions WHERE request_id=?','req_old_ggggggg1'),[]);
+  assert.deepEqual((await cli(['get','req_old_ggggggg1','--json'])).value.apply,{state:'released',reason:'apply_failed: disk full',at:read('SELECT resolved_at FROM apply_reservations WHERE request_id=?','req_old_ggggggg1')[0].resolved_at});
+  pass('two-phase apply over the real server: reserve records nothing, a correction after it is new work and the confirm applies, a revised job cannot be reserved, a release leaves the job unapplied, a restart keeps the open reservation');
+
   // ---- an open question survives a correction (c), across a restart
   assert.equal((await submit('req_old_eeeeeee1',['--revision','r1'])).code,0);
   const eGrant=await whileStopped(s=>{const g=s.claim('req_old_eeeeeee1','W1','local-principal',100);s.askQuestion('req_old_eeeeeee1',g.claim_id,'Q1','which file?');return g;});
@@ -125,5 +154,5 @@ try {
   pass('(c) an open question survives a correction and a restart, is answered through the CLI, and the finished result is then stale');
 } finally {
   if(service) { const exited=new Promise(r=>service.once('exit',r)); service.kill('SIGKILL'); await exited; }
-  fs.rmSync(home,{recursive:true,force:true});
+  if(!process.env.KEEP_HOME) fs.rmSync(home,{recursive:true,force:true}); else console.log('HOME',home);
 }

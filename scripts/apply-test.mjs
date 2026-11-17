@@ -69,6 +69,24 @@ const clash = repo('clash'); write(clash, 'a.txt', 'one\ntwo\n'); const CBASE = 
 assert.throws(() => applyPatch({ dir: clash, patch: PATCH, sha256: sha(PATCH), baseSha: CBASE }), /git apply --check failed/);
 assert.equal(fs.existsSync(path.join(clash, 'new.txt')), false, 'a failed check applies nothing');
 
+// A write that fails part-way leaves the tree byte-identical: a.txt is written first, then sub/b.txt cannot be (a read-only
+// directory). Without the snapshot-and-restore, a.txt keeps its new content and the tree is half applied.
+if (process.getuid?.() !== 0) {
+  const half = repo('half'); fs.mkdirSync(path.join(half, 'sub')); write(half, 'a.txt', 'one\n'); write(half, 'sub/b.txt', 'bee\n'); write(half, 'z.txt', 'zed\n'); const HBASE = commit(half, 'base');
+  write(half, 'a.txt', 'uno\n'); write(half, 'sub/b.txt', 'abeja\n'); write(half, 'sub/c.txt', 'new\n'); fs.rmSync(path.join(half, 'z.txt')); git(half, 'add', '-A');
+  const HPATCH = Buffer.from(git(half, 'diff', '--cached', '--binary') + '\n'); git(half, 'reset', '-q', '--hard');
+  const treeBytes = d => spawnSync('sh', ['-c', 'cd "$1" && find . -path ./.git -prune -o -type f -print | sort | xargs sha256sum', 'sh', d], { encoding: 'utf8' }).stdout;
+  const before = treeBytes(half);
+  fs.chmodSync(path.join(half, 'sub'), 0o555);
+  try {
+    assert.throws(() => applyPatch({ dir: half, patch: HPATCH, sha256: sha(HPATCH), baseSha: HBASE }), /git apply failed.*restored/s);
+  } finally { fs.chmodSync(path.join(half, 'sub'), 0o755); }
+  assert.equal(treeBytes(half), before, 'a failed write leaves every file byte-identical');
+  assert.equal(git(half, 'status', '--porcelain'), '', 'and git sees no change');
+  assert.equal(fs.existsSync(path.join(half, 'sub/c.txt')), false);
+  assert.equal(applyPatch({ dir: half, patch: HPATCH, sha256: sha(HPATCH), baseSha: HBASE }).length > 0, true, 'the same patch applies once the cause is gone');
+}
+
 // Patch presence is an observation, including equivalent preexisting changes.
 const mine = repo('mine'); write(mine, 'a.txt', 'one\ntwo\n'); commit(mine, 'base');
 const builds = [{ rid: 'req_build_aaaa', artifact_id: 'art_aaaaaaaa1', observed: false }];
@@ -89,11 +107,21 @@ fs.mkdirSync(receipts, { recursive: true, mode: 0o700 });
 const RID = 'req_applycli0001', ART = 'art_applycli0001';
 fs.writeFileSync(path.join(receipts, createHash('sha256').update(RID).digest('hex') + '.json'), JSON.stringify({ request_id: RID, token: 't'.repeat(32), body: 'x', delivery: 'none' }) + '\n');
 let evidenceSha = sha(PATCH), served = PATCH, decided = [], getStatus = 'finished', correctionLandsDuringDownload = false, corrected = false;
+// The fake bridge's apply reservation: null, 'applying', 'applied' or 'released'. dropConfirm loses the confirm; the other flags break one step.
+let reservation = null, dropConfirm = false, correctionAfterReserve = false, releaseReasons = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
-  if (url.pathname === '/get') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ request_id: RID, status: getStatus, assignment: { inputs: [{ base_sha: 'f'.repeat(40) }] }, report: { workspace_evidence: { base_sha: CLI_BASE, patch_artifact: { artifact_id: ART, size: PATCH.length, sha256: evidenceSha } } } })); }
+  if (url.pathname === '/get') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ request_id: RID, status: getStatus, assignment: { inputs: [{ base_sha: 'f'.repeat(40) }] }, ...(reservation ? { apply: { state: reservation === 'applying' ? 'applying' : reservation, uncertain: reservation === 'applying' } } : {}), ...(corrected && reservation !== 'applying' ? { revised_by: { request_id: 'req_correction1' } } : {}), report: { workspace_evidence: { base_sha: CLI_BASE, patch_artifact: { artifact_id: ART, size: PATCH.length, sha256: evidenceSha } } } })); }
   if (url.pathname === '/artifact') { if (correctionLandsDuringDownload) corrected = true; res.setHeader('x-artifact-sha256', sha(served)); res.setHeader('content-type', 'application/octet-stream'); return res.end(served); }
-  if (url.pathname === '/decide') { let b = ''; req.on('data', c => b += c); req.on('end', () => { if (corrected) { res.statusCode = 400; res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ error: 'stale_revision: ' + RID + ' was revised by req_correction1; its result is kept as evidence and cannot be accepted or applied.', stale: { request_id: RID, revised_by: 'req_correction1', recorded: true } })); } decided.push({ ...JSON.parse(b), token: req.headers['x-owner-capability'] }); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ request_id: RID, decision: JSON.parse(b).decision })); }); return; }
+  if (url.pathname === '/decide') { let b = ''; req.on('data', c => b += c); req.on('end', () => {
+    const body = JSON.parse(b), json = (code, value) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
+    const refuse = () => json(400, { error: 'stale_revision: ' + RID + ' was revised by req_correction1; its result is kept as evidence and cannot be accepted or applied.', stale: { request_id: RID, revised_by: 'req_correction1', recorded: true } });
+    if (body.phase === 'reserve') { if (reservation === 'applied') return json(200, { request_id: RID, state: 'applied' }); if (corrected && reservation !== 'applying') return refuse(); decided.push({ ...body, token: req.headers['x-owner-capability'] }); reservation = 'applying'; if (correctionAfterReserve) corrected = true; return json(200, { request_id: RID, state: 'applying', resumed: false }); }
+    if (body.phase === 'confirm') { if (dropConfirm) return req.socket.destroy(); if (reservation !== 'applying') return json(400, { error: 'no open apply reservation for ' + RID }); decided.push({ ...body, token: req.headers['x-owner-capability'] }); reservation = 'applied'; return json(200, { request_id: RID, decision: 'applied' }); }
+    if (body.phase === 'release') { decided.push({ ...body, token: req.headers['x-owner-capability'] }); releaseReasons.push(body.reason); reservation = 'released'; return json(200, { request_id: RID, state: 'released' }); }
+    if (corrected) return refuse();
+    decided.push({ ...body, token: req.headers['x-owner-capability'] }); json(200, { request_id: RID, decision: body.decision });
+  }); return; }
   res.statusCode = 404; res.end('{"error":"nope"}');
 });
 await new Promise(r => server.listen(path.join(root, 'admin.sock'), r));
@@ -102,6 +130,7 @@ const run = (...argv) => new Promise(resolve => {
   let stdout = '', stderr = ''; child.stdout.on('data', b => stdout += b); child.stderr.on('data', b => stderr += b);
   child.on('close', code => resolve({ code, stdout, stderr }));
 });
+const clone = name => { const d = path.join(base, name); const r = spawnSync('git', ['clone', '-q', cli, d]); assert.equal(r.status, 0, String(r.stderr)); return d; };
 const cli = repo('cli'); write(cli, 'a.txt', 'one\ntwo\n'); const CLI_BASE = commit(cli, 'base');
 try {
   // digest in the evidence does not match the bytes served: refused, nothing applied, nothing recorded
@@ -117,12 +146,13 @@ try {
   assert.equal(r.code, 0, r.stderr); const out = JSON.parse(r.stdout);
   assert.equal(out.applied, true); assert.deepEqual(out.files.sort(), ['a.txt', 'new.txt']); assert.equal(out.decision, 'applied');
   assert.equal(fs.readFileSync(path.join(cli, 'a.txt'), 'utf8'), 'uno\ntwo\n');
-  assert.deepEqual(decided.map(d => [d.id, d.decision, d.via, d.token]), [[RID, 'applied', 'apply', 't'.repeat(32)]]);
+  assert.deepEqual(decided.map(d => [d.id, d.decision, d.phase, d.via, d.token]), [[RID, 'applied', 'reserve', 'apply', 't'.repeat(32)], [RID, 'applied', 'confirm', 'apply', 't'.repeat(32)]], 'reserve, then write, then confirm');
+  assert.equal(reservation, 'applied');
   // A correction that commits after the initial get, while the artifact is still downloading, must stop the apply before the
   // patch touches the directory. The bridge records the decision first (its stale check shares that transaction) and the
   // patch is written only after the bridge accepts it.
   git(cli, 'reset', '--hard'); git(cli, 'clean', '-fdq');
-  const decidedBefore = decided.length; correctionLandsDuringDownload = true;
+  reservation = null; const decidedBefore = decided.length; correctionLandsDuringDownload = true;
   r = await run('apply', RID, '--dir', cli);
   correctionLandsDuringDownload = false; corrected = false;
   assert.notEqual(r.code, 0); assert.match(r.stderr, /stale_revision.*revised by req_correction1/);
@@ -135,7 +165,48 @@ try {
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /applied 2 files/);
   assert.equal(fs.readFileSync(path.join(cli, 'a.txt'), 'utf8'), 'uno\ntwo\n');
-  assert.equal(decided.length, 2, 'each explicit application records exactly one decision');
+  assert.equal(decided.length, decidedBefore + 2, 'each explicit application reserves once and confirms once');
+  assert.equal(reservation, 'applied');
+  // Applying a job that is already applied, into another checkout, writes the patch and records nothing more.
+  const again = clone('again'); const n = decided.length;
+  r = await run('apply', RID, '--dir', again); assert.equal(r.code, 0, r.stderr); assert.equal(decided.length, n, 'an already applied job is not reserved or confirmed again');
+  assert.equal(fs.readFileSync(path.join(again, 'a.txt'), 'utf8'), 'uno\ntwo\n');
+  // ---- Two-phase: the reservation, the write and the confirm are separate steps, each with its own failure.
+  const phases = from => decided.slice(from).map(d => d.phase);
+  // A correction that lands after the reservation is new work: the apply goes on and the bridge confirms.
+  reservation = null; correctionAfterReserve = true; let at = decided.length; const lateFix = clone('late-fix');
+  r = await run('apply', RID, '--dir', lateFix); correctionAfterReserve = false; corrected = false;
+  assert.equal(r.code, 0, r.stderr); assert.deepEqual(phases(at), ['reserve', 'confirm']); assert.equal(fs.readFileSync(path.join(lateFix, 'a.txt'), 'utf8'), 'uno\ntwo\n');
+  // A write that fails part-way: the tree is byte-identical, the reservation is released with the reason, nothing is confirmed.
+  if (process.getuid?.() !== 0) {
+    const sub = clone('mid-write'); fs.mkdirSync(path.join(sub, 'sub')); write(sub, 'sub/b.txt', 'bee\n'); commit(sub, 'sub'); write(sub, 'a.txt', 'uno\ntwo\n'); write(sub, 'sub/b.txt', 'abeja\n'); git(sub, 'add', '-A');
+    const SUBPATCH = Buffer.from(git(sub, 'diff', '--cached', '--binary') + '\n'); git(sub, 'reset', '-q', '--hard');
+    const stash = served; served = SUBPATCH; evidenceSha = sha(SUBPATCH);
+    reservation = null; at = decided.length; fs.chmodSync(path.join(sub, 'sub'), 0o555);
+    try { r = await run('apply', RID, '--dir', sub); } finally { fs.chmodSync(path.join(sub, 'sub'), 0o755); }
+    assert.notEqual(r.code, 0); assert.match(r.stderr, /apply_failed|not applied/); assert.match(r.stderr, /unchanged|restored/);
+    assert.equal(git(sub, 'status', '--porcelain'), '', 'the tree is byte-identical after a failed write');
+    assert.deepEqual(phases(at), ['reserve', 'release']); assert.equal(reservation, 'released'); assert.match(releaseReasons.at(-1), /write failed|git apply failed/);
+    // The cause is gone: the same command now applies.
+    r = await run('apply', RID, '--dir', sub); assert.equal(r.code, 0, r.stderr); assert.deepEqual(phases(at), ['reserve', 'release', 'reserve', 'confirm']);
+    served = stash; evidenceSha = sha(PATCH);
+  }
+  // A crash after the write and before the confirm: the response is lost, the tree has the patch, the reservation is uncertain.
+  // A re-run sees the patch in the tree, does not write again, and confirms.
+  const crashed = clone('crash-after-write'); reservation = null; at = decided.length; dropConfirm = true;
+  r = await run('apply', RID, '--dir', crashed); dropConfirm = false;
+  assert.notEqual(r.code, 0); assert.match(r.stderr, /patch is written in .*did not confirm/); assert.match(r.stderr, /dalan apply/);
+  assert.equal(fs.readFileSync(path.join(crashed, 'a.txt'), 'utf8'), 'uno\ntwo\n'); assert.equal(reservation, 'applying'); assert.deepEqual(phases(at), ['reserve']);
+  r = await run('apply', RID, '--dir', crashed); assert.equal(r.code, 0, r.stderr); assert.match(r.stdout, /already in|already present/);
+  assert.deepEqual(phases(at), ['reserve', 'confirm'], 'the re-run confirms and does not reserve or write again'); assert.equal(reservation, 'applied');
+  // A crash after the reservation and before the write: a re-run resumes the reservation, writes and confirms.
+  const early = clone('crash-before-write'); reservation = 'applying'; at = decided.length;
+  r = await run('apply', RID, '--dir', early); assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(phases(at), ['confirm'], 'an open reservation is resumed, not taken again'); assert.equal(fs.readFileSync(path.join(early, 'a.txt'), 'utf8'), 'uno\ntwo\n');
+  // An open reservation and a tree that has neither the patch nor a clean base: refused, still reserved.
+  const dirty = clone('dirty'); write(dirty, 'a.txt', 'changed\ntwo\n'); reservation = 'applying'; at = decided.length;
+  r = await run('apply', RID, '--dir', dirty); assert.notEqual(r.code, 0); assert.match(r.stderr, /git apply --check failed/); assert.deepEqual(phases(at), []); assert.equal(reservation, 'applying');
+  reservation = 'applied';
   // A prior build can match the working tree even though the owner rejected it.
   // Drive the real next-prompt path with persisted session state and a fake bridge.
   for (const ownerDecision of ['not_useful', null]) {

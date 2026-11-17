@@ -222,6 +222,47 @@ if(process.argv[2]==='--decide-child') {
     assert.deepEqual(decisions('job_l_old_0001').map(d=>d.decision),['stale']);
     pass('the stale check and the accept share one transaction: a decide that waited on the correction\'s commit was refused');
 
+    // ---- (e) Two-phase apply: reserve, write, confirm. The stale fence is at the reservation; a correction after it is new work.
+    const applying=id=>s.get(id).apply;
+    // A correction before the reservation: refused, stale recorded, nothing reserved.
+    submit(s,'job_p1_old_0001','op1',{m:meta('r1','ctx:p1')}); s.finish('job_p1_old_0001',claim('job_p1_old_0001').claim_id,'completed','s','r');
+    submit(s,'job_p1_new_0001','np1',{m:meta('r2','ctx:p1'),revises:revises('job_p1_old_0001','op1')});
+    stale(()=>s.reserveApply('job_p1_old_0001'));
+    assert.equal(applying('job_p1_old_0001'),null,'a refused reservation reserves nothing');
+    assert.deepEqual(decisions('job_p1_old_0001').map(d=>d.decision),['stale']);
+    // A correction after the reservation: the confirm still records applied, once, and the effect event follows the confirm only.
+    submit(s,'job_p2_old_0001','op2',{m:meta('r1','ctx:p2')}); s.finish('job_p2_old_0001',claim('job_p2_old_0001').claim_id,'completed','s','r');
+    const reserved=s.reserveApply('job_p2_old_0001');
+    assert.deepEqual([reserved.state,reserved.resumed],['applying',false]);
+    assert.deepEqual([decisions('job_p2_old_0001'),accepted('job_p2_old_0001')],[[],0],'a reservation records no decision and no accepted event: the effect has not happened');
+    assert.equal(applying('job_p2_old_0001').state,'applying'); assert.equal(applying('job_p2_old_0001').uncertain,true);
+    submit(s,'job_p2_new_0001','np2',{m:meta('r2','ctx:p2'),revises:revises('job_p2_old_0001','op2')});
+    restart();
+    assert.equal(applying('job_p2_old_0001').state,'applying','the reservation survives a restart');
+    assert.equal(s.reserveApply('job_p2_old_0001').resumed,true,'a second reserve of an open reservation resumes it even after a correction landed');
+    const confirmed=s.confirmApply('job_p2_old_0001');
+    assert.equal(confirmed.decision,'applied');
+    assert.deepEqual(decisions('job_p2_old_0001').map(d=>[d.decision,d.actor,d.via]),[['applied','owner','apply']]);
+    assert.equal(accepted('job_p2_old_0001'),1,'the confirm writes the accepted event once');
+    assert.equal(applying('job_p2_old_0001').state,'applied');
+    assert.equal(s.confirmApply('job_p2_old_0001').duplicate,true,'a repeated confirm is a no-op');
+    assert.equal(accepted('job_p2_old_0001'),1);
+    // A release (the write failed): no decision, no accepted event, reserve again works.
+    submit(s,'job_p3_old_0001','op3',{m:meta('r1','ctx:p3')}); s.finish('job_p3_old_0001',claim('job_p3_old_0001').claim_id,'completed','s','r');
+    s.reserveApply('job_p3_old_0001');
+    const released=s.releaseApply('job_p3_old_0001','write failed: disk full');
+    assert.equal(released.state,'released');
+    assert.deepEqual([decisions('job_p3_old_0001'),accepted('job_p3_old_0001')],[[],0],'a failed apply leaves the job not applied');
+    assert.deepEqual([applying('job_p3_old_0001').state,applying('job_p3_old_0001').reason],['released','write failed: disk full']);
+    assert.throws(()=>s.confirmApply('job_p3_old_0001'),/no open apply reservation/);
+    assert.equal(s.reserveApply('job_p3_old_0001').resumed,false,'a released job can be reserved again');
+    assert.throws(()=>s.confirmApply('job_p1_new_0001'),/(assignment not found|only a finished|no open apply reservation)/);
+    // A job already applied is not reserved again; a reservation needs a finished job.
+    assert.equal(s.reserveApply('job_p2_old_0001').state,'applied');
+    submit(s,'job_p4_old_0001','op4',{m:meta('r1','ctx:p4')});
+    assert.throws(()=>s.reserveApply('job_p4_old_0001'),/only a finished assignment/);
+    pass('(e) apply is two-phase: the fence is at the reserve, a correction after it is new work, a release leaves the job unapplied, a reservation survives a restart');
+
     // ---- The link is durable and only a link: the schema.
     assert.deepEqual(s.db.prepare("SELECT name FROM pragma_table_info('job_revisions') ORDER BY cid").all().map(c=>c.name),['request_id','prior_id','input_revision','at']);
     assert.equal(s.db.prepare('PRAGMA user_version').get().user_version>=71,true);

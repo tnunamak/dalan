@@ -966,6 +966,15 @@ export class Store {
           at TEXT NOT NULL,
           CHECK(request_id<>prior_id));
           CREATE INDEX IF NOT EXISTS job_revisions_prior ON job_revisions(prior_id);
+          -- A patch is applied in two phases so that no decision is recorded before the effect: 'applying' reserves it (the
+          -- stale check is made here), the CLI writes the patch, then 'confirmed' records the decision or 'released' gives it up.
+          -- A row left in 'applying' is an apply that may or may not have happened.
+          CREATE TABLE IF NOT EXISTS apply_reservations(
+            request_id TEXT PRIMARY KEY REFERENCES assignments(request_id),
+            state TEXT NOT NULL CHECK(state IN ('applying','confirmed','released')),
+            reserved_at TEXT NOT NULL,
+            resolved_at TEXT,
+            reason TEXT);
           PRAGMA user_version=71;`);
       }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
@@ -2138,7 +2147,7 @@ export class Store {
     const superseded_by=this.db.prepare('SELECT request_id,created_at FROM submit_supersedes WHERE target_id=?').get(id)??null;
     const link=this.db.prepare('SELECT prior_id AS request_id,input_revision,at FROM job_revisions WHERE request_id=?').get(id),revises=link?{...link}:null;
     const authorityRevoked=!!a.cancelled_at||this.isProtocolJob(id)&&a.status==='finished';
-    return {...this.destinationFields(id),...(this.pullQueue.row(id)?{work_order_id:this.pullQueue.row(id).work_order_id,child_request_id:id}:{}),request_id:id,supersedes,superseded_by,revises,revised_by:this.newerRevision(id),target_worker:a.target_worker,assignment:JSON.parse(a.payload),delivery_mode:a.delivery,t3_muted:this.deliveryMuted(id),thread_id:a.thread_id||null,environment_id:a.environment_id||null,parent_generation:a.parent_generation??null,status:a.status,execution:a.execution,required_capabilities:a.required_capabilities?JSON.parse(a.required_capabilities):[],review:!!a.review,created_at:a.created_at,valid_until:a.valid_until??null,valid_until_source:a.valid_until_source??null,expiry_requeues:a.expiry_requeues??0,...this.failureFields(id),cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancellation_requested:!!a.cancelled_at,authority_revoked:authorityRevoked,...this.sandboxStop(id,authorityRevoked),claim,progress,lifecycle_events:this.db.prepare("SELECT type,at,actor,reason FROM lifecycle_events WHERE request_id=? ORDER BY id").all(id),report:report??null,late_evidence,delivery,watch,owner_notes:this.ownerNotes(id),worker_break_notices:this.breakNotices(id),claim_denied:this.claimDenial(id),skipped_by_worker:a.skipped_at?{at:a.skipped_at,listed_count:a.listed_count,passed_over:a.passed_over}:null,pr_preflights:this.db.prepare("SELECT phase,evidence FROM pr_preflights WHERE request_id=? ORDER BY CASE phase WHEN 'submit' THEN 0 ELSE 1 END").all(id).map(row=>({phase:row.phase,...JSON.parse(row.evidence)}))};
+    return {...this.destinationFields(id),...(this.pullQueue.row(id)?{work_order_id:this.pullQueue.row(id).work_order_id,child_request_id:id}:{}),request_id:id,supersedes,superseded_by,revises,revised_by:this.newerRevision(id),apply:this.applyState(id),target_worker:a.target_worker,assignment:JSON.parse(a.payload),delivery_mode:a.delivery,t3_muted:this.deliveryMuted(id),thread_id:a.thread_id||null,environment_id:a.environment_id||null,parent_generation:a.parent_generation??null,status:a.status,execution:a.execution,required_capabilities:a.required_capabilities?JSON.parse(a.required_capabilities):[],review:!!a.review,created_at:a.created_at,valid_until:a.valid_until??null,valid_until_source:a.valid_until_source??null,expiry_requeues:a.expiry_requeues??0,...this.failureFields(id),cancelled_at:a.cancelled_at,cancelled_reason:a.cancelled_reason??null,cancellation_requested:!!a.cancelled_at,authority_revoked:authorityRevoked,...this.sandboxStop(id,authorityRevoked),claim,progress,lifecycle_events:this.db.prepare("SELECT type,at,actor,reason FROM lifecycle_events WHERE request_id=? ORDER BY id").all(id),report:report??null,late_evidence,delivery,watch,owner_notes:this.ownerNotes(id),worker_break_notices:this.breakNotices(id),claim_denied:this.claimDenial(id),skipped_by_worker:a.skipped_at?{at:a.skipped_at,listed_count:a.listed_count,passed_over:a.passed_over}:null,pr_preflights:this.db.prepare("SELECT phase,evidence FROM pr_preflights WHERE request_id=? ORDER BY CASE phase WHEN 'submit' THEN 0 ELSE 1 END").all(id).map(row=>({phase:row.phase,...JSON.parse(row.evidence)}))};
   }
   recordPrPreflight(id,phase,assignment,evidence,replace=false) {
     assertPreflight(assignment,evidence,this.nowMs());
@@ -3038,7 +3047,52 @@ export class Store {
     const row=this.db.prepare("SELECT r.request_id,r.input_revision,r.at FROM job_revisions r JOIN assignments a ON a.request_id=r.request_id WHERE r.prior_id=? AND a.status<>'cancelled' ORDER BY r.rowid LIMIT 1").get(id);
     return row?{...row}:null;
   }
-  recordDecision(id,decision,{note=null,actor='owner',via='cli'}={}) {
+  // The refusal for a result whose job has a newer revision, or null. Records stale on an undecided result. Run it inside a transaction.
+  staleRefusal(id) {
+    const newer=this.newerRevision(id); if(!newer) return null;
+    const recorded=!this.latestDecision(id);
+    if(recorded) this.db.prepare("INSERT INTO decisions(request_id,decision,note,actor,via,at) VALUES(?,'stale',?,'system','revises',?)").run(id,`revised by ${newer.request_id}`,this.stamp());
+    return {request_id:id,revised_by:newer.request_id,at:newer.at,recorded};
+  }
+  // Applying a patch is two phases, so that no decision is recorded before the patch is written. reserveApply is the fence: it
+  // refuses when a newer revision exists. The caller then writes the patch, and calls confirmApply (records applied) or
+  // releaseApply (the write failed; nothing is recorded). A reservation with neither is an apply that may or may not have
+  // happened; it shows as uncertain in get, and a re-run resumes it. A correction after the reservation is new work.
+  applyState(id) {
+    const r=this.db.prepare('SELECT state,reserved_at,resolved_at,reason FROM apply_reservations WHERE request_id=?').get(id);
+    if(!r) return null;
+    if(r.state==='applying') return {state:'applying',uncertain:true,since:r.reserved_at};
+    return r.state==='confirmed'?{state:'applied',at:r.resolved_at}:{state:'released',reason:r.reason,at:r.resolved_at};
+  }
+  reserveApply(id) {
+    const result=this.transaction(() => {
+      const a=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
+      if(a.status!=='finished') throw new Error('only a finished assignment can be decided');
+      const open=this.db.prepare("SELECT reserved_at FROM apply_reservations WHERE request_id=? AND state='applying'").get(id);
+      if(open) return {request_id:id,state:'applying',resumed:true,since:open.reserved_at};
+      if(this.latestDecision(id)?.decision==='applied') return {request_id:id,state:'applied',resumed:false};
+      const refusal=this.staleRefusal(id); if(refusal) return {request_id:id,stale_refusal:refusal};
+      const at=this.stamp();
+      this.db.prepare("INSERT INTO apply_reservations(request_id,state,reserved_at) VALUES(?,'applying',?) ON CONFLICT(request_id) DO UPDATE SET state='applying',reserved_at=excluded.reserved_at,resolved_at=NULL,reason=NULL").run(id,at);
+      return {request_id:id,state:'applying',resumed:false,since:at};
+    });
+    if(result.stale_refusal) throw staleRevisionError(result.stale_refusal);
+    return result;
+  }
+  confirmApply(id,{note=null,via='apply'}={}) { return this.transaction(() => {
+    const row=this.db.prepare('SELECT state FROM apply_reservations WHERE request_id=?').get(id);
+    if(row?.state==='confirmed') return {request_id:id,decision:'applied',duplicate:true,at:this.stamp()};
+    if(row?.state!=='applying') throw new Error(`no open apply reservation for ${id}`);
+    return this.recordDecision(id,'applied',{note,via,fenced:true});
+  }); }
+  releaseApply(id,reason=null) { return this.transaction(() => {
+    const row=this.db.prepare('SELECT state FROM apply_reservations WHERE request_id=?').get(id);
+    if(!row) throw new Error(`no apply reservation for ${id}`);
+    if(row.state==='confirmed') throw new Error(`${id} is already applied; a confirmed apply is not released`);
+    if(row.state==='applying') this.db.prepare("UPDATE apply_reservations SET state='released',resolved_at=?,reason=? WHERE request_id=?").run(this.stamp(),reason===null?null:String(reason).slice(0,512),id);
+    return {request_id:id,state:'released'};
+  }); }
+  recordDecision(id,decision,{note=null,actor='owner',via='cli',fenced=false}={}) {
     if(!decisionTypes.includes(decision)) throw new Error(`decision must be one of ${decisionTypes.join(', ')}`);
     const a=this.db.prepare('SELECT status FROM assignments WHERE request_id=?').get(id); if(!a) throw new Error('assignment not found');
     if(a.status!=='finished') throw new Error('only a finished assignment can be decided');
@@ -3046,18 +3100,15 @@ export class Store {
     if(decision==='stale'&&(actor!=='system'||this.latestDecision(id))) return {request_id:id,decision:latest?.decision??null,duplicate:true};
     // An owner cannot accept or apply a result whose job has a newer revision. The check and the write share this transaction,
     // so a correction that commits first is always seen. It runs before the duplicate shortcut: accepting or applying again after a
-    // correction is refused too. An undecided result is recorded stale; a decided one is left alone.
-    if(actor==='owner'&&(decision==='accepted'||decision==='applied')) {
-      const newer=this.newerRevision(id);
-      if(newer) {
-        const recorded=!this.latestDecision(id);
-        if(recorded) this.db.prepare("INSERT INTO decisions(request_id,decision,note,actor,via,at) VALUES(?,'stale',?,'system','revises',?)").run(id,`revised by ${newer.request_id}`,this.stamp());
-        return {request_id:id,stale_refusal:{request_id:id,revised_by:newer.request_id,at:newer.at,recorded}};
-      }
+    // correction is refused too. An undecided result is recorded stale; a decided one is left alone. A confirmed apply (fenced) was
+    // checked when it was reserved, so a correction after the reservation is new work and does not block it.
+    if(actor==='owner'&&!fenced&&(decision==='accepted'||decision==='applied')) {
+      const refusal=this.staleRefusal(id); if(refusal) return {request_id:id,stale_refusal:refusal};
     }
     if(latest&&latest.decision===decision&&latest.actor===actor) return {request_id:id,decision,duplicate:true,at:this.stamp()};
     const at=this.stamp();
     this.db.prepare('INSERT INTO decisions(request_id,decision,note,actor,via,at) VALUES(?,?,?,?,?,?)').run(id,decision,note,actor,via,at);
+    if(actor==='owner'&&decision==='applied') this.db.prepare("UPDATE apply_reservations SET state='confirmed',resolved_at=? WHERE request_id=? AND state='applying'").run(at,id);
     if(actor==='owner') {
       this.consumeOnce(id,'decide');
       if(decision==='accepted'||decision==='applied') this.lifecycle(id,'accepted','owner',decision==='applied'?(note?`applied: ${note}`:'applied'):note);

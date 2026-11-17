@@ -33,7 +33,7 @@ import { workerPrompt } from '../src/worker-prompt.mjs';
 import { stoppedTrialFix } from '../src/try-command.mjs';
 import { formatGetSummary, formatWaitLine } from '../src/get-summary.mjs';
 import { cliCommand } from '../src/cli-name.mjs';
-import { applyPatch } from '../src/patch-apply.mjs';
+import { applyPatch, patchMatchesWorktree } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, ensureWorkerRelationship, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError } from '../src/admin-socket.mjs';
@@ -644,23 +644,39 @@ async function main() {
       if(args.includes('--dir')&&!option('--dir')) throw new Error('--dir requires a path');
       const dir=path.resolve(option('--dir')??process.cwd()), headers={'x-owner-capability':receipt(id).token};
       const got=await request('/get?id='+encodeURIComponent(id),'GET',null,headers); indexArtifacts(id,got);
-      // The bridge refuses to record an apply of a revised job, so refuse before the patch touches the directory.
-      if(got.revised_by) throw Object.assign(new Error(`${id} was revised by ${got.revised_by.request_id}; its patch is not applied. Apply the patch of ${got.revised_by.request_id} instead (dalan get ${got.revised_by.request_id}).`),{local_code:'stale_revision'});
+      // The stale fence is at the reservation: an open reservation was made before any correction, so it may finish; a job
+      // revised before it was reserved is refused here, and again by the bridge at the reservation.
+      const open=got.apply?.state==='applying';
+      if(got.revised_by&&!open) throw Object.assign(new Error(`${id} was revised by ${got.revised_by.request_id}; its patch is not applied. Apply the patch of ${got.revised_by.request_id} instead (dalan get ${got.revised_by.request_id}).`),{local_code:'stale_revision'});
       const ev=got.report?.workspace_evidence, art=ev?.patch_artifact;
       if(!art?.artifact_id||!art.size) throw new Error('this result has no patch artifact (nothing to apply)');
       const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'dot-apply-')), file=path.join(tmp,'patch.diff');
+      const phase=(name,extra={})=>request('/decide','POST',{id,decision:'applied',phase:name,via:'apply',...extra},headers);
       try {
         await download(art.artifact_id,file);
         const patch=fs.readFileSync(file), patchArgs={dir,patch,sha256:art.sha256,baseSha:ev.base_sha??got.assignment?.inputs?.[0]?.base_sha};
-        // Check the patch, then take the bridge's authorization, then write. The bridge checks for a correction and records the
-        // decision in one transaction, so a correction that lands during the download makes /decide refuse and the directory is
-        // never touched. A correction that commits after the decision finds the job already applied and is new work.
-        applyPatch({...patchArgs,checkOnly:true});
-        let decided; try { decided=await request('/decide','POST',{id,decision:'applied',via:'apply'},headers); } catch(e) { if(e.http_status===400&&/^stale_revision/.test(e.message)) throw e; throw new Error(`not applied: the decision was not confirmed by the bridge (${e.message}), so ${dir} is unchanged`); }
-        let files; try { files=applyPatch(patchArgs); } catch(e) { throw new Error(`the bridge recorded ${id} as applied, but writing the patch in ${dir} failed: ${e.message}`); }
-        result={request_id:id,applied:true,dir,files,decision:decided.decision};
+        // Two phases, so the bridge never records an effect before it happens. Reserve (the bridge's stale check and the
+        // reservation share one transaction, so a correction that lands during the download makes it refuse and the directory is
+        // never touched), write (every touched file is restored if the write fails), then confirm. A reservation left open by an
+        // earlier run that died is resumed: if the tree already holds the patch, only the confirm is missing.
+        let files, written=false;
+        if(!(open&&patchMatchesWorktree(dir,patch))) {
+          applyPatch({...patchArgs,checkOnly:true});
+          let reserved={state:'applying'}; try { if(!open) reserved=await phase('reserve'); } catch(e) { if(e.http_status===400&&/^stale_revision/.test(e.message)) throw e; throw new Error(`not applied: the bridge did not reserve the apply (${e.message}), so ${dir} is unchanged`); }
+          try { files=applyPatch(patchArgs); written=true; }
+          catch(e) {
+            let released=true; try { await phase('release',{reason:`apply_failed: ${e.message}`.slice(0,500)}); } catch { released=false; }
+            throw Object.assign(new Error(`apply_failed: ${e.message}${released?`. ${id} is not applied and can be applied again.`:`. The bridge could not be told; ${id} still shows an apply in progress, and a re-run of dalan apply resolves it.`}`),{local_code:'apply_failed'});
+          }
+          if(reserved.state==='applied') { result={request_id:id,applied:true,dir,files,decision:'applied'}; }
+        }
+        if(!result) {
+          let decided; try { decided=await phase('confirm'); } catch(e) { throw new Error(`the patch is written in ${dir}, but the bridge did not confirm it (${e.message}). ${id} still shows an apply in progress. Run dalan apply ${id} again: it sees the patch in the tree and confirms without writing.`); }
+          result={request_id:id,applied:true,dir,files:files??[],already_present:!written,decision:decided.decision};
+        }
       } finally { fs.rmSync(tmp,{recursive:true,force:true}); }
-      if(!json) { const {files}=result; result=`applied ${files.length} file${files.length===1?'':'s'} in ${dir}; recorded decision applied for ${id}\n${files.map(f=>'  '+f).join('\n')}`; plainOutput=true; }
+      if(!json&&result.already_present) { result=`the patch was already in ${dir}; recorded decision applied for ${id} without writing`; plainOutput=true; }
+      else if(!json) { const {files}=result; result=`applied ${files.length} file${files.length===1?'':'s'} in ${dir}; recorded decision applied for ${id}\n${files.map(f=>'  '+f).join('\n')}`; plainOutput=true; }
       break;
     }
     case 'integrate': { const id=args[0]; if(!id||id.startsWith('-')) throw new Error('integrate requires request id'); result=await request('/lifecycle','POST',{id,type:'integrated',...(option('--reason')?{reason:option('--reason')}:{})},{'x-operator-key':operator()}); break; }

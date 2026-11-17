@@ -2,6 +2,8 @@
 // adapter's read-only check. Nothing here talks to the bridge.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const git = (dir, args, input, env) => spawnSync('git', ['-C', dir, ...args], { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env });
 
@@ -9,6 +11,49 @@ const git = (dir, args, input, env) => spawnSync('git', ['-C', dir, ...args], { 
 function worktreeRoot(dir, env) {
   const root = git(dir, ['rev-parse', '--show-toplevel'], undefined, env);
   return root.status === 0 ? root.stdout.replace(/\r?\n$/, '') : null;
+}
+
+// What the patch can touch, read before it runs: each named file's bytes, mode or link target, or its absence, and the
+// directories that do not exist yet (a new file may create them).
+function snapshot(root, files) {
+  const entries = [], newDirs = new Set();
+  for (const file of new Set(files)) {
+    const target = path.join(root, file);
+    let stat = null;
+    try { stat = fs.lstatSync(target); } catch {}
+    if (!stat) {
+      entries.push({ target, absent: true });
+      for (let parent = path.dirname(target); parent.startsWith(root + path.sep) && !fs.existsSync(parent); parent = path.dirname(parent)) newDirs.add(parent);
+    } else if (stat.isSymbolicLink()) entries.push({ target, link: fs.readlinkSync(target) });
+    else if (stat.isFile()) entries.push({ target, data: fs.readFileSync(target), mode: stat.mode & 0o7777 });
+    else entries.push({ target, opaque: true });
+  }
+  return { entries, newDirs: [...newDirs].sort((a, b) => b.length - a.length) };
+}
+
+// Puts every snapshotted file back. A file that already equals its snapshot is not rewritten, so a read-only directory
+// that stopped the patch does not stop the restore. Returns the names it could not restore.
+function restore(snap) {
+  const failed = [];
+  for (const entry of snap.entries) {
+    try {
+      let now = null;
+      try { now = fs.lstatSync(entry.target); } catch {}
+      if (entry.absent) { if (now) fs.rmSync(entry.target, { recursive: true, force: true }); }
+      else if (entry.link !== undefined) {
+        if (now?.isSymbolicLink() && fs.readlinkSync(entry.target) === entry.link) continue;
+        if (now) fs.rmSync(entry.target, { force: true });
+        fs.symlinkSync(entry.link, entry.target);
+      } else if (entry.data) {
+        if (now?.isFile() && (now.mode & 0o7777) === entry.mode && fs.readFileSync(entry.target).equals(entry.data)) continue;
+        if (now) fs.rmSync(entry.target, { force: true });
+        fs.mkdirSync(path.dirname(entry.target), { recursive: true });
+        fs.writeFileSync(entry.target, entry.data, { mode: entry.mode }); fs.chmodSync(entry.target, entry.mode);
+      }
+    } catch { failed.push(path.basename(entry.target)); }
+  }
+  for (const dir of snap.newDirs) { try { fs.rmdirSync(dir); } catch {} }
+  return failed;
 }
 
 // The patch must apply onto the job's base or a descendant of it, so HEAD has to contain base. Returns null when it does,
@@ -25,7 +70,7 @@ export function baseProblem(dir, baseSha, env) {
 }
 
 // Checks the digest, the base and `git apply --check`, then applies. Preflight failures touch nothing; a failed apply
-// process may have partially changed the checkout. Returns the list of touched file names. With checkOnly, it stops after
+// process restores the files it touched (a restore that itself fails is named in the error). Returns the list of touched file names. With checkOnly, it stops after
 // the checks and the file list and writes nothing, so a caller can take an authorization between the check and the write.
 export function applyPatch({ dir, patch, sha256, baseSha, env, checkOnly = false }) {
   const body = Buffer.from(patch);
@@ -55,8 +100,16 @@ export function applyPatch({ dir, patch, sha256, baseSha, env, checkOnly = false
     }
   }
   if (checkOnly) return files;
+  // git apply checks everything first but writes file by file, so a write error can leave some files changed. Keep what it
+  // may touch and put it back on any failure: the tree is the one it was, or the error names what could not be restored.
+  const before = snapshot(dir, files);
   const run = git(dir, ['apply', '-'], body, env);
-  if (run.status !== 0) throw new Error(`git apply failed after a clean check; the checkout may be partially changed: ${(run.stderr || '').trim().slice(0, 300)}`);
+  if (run.status !== 0) {
+    const failed = restore(before), reason = (run.stderr || run.error?.message || '').trim().slice(0, 300);
+    throw new Error(failed.length
+      ? `git apply failed after a clean check, and ${failed.join(', ')} could not be restored; the checkout is partially changed: ${reason}`
+      : `git apply failed after a clean check; every touched file was restored to its earlier content: ${reason}`);
+  }
   return files;
 }
 
