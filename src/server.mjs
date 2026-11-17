@@ -3,6 +3,7 @@ import {routingPolicy,PULL_PAGE_PREFIX} from './pull-queue.mjs';
 import {inspect} from 'node:util';
 import { loopbackRequestAllowed } from './loopback.mjs';
 import { normalizeRequestHost } from './gozar-routes.mjs';
+import { watchServicePublication } from './route-publication.mjs';
 import { defaultPath,workspaceRoot,rootWarnings } from './paths.mjs';
 import { readEnv } from './env.mjs';
 import http from 'node:http';
@@ -1562,6 +1563,9 @@ const publicListening=new Promise(resolve=>publicServer.listen(port,bindHost,()=
 // Every background writer starts only when no update window is open, so a candidate restarted inside the window changes no state
 // the rollback snapshot would discard. Outside a window this runs at once, in the same order as before.
 function startBackground() {
+  if (verifyService && as) void publicListening.then(() => watchServicePublication({
+    home, configDir, origin: new URL(as.publicUrl).origin, secret, canWrite: () => !updateWindowOpen(),
+  }));
   store.recoverSends();
 // Cleanup removes worktrees and dependency caches; it starts only after both servers listen, and
 // cleanupExpired is async and single-flight, so neither startup nor the hourly tick blocks requests.

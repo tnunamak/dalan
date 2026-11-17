@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { defaultPath } from '../src/paths.mjs';
 import { run } from './worker-bridge-setup.mjs';
 import { githubAuthRecovery } from '../src/projects.mjs';
 import { WORKER_INSTRUCTIONS } from '../src/worker-instructions.mjs';
@@ -166,12 +167,14 @@ try {
   const beforeRetry={home:snapshotTree(home),unit:fs.readFileSync(path.join(unitDir,'dot-bridge-lark.service'),'utf8')};
   const retryArgs=['--retry-public-check','--worker','lark','--public-url','https://lark-bridge.example.test','--port','18788','--home',home];
   let checkCalls=0;
-  await run(retryArgs,{platform:'linux',env,verifyPublic:async ({url,dnsName})=>{checkCalls++;assert.equal(url,'https://lark-bridge.example.test');assert.equal(dnsName,'lark-bridge.example.test');return true;},resolve4:async()=>null,log:()=>{}});
+  const retryGozar=createFakeGozar(), registerRoute=retryGozar.addService;
+  retryGozar.addService=async request=>{checkCalls++;assert.equal(request.origin,'https://lark-bridge.example.test');return registerRoute(request);};
+  await run(retryArgs,{platform:'linux',env,gozar:retryGozar,log:()=>{}});
   assert.equal(checkCalls,1,'matching retry checks its existing public origin');
   for(const [label,args] of [['worker',['--worker','other']],['port',['--port','18789']],['origin',['--public-url','https://other.example.test']],['home',['--home',path.join(root,'unrelated')]]]) {
-    let called=false;
-    assert.throws(()=>run([...retryArgs,...args],{platform:'linux',env,verifyPublic:async()=>{called=true;return true;},resolve4:async()=>null,log:()=>{}}),/--retry-public-check/);
-    assert.equal(called,false,`${label} mismatch refuses before public request`);
+    const before=checkCalls;
+    assert.throws(()=>run([...retryArgs,...args],{platform:'linux',env,gozar:retryGozar,log:()=>{}}),/--retry-public-check/);
+    assert.equal(checkCalls,before,`${label} mismatch refuses before public request`);
   }
   assert.deepEqual({home:snapshotTree(home),unit:fs.readFileSync(path.join(unitDir,'dot-bridge-lark.service'),'utf8')},beforeRetry,'retry leaves credentials, profile and service unchanged');
   const socket = fs.readFileSync(path.join(unitDir, 'dot-bridge-lark-lan.socket'), 'utf8');
@@ -453,34 +456,46 @@ try {
 
   // A macOS public-check timeout happens after the service exists. Its printed retry validates and reuses that service.
   const slowHome=path.join(root,'slow-home'),slowArgs=['--worker','slow','--port','18796','--home',slowHome,'--route','work','--start'];
-  const setupSeams={platform:'darwin',env:menv,log(){},resolve4:async()=>null,gozar:createFakeGozar(),consent:async()=>true};
+  const retryMacGozar=createFakeGozar(), routeStatus=retryMacGozar.routeStatus;
+  let allowProof=false,retried=0;
+  retryMacGozar.routeStatus=async request=>{
+    const view=await routeStatus(request);
+    retried++;
+    return allowProof?view:{...view,state:'unverified',published:null,verification:{status:'unverified'}};
+  };
+  const setupSeams={platform:'darwin',env:menv,log(){},gozar:retryMacGozar,consent:async()=>true};
   let slowUrl='';
   let publicFailure='';
-  await assert.rejects(run(slowArgs,{...setupSeams,verifyPublic:async()=>false}),error=>{
+  await assert.rejects(run(slowArgs,setupSeams),error=>{
     publicFailure=error.message;
     slowUrl=/--retry-public-check --worker slow --public-url (https:\/\/\S+) --port 18796/.exec(error.message)?.[1] ?? '';
     return slowUrl!=='';
   });
   assert.match(publicFailure,/left in place/);
   assert.match(publicFailure,/--remove --worker slow --home .* --purge-home/);
-  const slowSecret=fs.readFileSync(path.join(slowHome,'resource-url'),'utf8').trim().split('/')[3];
+  const slowSecret=/^BRIDGE_PATH_SECRET=([a-f0-9]{64})$/m.exec(fs.readFileSync(path.join(defaultPath(slowHome,'.config/dot-bridge'),'env'),'utf8'))[1];
+  assert.equal(fs.existsSync(path.join(slowHome,'resource-url')),false,'unverified routes withhold the connector URL');
   assert(!publicFailure.includes(slowSecret),'failure output never prints the private URL path secret');
   const slowFiles=snapshotTree(slowHome);
-  let retried=0;
-  await run(['--retry-public-check','--worker','slow','--public-url',slowUrl,'--port','18796','--home',slowHome],{...setupSeams,verifyPublic:async ({url,dnsName})=>{retried++;assert.equal(url,slowUrl);assert.equal(dnsName,new URL(slowUrl).hostname);return true;}});
+  allowProof=true;
+  retried=0;
+  await run(['--retry-public-check','--worker','slow','--public-url',slowUrl,'--port','18796','--home',slowHome],setupSeams);
   assert.equal(retried,1);
-  assert.deepEqual(snapshotTree(slowHome),slowFiles,'retry preserves Mac profile, resource URL and keys');
+  assert.equal(fs.readFileSync(path.join(slowHome,'resource-url'),'utf8').trim(),`${slowUrl}/${slowSecret}/mcp`);
+  const retriedFiles=snapshotTree(slowHome);
+  delete retriedFiles['resource-url'];
+  assert.deepEqual(retriedFiles,slowFiles,'retry preserves Mac profile and keys');
   const slowPlist=plistOf('slow'),originalSlowPlist=fs.readFileSync(slowPlist,'utf8');
   assert(/DALAN_PORT<\/key>\s*<string>18796<\/string>/.test(originalSlowPlist),'retry reused matching launchd service');
   const legacyPlist=originalSlowPlist.replace(/<key>DALAN_(AUTH_MODE|ENABLE_WORKSPACE|PORT)<\/key>/g,'<key>DOT_BRIDGE_$1</key>');
   fs.writeFileSync(slowPlist,legacyPlist);
-  await run(['--retry-public-check','--worker','slow','--public-url',slowUrl,'--port','18796','--home',slowHome],{...setupSeams,verifyPublic:async()=>true});
+  await run(['--retry-public-check','--worker','slow','--public-url',slowUrl,'--port','18796','--home',slowHome],setupSeams);
   assert.equal(fs.readFileSync(slowPlist,'utf8'),legacyPlist,'retry accepts legacy environment aliases without rewriting the service');
 
   fs.writeFileSync(slowPlist,originalSlowPlist.replace('<string>18796</string>','<string>18797</string>')+'\n<!-- previous port 18796 -->\n');
-  let badPlistVerified=false;
-  assert.throws(()=>run(['--retry-public-check','--worker','slow','--public-url',slowUrl,'--port','18796','--home',slowHome],{...setupSeams,verifyPublic:async()=>{badPlistVerified=true;return true;}}),/does not exactly match/);
-  assert.equal(badPlistVerified,false,'launchd port mismatch refuses before public verification');
+  const beforeBadPlist=retried;
+  assert.throws(()=>run(['--retry-public-check','--worker','slow','--public-url',slowUrl,'--port','18796','--home',slowHome],setupSeams),/does not exactly match/);
+  assert.equal(retried,beforeBadPlist,'launchd port mismatch refuses before public verification');
   fs.writeFileSync(slowPlist,originalSlowPlist);
 
   // An existing plist is never overwritten: a second home for the same worker is refused and creates nothing.

@@ -58,7 +58,7 @@ test('the fake returns the fixture shapes: same keys for a catalog, a candidate 
   const catalog = await gozar.catalogRoutes(buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1000 } }));
   const sample = fixture.valid.find(v => v.shape === 'Catalog').value;
   assert.deepEqual(Object.keys(catalog).sort(), Object.keys(sample).sort());
-  assert.deepEqual(Object.keys(catalog.candidates[0]).sort(), Object.keys(sample.candidates[0]).sort());
+  assert.deepEqual(Object.keys(catalog.candidates[0]).sort(), [...Object.keys(sample.candidates[0]), 'consentFactsDigest'].sort());
   const view = await gozar.expose({ ...buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1000 } }), approval: approvalFor(pickCandidate(catalog)), wait: 'verified' });
   assert.deepEqual(Object.keys(view).sort(), Object.keys(fixture.valid.find(v => v.shape === 'RouteView').value).sort());
 });
@@ -176,18 +176,15 @@ test('the route watch reports a changed address as rotated and a lost route as l
   }
 });
 
-test('a route Gozar has not verified yet is pending, not lost; a later loss still ends the wait', async () => {
+test('Gozar withdrawing proof on the first watch read ends an already published trial', async () => {
   const gozar = createFakeGozar();
   const original = gozar.watchRoutes;
   gozar.watchRoutes = async function* (args) {
     for await (const event of original(args)) {
-      yield event.type === 'snapshot' ? { ...event, route: { ...event.route, state: 'unverified', published: null, verification: { status: 'unverified', checkedAt: null } } } : event;
+      yield { ...event, route: { ...event.route, state: 'unverified', published: null, verification: { status: 'unverified' } } };
     }
   };
   const route = await startSessionRoute({ gozar, query: buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 5000 } }), consent: yes });
-  const early = await Promise.race([route.exited, new Promise(resolve => setTimeout(() => resolve('pending'), 300))]);
-  assert.equal(early, 'pending', 'an unverified first snapshot does not end the trial');
-  gozar.fake.change(route.handle.id, { state: 'lost', published: null });
   assert.equal(await route.exited, 'lost');
   await route.stop();
 });
@@ -239,7 +236,7 @@ test('Host: the default port written out is the same authority; every other host
 
 // ---- the bundled package -----------------------------------------------------------------------------------------------------------------
 test('installed bundled resolution: the package inside Dalan\'s own tree wins; a Gozar without the contract is runtime_missing with its version', async () => {
-  const good = await resolveGozar({ importer: async () => createFakeGozar() });
+  const good = await resolveGozar({ env: { HOME: tmp } });
   assert.equal(typeof good.catalogRoutes, 'function');
   await assert.rejects(() => resolveGozar({ importer: async () => ({ createServiceVerifier() {} }), resolvePackage: () => path.join(tmp, 'gozar-old-package.json') }), error => error.code === 'runtime_missing' && /missing catalogRoutes/.test(error.message));
   fs.writeFileSync(path.join(tmp, 'gozar-old-package.json'), JSON.stringify({ version: '0.1.0' }));

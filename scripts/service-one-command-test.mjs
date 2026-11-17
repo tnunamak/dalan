@@ -45,7 +45,7 @@ const fakeLaunchctl = () => {
 const systemctlCalls = [];
 const spawnSystemctl = (cmd, args) => { systemctlCalls.push([cmd, ...args]); return { status: 0, stdout: '', stderr: '' }; };
 const seamsFor = (name, platform, extra = {}) => {
-  const box = sandbox(name), launchctl = fakeLaunchctl(), gozar = createFakeGozar();
+  const box = sandbox(name), launchctl = fakeLaunchctl(), gozar = createFakeGozar({ providerIds: { cand_stable: 'qz-opaque-17' } });
   const closed = [];
   const closeRoute = gozar.closeRoute; gozar.closeRoute = async request => { closed.push(request.handle); return closeRoute(request); };
   const ensure = gozar.ensureRoute; gozar.ensureRoute = async query => { const view = await ensure(query); return { ...view, verification: { ...(view.verification ?? {}), status: 'verified', method: 'challenge' } }; };
@@ -178,7 +178,7 @@ try {
   const plistDir = path.join(mac.userHome, 'Library/LaunchAgents');
   const savedPlists = fs.readdirSync(plistDir).map(name => [name, fs.readFileSync(path.join(plistDir, name), 'utf8')]);
   const unknownCalls = [];
-  await assert.rejects(uninstallService({ home: first.home }, { ...mac.seams, launchd: { uid: 501, spawn(command, args) {
+  await assert.rejects(uninstallService({ home: first.home, confirmRouteStop: async () => true }, { ...mac.seams, launchd: { uid: 501, spawn(command, args) {
     unknownCalls.push(args[0]);
     return { status: 1, stderr: 'Operation not permitted' };
   } } }), /Cannot determine whether launchd service/);
@@ -190,7 +190,13 @@ try {
 
   // uninstall: agents gone, plists gone, route closed, pointer forgotten, home kept
   fs.writeFileSync(path.join(mac.userHome, 'Library/LaunchAgents', `${labels.service}.plist`), servicePlist({ unit: receipt.unit, node: '/usr/bin/node', home: first.home, port: 8789 }));
-  const gone = await uninstallService({ home: first.home }, mac.seams);
+  await assert.rejects(uninstallService({ home: first.home, confirmRouteStop: async handle => {
+    assert.deepEqual(handle, receipt.route_handle);
+    return false;
+  } }, mac.seams), /explicit approval/);
+  assert.equal(mac.closed.length, 0, 'decline made no Gozar stop call');
+  assert.ok(fs.existsSync(first.home), 'decline retained the service home');
+  const gone = await uninstallService({ home: first.home, confirmRouteStop: async () => true }, mac.seams);
   assert.ok(gone.removed.some(line => line.startsWith('removed') && line.endsWith(`${labels.service}.plist`)));
   assert.equal(fs.readdirSync(path.join(mac.userHome, 'Library/LaunchAgents')).length, 0, 'no agent file is left');
   assert.equal(mac.launchctl.loaded.size, 0, 'nothing stays loaded');
@@ -206,20 +212,24 @@ try {
   assert.equal(readDefaultHome(linux.env), lin.home);
   const again = await installService(options(linux), linux.seams); assert.equal(again.already_installed, true); assert.equal(again.origin, lin.origin);
   const linuxReceipt = JSON.parse(fs.readFileSync(path.join(defaultPath(lin.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
-  const removedLinux = await uninstallService({ home: lin.home }, linux.seams);
+  const removedLinux = await uninstallService({ home: lin.home, confirmRouteStop: async () => true }, linux.seams);
   assert.ok(removedLinux.removed.some(line => line.endsWith('.service')));
   assert.deepEqual(fs.readdirSync(path.join(linux.userHome, '.config/systemd/user')), [], 'no unit file is left');
   assert.ok(systemctlCalls.some(call => call.includes('disable') && call.includes(`${linuxReceipt.unit}.service`)));
 
-  // ---- --route WORD: a word in the label of a route Gozar offers (nothing here knows a provider) -----------------------------------------
-  const word = seamsFor('word', 'linux');
-  const byWord = await installService(options(word, { route: 'public' }), word.seams);
-  assert.match(byWord.origin, /^https:\/\//, 'a label word picks the offered route');
-  await assert.rejects(installService(options(seamsFor('badword', 'linux'), { route: 'nonesuch' }), seamsFor('badword', 'linux').seams), /No route named "nonesuch", and none offered is labelled with it\. Offered: Example public route/);
-  await assert.rejects(installService(options(seamsFor('wrongword', 'linux'), { route: 'temporary' }), seamsFor('wrongword', 'linux').seams), /No route|not usable|route/i);
-
-  // ---- explicit external route keeps working; --route alone needs a name, nothing alone is refused ------------------------------------
-  await assert.rejects(serviceMain(['install', '--worker', 'muse'], seamsFor('refuse', 'linux').seams), /pass --route NAME/);
+  // --route also accepts the exact catalog ID Gozar supplied.
+  const byId = seamsFor('opaque', 'linux');
+  const selected = await installService(options(byId, { route: 'qz-opaque-17' }), byId.seams);
+  assert.match(selected.origin, /^https:\/\//);
+  const unknown = seamsFor('unknown-opaque', 'linux');
+  await assert.rejects(installService(options(unknown, { route: 'nonesuch' }), unknown.seams), error => error.code === 'route_not_found');
+  assert.deepEqual(unknown.gozar.fake.state.effects, []);
+  const label = seamsFor('label', 'linux');
+  await assert.rejects(installService(options(label, { route: 'public' }), label.seams), error => error.code === 'route_not_found');
+  assert.deepEqual(label.gozar.fake.state.effects, [], 'matching a label substring cannot select a route');
+  const automatic = seamsFor('automatic', 'linux');
+  const installed = await serviceMain(['install', '--worker', 'muse'], { ...automatic.seams, out() {} });
+  assert.match(installed.origin, /^https:\/\//, 'Gozar ranks the available routes when the owner gives no name');
 
   // ---- a read-only preflight refusal allocates no public route ---------------------------------------------------
   {
@@ -319,7 +329,7 @@ try {
       assert.ok(pin, 'the route was allocated');
       const kept = JSON.parse(fs.readFileSync(path.join(defaultPath(home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
       assert.deepEqual(kept.route_handle, pin.view.handle, 'the receipt holds the handle of the allocated route');
-      await uninstallService({ home }, box.seams);
+      await uninstallService({ home, confirmRouteStop: async () => true }, box.seams);
       assert.deepEqual(box.closed, [pin.view.handle], 'uninstall releases the route the failed install allocated');
     }
   }

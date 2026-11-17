@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { defaultPath } from '../../src/paths.mjs';
-import { readEnv } from '../../src/env.mjs';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { buildQuery, gozarHomeFor, resolveGozar, startSessionRoute, targetFor } from '../../src/gozar-routes.mjs';
+import { buildQuery, closeExactRoute, describeCandidate, describeDisclosure, gozarHomeFor, resolveGozar, resolveRouteWord, startSessionRoute, targetFor } from '../../src/gozar-routes.mjs';
+import { writeAtomic } from '../../src/as-files.mjs';
+import { terminalSafe } from '../../src/terminal-safe.mjs';
 import { exposureRecord } from './exposure.mjs';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -125,7 +126,8 @@ async function main() {
   const configDir = defaultPath(home,'.config/dot-bridge');
 
   let child;
-  let sessionRoute = null;
+  let sessionRoute = null, gozar, routeRef;
+  const refFile = path.join(home, 'route-reference.json');
   try {
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     fs.chmodSync(configDir, 0o700);
@@ -175,17 +177,27 @@ async function main() {
     const resourcePath = `/${bridgeSecret(home)}/mcp`;
     const resourceUrl = new URL(resourcePath, `${publicUrl}/`).href;
     const resourceUrlFile = path.join(home, RESOURCE_URL_FILE);
-    fs.writeFileSync(resourceUrlFile, `${resourceUrl}\n`, { mode: 0o600 });
-    fs.chmodSync(resourceUrlFile, 0o600);
     let exposure = null;
     if (routeName !== undefined) {
       // The owner's Gozar route, pinned to the origin this trial was set up for. It lasts for the trial and is closed by teardown.
-      const gozar = await resolveGozar();
-      const consent = async () => readEnv('DALAN_LIVE_TRIAL_APPROVE_ROUTE') === '1' || fail('the route needs approval: rerun with DALAN_LIVE_TRIAL_APPROVE_ROUTE=1 after reading what `dalan setup --route NAME` shows for it');
-      sessionRoute = await startSessionRoute({ gozar, consent, query: buildQuery({ home: gozarHomeFor(), target: targetFor(port), route: routeName, origin: publicOrigin.origin, usage: { kind: 'session', lifetimeMs: lifetimeSeconds * 1000 } }) });
-      if (sessionRoute.origin !== publicOrigin.origin) fail(`Gozar allocated ${sessionRoute.origin}, not ${publicOrigin.origin}; the route was closed`);
-      exposure = exposureRecord({ view: sessionRoute.view, home: gozarHomeFor(), localPort: port, lifetimeMs: lifetimeSeconds * 1000 });
+      const routeHome = gozarHomeFor();
+      gozar = await resolveGozar({ home: routeHome });
+      const consent = async candidate => {
+        if (!process.stdin.isTTY) return false;
+        for (const line of [...describeCandidate(candidate), ...describeDisclosure(candidate)]) console.log(terminalSafe(line));
+        const { createInterface } = await import('node:readline/promises');
+        const rl = createInterface({ input: process.stdin, output: process.stderr });
+        try { return /^y(es)?$/i.test((await rl.question('Use this route? [y/N] ')).trim()); } finally { rl.close(); }
+      };
+      const wanted = buildQuery({ home: routeHome, target: targetFor(port), route: routeName, origin: publicOrigin.origin,
+        usage: { kind: 'session', lifetimeMs: lifetimeSeconds * 1000 } });
+      const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
+      const remember = ref => { writeAtomic(refFile, JSON.stringify(ref)); routeRef = ref; };
+      sessionRoute = await startSessionRoute({ gozar, consent, query, pick, remember });
+      if (sessionRoute.origin !== publicOrigin.origin) fail('Gozar allocated a different origin from the one configured for this trial.');
+      exposure = exposureRecord({ view: sessionRoute.view, home: routeHome });
     }
+    writeAtomic(resourceUrlFile, `${resourceUrl}\n`);
     const manifest = {
       schema_version: 1,
       kind: 'dot-bridge-live-trial',
@@ -212,21 +224,35 @@ async function main() {
 
     console.log(`Trial ready: worker=${worker}, listener=127.0.0.1:${port}, pid=${child.pid}`);
     console.log(`Resource URL saved privately (mode 0600): ${resourceUrlFile}`);
-    if (exposure) console.log(`Route active: ${exposure.origin} -> 127.0.0.1:${port}; Gozar ends it at ${exposure.deadline_at}, and teardown removes it sooner.`);
+    if (sessionRoute) console.log('Gozar verified the public route. Keep this terminal open until you finish.');
     console.log('Next operator commands:');
     const ownerHome = `HOME=${shellQuote(home)}`;
     console.log(`  ${ownerHome} node bin/dalan.mjs connect start --worker ${worker}`);
     console.log(`  ${ownerHome} node scripts/live-trial/job.mjs --home ${shellQuote(home)}`);
     console.log(`  ${ownerHome} node scripts/live-trial/verify.mjs --home ${shellQuote(home)}`);
     console.log(`  ${ownerHome} node scripts/live-trial/teardown.mjs --home ${shellQuote(home)}`);
+    if (sessionRoute) {
+      const signal = new AbortController();
+      const stop = () => signal.abort();
+      for (const name of ['SIGINT', 'SIGTERM']) process.once(name, stop);
+      try {
+        await Promise.race([sessionRoute.exited, new Promise(resolve => signal.signal.addEventListener('abort', resolve, { once: true }))]);
+      } finally { for (const name of ['SIGINT', 'SIGTERM']) process.off(name, stop); }
+      fs.rmSync(resourceUrlFile, { force: true });
+      const closed = await sessionRoute.stop();
+      if (!closed.removed) fail(closed.detail);
+      fs.rmSync(refFile, { force: true });
+      child.kill('SIGTERM');
+    }
   } catch (error) {
-    if (sessionRoute) await sessionRoute.stop().catch(() => {});
+    const closed = routeRef ? await closeExactRoute(gozar, routeRef) : { removed: true };
     if (child?.pid) {
       try { child.kill('SIGTERM'); } catch { /* the process may have exited */ }
       await new Promise(resolve => setTimeout(resolve, 250));
       try { child.kill('SIGKILL'); } catch { /* the process may have exited */ }
     }
-    fs.rmSync(home, { recursive: true, force: true });
+    if (closed.removed) fs.rmSync(home, { recursive: true, force: true });
+    else console.error(`Gozar cleanup is unconfirmed. Retained the exact route reference at ${refFile}.`);
     throw error;
   }
 }

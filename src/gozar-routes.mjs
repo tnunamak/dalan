@@ -1,13 +1,10 @@
-// The one place where Dalan reaches the network. Dalan asks Gozar for a route through its frozen consumer exports and branches only on
-// the shapes and the 21 error codes of that contract (tnunamak/gozar, contract/route-contract-c0 @ 91b41a1; the pinned fixture is
-// src/test-support/gozar-contract.json). Dalan never names a provider, never validates or translates a route name, and never builds a
-// command for a provider: a name from `--route` goes to Gozar as written.
-//
-// Every function takes the Gozar module as `gozar`, so tests inject a fake that is checked against the same fixture.
+// The route boundary for Dalan: supply application requirements and render Gozar's current offers and observations.
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { routeSecretBackend, routeCustodyPath } from './route-custody.mjs';
 import { safeDiagnostic } from './diagnostic.mjs';
 import { readJournal, removeJournal, writeJournal, readRouteSetting, writeRouteSetting } from './route-setting.mjs';
 
@@ -16,8 +13,8 @@ export const SCHEMA_VERSION = 1;
 export const FROZEN_CODES = Object.freeze(['invalid_input', 'requirements_unsatisfied', 'setup_required', 'consent_required', 'consent_unknown', 'consent_expired',
   'consent_mismatch', 'candidate_stale', 'preference_conflict', 'route_not_found', 'route_conflict', 'address_changed', 'stopped_by_user', 'handing_back',
   'verification_failed', 'provider_unavailable', 'cleanup_debt', 'unsupported', 'ambiguous_route', 'busy', 'internal_error']);
-// The exports Dalan calls. A Gozar that lacks one is older than the contract: that is `runtime_missing`, not a route error.
-export const REQUIRED_EXPORTS = Object.freeze(['catalogRoutes', 'ensureRoute', 'adoptRoute', 'expose', 'routeStatus', 'closeRoute', 'watchRoutes', 'inspectLegacyRoute', 'runSetupAction', 'addService']);
+// Check the public exports before starting an install or trial.
+export const REQUIRED_EXPORTS = Object.freeze(['catalogRoutes', 'ensureRoute', 'adoptRoute', 'expose', 'routeStatus', 'closeRoute', 'watchRoutes', 'inspectLegacyRoute', 'runSetupAction', 'readSetupOperation', 'cancelSetupOperation', 'createGozar', 'listRoutes', 'addService']);
 
 export class RouteError extends Error {
   constructor(code, message, { nextAction = null, cause } = {}) { super(message, cause ? { cause } : undefined); this.name = 'RouteError'; this.code = code; this.nextAction = nextAction; }
@@ -27,7 +24,7 @@ export class RouteError extends Error {
 const require = createRequire(import.meta.url);
 // The bundled package, resolved from Dalan's own install tree (not the working directory). An install without the contract's exports
 // is reported as `runtime_missing` with the next step; nothing falls back to another executable.
-export async function resolveGozar({ importer = () => import('@tnunamak/gozar'), resolvePackage = () => require.resolve('@tnunamak/gozar/package.json') } = {}) {
+export async function resolveGozar({ env = process.env, home = gozarHomeFor(env), custody = routeCustodyPath({ HOME: os.homedir(), ...env }, home), importer = () => import('@tnunamak/gozar'), resolvePackage = () => require.resolve('@tnunamak/gozar/package.json') } = {}) {
   let module;
   try { module = await importer(); } catch (error) {
     if (error?.code === 'ERR_MODULE_NOT_FOUND' || error?.code === 'MODULE_NOT_FOUND') throw new RouteError('runtime_missing', 'Gozar is not installed with this Dalan. Reinstall @tnunamak/dalan with its dependencies, then run this again.', { cause: error });
@@ -39,7 +36,12 @@ export async function resolveGozar({ importer = () => import('@tnunamak/gozar'),
     try { version = JSON.parse(fs.readFileSync(resolvePackage(), 'utf8')).version ?? version; } catch { /* reported as unknown */ }
     throw new RouteError('runtime_missing', `The installed Gozar (${version}) does not provide the route contract (missing ${missing.join(', ')}). Update @tnunamak/dalan to a release that bundles it.`);
   }
-  return module;
+  const secretBackend = routeSecretBackend(custody);
+  const api = module.createGozar({ secretBackend, hostCapabilities: {
+    'secrets.backend': { known: true, value: true },
+  } });
+  // These standalone calls are public and take the same private state home explicitly.
+  return { ...api, addService: module.addService, releaseRoute: module.releaseRoute, confirmHandBack: module.confirmHandBack };
 }
 
 // Gozar's profile home for the real OS user. An explicit GOZAR_HOME selects a separate profile.
@@ -63,20 +65,23 @@ export const targetFor = port => `127.0.0.1:${port}`;
 // ---- choosing and showing candidates (data only) ---------------------------------------------------------------------------------------
 export const readyCandidates = catalog => [...catalog.candidates].filter(c => c.eligible && c.setup.state === 'ready' && typeof c.candidateToken === 'string').sort((a, b) => a.rank - b.rank);
 export const pickCandidate = catalog => readyCandidates(catalog)[0] ?? null;
-// `--route WORD` is Gozar's own name for a route when Gozar has one. Otherwise it is a word in the label of a route Gozar offers, so an owner can
-// type what the label says. The word is matched only against labels Gozar returned; no provider is named here. Returns the query to send and how to
-// pick the candidate: an unnamed query lets Gozar offer every route, and `pick` chooses the matching one.
+// Gozar accepts configured route names and exact catalog IDs. It validates both.
 export async function resolveRouteWord({ gozar, query }) {
   if (query.route === undefined) return { query, pick: pickCandidate };
-  try { await gozar.catalogRoutes(query); return { query, pick: pickCandidate }; } catch (error) { if (error?.code !== 'route_not_found') throw error; }
-  const { route: word, ...bare } = query, needle = String(word).toLowerCase();
-  const catalog = await gozar.catalogRoutes(bare);
-  const matches = catalog.candidates.filter(c => `${c.display?.label ?? ''}`.toLowerCase().includes(needle));
-  const pick = cat => readyCandidates(cat).find(c => matches.some(m => m.name === c.name)) ?? null;
-  if (!matches.length) throw new RouteError('route_not_found', `No route named ${JSON.stringify(word)}, and none offered is labelled with it. Offered: ${catalog.candidates.map(c => c.display?.label).filter(Boolean).join('; ') || 'none'}.`);
-  return { query: bare, pick };
+  try { await gozar.catalogRoutes(query); return { query, pick: pickCandidate }; }
+  catch (error) {
+    if (error?.code !== 'route_not_found') throw error;
+    const { route, ...request } = query;
+    const exact = { ...request, providerId: route };
+    try { await gozar.catalogRoutes(exact); }
+    catch (fallback) { if (fallback?.code === 'route_not_found') throw error; throw fallback; }
+    return { query: exact, pick: pickCandidate };
+  }
 }
-export const approvalFor = candidate => ({ candidateToken: candidate.candidateToken, disclosureRevision: candidate.disclosure.revision });
+export const approvalFor = candidate => ({
+  kind: 'route', candidateToken: candidate.candidateToken, disclosureRevision: candidate.disclosure.revision,
+  consentFactsDigest: candidate.consentFactsDigest,
+});
 
 const yesNo = value => value === true ? 'yes' : value === false ? 'no' : 'unknown';
 // One block of lines per candidate, built only from what Gozar returned. Labels name a provider only as returned display data.
@@ -93,18 +98,19 @@ export function describeCandidate(candidate, index) {
 }
 export function describeDisclosure(candidate) {
   const d = candidate.disclosure;
-  return [d.text, ...d.links.map(l => `${l.label}: ${l.href}`)];
+  return [...describeFacts(candidate.consent?.facts ?? []), d.text, ...d.links.map(l => `${l.label}: ${l.href}`)];
 }
 
-// Frozen code -> one line and the owner's next step. Provider diagnostics stay inside Gozar; Dalan prints only its own text, the
-// message Gozar chose to expose, and the action Gozar names.
+export const describeFacts = facts => facts.map(fact => `${fact.label}: ${fact.known ? String(fact.value) : `unknown (${fact.reason})`}`);
+
+// Translate common route errors and display safe guidance returned by Gozar.
 const EXPLAIN = {
   invalid_input: 'Dalan sent Gozar a request it refused as invalid.', requirements_unsatisfied: 'No route satisfies what Dalan needs (an HTTPS address reachable from the internet).',
   setup_required: 'A route needs one setup step first.', consent_required: 'This route needs your approval first.', consent_unknown: 'The approval was already used or is unknown. Ask for the choices again.',
   consent_expired: 'The approval expired. Ask for the choices again.', consent_mismatch: 'The approval was for a different request. Ask for the choices again.', candidate_stale: 'The route choice changed while you decided. Ask again.',
   preference_conflict: 'Your route preferences changed meanwhile. Try again.', route_not_found: 'Gozar has no route with that name.', route_conflict: 'Another owner or a newer route replaced this one; it was left untouched.',
   address_changed: 'The public address changed.', stopped_by_user: 'This route was stopped by you; approve it again to start it.', handing_back: 'The route is being handed back to its previous owner.',
-  verification_failed: 'The route did not pass Gozar\'s check.', provider_unavailable: 'The route provider is unavailable right now.', cleanup_debt: 'A route could not be fully removed.',
+  verification_failed: 'The route did not pass Gozar\'s check.', provider_unavailable: 'The route provider is unavailable right now.', cleanup_debt: 'Gozar reports cleanup debt for this route.',
   unsupported: 'This computer or request is not supported by any route.', ambiguous_route: 'Gozar cannot tell which existing route this is, so it changed nothing.',
   busy: 'Gozar is busy. Wait a moment and try again.', internal_error: 'Gozar had an unexpected fault.', runtime_missing: 'Gozar is not available.',
 };
@@ -112,7 +118,7 @@ export function explainRouteError(error) {
   const code = typeof error?.code === 'string' && (FROZEN_CODES.includes(error.code) || error.code === 'runtime_missing') ? error.code : null;
   // Gozar's next step is shown as text for every code, including one Dalan does not know yet; Dalan never acts on it.
   const action = error?.nextAction ?? null;
-  const fix = action ? [action.label, action.instructions, action.href].filter(value => typeof value === 'string' && value.length > 0).map(value => safeDiagnostic(value, 240)).join(' - ') || null : null;
+  const fix = action ? [action.label, action.instructions, !action.step?.browser && action.href].filter(value => typeof value === 'string' && value.length > 0).map(value => safeDiagnostic(value, 240)).join(' - ') || null : null;
   if (!code) return { code: null, line: safeDiagnostic(String(error?.message ?? error), 240), fix };
   const detail = code === 'runtime_missing' ? error.message : `${EXPLAIN[code]}${error.message && !EXPLAIN[code].includes(error.message) ? ` (${safeDiagnostic(error.message, 160)})` : ''}`;
   return { code, line: detail, fix };
@@ -120,71 +126,129 @@ export function explainRouteError(error) {
 
 // ---- a session route (`dalan try --public`) --------------------------------------------------------------------------------------------
 // `consent(candidate)` shows the disclosure and resolves true only on an explicit yes. The route lasts for the trial and is closed with it.
-const abortError = signal => signal.reason ?? Object.assign(new Error('stopped'), { name: 'AbortError', code: 'ABORT_ERR' });
-
-// `wait: 'allocated'` is for a trial whose bridge needs the address before it can answer Gozar's check: Dalan then runs its own readiness check.
-export async function startSessionRoute({ gozar, query, consent, signal, wait = 'verified', pick = pickCandidate }) {
+// An allocated origin can configure the local app. Only a current, published view can be handed off.
+export async function startSessionRoute({ gozar, query, consent, signal, wait = 'verified', pick = pickCandidate, remember, setup }) {
   signal?.throwIfAborted();
-  const catalog = await gozar.catalogRoutes(query);
+  query = { ...query, operationId: query.operationId ?? randomUUID() };
+  const { candidate, catalog } = await chooseRoute({ gozar, query, pick, setup });
   signal?.throwIfAborted();
-  const candidate = pick(catalog);
-  if (!candidate) throw noCandidateError(catalog);
   if (!await consent(candidate, catalog)) throw Object.assign(new RouteError('consent_required', 'No public route was started because consent was not given.'), { tryKind: 'consent' });
+  signal?.throwIfAborted();
+  remember?.({ home: query.home, operationId: query.operationId });
   let view;
-  try { view = await gozar.expose({ ...query, approval: approvalFor(candidate), wait }); } catch (error) { throw error; }
-  const handle = view?.handle;
-  const closeNow = () => gozar.closeRoute({ home: query.home, handle, mode: 'remove' }).catch(() => null);
-  let url; try { url = new URL(view.origin); } catch { /* rejected below */ }
-  if (!handle || !url || url.protocol !== 'https:' || url.origin !== view.origin || (wait === 'verified' && (view.state !== 'usable' || view.verification?.status !== 'verified'))) {
-    if (handle) await closeNow();
-    throw new RouteError('verification_failed', 'Gozar did not return a verified HTTPS origin for this route.');
+  try {
+    view = await gozar.expose({ ...query, approval: approvalFor(candidate), wait });
+  } catch (error) {
+    if (error.route?.handle) remember?.({ home: query.home, operationId: query.operationId, handle: error.route.handle });
+    throw error;
   }
-  // Ctrl-C while Gozar was starting: the route exists now, so it is closed before the abort is reported.
-  if (signal?.aborted) { await closeNow(); throw abortError(signal); }
-  return sessionRoute({ gozar, home: query.home, view, candidate });
+  const handle = view?.handle;
+  if (handle) remember?.({ home: query.home, operationId: query.operationId, handle });
+  let url; try { url = new URL(view?.origin); } catch { /* rejected below */ }
+  if (!handle || !url || url.protocol !== 'https:' || url.origin !== view.origin || (wait === 'verified' && !isPublished(view))) {
+    throw routeFailure(view, 'Gozar did not return a verified HTTPS origin for this route.');
+  }
+  const route = monitorRoute({ gozar, home: query.home, view, candidate });
+  if (signal?.aborted) { if (!remember) await route.stop(); signal.throwIfAborted(); }
+  if (wait === 'verified') void route.watchPublished();
+  return route;
 }
 
-function sessionRoute({ gozar, home, view, candidate }) {
+export const isPublished = view => view?.state === 'usable' && typeof view.published === 'string' &&
+  view.origin === view.published && view.verification?.status === 'verified';
+
+export function routeFailure(view, message) {
+  return new RouteError('verification_failed', message, { nextAction: view?.binding?.remedy ?? null });
+}
+
+export async function waitForPublication({ gozar, home, handle, origin, signal, timeoutMs }) {
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const watchSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  let latest;
+  for await (const { route } of gozar.watchRoutes({ home, handle, signal: watchSignal })) {
+    latest = route;
+    if (isPublished(route) && route.published === origin) return route;
+    if (['lost', 'uncertain', 'released', 'address_changed', 'suspended'].includes(route.state) || route.consentChange) break;
+  }
+  signal?.throwIfAborted();
+  throw routeFailure(latest, 'Gozar could not prove that the route reaches this bridge.');
+}
+
+export async function retainedRoute(gozar, { home, operationId, handle }) {
+  if (handle) return gozar.routeStatus({ home, handle });
+  const { routes } = await gozar.listRoutes({ home, owner: OWNER });
+  const matches = routes.filter(route => route.operationId === operationId);
+  if (matches.length !== 1) throw new RouteError('route_conflict', 'Gozar could not identify exactly one retained route for the operation.');
+  return matches[0];
+}
+
+export async function closeExactRoute(gozar, { home, operationId, handle }) {
+  try {
+    if (!handle) {
+      const retained = await retainedRoute(gozar, { home, operationId });
+      if (retained.state === 'released' && retained.cleanup.state === 'confirmed') return { removed: true };
+      handle = retained.handle;
+    }
+    const closed = await gozar.closeRoute({ home, handle, mode: 'remove' });
+    if (closed.handle?.kind !== handle.kind || closed.handle?.id !== handle.id || closed.handle?.generation !== handle.generation) {
+      return { removed: false, detail: 'Gozar returned cleanup evidence for a different handle.' };
+    }
+    if (closed.state === 'released' && closed.published === null && closed.cleanup.state === 'confirmed') return { removed: true };
+    const remedy = closed.cleanup.nextAction ?? closed.binding?.remedy;
+    const explanation = explainRouteError({ code: 'cleanup_debt', message: closed.cleanup.message, nextAction: remedy });
+    return { removed: false, detail: [explanation.line, explanation.fix].filter(Boolean).join(' ') };
+  } catch (error) {
+    return { removed: false, detail: explainRouteError(error).line };
+  }
+}
+
+export function monitorRoute({ gozar, home, view, candidate, remove = true }) {
   const { handle, origin } = view;
   const watch = new AbortController();
   let reason = null, resolveEnded;
   const exited = new Promise(resolve => { resolveEnded = resolve; });
   const end = why => { if (reason === null) reason = why; resolveEnded(reason); };
-  const watcher = (async () => {
+  let watcher;
+  const watchPublished = () => watcher ??= (async () => {
     try {
-      for await (const event of gozar.watchRoutes({ home, handle, signal: watch.signal })) {
-        const route = event.route;
-        // A route Gozar has not verified yet (the bridge was still starting when it looked) is pending, not lost. Dalan's own public
-        // identity check covers a route that never works; only a lost or moved route ends the trial here.
-        if (route.state === 'unverified' && !route.published) continue;
-        if (event.type === 'snapshot' && route.state === 'usable' && route.published === origin) continue;
-        if (route.state === 'usable' && route.published === origin) continue;
+      for await (const { route } of gozar.watchRoutes({ home, handle, signal: watch.signal })) {
+        if (isPublished(route) && route.published === origin) continue;
         if (route.state === 'address_changed' || (route.published && route.published !== origin)) end('rotated');
         else end('lost');
         return;
       }
       if (!watch.signal.aborted) end('lost');
-    } catch (error) { if (!watch.signal.aborted) end('lost'); }
+    } catch { if (!watch.signal.aborted) end('lost'); }
   })();
   let stopped = null;
   return {
-    origin, handle, view, candidate, exited, endedBecause: () => reason,
-    stop() { // idempotent; ends the watch first, then asks Gozar to remove exactly this handle
+    origin, handle, view, candidate, exited, watchPublished, endedBecause: () => reason,
+    stop() {
       stopped ??= (async () => {
-        watch.abort(); await watcher.catch(() => {});
-        try {
-          const closed = await gozar.closeRoute({ home, handle, mode: 'remove' });
-          if (closed.cleanup?.state === 'debt') return { removed: false, detail: `Gozar reports cleanup debt for this route: ${safeDiagnostic(closed.cleanup.message ?? 'no detail', 200)}. Run \`dalan setup\` to review it.` };
-          return closed.state === 'released' ? { removed: true } : { removed: false, detail: `Gozar reports the route is ${closed.state}; its removal could not be confirmed.` };
-        } catch (error) {
-          if (error?.code === 'route_not_found') return { removed: true };
-          if (error?.code === 'route_conflict') return { removed: false, detail: 'Gozar reports a newer route replaced this one, so cleanup of this trial could not be confirmed. The replacement was left untouched.' };
-          return { removed: false, detail: `Gozar could not confirm the route removal (${explainRouteError(error).line}).` };
-        }
+        watch.abort();
+        await watcher;
+        return remove ? closeExactRoute(gozar, { home, handle }) : { removed: true };
       })();
       return stopped;
     },
   };
+}
+
+export async function chooseRoute({ gozar, query, pick = pickCandidate, setup }) {
+  let catalog = await gozar.catalogRoutes(query);
+  let candidate = pick(catalog);
+  if (setup) {
+    const selected = candidate ?? catalog.candidates.filter(c => c.eligible && c.setup.state === 'action-required').sort((a, b) => a.rank - b.rank)[0];
+    if (selected) {
+      if (!await setup(selected)) throw new RouteError('setup_required', 'The current Gozar setup operation still needs attention.');
+      if (!candidate) {
+        catalog = await gozar.catalogRoutes(query);
+        candidate = pick(catalog);
+      }
+    }
+  }
+  if (!candidate) throw noCandidateError(catalog);
+  return { candidate, catalog };
 }
 
 function noCandidateError(catalog) {
@@ -196,14 +260,22 @@ function noCandidateError(catalog) {
 
 // ---- durable routes and external services ----------------------------------------------------------------------------------------------
 // A durable route is never closed by an app exit. The first allocation asks once (the pin keeps the consent); a later call reuses it.
-export async function ensureDurableRoute({ gozar, query, consent, reconsent = false, pick = pickCandidate }) {
+export async function ensureDurableRoute({ gozar, query, consent, reconsent = false, pick = pickCandidate, setup, remember }) {
   try { return await gozar.ensureRoute({ ...query, ...(reconsent ? { reconsent: true } : {}) }); }
-  catch (error) { if (error?.code !== 'consent_required') throw error; }
-  const catalog = await gozar.catalogRoutes(query);
-  const candidate = pick(catalog);
-  if (!candidate) throw noCandidateError(catalog);
+  catch (error) { if (!['consent_required', 'setup_required'].includes(error?.code)) throw error; }
+  const { candidate, catalog } = await chooseRoute({ gozar, query, pick, setup });
   if (!await consent(candidate, catalog)) throw Object.assign(new RouteError('consent_required', 'The route was not started because consent was not given.'), { tryKind: 'consent' });
-  return gozar.ensureRoute({ ...query, approval: approvalFor(candidate), ...(reconsent ? { reconsent: true } : {}) });
+  const operationId = remember ? randomUUID() : undefined;
+  if (operationId) remember({ home: query.home, operationId });
+  let view;
+  try {
+    view = await gozar.ensureRoute({ ...query, ...(operationId && { operationId }), approval: approvalFor(candidate), ...(reconsent ? { reconsent: true } : {}) });
+  } catch (error) {
+    if (operationId && error.route?.handle) remember({ home: query.home, operationId, handle: error.route.handle });
+    throw error;
+  }
+  if (operationId && view.handle) remember({ home: query.home, operationId, handle: view.handle });
+  return view;
 }
 
 // Registers the owner's own origin (a route the owner runs) and reads it back through the same view as any other route.
@@ -211,7 +283,7 @@ export async function registerExternalService({ gozar, home, origin, target, ver
   const reply = await gozar.addService({ origin, target, home, ...(verifyCmd ? { verifyCmd } : {}) });
   const route = reply?.route;
   if (reply?.schemaVersion !== SCHEMA_VERSION || route?.origin !== origin || route?.target !== target) throw new RouteError('verification_failed', 'Gozar returned a service route that does not match the requested origin and target.');
-  const view = await gozar.routeStatus({ home, handle: { kind: 'external', id: origin, generation: 1 } });
+  const view = await gozar.routeStatus({ home, handle: { kind: 'external', id: origin, generation: route.generation } });
   return { route, view };
 }
 

@@ -31,10 +31,15 @@ if (help) {
   // stdout is the protocol channel: nothing else may print to it. The tools run the CLI, which applies the DALAN_HOME rules.
   await (await import('../src/mcp-stdio.mjs')).main();
 } else if (process.argv[2] === 'setup') {
-  await (await import('../src/setup.mjs')).main();
+  await (await import('../src/setup.mjs')).main(process.argv.slice(3));
 } else if (process.argv[2] === 'service') {
   try { await (await import('../src/service.mjs')).serviceMain(process.argv.slice(3)); }
-  catch (error) { process.stderr.write(`dalan: service: ${error.message}\n`); process.exitCode = 1; }
+  catch (error) {
+    const { explainRouteError } = await import('../src/gozar-routes.mjs');
+    const { fix } = explainRouteError(error);
+    process.stderr.write(`dalan: service: ${error.message}\n${fix ? `Next: ${fix}\n` : ''}`);
+    process.exitCode = 1;
+  }
 } else if (process.argv[2] === 'try') {
   await (await import('../src/try.mjs')).main();
 } else {

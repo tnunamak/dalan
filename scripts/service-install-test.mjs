@@ -35,6 +35,12 @@ const makeGozar = ({ status = 'verified', mutate = r => r, failWith = null, log 
     reply.route = mutate({ ...reply.route, verification: { status: statusOf(), method: 'challenge' } });
     return reply;
   };
+  const routeStatus = gozar.routeStatus;
+  gozar.routeStatus = async request => {
+    const view = await routeStatus(request);
+    if (request.handle.kind !== 'external' || statusOf() === 'verified') return view;
+    return { ...view, state: 'unverified', published: null, verification: { status: 'unverified' } };
+  };
   return gozar;
 };
 const privateState = home => {
@@ -42,7 +48,7 @@ const privateState = home => {
   const required = ['workers.json', 'service-install.json', 'as.json', 'as-jwks.json', 'as-cookie-keys.json', 'env'];
   const optional = ['workers-repos.json', 'workers-audit.jsonl', 'workers-audit-checkpoint.sqlite', 'workers-audit-checkpoint.sqlite-wal', 'workers-audit-checkpoint.sqlite-shm'];
   const paths = [...required.map(name => [name, path.join(config, name), true]),
-    ...optional.map(name => [name, path.join(config, name), false]), ['resource-url', path.join(home, 'resource-url'), true]];
+    ...optional.map(name => [name, path.join(config, name), false]), ['resource-url', path.join(home, 'resource-url'), false]];
   return Object.fromEntries(paths.map(([name, file, mustExist]) => {
     const exists = fs.existsSync(file);
     if (mustExist) assert.ok(exists, `${file} unexpectedly missing`);
@@ -111,9 +117,10 @@ assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling a
   assert.equal(fs.existsSync(path.join(xdg, 'systemd/user')) && fs.readdirSync(path.join(xdg, 'systemd/user')).some(f => f.includes('wide-bridge')), false);
 
   const home = path.join(root, 'bridge');
+  const bridgeGozar = makeGozar();
   const result = await installService({ home, origin: 'https://bridge.example.test', port: 8787,
     target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
-    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+    gozar: bridgeGozar, env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn, waitForSocket: async () => true,
   });
   assert.equal(result.started, true);
@@ -149,7 +156,7 @@ assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling a
   const installState = privateState(home);
   const retryServiceInstall = () => installService({ home, origin: 'https://bridge.example.test', port: 8787,
     target: '192.0.2.10:8787', lanPort: 8787, workers: ['dot', 'muse', 'duet-default', 'duet-dondo'] }, {
-    gozar: makeGozar(), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+    gozar: bridgeGozar, env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn, waitForSocket: async () => true,
   });
   const createRuntimeFixture = () => spawnSync(process.execPath, ['--input-type=module', '-e', `
@@ -371,23 +378,28 @@ assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling a
 
   const retryHome = path.join(root, 'retry-route');
   let firstGozarCall = true;
+  const retryGozar = makeGozar({ statusOf: () => (firstGozarCall ? 'failed' : 'verified') });
   const retryInstall = workers => installService({ home: retryHome, origin: 'https://retry.example.test', port: 8791,
     target: '127.0.0.1:8791', workers }, {
-    gozar: makeGozar({ statusOf: () => (firstGozarCall ? 'failed' : 'verified') }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn, waitForSocket: async () => true,
+    gozar: retryGozar, env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn, waitForSocket: async () => true,
   });
   await assert.rejects(retryInstall(['dot']), /did not verify the route/);
   const failedRouteState = privateState(retryHome);
   firstGozarCall = false;
   const retried = await retryInstall(['dot']);
   assert.equal(retried.route.verification.status, 'verified', 'an exact own-install receipt permits a safe retry');
-  assert.deepEqual(privateState(retryHome), failedRouteState, 'route retry must preserve keys, policy, grants and receipt');
+  assert.equal(failedRouteState['resource-url'], null, 'an unverified route produces no connector handoff');
+  const retriedState = privateState(retryHome);
+  assert.ok(retriedState['resource-url'], 'proof creates the handoff');
+  assert.deepEqual({ ...retriedState, 'resource-url': null }, failedRouteState, 'route retry preserves keys, policy, grants and receipt');
   await assert.rejects(installService({ home: retryHome, origin: 'https://changed.example.test', port: 8791,
     target: '127.0.0.1:8791', workers: ['dot'] }, { env, platform: 'linux' }), /belongs to a different service configuration/);
 
   const legacyHome = path.join(root, 'legacy-unit');
+  const legacyGozar = makeGozar({ log: [] });
   const legacyInstall = () => installService({ home: legacyHome, origin: 'https://legacy.example.test', port: 8790,
     target: '127.0.0.1:8790', workers: ['dot'] }, {
-    gozar: makeGozar({ log: [] }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn: (command, args) => args.includes('service') && args.includes('add')
+    gozar: legacyGozar, env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn: (command, args) => args.includes('service') && args.includes('add')
       ? { status: 0, stdout: JSON.stringify({ schemaVersion: 1, route: { ...route, origin: 'https://legacy.example.test', target: '127.0.0.1:8790', verification: { status: 'verified' } } }), stderr: '' }
       : { status: 0, stdout: '', stderr: '' }, waitForSocket: async () => true,
   });

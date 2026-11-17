@@ -2,9 +2,7 @@
 
 Put your MCP-only agent to work on coding jobs from your Mac or Linux computer. The hosted agent is the worker: it connects to your local Dalan bridge over MCP and claims jobs you queue. With explicit repository grants and workspace setup, it can return findings or a patch for you to review. You decide whether to apply changes. Dalan does not run a model or start the agent.
 
-Before you begin, install [Node.js](https://nodejs.org) 24 or newer and [Tailscale](https://tailscale.com/download) with Funnel enabled. Your agent's account must allow custom MCP connectors.
-
-**Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
+Before you begin, install [Node.js](https://nodejs.org) 24 or newer. Your agent's account must allow custom MCP connectors.
 
 <a id="quickstart"></a>
 
@@ -12,7 +10,7 @@ Before you begin, install [Node.js](https://nodejs.org) 24 or newer and [Tailsca
 
 ```sh
 npm install -g @tnunamak/dalan
-dalan try --public --route tailscale
+dalan try --public
 ```
 
 Follow the terminal instructions to add the connector and approve only the matching sign-in code. Paste the supplied prompt into your agent's chat. Success is a report returned to your terminal.
@@ -21,9 +19,7 @@ The trial has no repository access. Keep private code and secrets out of it. It 
 
 ### Stop a trial
 
-Ctrl-C stops the trial and cancels a route that is still starting. Dalan closes its forwarding gate and attempts to remove its route. If it cannot confirm cleanup, it reports that. When Gozar cannot confirm route ownership, Dalan leaves the route alone and gives no stop command.
-
-If Gozar reports cleanup as pending, Dalan prints a recovery command that stops by port. Gozar does not bind that command to a session, so inspect the current route before you run it.
+Ctrl-C stops the bridge and asks Gozar to close the trial's recorded route. If Gozar cannot confirm removal, rerun the trial with the same `--home DIR`. Dalan checks the retained route before it asks Gozar for a new one.
 
 A trial prints its own home. Set `DALAN_HOME` to that home before you run other `dalan` commands against the trial. On stop, Dalan removes the connector URL file and the bridge's secret file for temporary routes.
 
@@ -45,7 +41,7 @@ The persistent service uses a fresh home and needs a new sign-in. Do not reuse t
 
 ```sh
 npm install -g @tnunamak/dalan
-dalan service install --worker assistant --route tailscale
+dalan service install --worker assistant
 dalan connect start --worker assistant
 ```
 

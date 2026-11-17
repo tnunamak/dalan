@@ -106,7 +106,7 @@ await asyncCheck('retry preserves owned home bytes and modes and rejects unsafe 
   const home=path.join(root,'bridge-home'),xdg=path.join(root,'xdg'),ownerHome=path.join(root,'owner-home'),bin=path.join(root,'bin');
   fs.mkdirSync(ownerHome,{recursive:true});fs.mkdirSync(bin);
   const calls=path.join(root,'external.calls');
-  for(const command of ['systemctl','tailscale','launchctl']) fs.writeFileSync(path.join(bin,command),`#!/bin/sh\nprintf '%s\\n' "${command} $*" >> '${calls}'\nif [ "$2" = show ]; then [ "$TEST_SHOW_FAIL" != 1 ] || exit 1; printf '%s\\n' "$TEST_DROPINS"; fi\n`,{mode:0o755});
+  for(const command of ['systemctl','launchctl']) fs.writeFileSync(path.join(bin,command),`#!/bin/sh\nprintf '%s\\n' "${command} $*" >> '${calls}'\nif [ "$2" = show ]; then [ "$TEST_SHOW_FAIL" != 1 ] || exit 1; printf '%s\\n' "$TEST_DROPINS"; fi\n`,{mode:0o755});
   const env={...process.env,HOME:ownerHome,XDG_CONFIG_HOME:xdg,PATH:`${bin}:${process.env.PATH}`};
   assert.equal(spawnSync('sh',['-c','command -v launchctl'],{env,encoding:'utf8'}).stdout.trim(),path.join(bin,'launchctl'));
   const args=['--worker','lark','--public-url','https://retry.example.test','--port','18788','--home',home];
@@ -115,16 +115,18 @@ await asyncCheck('retry preserves owned home bytes and modes and rejects unsafe 
   const exposure=path.join(home,'dot-bridge-lark.exposure.json');
   const quiet={platform:'linux',env,log:()=>{}};
   let checks=0;
-  const verifyPublic=async()=>{checks++;return true;};
+  const gozar=createFakeGozar();
+  const addService=gozar.addService;
+  gozar.addService=async request=>{checks++;return addService(request);};
   const tree=()=>{
     const entries={};
     const visit=p=>{if(p===calls)return;const st=fs.lstatSync(p),rel=path.relative(root,p)||'.';entries[rel]={mode:st.mode&0o777,uid:st.uid,type:st.isDirectory()?'dir':st.isFile()?'file':'other'};if(st.isDirectory())for(const name of fs.readdirSync(p).sort())visit(path.join(p,name));else if(st.isFile())entries[rel].bytes=fs.readFileSync(p);};
     visit(root);return entries;
   };
-  const attempt=async(argv=retry)=>{checks=0;try{await run(argv,{...quiet,verifyPublic});return true;}catch{return false;}};
+  const attempt=async(argv=retry)=>{checks=0;try{await run(argv,{...quiet,gozar});return true;}catch{return false;}};
   try {
     await run(args,quiet);
-    fs.writeFileSync(exposure,JSON.stringify({mode:'tailscale',worker:'lark',dns_name:'retry.example.test',public_url:'https://retry.example.test',public_port:443,local_port:18788}),{mode:0o600});
+    fs.writeFileSync(exposure,JSON.stringify({mode:'historical-route',worker:'lark',dns_name:'retry.example.test',public_url:'https://retry.example.test',public_port:443,local_port:18788}),{mode:0o600});
     const before=tree();
     assert.equal(await attempt(),true,'valid initialized retry succeeds');
     assert.equal(checks,1,'valid retry performs one public check');
@@ -183,16 +185,23 @@ await asyncCheck('printed public retries retain no-repo-tools on both platform s
   const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'io-'));
   try {
     const bin=path.join(root,'bin');fs.mkdirSync(bin);
-    for(const name of ['systemctl','tailscale','launchctl','plutil']) fs.writeFileSync(path.join(bin,name),'#!/bin/sh\nexit 0\n',{mode:0o755});
+    for(const name of ['systemctl','launchctl','plutil']) fs.writeFileSync(path.join(bin,name),'#!/bin/sh\nexit 0\n',{mode:0o755});
     for(const platform of ['linux','darwin']) {
       const home=path.join(root,platform),ownerHome=path.join(root,platform+'-owner');fs.mkdirSync(ownerHome);
       const env={...process.env,HOME:ownerHome,XDG_CONFIG_HOME:path.join(root,platform+'-xdg'),PATH:`${bin}:${process.env.PATH}`};
-      let message='';
-      try {await run(['--worker','plain','--home',home,'--port','18790','--route','work','--start','--no-repo-tools'],{platform,env,log:()=>{},gozar:createFakeGozar(),consent:async()=>true,resolve4:async()=>null,verifyPublic:async()=>false});} catch(error) {message=error.message;}
+      let message='', allowProof=false, probes=0;
+      const routeApi=createFakeGozar(), status=routeApi.routeStatus;
+      routeApi.routeStatus=async request=>{
+        probes++;
+        const view=await status(request);
+        return allowProof?view:{...view,state:'unverified',published:null,verification:{status:'unverified'}};
+      };
+      try {await run(['--worker','plain','--home',home,'--port','18790','--route','work','--start','--no-repo-tools'],{platform,env,log:()=>{},gozar:routeApi,consent:async()=>true});} catch(error) {message=error.message;}
       const command=message.match(/Retry the check with: (.+?)\. To remove this install:/)?.[1];assert(command,message);
       const args=command.split(' ').slice(2);assert(args.includes('--no-repo-tools'),`${platform}: retry omitted the installed setting`);
-      let probes=0;
-      await run(args,{platform,env,log:()=>{},verifyPublic:async()=>{probes++;return true;}});
+      probes=0;
+      allowProof=true;
+      await run(args,{platform,env,log:()=>{},gozar:routeApi});
       assert.equal(probes,1,`${platform}: printed retry did not verify the matching target`);
     }
   } finally {fs.rmSync(root,{recursive:true,force:true});}

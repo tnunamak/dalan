@@ -19,7 +19,7 @@ import { acquireHomeLock, handoffText, hostedPrompt } from '../src/try-hosted.mj
 import { uaToken } from '../src/mcp-outcome.mjs';
 import { mcpResponseText } from '../src/mcp-sse.mjs';
 import { runSelfCheck, SELFCHECK_REDIRECT } from '../src/try-selfcheck.mjs';
-import { createGate, authorizationServerMetadataUrl, verifyPublicReady, watchPublicIdentity } from '../src/try-exposure.mjs';
+import { authorizationServerMetadataUrl, verifyPublicReady, watchPublicIdentity } from '../src/try-exposure.mjs';
 import { registerChild, sweepChildren } from '../src/child-registry.mjs';
 import { writeRouteSetting } from '../src/route-setting.mjs';
 import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
@@ -477,9 +477,11 @@ test('a home set up for another public address is refused, not re-issued', async
   const route = fakeRoute();
   const input = new PassThrough();
   const out = { write: text => { if (/Use this route\? \[y\/N\]/.test(text)) setImmediate(() => input.write('y\n')); } };
-  const run = await runTry({ argv: ['--public', '--home', home], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, 'cfg-moved') }, out, input, errorContext: {}, hosted: { interactive: true, gozar: route.gozar } }).catch(e => e);
-  assert.match(run?.message ?? '', /this home was set up for https:\/\/old\.example\.com/);
-  assert.equal(route.record.stopped, 1);
+  try {
+    const run = await runTry({ argv: ['--public', '--home', home], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, 'cfg-moved') }, out, input, errorContext: {}, hosted: { interactive: true, gozar: route.gozar } }).catch(e => e);
+    assert.match(run?.message ?? '', /this home was set up for https:\/\/old\.example\.com/);
+    assert.equal(route.record.stopped, 1);
+  } finally { await route.closeAll(); }
 });
 
 test('option parsing: local and public modes, routes and conflicts; no client enum, no callback gate', () => {
@@ -577,7 +579,7 @@ test('a run that loses the home lock removes nothing of the winner', async () =>
 });
 
 // ---- the route contract in a hosted run ------------------------------------------------------------------------------------------------
-test('unknown-origin bootstrap: a session route is allocated first, the gate answers 503 until the bridge is up, then Dalan verifies the address itself', async () => {
+test('unknown-origin bootstrap: Dalan allocates one route and waits for proof before revealing the address', async () => {
   const run = await hostedRun('bootstrap');
   try {
     await run.handoff();
@@ -585,7 +587,7 @@ test('unknown-origin bootstrap: a session route is allocated first, the gate ans
     const exposes = calls.filter(name => name === 'expose');
     assert.equal(exposes.length, 1);
     assert.match(run.out, /Public HTTPS, OAuth discovery and the authorization server's metadata verified\./);
-    assert.ok(run.out.indexOf('Public route ready.') < run.out.indexOf('Starting isolated trial'), 'the route exists before the bridge starts');
+    assert.doesNotMatch(run.out.slice(0, run.out.indexOf('verified.')), URL_LINE, 'no connector URL before proof');
     assert.ok(run.out.indexOf('Starting isolated trial') < run.out.indexOf('verified.'), 'the address is verified after the bridge starts');
   } finally { await run.close(); }
 });
@@ -701,25 +703,19 @@ test('two public identity failures interrupt an unanswered approval and ignore l
   } finally { await run.close(); }
 });
 
-test('the gate restores the public Host and keeps the Origin header intact', async () => {
-  const upstream = http.createServer((req, res) => {
-    if (req.headers.host !== 'fake-1.route.invalid') { res.writeHead(421); res.end(); return; }
-    res.writeHead(req.headers.origin === 'https://evil.example' ? 403 : 200);
-    res.end();
-  });
-  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
-  const gate = await createGate();
+test('the authenticated bridge behind a forwarding fixture refuses a wrong Host and an unrelated Origin', async () => {
+  const run = await hostedRun('host-fence');
   try {
-    gate.open(upstream.address().port, { publicOrigin: 'https://fake-1.route.invalid' });
-    const target = `http://127.0.0.1:${gate.port}/mcp`;
-    assert.equal((await realFetch(target)).status, 200, 'Gozar rewrites Host to the loopback target; restore the configured public host');
-    const wrongHost = await new Promise((resolve, reject) => {
-      const request = http.get(target, { headers: { host: 'evil.example' } }, response => { response.resume(); resolve(response.statusCode); });
+    const { url } = await run.handoff();
+    const port = run.errorContext.bindPort;
+    const status = (host, origin) => new Promise((resolve, reject) => {
+      const request = http.get({ hostname: '127.0.0.1', port, path: '/admin', headers: { host, ...(origin && { origin }) } },
+        response => { response.resume(); resolve(response.statusCode); });
       request.on('error', reject);
     });
-    assert.equal(wrongHost, 421, 'an unrelated host is still rejected');
-    assert.equal((await realFetch(target, { headers: { origin: 'https://evil.example' } })).status, 403, 'Origin is preserved for Dalan to check');
-  } finally { await gate.close(); await new Promise(resolve => upstream.close(resolve)); }
+    assert.equal(await status('evil.example'), 421);
+    assert.notEqual(await status(new URL(url).host, 'https://evil.example'), 200);
+  } finally { await run.close(); }
 });
 
 test('a session route asks Gozar for the trial lifetime and for allocation only', async () => {
@@ -728,24 +724,8 @@ test('a session route asks Gozar for the trial lifetime and for allocation only'
     await run.handoff();
     const exposed = run.gozar.fake.state.effects.find(e => e.type === 'expose');
     assert.ok(exposed.lifetimeMs > 0 && exposed.lifetimeMs <= 3 * 60 * 60 * 1000, `bounded lifetime, got ${exposed.lifetimeMs}`);
-    assert.equal(exposed.target, `127.0.0.1:${run.route.gatePort}`, 'the target is the gate, never the bridge bind address');
+    assert.equal(exposed.target, `127.0.0.1:${run.errorContext.bindPort}`, 'Dalan supplies its app port and Gozar owns the gate');
   } finally { await run.close(); }
-});
-
-test('the gate answers 503 until the bridge port is set, forwards to that one port, and refuses again when shut', async () => {
-  const upstream = http.createServer((req, res) => { res.writeHead(200, { 'x-saw': req.url }); res.end('bridge'); });
-  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
-  const gate = await createGate();
-  try {
-    assert.equal((await fetch(`http://127.0.0.1:${gate.port}/x`)).status, 503);
-    gate.open(upstream.address().port);
-    const through = await fetch(`http://127.0.0.1:${gate.port}/a/b`);
-    assert.equal(through.status, 200);
-    assert.equal(through.headers.get('x-saw'), '/a/b');
-    gate.shut();
-    assert.equal((await fetch(`http://127.0.0.1:${gate.port}/x`)).status, 503);
-  } finally { await gate.close(); upstream.close(); }
-  assert.equal(await closed(gate.port), true);
 });
 
 test('public readiness: wrong resource, wrong issuer, an unauthenticated 200 or an exposed owner route is not ready', async () => {
