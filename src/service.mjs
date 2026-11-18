@@ -498,22 +498,27 @@ async function installServiceLocked(o, seams) {
   const consent = seams.consent ?? (async () => fail('A durable route needs your explicit approval in a terminal.'));
   const setup = seams.setup && (candidate => seams.setup({ gozar, candidate, home: routeHome, env }));
   const allocateRoute = async origin => {
+    const remember = ref => {
+      const next = { ...ref, port: o.port };
+      writeAtomic(pendingPath, JSON.stringify(next));
+      pending = next;
+    };
     if (pending) {
       const observed = await observeRetainedRoute(gozar, pending);
       if (observed.state === 'recorded') {
         const { view } = observed;
         if (view.cleanup.state === 'confirmed') fail('The retained Gozar operation has been closed. Run dalan service uninstall for this home before starting a new install.');
         if (view.hostConfiguration?.target?.known && view.hostConfiguration.target.value !== o.target.value) fail('The retained route targets a different local listener.');
+        if (view.operationId !== pending.operationId || !view.handle) fail('The retained Gozar view does not identify the original operation and handle.');
+        // Observation recovery needs the same durable pointer as dispatch delivery,
+        // before a receipt or service-start failure can split those two records.
+        remember({ home: pending.home, operationId: pending.operationId, handle: view.handle });
         return view;
       }
     }
     const wanted = buildQuery({ home: routeHome, target: o.target.value, usage: { kind: 'durable', routeId: saved?.routeId ?? 'dalan-main' },
       route: o.route ?? saved?.routeName ?? undefined, origin, address: 'stable' });
     const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
-    const remember = ref => {
-      pending = { ...ref, port: o.port };
-      writeAtomic(pendingPath, JSON.stringify(pending));
-    };
     return ensureDurableRoute({ gozar, query, pick, consent, setup, remember, recovery: pending, external });
   };
   if (allocate) {

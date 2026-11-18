@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { defaultPath } from '../src/paths.mjs';
 import { fork } from 'node:child_process';
 import { deliveryFixture } from './gozar-admission-recovery-worker.mjs';
 import { createHash, randomUUID } from 'node:crypto';
@@ -331,4 +333,123 @@ test('service facade delivery release remembers the returned handle before servi
     release();
     await run;
   }
+});
+
+async function interruptedDelivery(t) {
+  const root = await mkdtemp(path.join(homedir(), '.tmp', 'delivery-observed-'));
+  let child, exited;
+  t.after(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    if (exited) await exited;
+    await rm(root, { recursive: true, force: true });
+  });
+  child = fork(new URL('./gozar-admission-recovery-worker.mjs', import.meta.url), [root],
+    { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  exited = new Promise(resolve => child.once('exit', resolve));
+  const held = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error('observed recovery barrier timed out')), 10000);
+    const finish = (error, value) => {
+      clearTimeout(timer);
+      child.off('message', message); child.off('exit', earlyExit); child.off('error', failed);
+      if (error) reject(error); else resolve(value);
+    };
+    const message = value => value.type === 'service-delivery-held'
+      ? finish(null, value) : finish(new Error('unexpected worker message: ' + JSON.stringify(value)));
+    const earlyExit = () => finish(new Error('worker exited before delivery barrier'));
+    const failed = error => finish(error);
+    child.on('message', message); child.once('exit', earlyExit); child.once('error', failed);
+  });
+  const x = deliveryFixture(root);
+  assert.equal(held.pointer.phase, 'dispatching');
+  assert.equal(held.pointer.handle, undefined);
+  assert.equal(held.pointer.operationId, held.returned.operationId);
+  assert.deepEqual(x.read().requests, [held.returned.operationId]);
+  child.kill('SIGKILL');
+  await exited;
+  return { x, held };
+}
+
+test('normal observed recovery remembers the handle before readiness and retires its pointer on approved uninstall',
+  { timeout: 20000 }, async t => {
+  const { x, held } = await interruptedDelivery(t);
+  const receiptFile = defaultPath(x.bridge, '.config/dot-bridge', 'service-install.json');
+  let readiness = 0;
+  await assert.rejects(installService(x.service, { ...x.seams, waitForSocket: async () => {
+    readiness++;
+    const pending = JSON.parse(readFileSync(x.pointer, 'utf8'));
+    const receipt = JSON.parse(readFileSync(receiptFile, 'utf8'));
+    assert.equal(pending.operationId, held.returned.operationId);
+    assert.deepEqual(pending.handle, held.returned.handle);
+    assert.equal(pending.phase, undefined);
+    assert.deepEqual(receipt.route_handle, pending.handle);
+    return false;
+  } }), /did not start on its admin socket/);
+  assert.equal(readiness, 1);
+  const pointer = readFileSync(x.pointer, 'utf8'), receipt = readFileSync(receiptFile, 'utf8');
+  assert.deepEqual(x.read().requests, [held.returned.operationId], 'observation does not redispatch');
+  await assert.rejects(uninstallService({ home: x.bridge, confirmRouteStop: async handle => {
+    assert.deepEqual(handle, held.returned.handle); return false;
+  } }, x.seams), /approval/);
+  assert.equal(readFileSync(x.pointer, 'utf8'), pointer);
+  assert.equal(readFileSync(receiptFile, 'utf8'), receipt);
+  assert.deepEqual(x.read().closes, []);
+  await uninstallService({ home: x.bridge, confirmRouteStop: async handle => {
+    assert.deepEqual(handle, held.returned.handle); return true;
+  } }, x.seams);
+  assert.equal(existsSync(x.pointer), false);
+  assert.deepEqual(x.read().closes, [held.returned.handle]);
+  assert.deepEqual(x.read().sentinel, { owner: 'neighbor', id: 'foreign-do-not-close' });
+  let consent = 0;
+  const fresh = deliveryFixture(x.root);
+  await assert.rejects(installService(fresh.service, { ...fresh.seams, consent: async () => {
+    consent++; return false;
+  } }), { code: 'consent_required' });
+  assert.equal(consent, 1, 'fresh install reaches new consent, not the retired operation');
+  assert.deepEqual(x.read().requests, [held.returned.operationId]);
+  assert.deepEqual(x.read().closes, [held.returned.handle]);
+});
+
+test('observed recovery write failure retains uncertainty and stops before service effects',
+  { timeout: 20000 }, async t => {
+  const { x, held } = await interruptedDelivery(t);
+  const before = readFileSync(x.pointer, 'utf8');
+  const originalOpen = fs.openSync;
+  const failure = Object.assign(new Error('fixture pending atomic open failed'), { code: 'EIO' });
+  let writes = 0, starts = 0, readiness = 0;
+  const seams = { ...x.seams,
+    spawn: (command, args) => {
+      if (!args.includes('show-environment')) starts++;
+      return { status: 0, stdout: '' };
+    },
+    waitForSocket: async () => { readiness++; return false; },
+  };
+  const mock = t.mock.method(fs, 'openSync', function(file, flags, ...args) {
+    if (typeof file === 'string' && file.startsWith(x.pointer + '.') &&
+        file.endsWith('.tmp') && flags === 'wx') {
+      writes++; throw failure;
+    }
+    return originalOpen.call(fs, file, flags, ...args);
+  });
+  try {
+    await assert.rejects(installService(x.service, seams), error => error === failure);
+  } finally { mock.mock.restore(); }
+  assert.equal(writes, 1);
+  assert.equal(starts, 0);
+  assert.equal(readiness, 0);
+  assert.equal(existsSync(defaultPath(x.bridge, '.config/dot-bridge', 'service-install.json')), false);
+  assert.equal(readFileSync(x.pointer, 'utf8'), before);
+  assert.deepEqual(x.read().requests, [held.returned.operationId]);
+  assert.deepEqual(x.read().closes, []);
+  assert.deepEqual(x.read().sentinel, { owner: 'neighbor', id: 'foreign-do-not-close' });
+  await assert.rejects(installService(x.service, x.seams), /did not start on its admin socket/);
+  const saved = JSON.parse(readFileSync(x.pointer, 'utf8'));
+  assert.equal(saved.operationId, held.returned.operationId);
+  assert.deepEqual(saved.handle, held.returned.handle);
+  assert.deepEqual(x.read().requests, [held.returned.operationId]);
+  await uninstallService({ home: x.bridge, confirmRouteStop: async handle => {
+    assert.deepEqual(handle, held.returned.handle); return true;
+  } }, x.seams);
+  assert.equal(existsSync(x.pointer), false);
+  assert.deepEqual(x.read().closes, [held.returned.handle]);
+  assert.deepEqual(x.read().sentinel, { owner: 'neighbor', id: 'foreign-do-not-close' });
 });
