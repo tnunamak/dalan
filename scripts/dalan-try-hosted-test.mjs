@@ -459,6 +459,33 @@ test('a route that is lost stops the trial, with the route closed and the restar
   } finally { await run.close(); }
 });
 
+test('a pending reproof withdraws the handoff and resumes the same hosted trial', async () => {
+  const run = await hostedRun('reproof');
+  try {
+    const { url } = await run.handoff();
+    const file = path.join(run.home, 'resource-url');
+    await beginPairing(url, { redirect: CHATGPT_CALLBACK, clientName: 'Fixture client' });
+    await run.until(/Approve this connection\? \[y\/N\] /);
+    const original = run.gozar.fake.state.sessions.get(run.route.id).view;
+    run.gozar.fake.change(run.route.id, { state: 'unverified', published: null, verification: { status: 'unverified' } });
+    await run.until(/Waiting for verification of the same address/);
+    run.input.write('y\n');
+    await run.until(/Approval was not recorded/);
+    assert.doesNotMatch(run.out, /Connection approved\./);
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(run.route.started, 1);
+    assert.equal(run.route.stopped, 0);
+    run.gozar.fake.change(run.route.id, original);
+    for (let attempt = 0; attempt < 40 && !fs.existsSync(file); attempt++) await sleepMs(50);
+    assert.equal(fs.readFileSync(file, 'utf8').trim(), url);
+    assert.equal(run.route.started, 1);
+    run.route.die();
+    assert.equal((await run.finished).error.tryKind, 'route_lost');
+    assert.equal(run.route.stopped, 1);
+    assert.equal(fs.existsSync(file), false);
+  } finally { await run.close(); }
+});
+
 test('a public address that never answers as this bridge stops the trial before any URL is shown', async () => {
   const clock = virtualClock();
   const run = await hostedRun('notready', { clock, fetchImpl: async () => { throw new Error('fetch failed'); } });

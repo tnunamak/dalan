@@ -16,7 +16,19 @@ async function fixture(t) {
   const registry = await fakeRegistry({ id: 'edge-' + randomUUID().slice(0, 8), kinds: ['attached', 'durable', 'session'],
     reach: 'internet', dir: root });
   const harness = await createTestingGozar({ manifest: registry.manifest, root: registry.root, effects: [] });
-  t.after(async () => { await harness.close(); await rm(root, { recursive: true, force: true }); });
+  let expectedDebt;
+  t.after(async () => {
+    try {
+      if (expectedDebt) {
+        assert.deepEqual(harness.events, [], 'the isolated failure started no provider effects');
+        await assert.rejects(harness.close(), error => {
+          assert.equal(error.code, 'cleanup_debt');
+          assert.deepEqual(error.route.handle, expectedDebt);
+          return true;
+        });
+      } else await harness.close();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   const home = path.join(root, 'g'), bridge = path.join(root, 'd');
   const env = { PATH: process.env.PATH, HOME: root, GOZAR_HOME: home, XDG_CONFIG_HOME: path.join(root, 'c'), XDG_STATE_HOME: path.join(root, 's') };
   const serviceFile = path.join(env.XDG_CONFIG_HOME, 'dalan', 'route-installs', createHash('sha256').update(bridge).digest('hex') + '.json');
@@ -39,7 +51,8 @@ async function fixture(t) {
     assert.deepEqual(current.handle, sentinel.handle);
     assert.notEqual(current.cleanup.state, 'confirmed');
   };
-  return { home, bridge, env, gozar, sentinel, serviceFile, trialFile, service, seams, makeRef, intact };
+  return { home, bridge, env, gozar, sentinel, serviceFile, trialFile, service, seams, makeRef, intact,
+    expectCleanupDebt(handle) { expectedDebt = handle; } };
 }
 
 test('service retry obtains fresh consent and dispatches the prepared operation ID once', async t => {
@@ -113,6 +126,29 @@ test('a real pre-reservation SDK consent refusal keeps the same prepared ID for 
     assert.equal(subject.operationId, offered);
     return true;
   } }, x.seams);
+  await x.intact();
+});
+
+test('a consent refusal with a public SDK recovery view retains its exact handle', async t => {
+  const x = await fixture(t);
+  const ensureRoute = x.gozar.ensureRoute;
+  let providerId;
+  x.gozar.ensureRoute = request => ensureRoute(request.approval
+    ? { ...request, providerId, approval: { ...request.approval, candidateToken: 'unissued-fixture-token' } }
+    : request);
+  let refused;
+  await assert.rejects(installService(x.service, { ...x.seams, consent: async candidate => {
+    providerId = candidate.providerId;
+    return true;
+  } }), error => {
+    refused = error;
+    return error.code === 'consent_unknown' && !!error.route?.handle;
+  });
+  const saved = JSON.parse(readFileSync(x.serviceFile));
+  assert.equal(saved.phase, undefined);
+  assert.equal(saved.operationId, refused.route.operationId);
+  assert.deepEqual(saved.handle, refused.route.handle);
+  x.expectCleanupDebt(saved.handle);
   await x.intact();
 });
 

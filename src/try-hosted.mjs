@@ -319,7 +319,20 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       if (fix) say(`Next: ${fix}`);
       throw error;
     }
-    void route.watchPublished();
+    let sdkPublished = false, handoffEnabled = false;
+    let publication = Promise.withResolvers();
+    const writeHandoff = () => writeAtomic(urlFile, `${mcpUrl}\n`);
+    void route.watchPublished(available => {
+      sdkPublished = available;
+      if (available) {
+        if (handoffEnabled && !routeDied && !stopRequested()) writeHandoff();
+        publication.resolve();
+      } else {
+        fs.rmSync(urlFile, { force: true });
+        publication = Promise.withResolvers();
+        if (handoffEnabled) say('Gozar withdrew route proof. Waiting for verification of the same address.');
+      }
+    });
     const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS, say, signal });
     if (!ready.ready) { const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
     say("Public HTTPS, OAuth discovery and the authorization server's metadata verified.");
@@ -336,7 +349,6 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     }
 
     if (routeDied) throw Object.assign(new Error('Gozar withdrew the public route during startup.'), { tryKind: 'route_lost' });
-    writeAtomic(urlFile, `${mcpUrl}\n`);
     await dalan(['connect', 'start', '--worker', HOSTED_WORKER]);
     const requestId = `req_${randomUUID()}`;
     const phrase = `${REPORT} ${randomBytes(4).toString('hex')}`;
@@ -352,6 +364,16 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       routeGone = Promise.race([routeGone, expiry]);
     }
     const trialLeft = () => trialEndsAt === null ? '' : ` Local shutdown limit: ${timeLeft(trialEndsAt - clock.now())}. The temporary link can stop earlier.`;
+    const proofDeadline = AbortSignal.timeout(deps.readyMs ?? PUBLIC_READY_MS);
+    const proofTimedOut = new Promise(resolve => proofDeadline.addEventListener('abort', resolve, { once: true }));
+    while (!sdkPublished && !routeDied && !stopRequested() && !trialOver() && !proofDeadline.aborted) {
+      await Promise.race([publication.promise, untilStopRequested(), proofTimedOut]);
+    }
+    if (stopRequested()) return;
+    if (routeDied) throw Object.assign(new Error('Gozar withdrew the public route during startup.'), { tryKind: 'route_lost' });
+    if (!sdkPublished || trialOver()) throw Object.assign(new Error('Gozar did not verify the same public address before the handoff deadline.'), { tryKind: 'route' });
+    handoffEnabled = true;
+    writeHandoff();
     if (trialEndsAt !== null) say(`This trial has a local shutdown limit of ${timeLeft(trialEndsAt - clock.now())}; the temporary link can stop earlier or without warning. Run \`dalan setup\` to choose a stable route. Setup does not install a background service.`);
     say('');
     say(handoffText({ url: mcpUrl }));
@@ -369,16 +391,21 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     }[stage]);
     const stillCurrent = async attempt => (await pendingNow()).pending.some(p => p.code === attempt.code && !p.superseded);
     const approve = async attempt => {
-      if (routeDied || !await stillCurrent(attempt) || routeDied) return false;
+      if (!sdkPublished || routeDied || !await stillCurrent(attempt) || !sdkPublished || routeDied) return false;
       try { return JSON.parse(await dalan(['connect', 'approve', attempt.code, '--worker', HOSTED_WORKER, '--replace', '--json'])).result ?? true; }
       catch (error) { if (routeDied) return false; if (exited || await stillCurrent(attempt)) throw error; return false; }
     };
     // Help is read from the same input as the answers: a line that is not an answer is checked for it.
     let asking = false;
-    lines.on('line', line => { if (line.trim().toLowerCase() === 'help' && !asking) { if (stage === 'approved') { showPrompt(); return; } say(`${STEPS.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n(The connector URL is in ${urlFile}.)`); } });
+    lines.on('line', line => { if (line.trim().toLowerCase() === 'help' && !asking) {
+      if (!sdkPublished) { say('Waiting for Gozar to verify the public route.'); return; }
+      if (stage === 'approved') { showPrompt(); return; }
+      say(`${STEPS.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n(The connector URL is in ${urlFile}.)`);
+    } });
     const askOnce = async question => { asking = true; try { return await ask(question); } finally { asking = false; } };
 
     while (!exited && !stopRequested() && !routeDied && !trialOver()) {
+      if (!sdkPublished) { await Promise.race([publication.promise, untilStopRequested()]); continue; }
       const current = await job();
       if (current.status === 'finished') {
         const result = String(current.report?.result ?? '');
@@ -413,6 +440,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
           const answer = await askOnce('Approve this connection? [y/N] ');
           remindAt = Math.max(remindAt, clock.now() + DIAGNOSE_AFTER_MS);
           if (answer?.trim().toLowerCase() === 'y' && !routeDied) {
+            if (!sdkPublished) {
+              seen.delete(attempt.code);
+              say('The route is waiting for proof. Approval was not recorded.');
+              break;
+            }
             const result = await approve(attempt);
             if (routeDied) {
               break;

@@ -1,8 +1,9 @@
 // All SDK imports resolve through the installed package's public exports.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
+import net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
@@ -34,12 +35,24 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
   const registry = await fakeRegistry({ id, kinds: ['attached', 'session'], reach: 'internet', dir: root,
     protocols: ['sse', 'streamable-http', 'oauth-dcr'] });
   const trial = join(root, 'd');
+  const probe = net.createServer();
+  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const appPort = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  const preparedId = process.env.DALAN_TEST_PREPARED_ROUTE === '1' ? randomUUID() : null;
+  if (preparedId) {
+    await mkdir(trial, { mode: 0o700 });
+    await writeFile(join(trial, '.dalan-trial'), 'created by dalan try\n', { mode: 0o600 });
+    await writeFile(join(trial, '.route-reference.json'), JSON.stringify({ home, operationId: preparedId, phase: 'prepared', port: appPort }), { mode: 0o600 });
+  }
   const stop = new AbortController();
   const input = new PassThrough();
   const foreign = await forwarder('127.0.0.1:1');
   const resources = new Map([['foreign', foreign]]);
   let requestedTarget, publicOrigin, nonceReads = 0, removed = [];
   const browserReceipt = process.env.DALAN_TEST_BROWSER_RECEIPT;
+  const testReproof = process.env.DALAN_TEST_REPROOF_ROUTE === '1';
+  let challengeAvailable = true;
   let browserObserved, browserProbePending = Boolean(browserReceipt);
   const publicFetch = async (url, init = {}) => {
     const parsed = new URL(url);
@@ -80,6 +93,7 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
       return { closed: true };
     } },
     { kind: 'network', operation: 'fetch', async handle({ url, method, headers }) {
+      if (!challengeAvailable && /\/identity$/.test(new URL(url).pathname)) return { status: 502, headers: {}, chunks: [] };
       const response = await publicFetch(url, { method, headers });
       if (/\/identity$/.test(new URL(url).pathname) && response.ok) nonceReads++;
       const chunks = [];
@@ -103,7 +117,7 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
   let output = '';
   let signalHandoff;
   const handoff = new Promise(resolve => { signalHandoff = resolve; });
-  const run = runTry({ argv: ['--public', '--home', trial],
+  const run = runTry({ argv: ['--public', '--home', trial, '--port', String(appPort)],
     env: { PATH: process.env.PATH, HOME: root, GOZAR_HOME: home, XDG_CONFIG_HOME: join(root, 'c'), XDG_STATE_HOME: join(root, 's') },
     out: { write(text) {
       output += text;
@@ -112,13 +126,17 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
     } }, input, signal: stop.signal, errorContext: {},
     hosted: { interactive: true, gozar: harness.gozar, fetchImpl: publicFetch, readyMs: browserReceipt ? 18000 : 3000 },
   });
+  let handedOff = false;
   try {
     await Promise.race([handoff, run.then(() => assert.fail('trial stopped before handoff'))]);
-    const url = (await readFile(join(trial, 'resource-url'), 'utf8')).trim();
+    handedOff = true;
+    const resourceFile = join(trial, 'resource-url');
+    const url = (await readFile(resourceFile, 'utf8')).trim();
     assert.equal(new URL(url).origin, publicOrigin);
     assert.ok(nonceReads > 0, 'the public check reached the SDK-owned nonce endpoint');
     const { routes } = await harness.gozar.listRoutes({ home, owner: 'dalan' });
     const [route] = routes;
+    if (preparedId) assert.deepEqual(routes.map(view => view.operationId), [preparedId]);
     assert.equal(route.published, publicOrigin);
     assert.notEqual(requestedTarget, route.verification.subject.target, 'provider forwards to the SDK gate');
     assert.ok(route.verification.checks.includes('nonce'));
@@ -129,14 +147,30 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
     assert.equal(owner.status, 404);
     const wrongHost = await publicFetch(publicOrigin + '/admin', { headers: { host: 'unrelated.invalid', 'x-forwarded-host': new URL(publicOrigin).host } });
     assert.equal(wrongHost.status, 421, 'a forwarded authority cannot substitute for the wrong Host');
+    if (testReproof) {
+      challengeAvailable = false;
+      await waitForResource(resourceFile, false);
+      assert.deepEqual([...resources.keys()], ['foreign', 'owned']);
+      assert.deepEqual(removed, []);
+      challengeAvailable = true;
+      await waitForResource(resourceFile, true);
+      assert.equal((await readFile(resourceFile, 'utf8')).trim(), url);
+      const { routes: resumed } = await harness.gozar.listRoutes({ home, owner: 'dalan' });
+      assert.deepEqual(resumed.map(view => view.handle), [route.handle]);
+      t.diagnostic('The installed SDK withdrew proof after a failed nonce read, and Dalan restored the same handoff when proof returned.');
+    }
     assert.doesNotMatch(output, /candidateToken|approvalToken/);
     stop.abort();
     await run;
     assert.deepEqual(removed, ['owned']);
     assert.equal(resources.size, 1);
     assert.equal(resources.get('foreign'), foreign);
+    if (preparedId) {
+      await assert.rejects(readFile(join(trial, '.route-reference.json')), { code: 'ENOENT' });
+      t.diagnostic('The prepared operation kept its ID through approval, route proof, bridge traffic and cleanup.');
+    }
   } catch (error) {
-    if (proof) {
+    if (proof && !handedOff) {
       assert.equal(proof.published, publicOrigin);
       assert.ok(proof.verification.checks.includes('nonce'));
       assert.notEqual(requestedTarget, proof.verification.subject.target);
@@ -157,3 +191,16 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function waitForResource(file, expected) {
+  const until = Date.now() + 12000;
+  while (Date.now() < until) {
+    const present = await readFile(file).then(() => true, error => {
+      if (error.code !== 'ENOENT') throw error;
+      return false;
+    });
+    if (present === expected) return;
+    await sleep(75);
+  }
+  assert.fail(`The trial connector URL should be ${expected ? 'published' : 'withdrawn'}.`);
+}

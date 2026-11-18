@@ -69,7 +69,7 @@ If you already serve a stable HTTPS address through your own reverse proxy, regi
 dalan service install --worker assistant --public-url https://PUBLIC_HOST --port PORT --target TARGET_IP:TARGET_PORT
 ```
 
-Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. Prepare the proxy first so the public origin forwards to the address in `--target`, an IPv4 address and port such as `192.168.1.20:8792`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. TLS ends at the proxy. Keep the secret path out of proxy logs.
+Run this command in a terminal and approve the matching owner-managed offer shown by Gozar. Gozar records and verifies the existing origin and listener. You retain the proxy and its configuration. Prepare the proxy first so the public origin forwards to the address in `--target`, an IPv4 address and port such as `192.168.1.20:8792`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. TLS ends at the proxy. Keep the secret path out of proxy logs.
 
 The proxy must forward these routes without removing their prefixes, methods, query strings, authorization headers or cookies:
 

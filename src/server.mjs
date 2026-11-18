@@ -1563,7 +1563,7 @@ const publicListening=new Promise(resolve=>publicServer.listen(port,bindHost,()=
 // Every background writer starts only when no update window is open, so a candidate restarted inside the window changes no state
 // the rollback snapshot would discard. Outside a window this runs at once, in the same order as before.
 function startBackground() {
-  if (verifyService && as) void publicListening.then(() => watchServicePublication({
+  if (verifyService && as && readEnv('DALAN_TRIAL_SSE') !== '1') void publicListening.then(() => watchServicePublication({
     home, configDir, origin: new URL(as.publicUrl).origin, secret, canWrite: () => !updateWindowOpen(),
   }));
   store.recoverSends();

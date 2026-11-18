@@ -115,12 +115,10 @@ try {
   assert.deepEqual(JSON.parse(fs.readFileSync(workersFile, 'utf8')), { workers: { lark: { repos: [], workspaceAllowed: true } }, default_execution: 'none' });
   assert(fs.existsSync(path.join(home, '.config/dalan/as.json')), 'init wrote as.json');
   const urlFile = path.join(home, 'resource-url');
-  assert.equal(mode(urlFile), 0o600);
-  const resourceUrl = fs.readFileSync(urlFile, 'utf8').trim();
-  assert.match(resourceUrl, /^https:\/\/lark-bridge\.example\.test\/[a-f0-9]{64}\/mcp$/);
-  const secret = resourceUrl.split('/')[3];
+  assert.equal(fs.existsSync(urlFile), false, 'an unstarted service has no connector handoff');
+  const secret = /BRIDGE_PATH_SECRET=([a-f0-9]{64})/.exec(fs.readFileSync(path.join(home, '.config/dalan/env'), 'utf8'))[1];
   assert(!ok.stdout.includes(secret) && !ok.stderr.includes(secret), 'output never shows the resource URL secret');
-  assert(ok.stdout.includes(urlFile), 'output names the resource URL file');
+  assert(ok.stdout.includes('--retry-public-check'), 'output names the approval and verification command');
   // The same worker guidance that `dalan try` writes sits next to the resource URL file, so one recipe path works for both.
   const guideFile = path.join(home, 'worker-instructions.md');
   assert.equal(mode(guideFile), 0o600);
@@ -165,18 +163,26 @@ try {
   assert(lines.some(l => /^WorkingDirectory=\/.+/.test(l)), 'absolute working directory');
   assert(!service.includes(secret) && !/KEY=.+|TOKEN|SECRET/.test(service.replace('UnsetEnvironment=OPENAI_API_KEY ANTHROPIC_API_KEY', '')), 'no secrets in the unit');
   const beforeRetry={home:snapshotTree(home),unit:fs.readFileSync(path.join(unitDir,'dot-bridge-lark.service'),'utf8')};
-  const retryArgs=['--retry-public-check','--worker','lark','--public-url','https://lark-bridge.example.test','--port','18788','--home',home];
+  const retryArgs=['--retry-public-check','--worker','lark','--public-url','https://lark-bridge.example.test','--port','18788','--home',home,'--lan-forward','198.51.100.180:18789'];
   let checkCalls=0;
-  const retryGozar=createFakeGozar(), registerRoute=retryGozar.addService;
-  retryGozar.addService=async request=>{checkCalls++;assert.equal(request.origin,'https://lark-bridge.example.test');return registerRoute(request);};
-  await run(retryArgs,{platform:'linux',env,gozar:retryGozar,log:()=>{}});
+  const retryGozar=createFakeGozar(), ensureRoute=retryGozar.ensureRoute;
+  retryGozar.ensureRoute=async request=>{checkCalls++;assert.equal(request.origin,'https://lark-bridge.example.test');assert.equal(request.target,'198.51.100.180:18789');return ensureRoute(request);};
+  const publicOutput = [];
+  await run(retryArgs,{platform:'linux',env,gozar:retryGozar,log:text=>publicOutput.push(text),consent:async()=>true});
   assert.equal(checkCalls,1,'matching retry checks its existing public origin');
+  assert.equal(mode(urlFile), 0o600);
+  assert.equal(fs.readFileSync(urlFile, 'utf8').trim(), `https://lark-bridge.example.test/${secret}/mcp`);
+  assert(publicOutput.some(line => line.includes(urlFile)), 'output names the verified resource file');
+  assert(publicOutput.every(line => !line.includes(secret)), 'verification output never shows the resource URL secret');
   for(const [label,args] of [['worker',['--worker','other']],['port',['--port','18789']],['origin',['--public-url','https://other.example.test']],['home',['--home',path.join(root,'unrelated')]]]) {
     const before=checkCalls;
     assert.throws(()=>run([...retryArgs,...args],{platform:'linux',env,gozar:retryGozar,log:()=>{}}),/--retry-public-check/);
     assert.equal(checkCalls,before,`${label} mismatch refuses before public request`);
   }
-  assert.deepEqual({home:snapshotTree(home),unit:fs.readFileSync(path.join(unitDir,'dot-bridge-lark.service'),'utf8')},beforeRetry,'retry leaves credentials, profile and service unchanged');
+  const afterRetry = snapshotTree(home);
+  delete afterRetry['resource-url'];
+  delete afterRetry['.config/dalan/route-reference.json'];
+  assert.deepEqual({home:afterRetry,unit:fs.readFileSync(path.join(unitDir,'dot-bridge-lark.service'),'utf8')},beforeRetry,'retry leaves credentials, profile and service unchanged');
   const socket = fs.readFileSync(path.join(unitDir, 'dot-bridge-lark-lan.socket'), 'utf8');
   assert(socket.includes('ListenStream=198.51.100.180:18789') && socket.includes('FreeBind=true'));
   const forward = fs.readFileSync(path.join(unitDir, 'dot-bridge-lark-lan.service'), 'utf8');
@@ -427,7 +433,8 @@ try {
   assert.equal(fs.statSync(plist).mode & 0o777, 0o644);
   const text = fs.readFileSync(plist, 'utf8');
   const envSecret = /BRIDGE_PATH_SECRET=([a-f0-9]{64})/.exec(fs.readFileSync(path.join(fern, '.config/dalan/env'), 'utf8'))[1];
-  const fernUrl = fs.readFileSync(path.join(fern, 'resource-url'), 'utf8').trim();
+  assert.equal(fs.existsSync(path.join(fern, 'resource-url')), false);
+  const fernUrl = `https://fern-bridge.example.test/${envSecret}/mcp`;
   assert(!text.includes(envSecret) && !text.includes(fernUrl), 'plist holds no secret or resource URL');
   const plistNode = text.match(/<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>/)[1];
   assert(path.isAbsolute(plistNode) && fs.realpathSync(plistNode) === fs.realpathSync(process.execPath), 'plist uses an absolute node path resolving to the running node');

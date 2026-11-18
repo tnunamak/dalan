@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { defaultPath } from '../src/paths.mjs';
-import { installService } from '../src/service.mjs';
+import { installService as install } from '../src/service.mjs';
 import { createFakeGozar } from '../src/test-support/gozar-fake.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -21,19 +21,23 @@ const xdg = path.join(userHome, '.config');
 const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: xdg, GOZAR_HOME: gozarHome };
 const assertPrivateGozarHome = value => assert.ok(typeof value === 'string' && (path.resolve(value) === root || path.resolve(value).startsWith(`${root}${path.sep}`)), `Gozar home must be inside test root: ${value}`);
 const calls = [];
+const installService = (options, seams) => install(options, { consent: async () => true, ...seams });
 const route = { origin: 'https://bridge.example.test', target: '192.0.2.10:8787', verification: { status: 'verified', method: 'challenge' } };
 const spawn = (command, args, options = {}) => { assertPrivateGozarHome(options.env?.GOZAR_HOME); calls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; };
 // A contract-faithful Gozar (the unreleased runtime is not needed here). It records the call in the same list as systemctl so order is visible.
 const makeGozar = ({ status = 'verified', mutate = r => r, failWith = null, log = calls, statusOf = () => status } = {}) => {
   const gozar = createFakeGozar();
-  const add = gozar.addService;
-  gozar.addService = async request => {
+  const ensure = gozar.ensureRoute;
+  gozar.ensureRoute = async request => {
     assertPrivateGozarHome(request.home);
-    log.push(['gozar-addService', request.origin, request.target, request.verifyCmd ?? null]);
+    log.push(['gozar-ensureRoute', request.origin, request.target]);
     if (failWith) throw failWith;
-    const reply = await add(request);
-    reply.route = mutate({ ...reply.route, verification: { status: statusOf(), method: 'challenge' } });
-    return reply;
+    const view = await ensure(request);
+    const result = mutate({ ...view, target: view.hostConfiguration.target.value });
+    const verified = statusOf() === 'verified';
+    return { ...result, state: verified ? 'usable' : 'unverified', published: verified ? result.origin : null,
+      hostConfiguration: { target: { known: true, value: result.target } },
+      verification: { ...result.verification, status: verified ? 'verified' : 'unverified' } };
   };
   const routeStatus = gozar.routeStatus;
   gozar.routeStatus = async request => {
@@ -71,7 +75,7 @@ try {
     spawn(command, args) { bundledCalls.push([command, ...args]); return { status: 0, stdout: '', stderr: '' }; }, waitForSocket: async () => true,
   });
   assert.equal(bundledResult.started, true);
-  assert.equal(bundledCalls.filter(call => call[0] === 'gozar-addService').length, 1);
+  assert.equal(bundledCalls.filter(call => call[0] === 'gozar-ensureRoute').length, 1);
   assert.equal(bundledCalls.some(call => call[0] === 'gozar'), false, 'no Gozar executable is run');
 
   // Simulate an installed SDK without the route contract; do not depend on the real package being old.
@@ -138,10 +142,10 @@ assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling a
   assert.match(serviceUnit, /Environment=DALAN_AUTH_MODE=builtin/);
   assert.match(serviceUnit, /Environment=DALAN_GOZAR_SERVICE=1/);
   assert.match(serviceUnit, /Environment=DALAN_CATALOG_PROFILE=stable/);
-  const callsBeforeGozar = calls.findIndex(call => call[0] === 'gozar-addService');
+  const callsBeforeGozar = calls.findIndex(call => call[0] === 'gozar-ensureRoute');
   assert(callsBeforeGozar > 0, 'Gozar route is registered after systemd starts the service');
   assert(calls.some(call => call.join(' ').includes('enable --now') && call.join(' ').includes('target.socket')));
-  assert.deepEqual(calls[callsBeforeGozar], ['gozar-addService', 'https://bridge.example.test', '192.0.2.10:8787', null]);
+  assert.deepEqual(calls[callsBeforeGozar], ['gozar-ensureRoute', 'https://bridge.example.test', '192.0.2.10:8787']);
   assert(calls.findIndex(call => call.join(' ').includes('enable --now')) < callsBeforeGozar, 'the route is registered only after the service is enabled');
 
   const grantedRepo = 'example-owner/fixture';
@@ -338,13 +342,13 @@ assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling a
 
   const verifyCmd = 'trusted-check --origin "https://bridge.example.test"';
   const translatedCalls = [];
-  const translated = await installService({ home: path.join(root, 'translated'), origin: route.origin, port: 8798,
+  await assert.rejects(installService({ home: path.join(root, 'translated'), origin: route.origin, port: 8798,
     target: '192.0.2.10:8799', lanPort: 8799, verifyCmd, workers: ['dot'] }, {
     gozar: makeGozar({ log: translatedCalls, mutate: r => ({ ...r, target: '192.0.2.10:8799' }) }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
     spawn: () => ({ status: 0, stdout: '', stderr: '' }), waitForSocket: async () => true,
-  });
-  assert.equal(translated.started, true);
-  assert.deepEqual(translatedCalls.find(call => call[0] === 'gozar-addService'), ['gozar-addService', route.origin, '192.0.2.10:8799', verifyCmd]);
+  }), /custom verification command cannot publish/);
+  assert.deepEqual(translatedCalls, [], 'a custom verifier grants no route effects');
+  assert.equal(fs.existsSync(path.join(root, 'translated')), false);
 
   const oldHome = path.join(root, 'existing-bridge-data');
   fs.mkdirSync(path.join(oldHome, '.local/share/dalan'), { recursive: true, mode: 0o700 });
@@ -411,13 +415,17 @@ assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling a
   await legacyInstall();
   assert.equal(fs.readFileSync(legacyFile, 'utf8'), fresh, 'a unit from 0.6.x without ExecStartPre is still enrolled and gains recovery');
 
-  for (const field of ['origin', 'target']) {
+  for (const field of ['origin', 'target', 'proof-generation']) {
     const mismatchHome = path.join(root, `mismatch-${field}`);
     await assert.rejects(installService({ home: mismatchHome, origin: route.origin, port: 8787,
       target: route.target, lanPort: 8787, workers: ['dot'] }, {
-      gozar: makeGozar({ mutate: r => ({ ...r, [field]: field === 'origin' ? 'https://wrong.example.test' : '192.0.2.11:8789' }) }), env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
+      gozar: makeGozar({ mutate: r => field === 'proof-generation' ? {
+        ...r, verification: { ...r.verification, subject: { ...r.verification.subject, handleGeneration: 9 } },
+      } : { ...r, [field]: field === 'origin' ? 'https://wrong.example.test' : '192.0.2.11:8789' } }),
+      env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', proxy: '/usr/lib/systemd/systemd-socket-proxyd',
       spawn, waitForSocket: async () => true,
-    }), /does not match/);
+    }), field === 'proof-generation' ? /publication proof for a different/ : /does not match/);
+    assert.equal(fs.existsSync(path.join(mismatchHome, 'resource-url')), false);
   }
 
   const gozarFailureHome = path.join(root, 'gozar-failure');
@@ -431,7 +439,7 @@ assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling a
   await assert.rejects(installService({ home: path.join(root, 'named-unknown'), origin: 'https://named.example.test', port: 8797, target: '127.0.0.1:8797', workers: ['dot'], route: 'zq-invented-7' }, {
     gozar: named, env, platform: 'linux', node: '/usr/bin/node', repo: '/opt/dalan', spawn, waitForSocket: async () => true, consent: async () => true,
   }), error => error.code === 'route_not_found');
-  assert.equal(named.fake.state.effects.some(effect => effect.type === 'addService'), false, 'no external service is registered for a named route');
+  assert.deepEqual(named.fake.state.effects, [], 'an unknown route name authorizes no effects');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

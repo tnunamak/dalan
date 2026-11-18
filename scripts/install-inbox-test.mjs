@@ -116,21 +116,25 @@ await asyncCheck('retry preserves owned home bytes and modes and rejects unsafe 
   const quiet={platform:'linux',env,log:()=>{}};
   let checks=0;
   const gozar=createFakeGozar();
-  const addService=gozar.addService;
-  gozar.addService=async request=>{checks++;return addService(request);};
+  const ensureRoute=gozar.ensureRoute, routeStatus=gozar.routeStatus;
+  gozar.ensureRoute=async request=>{checks++;return ensureRoute(request);};
+  gozar.routeStatus=async request=>{checks++;return routeStatus(request);};
   const tree=()=>{
     const entries={};
     const visit=p=>{if(p===calls)return;const st=fs.lstatSync(p),rel=path.relative(root,p)||'.';entries[rel]={mode:st.mode&0o777,uid:st.uid,type:st.isDirectory()?'dir':st.isFile()?'file':'other'};if(st.isDirectory())for(const name of fs.readdirSync(p).sort())visit(path.join(p,name));else if(st.isFile())entries[rel].bytes=fs.readFileSync(p);};
     visit(root);return entries;
   };
-  const attempt=async(argv=retry)=>{checks=0;try{await run(argv,{...quiet,gozar});return true;}catch{return false;}};
+  const attempt=async(argv=retry)=>{checks=0;try{await run(argv,{...quiet,gozar,consent:async()=>true});return true;}catch{return false;}};
   try {
     await run(args,quiet);
     fs.writeFileSync(exposure,JSON.stringify({mode:'historical-route',worker:'lark',dns_name:'retry.example.test',public_url:'https://retry.example.test',public_port:443,local_port:18788}),{mode:0o600});
     const before=tree();
     assert.equal(await attempt(),true,'valid initialized retry succeeds');
     assert.equal(checks,1,'valid retry performs one public check');
-    assert.deepEqual(tree(),before,'successful retry does not rewrite owned files or modes');
+    const after=tree();
+    delete after[path.relative(root,path.join(home,'resource-url'))];
+    delete after[path.relative(root,path.join(config,'route-reference.json'))];
+    assert.deepEqual(after,before,'successful retry does not rewrite credentials, policy, or units');
 
     const workers=path.join(config,'workers.json'),savedWorkers=fs.readFileSync(workers);
     fs.renameSync(workers,workers+'.saved');fs.symlinkSync(workers+'.saved',workers);

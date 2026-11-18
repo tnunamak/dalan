@@ -16,7 +16,7 @@ import { parseArgs } from './live-trial/common.mjs';
 import { loadKeys, writeAtomic } from '../src/as-files.mjs';
 import { routeCustodyPath } from '../src/route-custody.mjs';
 import { writeWorkerInstructions } from '../src/worker-instructions.mjs';
-import { buildQuery, ensureDurableRoute, gozarHomeFor, isPublished, registerExternalService, resolveGozar, describeCandidate, describeDisclosure, routeFailure } from '../src/gozar-routes.mjs';
+import { buildQuery, ensureDurableRoute, gozarHomeFor, isPublished, observeRetainedRoute, requireExternalRoute, resolveGozar, describeCandidate, describeDisclosure, routeFailure } from '../src/gozar-routes.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/; // no space, quote, %, $ or newline: the value goes into a unit or plist as is
@@ -321,14 +321,12 @@ function writeHome(o, platform, initHome = runDotWorkerInit) {
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     const init = initHome({ ...o, home: stage });
     if (init.status !== 0) fail(`dalan init failed (exit ${init.status}): ${String(init.stderr).trim().split('\n').at(-1)}`);
-    // Create the path secret now so the private resource URL file exists before the first start. The server keeps an existing env file.
+    // Reserve the path secret before startup. Publication writes the connector URL after proof.
     const envFile = path.join(configDir, 'env');
     if (!fs.existsSync(envFile)) writeExclusive(envFile, `BRIDGE_PATH_SECRET=${randomBytes(32).toString('hex')}\n`, 0o600, 'bridge environment file');
     fs.chmodSync(envFile, 0o600);
     const secret = /^BRIDGE_PATH_SECRET=([a-f0-9]{64})$/m.exec(fs.readFileSync(envFile, 'utf8'))?.[1];
     if (!secret) fail('bridge path secret is missing or invalid');
-    const urlFile = path.join(stage, 'resource-url');
-    if (o.route === undefined) writeAtomic(urlFile, `${o.publicUrl}/${secret}/mcp\n`);
     writeWorkerInstructions(stage);
     try { fs.mkdirSync(o.home, { mode: 0o700 }); }
     catch (error) {
@@ -429,7 +427,7 @@ function assertNoSystemdOverrides(unit,env) {
 }
 
 function publicRetryCommand(o,url) {
-  return `node ${path.join(o.repo,'scripts/worker-bridge-setup.mjs')} --retry-public-check --worker ${o.worker} --public-url ${url} --port ${o.port} --home ${o.home}${o.repoTools?'':' --no-repo-tools'}`;
+  return `node ${path.join(o.repo,'scripts/worker-bridge-setup.mjs')} --retry-public-check --worker ${o.worker} --public-url ${url} --port ${o.port} --home ${o.home}${o.lan?` --lan-forward ${o.lan.address}:${o.lan.port}`:''}${o.repoTools?'':' --no-repo-tools'}`;
 }
 
 function recoveryCommand(o) {
@@ -591,6 +589,8 @@ function removeUnit(o, { platform, env, log, spawn = spawnSync, holderProbe = ho
   if (o.purge && homeExists && !isBridgeHome(o.home, o.worker)) fail(`${o.home} is not a bridge home for worker ${o.worker}; refusing to purge it`);
   if (!present.length && !(o.purge && homeExists)) { log(`Nothing to remove for worker ${o.worker}.`); return; }
   if (o.purge && homeExists) {
+    const ref = readWorkerRouteReference(o.home, defaultPath(o.home, '.config/dot-bridge', 'route-reference.json'));
+    if (ref && !ref.handle) fail('The worker has a pending Gozar route operation. Keep the home and retry the public check to recover its exact route before purging.');
     const { named: users, unreadable } = unitsNamingHome(unitDir, o.home, present);
     if (unreadable.length) fail(`${unreadable.join(', ')} could not be read, so it is not known whether a service that uses ${o.home} is defined there. Nothing was removed. Make ${unreadable.length > 1 ? 'them' : 'it'} readable (or delete ${unreadable.length > 1 ? 'them' : 'it'} once the service is stopped), then run this command again.`);
     if (users.length) {
@@ -712,7 +712,16 @@ function verifyRetryTarget(o, { platform, env }) {
   const compatibleText=text.replace(/^Environment=DOT_BRIDGE_(AUTH_MODE|ENABLE_WORKSPACE|PORT)=/gm,'Environment=DALAN_$1=').replace(/<key>DOT_BRIDGE_(AUTH_MODE|ENABLE_WORKSPACE|PORT)<\/key>/g,'<key>DALAN_$1</key>');
   const oldExpected = expected.replace('Environment=DALAN_GOZAR_SERVICE=1\n', '').replace('    <key>DALAN_GOZAR_SERVICE</key>\n    <string>1</string>\n', '');
   if(compatibleText!==expected && compatibleText!==oldExpected) fail(`--retry-public-check refused: ${unit} does not exactly match the generated worker, HOME, executable, working directory and port`);
-  if(platform==='linux') assertNoSystemdOverrides(unit,env);
+  if (platform === 'linux') {
+    assertNoSystemdOverrides(unit, env);
+    const generated = unitFiles(o).files;
+    for (const suffix of ['lan.socket', 'lan.service']) {
+      const name = `dot-bridge-${o.worker}-${suffix}`, file = path.join(dir, name);
+      if (o.lan ? readOwnedFile(configRoot, file, 'forwarding unit') !== generated[name] : fs.existsSync(file)) {
+        fail('--retry-public-check refused: --lan-forward must match the generated forwarding units');
+      }
+    }
+  }
   return { url: o.publicUrl, secret: secretMatch[1], urlFile, configDir };
 }
 
@@ -762,7 +771,7 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
 
   if (o.retryPublicCheck) {
     const { url, secret, urlFile, configDir } = verifyRetryTarget(o, { platform, env });
-    return publishWorkerRoute({ o, env, gozar: suppliedGozar, url, secret, urlFile, configDir, log });
+    return publishWorkerRoute({ o, env, gozar: suppliedGozar, url, secret, urlFile, configDir, log, consent });
   }
 
   // Check everything before the first write so a refusal leaves nothing behind.
@@ -780,7 +789,7 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
   if (o.start) checkStartReadiness(platform, env);
   if (o.route !== undefined && !exposure) {
     if (o.writeUnitsOnly) fail('--write-units-only requires --public-url; it does not start a route.');
-    return allocateRoute(o, { env, gozar: suppliedGozar, consent }).then(gozar => runUnlocked(argv,
+    return allocateRoute(o, { env, gozar: suppliedGozar, consent, log }).then(gozar => runUnlocked(argv,
       { platform, env, log, gozar, consent, initHome, spawn, waitForSocket, holderProbe }, o));
   }
   if (o.start) warnIfLingeringDisabled(platform, env, log, spawn);
@@ -822,7 +831,6 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
     } else log(`Not started. To start:\n  launchctl bootstrap ${domain} ${plist}\nTo stop:\n  ${stop}`);
   }
   if (o.lan) log(`LAN forwarder: ${o.lan.address}:${o.lan.port} -> 127.0.0.1:${o.port}. Point the reverse proxy there; anything on that network can reach it.`);
-  if (!exposure) log(`Resource URL file (private, mode 0600): ${urlFile}`);
   const dw = `dalan() { HOME=${shellQuote(o.home)} ${shellQuote(o.node)} ${shellQuote(path.join(o.repo, 'bin/dalan.mjs'))} "$@"; }`;
   log('Owner commands (run after the service is up):');
   log(`  ${dw}`);
@@ -830,28 +838,66 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
   log('  dalan connect pending');
   log(`  dalan connect approve CODE --worker ${o.worker}`);
   log('  dalan connect signal-token    # save wake URL privately for hook-driven workers; print path; --rotate replaces it');
-  if (!exposure || o.writeUnitsOnly) return;
-  if (!o.start) { log('Start the bridge and run --retry-public-check to verify the public route.'); return; }
+  if (o.writeUnitsOnly) return;
+  if (!o.start || (!exposure && !consent && !process.stdin.isTTY)) {
+    log(`With the bridge running, approve and verify the public route in a terminal: ${publicRetryCommand(o, o.publicUrl)}`);
+    return;
+  }
   const secret = /^BRIDGE_PATH_SECRET=([a-f0-9]{64})$/m.exec(fs.readFileSync(path.join(configDir, 'env'), 'utf8'))?.[1];
-  return publishWorkerRoute({ o, env, gozar: suppliedGozar, url: o.publicUrl, secret, urlFile, configDir, log });
+  return publishWorkerRoute({ o, env, gozar: suppliedGozar, url: o.publicUrl, secret, urlFile, configDir, log, consent });
 }
 
-async function publishWorkerRoute({ o, env, gozar, url, secret, urlFile, configDir, log }) {
-  let ref;
-  try { ref = JSON.parse(readOwnedFile(o.home, path.join(configDir, 'route-reference.json'), 'Gozar route reference')); }
-  catch (error) { if (fs.existsSync(path.join(configDir, 'route-reference.json'))) throw error; }
-  const home = ref?.home ?? gozarHomeFor(env);
-  gozar ??= await resolveGozar({ env, home });
-  const view = ref ? await gozar.routeStatus({ home, handle: ref.handle })
-    : (await registerExternalService({ gozar, home, origin: url, target: o.lan ? `${o.lan.address}:${o.lan.port}` : `127.0.0.1:${o.port}` })).view;
-  if (!isPublished(view) || view.published !== url) {
+function readWorkerRouteReference(home, file) {
+  try { fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const ref = JSON.parse(readOwnedFile(home, file, 'Gozar route reference'));
+  if (typeof ref?.home !== 'string' || !path.isAbsolute(ref.home) || (!ref.handle && typeof ref.operationId !== 'string')) {
+    fail('The saved Gozar route reference is invalid.');
+  }
+  return ref;
+}
+
+async function publishWorkerRoute({ o, env, gozar, url, secret, urlFile, configDir, log, consent = routeConsent(log) }) {
+  try {
+    const reference = path.join(configDir, 'route-reference.json');
+    let ref = readWorkerRouteReference(o.home, reference);
+    const home = ref?.home ?? gozarHomeFor(env);
+    const custody = ref?.custody ?? routeCustodyPath({ HOME: os.homedir(), ...env }, home);
+    const target = o.lan ? `${o.lan.address}:${o.lan.port}` : `127.0.0.1:${o.port}`;
+    const external = !ref?.handle || ref.handle.kind === 'external';
+    const remember = value => {
+      const next = { ...value, custody };
+      writeAtomic(reference, JSON.stringify(next));
+      ref = next;
+    };
+    gozar ??= await resolveGozar({ env, home, custody });
+    const observed = ref && await observeRetainedRoute(gozar, ref);
+    const view = observed?.state === 'recorded' ? observed.view : await ensureDurableRoute({
+      gozar, query: buildQuery({ home, origin: url, target, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${o.worker}` } }),
+      consent, remember, recovery: ref, external: true,
+    });
+    if (!ref?.handle) remember({ home, operationId: view.operationId, handle: view.handle });
+    if (external) requireExternalRoute(view, url, target);
+    if (!isPublished(view) || view.published !== url) {
+      const error = routeFailure(view, `Gozar could not verify the public route. The service and home were left in place. Retry the check with: ${publicRetryCommand(o, url)}. To remove this install: ${recoveryCommand(o)}`);
+      if (error.nextAction) log(error.nextAction.instructions ?? error.nextAction.label);
+      throw error;
+    }
+    writeAtomic(urlFile, `${view.published}/${secret}/mcp\n`);
+  } catch (error) {
     fs.rmSync(urlFile, { force: true });
-    const error = routeFailure(view, `Gozar could not verify the public route. The service and home were left in place. Retry the check with: ${publicRetryCommand(o, url)}. To remove this install: ${recoveryCommand(o)}`);
-    if (error.nextAction) log(error.nextAction.instructions ?? error.nextAction.label);
     throw error;
   }
-  writeAtomic(urlFile, `${view.published}/${secret}/mcp\n`);
   log(`Resource URL file (private, mode 0600): ${urlFile}`);
+}
+
+function routeConsent(log) {
+  return async candidate => {
+    for (const line of [...describeCandidate(candidate), ...describeDisclosure(candidate)]) log(line);
+    if (!process.stdin.isTTY) fail('This route needs your approval. Run the command in a terminal.');
+    const rl = (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout });
+    try { return /^y(es)?$/i.test((await rl.question('Use this route? [y/N] ')).trim()); }
+    finally { rl.close(); }
+  };
 }
 
 // With --route, Gozar allocates (or finds) the durable route first; its origin is the bridge's public address. Nothing is written
@@ -861,13 +907,7 @@ async function allocateRoute(parsed, seams) {
   const home = gozarHomeFor(env);
   const gozar = seams.gozar ?? await resolveGozar({ env, home });
   const query = buildQuery({ home, target: `127.0.0.1:${parsed.port}`, route: parsed.route, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${parsed.worker}` } });
-  const consent = seams.consent ?? (async candidate => {
-    if (!process.stdin.isTTY) fail('this route needs your approval; run this in a terminal, or run `dalan setup --route NAME` first');
-    for (const line of [...describeCandidate(candidate), ...describeDisclosure(candidate)]) console.log(line);
-    const rl = (await import('node:readline')).createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise(resolve => rl.question('Use this route? [y/N] ', resolve)); rl.close();
-    return ['y', 'yes'].includes(answer.trim().toLowerCase());
-  });
+  const consent = seams.consent ?? routeConsent(seams.log ?? console.log);
   const view = await ensureDurableRoute({ gozar, query, consent });
   if (!view.origin) throw routeFailure(view, 'Gozar has not supplied the bridge address.');
   parsed.publicUrl = view.origin;

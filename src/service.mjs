@@ -12,7 +12,7 @@ import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { loadCapacity } from './projects.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
-import { buildQuery, closeExactRoute, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, isPublished, registerExternalService, resolveGozar, resolveRouteWord, observeRetainedRoute, routeFailure, routeNotDispatched } from './gozar-routes.mjs';
+import { buildQuery, closeExactRoute, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, isPublished, requireExternalRoute, resolveGozar, resolveRouteWord, observeRetainedRoute, routeFailure, routeNotDispatched } from './gozar-routes.mjs';
 import { routeCustodyPath } from './route-custody.mjs';
 import { muteableTerminal, runRouteSetup } from './route-setup.mjs';
 import { readRouteSetting } from './route-setting.mjs';
@@ -412,7 +412,7 @@ async function installServiceLocked(o, seams) {
   if (socketBytes > socketLimit) fail(`--home is too long: the bridge's admin socket ${adminSocket} would be ${socketBytes} bytes, and the limit on ${mac ? 'macOS' : 'Linux'} is ${socketLimit} bytes. Use a shorter --home.`);
   const saved = o.auto && o.route === undefined ? readRouteSetting(env) : null;
   const gozarHome = saved?.gozarHome ?? gozarHomeFor(env);
-  const managed = o.auto || o.route !== undefined;
+  const external = !o.auto;
   const pendingPath = pendingInstallPath(env, o.home);
   const persisted = readReceipt(o.home);
   let pending = readPendingInstall(pendingPath);
@@ -431,6 +431,9 @@ async function installServiceLocked(o, seams) {
   const target = parseTarget(typeof o.target === 'string' ? o.target : `${o.target?.host}:${o.target?.port}`);
   o = { ...o, target };
   validateTopology(o);
+  if (external && !o.writeUnitsOnly && o.target.port !== o.port) {
+    fail('Route proof requires the target and Dalan listener to use the same port. A custom verification command cannot publish the address.');
+  }
   const profile = profileFor(o.home, o.workers ?? []);
   assertRealDirectoryPath(path.dirname(profile.file));
   const unitDir = mac ? launchAgentsDir(env) : path.join(env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.join(os.homedir(), '.config'), 'systemd/user');
@@ -511,7 +514,7 @@ async function installServiceLocked(o, seams) {
       pending = { ...ref, port: o.port };
       writeAtomic(pendingPath, JSON.stringify(pending));
     };
-    return ensureDurableRoute({ gozar, query, pick, consent, setup, remember, recovery: pending });
+    return ensureDurableRoute({ gozar, query, pick, consent, setup, remember, recovery: pending, external });
   };
   if (allocate) {
     const view = await allocateRoute(saved?.origin ?? undefined);
@@ -551,18 +554,23 @@ async function installServiceLocked(o, seams) {
   if (!ready) fail(`Dalan did not start on its admin socket; the service and home remain for inspection: ${mac ? `tail ${path.join(o.home, 'logs', 'bridge.err.log')}` : `systemctl --user status ${name}.service`}`);
   let routeReply;
   const existingHandle = allocated ?? previous?.route_handle;
-  if (existingHandle) routeReply = await gozar.routeStatus({ home: routeHome, handle: existingHandle });
-  else if (managed) routeReply = await allocateRoute(o.origin);
-  else routeReply = (await registerExternalService({ gozar, home: routeHome, origin: o.origin, target: o.target.value,
-    ...(o.verifyCmd ? { verifyCmd: o.verifyCmd } : {}) })).view;
-
-  if (routeReply.origin !== o.origin) throw routeFailure(routeReply, 'Gozar returned a different address from the saved service origin.');
+  try {
+    routeReply = existingHandle ? await gozar.routeStatus({ home: routeHome, handle: existingHandle }) : await allocateRoute(o.origin);
+    if (external) requireExternalRoute(routeReply, o.origin, o.target.value);
+    if (routeReply.origin !== o.origin) throw routeFailure(routeReply, 'Gozar returned a different address from the saved service origin.');
+  } catch (error) {
+    fs.rmSync(homeFiles.resourceFile, { force: true });
+    throw error;
+  }
   const done = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
   if (routeReply.handle && (JSON.stringify(done.route_handle) !== JSON.stringify(routeReply.handle) || done.gozar_home !== routeHome || done.route_custody !== custody)) {
     writeAtomic(receiptFile, `${JSON.stringify({ ...done, route_handle: routeReply.handle, gozar_home: routeHome, route_custody: custody }, null, 2)}\n`);
   }
   if (pending && readPendingInstall(pendingPath)?.operationId === pending.operationId) fs.rmSync(pendingPath, { force: true });
-  if (!isPublished(routeReply)) throw routeFailure(routeReply, 'Gozar did not verify the route; the bridge is running and the route needs repair.');
+  if (!isPublished(routeReply)) {
+    fs.rmSync(homeFiles.resourceFile, { force: true });
+    throw routeFailure(routeReply, 'Gozar did not verify the route; the bridge is running and the route needs repair.');
+  }
   writeAtomic(homeFiles.resourceFile, `${routeReply.published}/${homeFiles.secret}/mcp\n`);
   await setAutoUpdate({ home: o.home, enabled: autoUpdate }, { ...seams, env, spawn, platform });
   if (!env.DALAN_HOME) recordDefaultHome(o.home, env);

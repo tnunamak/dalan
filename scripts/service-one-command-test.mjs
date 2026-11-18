@@ -49,7 +49,6 @@ const seamsFor = (name, platform, extra = {}) => {
   const closed = [];
   const closeRoute = gozar.closeRoute; gozar.closeRoute = async request => { closed.push(request.handle); return closeRoute(request); };
   const ensure = gozar.ensureRoute; gozar.ensureRoute = async query => { const view = await ensure(query); return { ...view, verification: { ...(view.verification ?? {}), status: 'verified', method: 'challenge' } }; };
-  const addService = gozar.addService; gozar.addService = async request => { const reply = await addService(request); reply.route = { ...reply.route, verification: { status: 'verified', method: 'challenge' } }; return reply; };
   const seams = { env: box.env, platform, gozar, node: '/usr/bin/node', repo: path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'), spawn: spawnSystemctl,
     waitForSocket: async () => true, freePort: async () => 8789, launchd: { spawn: launchctl.spawn, uid: 501, env: box.env }, consent: async () => true, ...extra };
   return { ...box, launchctl, gozar, closed, seams };

@@ -46,5 +46,5 @@ export function watchServicePublication({ home, configDir, origin, secret, canWr
       if (canWrite() && fs.existsSync(target)) withdraw();
     } finally { setTimeout(refresh, delay).unref(); }
   };
-  if (fs.existsSync(target)) void refresh();
+  void refresh();
 }

@@ -22,7 +22,17 @@
     "unsupported",
     "ambiguous_route",
     "busy",
-    "internal_error"
+    "internal_error",
+    "configuration_stale",
+    "configuration_in_use",
+    "secret_in_use",
+    "secret_backend_locked",
+    "secret_backend_unavailable",
+    "host_policy_denied",
+    "artifact_integrity_failed",
+    "configuration_migration_required",
+    "proof_refresh_unsupported",
+    "operation_conflict"
   ],
   "valid": [
     {
@@ -361,14 +371,12 @@
           "scope": "account",
           "conditions": [
             "reserved name kept by the account"
-          ]
+          ],
+          "ports": null
         },
         "cost": {
           "kind": "free",
-          "summary": "No charge",
-          "currency": null,
-          "amount": null,
-          "period": null
+          "summary": "No charge"
         },
         "needsAccount": true,
         "lifetimes": [
@@ -381,6 +389,13 @@
           "sse": true,
           "streamableHttp": true,
           "oauthDcr": true
+        },
+        "proof": {
+          "vantage": "public",
+          "checks": [
+            "tls",
+            "nonce"
+          ]
         }
       }
     },
@@ -401,14 +416,12 @@
         "address": {
           "stability": "ephemeral",
           "scope": "network",
-          "conditions": []
+          "conditions": [],
+          "ports": null
         },
         "cost": {
           "kind": "free",
-          "summary": "No charge",
-          "currency": null,
-          "amount": null,
-          "period": null
+          "summary": "No charge"
         },
         "needsAccount": false,
         "lifetimes": [
@@ -420,6 +433,10 @@
           "sse": true,
           "streamableHttp": true,
           "oauthDcr": true
+        },
+        "proof": {
+          "vantage": "none",
+          "checks": []
         }
       }
     },
@@ -440,14 +457,12 @@
         "address": {
           "stability": "unknown",
           "scope": "unknown",
-          "conditions": []
+          "conditions": [],
+          "ports": null
         },
         "cost": {
           "kind": "unknown",
-          "summary": "Unknown",
-          "currency": null,
-          "amount": null,
-          "period": null
+          "summary": "Unknown"
         },
         "needsAccount": null,
         "lifetimes": [
@@ -460,6 +475,13 @@
           "sse": true,
           "streamableHttp": true,
           "oauthDcr": true
+        },
+        "proof": {
+          "vantage": "public",
+          "checks": [
+            "tls",
+            "nonce"
+          ]
         }
       }
     },
@@ -486,7 +508,8 @@
           "scope": "account",
           "conditions": [
             "reserved name kept by the account"
-          ]
+          ],
+          "ports": null
         },
         "cost": {
           "kind": "paid",
@@ -506,22 +529,32 @@
           "sse": true,
           "streamableHttp": true,
           "oauthDcr": true
+        },
+        "proof": {
+          "vantage": "public",
+          "checks": [
+            "tls",
+            "nonce"
+          ]
         }
       }
     },
     {
       "schema": "route-catalog",
       "shape": "Candidate",
-      "name": "eligible, ready, with token",
+      "name": "eligible, ready, with token and ordered ports",
       "value": {
+        "providerId": "example-96",
         "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_1",
         "rank": 1,
         "eligible": true,
         "unmet": [],
         "display": {
           "label": "Example public route",
-          "description": "Example public route (synthetic)"
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -542,14 +575,15 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
+            ],
+            "ports": [
+              8443,
+              10000
             ]
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -562,6 +596,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -585,7 +626,110 @@
           ]
         },
         "candidateToken": "tok_synthetic_eligible_1",
-        "expiresAt": "2026-11-12T12:10:00.000Z"
+        "expiresAt": "2026-11-12T12:10:00.000Z",
+        "availability": {
+          "session": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "attached": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "durable": {
+            "state": "available",
+            "reason": "fixture"
+          }
+        },
+        "prerequisites": [],
+        "facts": [],
+        "configuration": {
+          "values": {},
+          "credentials": {},
+          "actions": [],
+          "inputRequirements": [],
+          "revision": "cfg-synthetic-1",
+          "scopeId": "scope-synthetic-1"
+        },
+        "consent": {
+          "scope": {
+            "configurationRevision": "cfg-synthetic-1",
+            "kind": "route",
+            "providerId": "example-96",
+            "query": {
+              "expectedOrigin": null,
+              "reach": "internet",
+              "target": "127.0.0.1:1234",
+              "transport": "https",
+              "usage": {
+                "kind": "attached"
+              }
+            },
+            "registryId": "registry-synthetic-1",
+            "scopeId": "scope-synthetic-1"
+          },
+          "consentFactsDigest": "consent-v1:fd89d64637aa75d369afdf1feef7a94f0b671a7e43dad14e063032361a52e5c9",
+          "facts": [],
+          "disclosures": {
+            "ownership": "gozar-owned",
+            "address": {
+              "conditions": [
+                "reserved name kept by the account"
+              ],
+              "ports": [
+                8443,
+                10000
+              ],
+              "scope": "account",
+              "stability": "stable"
+            },
+            "cost": {
+              "kind": "free",
+              "summary": "No charge"
+            },
+            "disclosure": {
+              "links": [
+                {
+                  "href": "https://provider.example/terms",
+                  "label": "Terms",
+                  "rel": "terms"
+                },
+                {
+                  "href": "https://provider.example/privacy",
+                  "label": "Privacy",
+                  "rel": "privacy"
+                }
+              ],
+              "revision": "disc-synthetic-1",
+              "text": "Example disclosure text for a synthetic provider."
+            },
+            "lifetimes": [
+              "session",
+              "attached",
+              "durable"
+            ],
+            "protocols": {
+              "oauthDcr": true,
+              "sse": true,
+              "streamableHttp": true
+            },
+            "reach": "internet",
+            "supervision": "provider-persistent",
+            "traffic": {
+              "evidenceRef": "evidence-synthetic-1",
+              "metadataVisibleTo": [
+                "provider"
+              ],
+              "providerCanReadPayload": true,
+              "readers": [
+                "provider"
+              ],
+              "tlsTermination": "provider"
+            },
+            "transport": "https"
+          }
+        },
+        "consentFactsDigest": "consent-v1:fd89d64637aa75d369afdf1feef7a94f0b671a7e43dad14e063032361a52e5c9"
       }
     },
     {
@@ -593,7 +737,9 @@
       "shape": "Candidate",
       "name": "ineligible: address not stable",
       "value": {
+        "providerId": "example-32",
         "name": "cand_synthetic_2",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_2",
         "rank": 2,
         "eligible": false,
@@ -606,7 +752,8 @@
         ],
         "display": {
           "label": "Example temporary route",
-          "description": "Example temporary route (synthetic)"
+          "description": "Example temporary route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -627,14 +774,12 @@
             "scope": "session",
             "conditions": [
               "address changes on restart"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -647,6 +792,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -670,7 +822,107 @@
           ]
         },
         "candidateToken": null,
-        "expiresAt": null
+        "expiresAt": null,
+        "availability": {
+          "session": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "attached": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "durable": {
+            "state": "available",
+            "reason": "fixture"
+          }
+        },
+        "prerequisites": [],
+        "facts": [],
+        "configuration": {
+          "values": {},
+          "credentials": {},
+          "actions": [],
+          "inputRequirements": [],
+          "revision": "cfg-synthetic-1",
+          "scopeId": "scope-synthetic-1"
+        },
+        "consent": {
+          "scope": {
+            "configurationRevision": "cfg-synthetic-1",
+            "kind": "route",
+            "providerId": "example-32",
+            "query": {
+              "expectedOrigin": null,
+              "reach": "internet",
+              "target": "127.0.0.1:1234",
+              "transport": "https",
+              "usage": {
+                "kind": "attached"
+              }
+            },
+            "registryId": "registry-synthetic-1",
+            "scopeId": "scope-synthetic-1"
+          },
+          "consentFactsDigest": "consent-v1:b537950474ff35b2240fec89e6b7a41a6a03eadc5e08b5df0fac10f9cbdef06c",
+          "facts": [],
+          "disclosures": {
+            "ownership": "gozar-owned",
+            "address": {
+              "conditions": [
+                "address changes on restart"
+              ],
+              "ports": null,
+              "scope": "session",
+              "stability": "ephemeral"
+            },
+            "cost": {
+              "kind": "free",
+              "summary": "No charge"
+            },
+            "disclosure": {
+              "links": [
+                {
+                  "href": "https://provider.example/terms",
+                  "label": "Terms",
+                  "rel": "terms"
+                },
+                {
+                  "href": "https://provider.example/privacy",
+                  "label": "Privacy",
+                  "rel": "privacy"
+                }
+              ],
+              "revision": "disc-synthetic-1",
+              "text": "Example disclosure text for a synthetic provider."
+            },
+            "lifetimes": [
+              "session",
+              "attached",
+              "durable"
+            ],
+            "protocols": {
+              "oauthDcr": true,
+              "sse": true,
+              "streamableHttp": true
+            },
+            "reach": "internet",
+            "supervision": "provider-persistent",
+            "traffic": {
+              "evidenceRef": "evidence-synthetic-1",
+              "metadataVisibleTo": [
+                "provider"
+              ],
+              "providerCanReadPayload": true,
+              "readers": [
+                "provider"
+              ],
+              "tlsTermination": "provider"
+            },
+            "transport": "https"
+          }
+        },
+        "consentFactsDigest": "consent-v1:b537950474ff35b2240fec89e6b7a41a6a03eadc5e08b5df0fac10f9cbdef06c"
       }
     },
     {
@@ -678,7 +930,9 @@
       "shape": "Candidate",
       "name": "macOS: unsupported",
       "value": {
+        "providerId": "example-51",
         "name": "cand_synthetic_3",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_3",
         "rank": 3,
         "eligible": false,
@@ -691,7 +945,8 @@
         ],
         "display": {
           "label": "Example route on macOS",
-          "description": "Example route on macOS (synthetic)"
+          "description": "Example route on macOS (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -712,14 +967,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -732,6 +985,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -755,7 +1015,107 @@
           ]
         },
         "candidateToken": null,
-        "expiresAt": null
+        "expiresAt": null,
+        "availability": {
+          "session": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "attached": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "durable": {
+            "state": "available",
+            "reason": "fixture"
+          }
+        },
+        "prerequisites": [],
+        "facts": [],
+        "configuration": {
+          "values": {},
+          "credentials": {},
+          "actions": [],
+          "inputRequirements": [],
+          "revision": "cfg-synthetic-1",
+          "scopeId": "scope-synthetic-1"
+        },
+        "consent": {
+          "scope": {
+            "configurationRevision": "cfg-synthetic-1",
+            "kind": "route",
+            "providerId": "example-51",
+            "query": {
+              "expectedOrigin": null,
+              "reach": "internet",
+              "target": "127.0.0.1:1234",
+              "transport": "https",
+              "usage": {
+                "kind": "attached"
+              }
+            },
+            "registryId": "registry-synthetic-1",
+            "scopeId": "scope-synthetic-1"
+          },
+          "consentFactsDigest": "consent-v1:1e85f4c24f35410a321009e9e5d930534ac574246f68280f5c20e4180ea722ad",
+          "facts": [],
+          "disclosures": {
+            "ownership": "gozar-owned",
+            "address": {
+              "conditions": [
+                "reserved name kept by the account"
+              ],
+              "ports": null,
+              "scope": "account",
+              "stability": "stable"
+            },
+            "cost": {
+              "kind": "free",
+              "summary": "No charge"
+            },
+            "disclosure": {
+              "links": [
+                {
+                  "href": "https://provider.example/terms",
+                  "label": "Terms",
+                  "rel": "terms"
+                },
+                {
+                  "href": "https://provider.example/privacy",
+                  "label": "Privacy",
+                  "rel": "privacy"
+                }
+              ],
+              "revision": "disc-synthetic-1",
+              "text": "Example disclosure text for a synthetic provider."
+            },
+            "lifetimes": [
+              "session",
+              "attached",
+              "durable"
+            ],
+            "protocols": {
+              "oauthDcr": true,
+              "sse": true,
+              "streamableHttp": true
+            },
+            "reach": "internet",
+            "supervision": "provider-persistent",
+            "traffic": {
+              "evidenceRef": "evidence-synthetic-1",
+              "metadataVisibleTo": [
+                "provider"
+              ],
+              "providerCanReadPayload": true,
+              "readers": [
+                "provider"
+              ],
+              "tlsTermination": "provider"
+            },
+            "transport": "https"
+          }
+        },
+        "consentFactsDigest": "consent-v1:1e85f4c24f35410a321009e9e5d930534ac574246f68280f5c20e4180ea722ad"
       }
     },
     {
@@ -763,14 +1123,17 @@
       "shape": "Candidate",
       "name": "setup required",
       "value": {
+        "providerId": "example-39",
         "name": "cand_synthetic_4",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_4",
         "rank": 4,
         "eligible": true,
         "unmet": [],
         "display": {
           "label": "Example route needing sign-in",
-          "description": "Example route needing sign-in (synthetic)"
+          "description": "Example route needing sign-in (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -791,14 +1154,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -811,6 +1172,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -858,7 +1226,107 @@
           ]
         },
         "candidateToken": null,
-        "expiresAt": null
+        "expiresAt": null,
+        "availability": {
+          "session": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "attached": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "durable": {
+            "state": "available",
+            "reason": "fixture"
+          }
+        },
+        "prerequisites": [],
+        "facts": [],
+        "configuration": {
+          "values": {},
+          "credentials": {},
+          "actions": [],
+          "inputRequirements": [],
+          "revision": "cfg-synthetic-1",
+          "scopeId": "scope-synthetic-1"
+        },
+        "consent": {
+          "scope": {
+            "configurationRevision": "cfg-synthetic-1",
+            "kind": "route",
+            "providerId": "example-39",
+            "query": {
+              "expectedOrigin": null,
+              "reach": "internet",
+              "target": "127.0.0.1:1234",
+              "transport": "https",
+              "usage": {
+                "kind": "attached"
+              }
+            },
+            "registryId": "registry-synthetic-1",
+            "scopeId": "scope-synthetic-1"
+          },
+          "consentFactsDigest": "consent-v1:65758a2e0ea83b77ced769dff36c65272f0c10af507ef055f217651f1cb9ba95",
+          "facts": [],
+          "disclosures": {
+            "ownership": "gozar-owned",
+            "address": {
+              "conditions": [
+                "reserved name kept by the account"
+              ],
+              "ports": null,
+              "scope": "account",
+              "stability": "stable"
+            },
+            "cost": {
+              "kind": "free",
+              "summary": "No charge"
+            },
+            "disclosure": {
+              "links": [
+                {
+                  "href": "https://provider.example/terms",
+                  "label": "Terms",
+                  "rel": "terms"
+                },
+                {
+                  "href": "https://provider.example/privacy",
+                  "label": "Privacy",
+                  "rel": "privacy"
+                }
+              ],
+              "revision": "disc-synthetic-1",
+              "text": "Example disclosure text for a synthetic provider."
+            },
+            "lifetimes": [
+              "session",
+              "attached",
+              "durable"
+            ],
+            "protocols": {
+              "oauthDcr": true,
+              "sse": true,
+              "streamableHttp": true
+            },
+            "reach": "internet",
+            "supervision": "provider-persistent",
+            "traffic": {
+              "evidenceRef": "evidence-synthetic-1",
+              "metadataVisibleTo": [
+                "provider"
+              ],
+              "providerCanReadPayload": true,
+              "readers": [
+                "provider"
+              ],
+              "tlsTermination": "provider"
+            },
+            "transport": "https"
+          }
+        },
+        "consentFactsDigest": "consent-v1:65758a2e0ea83b77ced769dff36c65272f0c10af507ef055f217651f1cb9ba95"
       }
     },
     {
@@ -866,7 +1334,9 @@
       "shape": "Candidate",
       "name": "unknown privacy",
       "value": {
+        "providerId": "example-82",
         "name": "cand_synthetic_5",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_5",
         "rank": 5,
         "eligible": false,
@@ -879,7 +1349,8 @@
         ],
         "display": {
           "label": "Example route with unknown privacy",
-          "description": "Example route with unknown privacy (synthetic)"
+          "description": "Example route with unknown privacy (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -894,14 +1365,12 @@
           "address": {
             "stability": "unknown",
             "scope": "unknown",
-            "conditions": []
+            "conditions": [],
+            "ports": null
           },
           "cost": {
             "kind": "unknown",
-            "summary": "Unknown",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "Unknown"
           },
           "needsAccount": null,
           "lifetimes": [
@@ -914,6 +1383,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -937,7 +1413,101 @@
           ]
         },
         "candidateToken": null,
-        "expiresAt": null
+        "expiresAt": null,
+        "availability": {
+          "session": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "attached": {
+            "state": "available",
+            "reason": "fixture"
+          },
+          "durable": {
+            "state": "available",
+            "reason": "fixture"
+          }
+        },
+        "prerequisites": [],
+        "facts": [],
+        "configuration": {
+          "values": {},
+          "credentials": {},
+          "actions": [],
+          "inputRequirements": [],
+          "revision": "cfg-synthetic-1",
+          "scopeId": "scope-synthetic-1"
+        },
+        "consent": {
+          "scope": {
+            "configurationRevision": "cfg-synthetic-1",
+            "kind": "route",
+            "providerId": "example-82",
+            "query": {
+              "expectedOrigin": null,
+              "reach": "internet",
+              "target": "127.0.0.1:1234",
+              "transport": "https",
+              "usage": {
+                "kind": "attached"
+              }
+            },
+            "registryId": "registry-synthetic-1",
+            "scopeId": "scope-synthetic-1"
+          },
+          "consentFactsDigest": "consent-v1:50b15d0fad44e30a670e5ae6d9582b8dd6d8355d881cdcaf21e598e5111a638d",
+          "facts": [],
+          "disclosures": {
+            "ownership": "gozar-owned",
+            "address": {
+              "conditions": [],
+              "ports": null,
+              "scope": "unknown",
+              "stability": "unknown"
+            },
+            "cost": {
+              "kind": "unknown",
+              "summary": "Unknown"
+            },
+            "disclosure": {
+              "links": [
+                {
+                  "href": "https://provider.example/terms",
+                  "label": "Terms",
+                  "rel": "terms"
+                },
+                {
+                  "href": "https://provider.example/privacy",
+                  "label": "Privacy",
+                  "rel": "privacy"
+                }
+              ],
+              "revision": "disc-synthetic-1",
+              "text": "Example disclosure text for a synthetic provider."
+            },
+            "lifetimes": [
+              "session",
+              "attached",
+              "durable"
+            ],
+            "protocols": {
+              "oauthDcr": true,
+              "sse": true,
+              "streamableHttp": true
+            },
+            "reach": "internet",
+            "supervision": "provider-persistent",
+            "traffic": {
+              "evidenceRef": null,
+              "metadataVisibleTo": [],
+              "providerCanReadPayload": null,
+              "readers": [],
+              "tlsTermination": "unknown"
+            },
+            "transport": "https"
+          }
+        },
+        "consentFactsDigest": "consent-v1:50b15d0fad44e30a670e5ae6d9582b8dd6d8355d881cdcaf21e598e5111a638d"
       }
     },
     {
@@ -945,20 +1515,23 @@
       "shape": "Catalog",
       "name": "five candidates of every kind",
       "value": {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "catalogRevision": "catrev_synthetic_1",
         "observedAt": "2026-11-12T12:00:00.000Z",
         "preferenceRevision": 3,
         "candidates": [
           {
+            "providerId": "example-96",
             "name": "cand_synthetic_1",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_1",
             "rank": 1,
             "eligible": true,
             "unmet": [],
             "display": {
               "label": "Example public route",
-              "description": "Example public route (synthetic)"
+              "description": "Example public route (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -979,14 +1552,12 @@
                 "scope": "account",
                 "conditions": [
                   "reserved name kept by the account"
-                ]
+                ],
+                "ports": null
               },
               "cost": {
                 "kind": "free",
-                "summary": "No charge",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "No charge"
               },
               "needsAccount": true,
               "lifetimes": [
@@ -999,6 +1570,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -1022,10 +1600,112 @@
               ]
             },
             "candidateToken": "tok_synthetic_eligible_1",
-            "expiresAt": "2026-11-12T12:10:00.000Z"
+            "expiresAt": "2026-11-12T12:10:00.000Z",
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-96",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:201d0217a47beb55c0159c73f905c230b4a2dc67561ea806ed21caab71a8b84b",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [
+                    "reserved name kept by the account"
+                  ],
+                  "ports": null,
+                  "scope": "account",
+                  "stability": "stable"
+                },
+                "cost": {
+                  "kind": "free",
+                  "summary": "No charge"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": "evidence-synthetic-1",
+                  "metadataVisibleTo": [
+                    "provider"
+                  ],
+                  "providerCanReadPayload": true,
+                  "readers": [
+                    "provider"
+                  ],
+                  "tlsTermination": "provider"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:201d0217a47beb55c0159c73f905c230b4a2dc67561ea806ed21caab71a8b84b"
           },
           {
+            "providerId": "example-32",
             "name": "cand_synthetic_2",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_2",
             "rank": 2,
             "eligible": false,
@@ -1038,7 +1718,8 @@
             ],
             "display": {
               "label": "Example temporary route",
-              "description": "Example temporary route (synthetic)"
+              "description": "Example temporary route (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -1059,14 +1740,12 @@
                 "scope": "session",
                 "conditions": [
                   "address changes on restart"
-                ]
+                ],
+                "ports": null
               },
               "cost": {
                 "kind": "free",
-                "summary": "No charge",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "No charge"
               },
               "needsAccount": true,
               "lifetimes": [
@@ -1079,6 +1758,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -1102,10 +1788,112 @@
               ]
             },
             "candidateToken": null,
-            "expiresAt": null
+            "expiresAt": null,
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-32",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:b537950474ff35b2240fec89e6b7a41a6a03eadc5e08b5df0fac10f9cbdef06c",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [
+                    "address changes on restart"
+                  ],
+                  "ports": null,
+                  "scope": "session",
+                  "stability": "ephemeral"
+                },
+                "cost": {
+                  "kind": "free",
+                  "summary": "No charge"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": "evidence-synthetic-1",
+                  "metadataVisibleTo": [
+                    "provider"
+                  ],
+                  "providerCanReadPayload": true,
+                  "readers": [
+                    "provider"
+                  ],
+                  "tlsTermination": "provider"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:b537950474ff35b2240fec89e6b7a41a6a03eadc5e08b5df0fac10f9cbdef06c"
           },
           {
+            "providerId": "example-51",
             "name": "cand_synthetic_3",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_3",
             "rank": 3,
             "eligible": false,
@@ -1118,7 +1906,8 @@
             ],
             "display": {
               "label": "Example route on macOS",
-              "description": "Example route on macOS (synthetic)"
+              "description": "Example route on macOS (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -1139,14 +1928,12 @@
                 "scope": "account",
                 "conditions": [
                   "reserved name kept by the account"
-                ]
+                ],
+                "ports": null
               },
               "cost": {
                 "kind": "free",
-                "summary": "No charge",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "No charge"
               },
               "needsAccount": true,
               "lifetimes": [
@@ -1159,6 +1946,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -1182,17 +1976,120 @@
               ]
             },
             "candidateToken": null,
-            "expiresAt": null
+            "expiresAt": null,
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-51",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:1e85f4c24f35410a321009e9e5d930534ac574246f68280f5c20e4180ea722ad",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [
+                    "reserved name kept by the account"
+                  ],
+                  "ports": null,
+                  "scope": "account",
+                  "stability": "stable"
+                },
+                "cost": {
+                  "kind": "free",
+                  "summary": "No charge"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": "evidence-synthetic-1",
+                  "metadataVisibleTo": [
+                    "provider"
+                  ],
+                  "providerCanReadPayload": true,
+                  "readers": [
+                    "provider"
+                  ],
+                  "tlsTermination": "provider"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:1e85f4c24f35410a321009e9e5d930534ac574246f68280f5c20e4180ea722ad"
           },
           {
+            "providerId": "example-39",
             "name": "cand_synthetic_4",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_4",
             "rank": 4,
             "eligible": true,
             "unmet": [],
             "display": {
               "label": "Example route needing sign-in",
-              "description": "Example route needing sign-in (synthetic)"
+              "description": "Example route needing sign-in (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -1213,14 +2110,12 @@
                 "scope": "account",
                 "conditions": [
                   "reserved name kept by the account"
-                ]
+                ],
+                "ports": null
               },
               "cost": {
                 "kind": "free",
-                "summary": "No charge",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "No charge"
               },
               "needsAccount": true,
               "lifetimes": [
@@ -1233,6 +2128,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -1280,10 +2182,112 @@
               ]
             },
             "candidateToken": null,
-            "expiresAt": null
+            "expiresAt": null,
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-39",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:65758a2e0ea83b77ced769dff36c65272f0c10af507ef055f217651f1cb9ba95",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [
+                    "reserved name kept by the account"
+                  ],
+                  "ports": null,
+                  "scope": "account",
+                  "stability": "stable"
+                },
+                "cost": {
+                  "kind": "free",
+                  "summary": "No charge"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": "evidence-synthetic-1",
+                  "metadataVisibleTo": [
+                    "provider"
+                  ],
+                  "providerCanReadPayload": true,
+                  "readers": [
+                    "provider"
+                  ],
+                  "tlsTermination": "provider"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:65758a2e0ea83b77ced769dff36c65272f0c10af507ef055f217651f1cb9ba95"
           },
           {
+            "providerId": "example-82",
             "name": "cand_synthetic_5",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_5",
             "rank": 5,
             "eligible": false,
@@ -1296,7 +2300,8 @@
             ],
             "display": {
               "label": "Example route with unknown privacy",
-              "description": "Example route with unknown privacy (synthetic)"
+              "description": "Example route with unknown privacy (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -1311,14 +2316,12 @@
               "address": {
                 "stability": "unknown",
                 "scope": "unknown",
-                "conditions": []
+                "conditions": [],
+                "ports": null
               },
               "cost": {
                 "kind": "unknown",
-                "summary": "Unknown",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "Unknown"
               },
               "needsAccount": null,
               "lifetimes": [
@@ -1331,6 +2334,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -1354,10 +2364,110 @@
               ]
             },
             "candidateToken": null,
-            "expiresAt": null
+            "expiresAt": null,
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-82",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:50b15d0fad44e30a670e5ae6d9582b8dd6d8355d881cdcaf21e598e5111a638d",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [],
+                  "ports": null,
+                  "scope": "unknown",
+                  "stability": "unknown"
+                },
+                "cost": {
+                  "kind": "unknown",
+                  "summary": "Unknown"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": null,
+                  "metadataVisibleTo": [],
+                  "providerCanReadPayload": null,
+                  "readers": [],
+                  "tlsTermination": "unknown"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:50b15d0fad44e30a670e5ae6d9582b8dd6d8355d881cdcaf21e598e5111a638d"
           }
         ],
-        "noMatch": null
+        "noMatch": null,
+        "features": [
+          "structured-state",
+          "open-facts",
+          "input-requirements",
+          "secret-intake"
+        ]
       }
     },
     {
@@ -1365,7 +2475,7 @@
       "shape": "Catalog",
       "name": "no match",
       "value": {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "catalogRevision": "catrev_synthetic_2",
         "observedAt": "2026-11-12T12:00:00.000Z",
         "preferenceRevision": 0,
@@ -1376,7 +2486,13 @@
             "address",
             "payloadAccess"
           ]
-        }
+        },
+        "features": [
+          "structured-state",
+          "open-facts",
+          "input-requirements",
+          "secret-intake"
+        ]
       }
     },
     {
@@ -1549,7 +2665,7 @@
       "shape": "RouteView",
       "name": "durable usable with ingress",
       "value": {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "handle": {
           "kind": "durable",
           "id": "example-main",
@@ -1578,14 +2694,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -1598,6 +2712,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "ingress": {
@@ -1628,14 +2749,70 @@
         },
         "verification": {
           "status": "verified",
-          "checkedAt": "2026-11-12T12:00:00.000Z"
+          "checkedAt": "2026-11-12T12:00:00.000Z",
+          "vantage": "this-device",
+          "checks": [
+            "nonce"
+          ],
+          "validUntil": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "results": [],
+          "observedAt": "2026-11-12T12:00:00.000Z",
+          "subject": {
+            "origin": "https://example.invalid",
+            "target": "127.0.0.1:8799",
+            "instanceId": "fixture-instance",
+            "bootId": "fixture-boot",
+            "handleGeneration": 4
+          }
         },
         "limits": {
           "recommendedPollIntervalMs": 60000,
           "idleTimeoutMs": null
         },
         "cleanup": {
-          "state": "none"
+          "state": "none",
+          "nextAction": null
+        },
+        "routeState": "verified",
+        "expiresAt": {
+          "known": false,
+          "reason": "not-observed"
+        },
+        "hostConfiguration": {
+          "target": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "localPort": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "bindTarget": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "origin": {
+            "known": false,
+            "reason": "not-observed"
+          }
+        },
+        "facts": [],
+        "actions": [
+          "stop",
+          "edit",
+          "rotate"
+        ],
+        "operationId": null,
+        "binding": {
+          "authority": "unknown",
+          "target": {
+            "known": false,
+            "reason": "unobserved"
+          },
+          "remedy": null
         }
       }
     },
@@ -1644,7 +2821,7 @@
       "shape": "RouteView",
       "name": "external-owned, unknown privacy",
       "value": {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "handle": {
           "kind": "external",
           "id": "ext-synthetic-1",
@@ -1667,14 +2844,12 @@
           "address": {
             "stability": "unknown",
             "scope": "unknown",
-            "conditions": []
+            "conditions": [],
+            "ports": null
           },
           "cost": {
             "kind": "unknown",
-            "summary": "Unknown",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "Unknown"
           },
           "needsAccount": null,
           "lifetimes": [
@@ -1687,19 +2862,74 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "ingress": null,
         "verification": {
           "status": "unverified",
-          "checkedAt": null
+          "checkedAt": null,
+          "vantage": "none",
+          "checks": [],
+          "validUntil": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "results": [],
+          "observedAt": null,
+          "subject": null
         },
         "limits": {
           "recommendedPollIntervalMs": 60000,
           "idleTimeoutMs": null
         },
         "cleanup": {
-          "state": "none"
+          "state": "none",
+          "nextAction": null
+        },
+        "routeState": "detected",
+        "expiresAt": {
+          "known": false,
+          "reason": "not-observed"
+        },
+        "hostConfiguration": {
+          "target": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "localPort": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "bindTarget": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "origin": {
+            "known": false,
+            "reason": "not-observed"
+          }
+        },
+        "facts": [],
+        "actions": [
+          "stop",
+          "edit",
+          "rotate"
+        ],
+        "operationId": null,
+        "binding": {
+          "authority": "unknown",
+          "target": {
+            "known": false,
+            "reason": "unobserved"
+          },
+          "remedy": null
         }
       }
     },
@@ -1708,7 +2938,7 @@
       "shape": "RouteView",
       "name": "handing-back: published null",
       "value": {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "handle": {
           "kind": "durable",
           "id": "example-main",
@@ -1737,14 +2967,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -1757,19 +2985,82 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "ingress": null,
         "verification": {
           "status": "verified",
-          "checkedAt": "2026-11-12T12:00:00.000Z"
+          "checkedAt": "2026-11-12T12:00:00.000Z",
+          "vantage": "this-device",
+          "checks": [
+            "nonce"
+          ],
+          "validUntil": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "results": [],
+          "observedAt": "2026-11-12T12:00:00.000Z",
+          "subject": {
+            "origin": "https://example.invalid",
+            "target": "127.0.0.1:8799",
+            "instanceId": "fixture-instance",
+            "bootId": "fixture-boot",
+            "handleGeneration": 4
+          }
         },
         "limits": {
           "recommendedPollIntervalMs": 60000,
           "idleTimeoutMs": null
         },
         "cleanup": {
-          "state": "none"
+          "state": "none",
+          "nextAction": null
+        },
+        "routeState": "verified",
+        "expiresAt": {
+          "known": false,
+          "reason": "not-observed"
+        },
+        "hostConfiguration": {
+          "target": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "localPort": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "bindTarget": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "origin": {
+            "known": false,
+            "reason": "not-observed"
+          }
+        },
+        "facts": [],
+        "actions": [
+          "stop",
+          "edit",
+          "rotate"
+        ],
+        "operationId": null,
+        "binding": {
+          "authority": "unknown",
+          "target": {
+            "known": false,
+            "reason": "unobserved"
+          },
+          "remedy": null
         }
       }
     },
@@ -1778,7 +3069,7 @@
       "shape": "RouteView",
       "name": "released terminal, cleanup debt",
       "value": {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "handle": {
           "kind": "durable",
           "id": "example-main",
@@ -1807,14 +3098,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -1827,20 +3116,77 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "ingress": null,
         "verification": {
           "status": "verified",
-          "checkedAt": "2026-11-12T12:00:00.000Z"
+          "checkedAt": "2026-11-12T12:00:00.000Z",
+          "vantage": "this-device",
+          "checks": [
+            "nonce"
+          ],
+          "validUntil": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "results": [],
+          "observedAt": "2026-11-12T12:00:00.000Z",
+          "subject": null
         },
         "limits": {
           "recommendedPollIntervalMs": 60000,
           "idleTimeoutMs": null
         },
         "cleanup": {
-          "state": "debt",
-          "message": "Provider rule not removed."
+          "state": "unconfirmed",
+          "message": "Provider rule not removed.",
+          "nextAction": null
+        },
+        "routeState": "verified",
+        "expiresAt": {
+          "known": false,
+          "reason": "not-observed"
+        },
+        "hostConfiguration": {
+          "target": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "localPort": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "bindTarget": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "origin": {
+            "known": false,
+            "reason": "not-observed"
+          }
+        },
+        "facts": [],
+        "actions": [
+          "stop",
+          "edit",
+          "rotate"
+        ],
+        "operationId": null,
+        "binding": {
+          "authority": "unknown",
+          "target": {
+            "known": false,
+            "reason": "unobserved"
+          },
+          "remedy": null
         }
       }
     },
@@ -1850,7 +3196,9 @@
       "name": "token and disclosure revision",
       "value": {
         "candidateToken": "tok_synthetic_eligible_1",
-        "disclosureRevision": "disc-synthetic-1"
+        "disclosureRevision": "disc-synthetic-1",
+        "kind": "route",
+        "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       }
     },
     {
@@ -1942,7 +3290,17 @@
         "schemaVersion": 1,
         "state": "complete",
         "nextAction": null,
-        "catalogRevision": "catrev_synthetic_3"
+        "catalogRevision": "catrev_synthetic_3",
+        "configurationRevision": "cfg-synthetic-1",
+        "scopeId": "scope-synthetic-1",
+        "configuration": {
+          "revision": "cfg-synthetic-1",
+          "scopeId": "scope-synthetic-1",
+          "inputRequirements": [],
+          "values": {},
+          "credentials": {},
+          "actions": []
+        }
       }
     },
     {
@@ -1975,7 +3333,17 @@
           },
           "href": "https://provider.example/login"
         },
-        "catalogRevision": "catrev_synthetic_3"
+        "catalogRevision": "catrev_synthetic_3",
+        "configurationRevision": "cfg-synthetic-1",
+        "scopeId": "scope-synthetic-1",
+        "configuration": {
+          "revision": "cfg-synthetic-1",
+          "scopeId": "scope-synthetic-1",
+          "inputRequirements": [],
+          "values": {},
+          "credentials": {},
+          "actions": []
+        }
       }
     },
     {
@@ -1987,7 +3355,7 @@
         "sequence": 0,
         "type": "snapshot",
         "route": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "handle": {
             "kind": "durable",
             "id": "example-main",
@@ -2016,14 +3384,12 @@
               "scope": "account",
               "conditions": [
                 "reserved name kept by the account"
-              ]
+              ],
+              "ports": null
             },
             "cost": {
               "kind": "free",
-              "summary": "No charge",
-              "currency": null,
-              "amount": null,
-              "period": null
+              "summary": "No charge"
             },
             "needsAccount": true,
             "lifetimes": [
@@ -2036,19 +3402,82 @@
               "sse": true,
               "streamableHttp": true,
               "oauthDcr": true
+            },
+            "proof": {
+              "vantage": "public",
+              "checks": [
+                "tls",
+                "nonce"
+              ]
             }
           },
           "ingress": null,
           "verification": {
             "status": "verified",
-            "checkedAt": "2026-11-12T12:00:00.000Z"
+            "checkedAt": "2026-11-12T12:00:00.000Z",
+            "vantage": "this-device",
+            "checks": [
+              "nonce"
+            ],
+            "validUntil": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "results": [],
+            "observedAt": "2026-11-12T12:00:00.000Z",
+            "subject": {
+              "origin": "https://example.invalid",
+              "target": "127.0.0.1:8799",
+              "instanceId": "fixture-instance",
+              "bootId": "fixture-boot",
+              "handleGeneration": 4
+            }
           },
           "limits": {
             "recommendedPollIntervalMs": 60000,
             "idleTimeoutMs": null
           },
           "cleanup": {
-            "state": "none"
+            "state": "none",
+            "nextAction": null
+          },
+          "routeState": "verified",
+          "expiresAt": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "hostConfiguration": {
+            "target": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "localPort": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "bindTarget": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "origin": {
+              "known": false,
+              "reason": "not-observed"
+            }
+          },
+          "facts": [],
+          "actions": [
+            "stop",
+            "edit",
+            "rotate"
+          ],
+          "operationId": null,
+          "binding": {
+            "authority": "unknown",
+            "target": {
+              "known": false,
+              "reason": "unobserved"
+            },
+            "remedy": null
           }
         }
       }
@@ -2062,7 +3491,7 @@
         "sequence": 1,
         "type": "changed",
         "route": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "handle": {
             "kind": "durable",
             "id": "example-main",
@@ -2091,14 +3520,12 @@
               "scope": "account",
               "conditions": [
                 "reserved name kept by the account"
-              ]
+              ],
+              "ports": null
             },
             "cost": {
               "kind": "free",
-              "summary": "No charge",
-              "currency": null,
-              "amount": null,
-              "period": null
+              "summary": "No charge"
             },
             "needsAccount": true,
             "lifetimes": [
@@ -2111,19 +3538,82 @@
               "sse": true,
               "streamableHttp": true,
               "oauthDcr": true
+            },
+            "proof": {
+              "vantage": "public",
+              "checks": [
+                "tls",
+                "nonce"
+              ]
             }
           },
           "ingress": null,
           "verification": {
             "status": "verified",
-            "checkedAt": "2026-11-12T12:00:00.000Z"
+            "checkedAt": "2026-11-12T12:00:00.000Z",
+            "vantage": "this-device",
+            "checks": [
+              "nonce"
+            ],
+            "validUntil": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "results": [],
+            "observedAt": "2026-11-12T12:00:00.000Z",
+            "subject": {
+              "origin": "https://example.invalid",
+              "target": "127.0.0.1:8799",
+              "instanceId": "fixture-instance",
+              "bootId": "fixture-boot",
+              "handleGeneration": 4
+            }
           },
           "limits": {
             "recommendedPollIntervalMs": 60000,
             "idleTimeoutMs": null
           },
           "cleanup": {
-            "state": "none"
+            "state": "none",
+            "nextAction": null
+          },
+          "routeState": "verified",
+          "expiresAt": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "hostConfiguration": {
+            "target": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "localPort": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "bindTarget": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "origin": {
+              "known": false,
+              "reason": "not-observed"
+            }
+          },
+          "facts": [],
+          "actions": [
+            "stop",
+            "edit",
+            "rotate"
+          ],
+          "operationId": null,
+          "binding": {
+            "authority": "unknown",
+            "target": {
+              "known": false,
+              "reason": "unobserved"
+            },
+            "remedy": null
           }
         }
       }
@@ -2137,7 +3627,7 @@
         "sequence": 1,
         "type": "terminal",
         "route": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "handle": {
             "kind": "durable",
             "id": "example-main",
@@ -2166,14 +3656,12 @@
               "scope": "account",
               "conditions": [
                 "reserved name kept by the account"
-              ]
+              ],
+              "ports": null
             },
             "cost": {
               "kind": "free",
-              "summary": "No charge",
-              "currency": null,
-              "amount": null,
-              "period": null
+              "summary": "No charge"
             },
             "needsAccount": true,
             "lifetimes": [
@@ -2186,19 +3674,82 @@
               "sse": true,
               "streamableHttp": true,
               "oauthDcr": true
+            },
+            "proof": {
+              "vantage": "public",
+              "checks": [
+                "tls",
+                "nonce"
+              ]
             }
           },
           "ingress": null,
           "verification": {
             "status": "verified",
-            "checkedAt": "2026-11-12T12:00:00.000Z"
+            "checkedAt": "2026-11-12T12:00:00.000Z",
+            "vantage": "this-device",
+            "checks": [
+              "nonce"
+            ],
+            "validUntil": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "results": [],
+            "observedAt": "2026-11-12T12:00:00.000Z",
+            "subject": {
+              "origin": "https://example.invalid",
+              "target": "127.0.0.1:8799",
+              "instanceId": "fixture-instance",
+              "bootId": "fixture-boot",
+              "handleGeneration": 4
+            }
           },
           "limits": {
             "recommendedPollIntervalMs": 60000,
             "idleTimeoutMs": null
           },
           "cleanup": {
-            "state": "none"
+            "state": "none",
+            "nextAction": null
+          },
+          "routeState": "verified",
+          "expiresAt": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "hostConfiguration": {
+            "target": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "localPort": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "bindTarget": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "origin": {
+              "known": false,
+              "reason": "not-observed"
+            }
+          },
+          "facts": [],
+          "actions": [
+            "stop",
+            "edit",
+            "rotate"
+          ],
+          "operationId": null,
+          "binding": {
+            "authority": "unknown",
+            "target": {
+              "known": false,
+              "reason": "unobserved"
+            },
+            "remedy": null
           }
         }
       }
@@ -2335,7 +3886,9 @@
         },
         "approval": {
           "candidateToken": "tok_synthetic_eligible_1",
-          "disclosureRevision": "disc-synthetic-1"
+          "disclosureRevision": "disc-synthetic-1",
+          "kind": "route",
+          "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }
       }
     },
@@ -2395,7 +3948,9 @@
         },
         "approval": {
           "candidateToken": "tok_synthetic_eligible_1",
-          "disclosureRevision": "disc-synthetic-1"
+          "disclosureRevision": "disc-synthetic-1",
+          "kind": "route",
+          "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
         "reconsent": true
       }
@@ -2430,7 +3985,9 @@
         "origin": "https://example.invalid",
         "approval": {
           "candidateToken": "tok_synthetic_eligible_1",
-          "disclosureRevision": "disc-synthetic-1"
+          "disclosureRevision": "disc-synthetic-1",
+          "kind": "route",
+          "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
         "handover": {
           "from": "example-app-legacy",
@@ -2466,7 +4023,9 @@
         },
         "approval": {
           "candidateToken": "tok_synthetic_eligible_1",
-          "disclosureRevision": "disc-synthetic-1"
+          "disclosureRevision": "disc-synthetic-1",
+          "kind": "route",
+          "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
         "wait": "verified"
       }
@@ -2498,7 +4057,9 @@
         },
         "approval": {
           "candidateToken": "tok_synthetic_eligible_1",
-          "disclosureRevision": "disc-synthetic-1"
+          "disclosureRevision": "disc-synthetic-1",
+          "kind": "route",
+          "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
         "wait": "allocated"
       }
@@ -2525,9 +4086,13 @@
         "actionId": "act_synthetic_1",
         "approval": {
           "digest": "sha256:synthetic-action-1",
-          "disclosureRevision": "disc-synthetic-1"
+          "disclosureRevision": "disc-synthetic-1",
+          "kind": "setup",
+          "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
-        "secretHandle": "secret_synthetic_1"
+        "secretHandle": "secret_synthetic_1",
+        "providerId": "example-96",
+        "expectedConfigurationRevision": "cfg-synthetic-1"
       }
     },
     {
@@ -2539,8 +4104,12 @@
         "actionId": "act_synthetic_1",
         "approval": {
           "digest": "sha256:synthetic-action-1",
-          "disclosureRevision": "disc-synthetic-1"
-        }
+          "disclosureRevision": "disc-synthetic-1",
+          "kind": "setup",
+          "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "providerId": "example-96",
+        "expectedConfigurationRevision": "cfg-synthetic-1"
       }
     },
     {
@@ -2570,14 +4139,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -2590,6 +4157,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "supportedKinds": [
@@ -2641,14 +4215,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -2661,6 +4233,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "supportedKinds": [
@@ -2808,7 +4387,9 @@
         "origin": "https://example.invalid",
         "approval": {
           "candidateToken": "tok_synthetic_eligible_1",
-          "disclosureRevision": "disc-synthetic-1"
+          "disclosureRevision": "disc-synthetic-1",
+          "kind": "route",
+          "consentFactsDigest": "consent-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
         "handover": {
           "from": "example-app-legacy",
@@ -2996,6 +4577,934 @@
         "code": "setup_required",
         "message": "Synthetic message."
       }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Query",
+      "name": "durable create selecting one provider by id",
+      "value": {
+        "schemaVersion": 1,
+        "owner": "example-app",
+        "target": "127.0.0.1:8799",
+        "home": "/private/gozar-state",
+        "usage": {
+          "kind": "durable",
+          "routeId": "example-main"
+        },
+        "requirements": {
+          "reach": "internet",
+          "transport": "https",
+          "payloadAccess": "allow-provider",
+          "address": "stable",
+          "setup": "allow",
+          "protocols": [
+            "sse",
+            "streamable-http",
+            "oauth-dcr"
+          ]
+        },
+        "providerId": "example-route-id"
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Action",
+      "name": "provide-value",
+      "value": {
+        "id": "act_synthetic_1",
+        "kind": "provide-value",
+        "label": "Sign in to the provider",
+        "digest": "sha256:synthetic-action-1",
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "valueLabel": "Public address of your app",
+        "valuePlaceholder": "https://app.example.com",
+        "valueFormat": "https-origin",
+        "required": true
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Requirements",
+      "name": "lan, any transport",
+      "value": {
+        "reach": "lan",
+        "transport": "any",
+        "payloadAccess": "endpoint-only",
+        "address": "any",
+        "setup": "none",
+        "protocols": []
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "RouteView",
+      "name": "suspending: published null",
+      "value": {
+        "schemaVersion": 2,
+        "handle": {
+          "kind": "durable",
+          "id": "example-main",
+          "generation": 4
+        },
+        "origin": "https://example.invalid",
+        "published": null,
+        "state": "suspending",
+        "ownership": "gozar-owned",
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": null
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
+          }
+        },
+        "ingress": null,
+        "verification": {
+          "status": "verified",
+          "checkedAt": "2026-11-12T12:00:00.000Z",
+          "vantage": "this-device",
+          "checks": [
+            "nonce"
+          ],
+          "validUntil": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "results": [],
+          "observedAt": "2026-11-12T12:00:00.000Z",
+          "subject": {
+            "origin": "https://example.invalid",
+            "target": "127.0.0.1:8799",
+            "instanceId": "fixture-instance",
+            "bootId": "fixture-boot",
+            "handleGeneration": 4
+          }
+        },
+        "limits": {
+          "recommendedPollIntervalMs": 60000,
+          "idleTimeoutMs": null
+        },
+        "cleanup": {
+          "state": "none",
+          "nextAction": null
+        },
+        "routeState": "verified",
+        "expiresAt": {
+          "known": false,
+          "reason": "not-observed"
+        },
+        "hostConfiguration": {
+          "target": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "localPort": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "bindTarget": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "origin": {
+            "known": false,
+            "reason": "not-observed"
+          }
+        },
+        "facts": [],
+        "actions": [
+          "stop",
+          "edit",
+          "rotate"
+        ],
+        "operationId": null,
+        "binding": {
+          "authority": "unknown",
+          "target": {
+            "known": false,
+            "reason": "unobserved"
+          },
+          "remedy": null
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "RouteView",
+      "name": "suspended: published null",
+      "value": {
+        "schemaVersion": 2,
+        "handle": {
+          "kind": "durable",
+          "id": "example-main",
+          "generation": 4
+        },
+        "origin": "https://example.invalid",
+        "published": null,
+        "state": "suspended",
+        "ownership": "gozar-owned",
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": null
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
+          }
+        },
+        "ingress": null,
+        "verification": {
+          "status": "verified",
+          "checkedAt": "2026-11-12T12:00:00.000Z",
+          "vantage": "this-device",
+          "checks": [
+            "nonce"
+          ],
+          "validUntil": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "results": [],
+          "observedAt": "2026-11-12T12:00:00.000Z",
+          "subject": {
+            "origin": "https://example.invalid",
+            "target": "127.0.0.1:8799",
+            "instanceId": "fixture-instance",
+            "bootId": "fixture-boot",
+            "handleGeneration": 4
+          }
+        },
+        "limits": {
+          "recommendedPollIntervalMs": 60000,
+          "idleTimeoutMs": null
+        },
+        "cleanup": {
+          "state": "none",
+          "nextAction": null
+        },
+        "routeState": "verified",
+        "expiresAt": {
+          "known": false,
+          "reason": "not-observed"
+        },
+        "hostConfiguration": {
+          "target": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "localPort": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "bindTarget": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "origin": {
+            "known": false,
+            "reason": "not-observed"
+          }
+        },
+        "facts": [],
+        "actions": [
+          "stop",
+          "edit",
+          "rotate"
+        ],
+        "operationId": null,
+        "binding": {
+          "authority": "unknown",
+          "target": {
+            "known": false,
+            "reason": "unobserved"
+          },
+          "remedy": null
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Binding",
+      "name": "adapter known target with remedy",
+      "value": {
+        "authority": "adapter",
+        "target": {
+          "known": true,
+          "value": "127.0.0.1:8799"
+        },
+        "remedy": {
+          "id": "act_synthetic_binding",
+          "kind": "instructions",
+          "label": "Review the synthetic binding",
+          "digest": "sha256:synthetic-binding",
+          "disclosure": {
+            "revision": "disc-synthetic-1",
+            "text": "Example disclosure text for a synthetic provider.",
+            "links": [
+              {
+                "rel": "terms",
+                "label": "Terms",
+                "href": "https://provider.example/terms"
+              },
+              {
+                "rel": "privacy",
+                "label": "Privacy",
+                "href": "https://provider.example/privacy"
+              }
+            ]
+          },
+          "instructions": "Review the target binding before proceeding."
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Binding",
+      "name": "owner known target with remedy",
+      "value": {
+        "authority": "owner",
+        "target": {
+          "known": true,
+          "value": "127.0.0.1:8799"
+        },
+        "remedy": {
+          "id": "act_synthetic_binding",
+          "kind": "instructions",
+          "label": "Review the synthetic binding",
+          "digest": "sha256:synthetic-binding",
+          "disclosure": {
+            "revision": "disc-synthetic-1",
+            "text": "Example disclosure text for a synthetic provider.",
+            "links": [
+              {
+                "rel": "terms",
+                "label": "Terms",
+                "href": "https://provider.example/terms"
+              },
+              {
+                "rel": "privacy",
+                "label": "Privacy",
+                "href": "https://provider.example/privacy"
+              }
+            ]
+          },
+          "instructions": "Review the target binding before proceeding."
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Availability",
+      "name": "three observed usage states",
+      "value": {
+        "session": {
+          "state": "available",
+          "reason": "Synthetic session supported"
+        },
+        "attached": {
+          "state": "detect-only",
+          "reason": "Synthetic route may only be detected"
+        },
+        "durable": {
+          "state": "unsupported",
+          "reason": "Synthetic durable route unsupported"
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Prerequisite",
+      "name": "observed present",
+      "value": {
+        "id": "synthetic-prerequisite",
+        "label": "Synthetic tool",
+        "state": "present",
+        "observedAt": "2026-11-12T12:00:00.000Z",
+        "version": {
+          "known": true,
+          "value": "1.0.0"
+        },
+        "remedy": null,
+        "observation": {
+          "known": true,
+          "value": true
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Fact",
+      "name": "known observation",
+      "value": {
+        "id": "synthetic-fact",
+        "label": "Synthetic observation",
+        "value": true,
+        "known": true,
+        "group": "runtime",
+        "affectsConsent": true,
+        "source": "synthetic-fixture",
+        "asOf": "2026-11-12T12:00:00.000Z"
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Prerequisite",
+      "name": "observation unknown",
+      "value": {
+        "id": "synthetic-prerequisite",
+        "label": "Synthetic tool",
+        "state": "unknown",
+        "observedAt": null,
+        "version": {
+          "known": false,
+          "reason": "not-observed"
+        },
+        "remedy": {
+          "id": "act_synthetic_binding",
+          "kind": "instructions",
+          "label": "Review the synthetic binding",
+          "digest": "sha256:synthetic-binding",
+          "disclosure": {
+            "revision": "disc-synthetic-1",
+            "text": "Example disclosure text for a synthetic provider.",
+            "links": [
+              {
+                "rel": "terms",
+                "label": "Terms",
+                "href": "https://provider.example/terms"
+              },
+              {
+                "rel": "privacy",
+                "label": "Privacy",
+                "href": "https://provider.example/privacy"
+              }
+            ]
+          },
+          "instructions": "Review the target binding before proceeding."
+        },
+        "observation": {
+          "known": false,
+          "reason": "not-observed"
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Fact",
+      "name": "unknown observation",
+      "value": {
+        "id": "synthetic-fact",
+        "label": "Synthetic observation",
+        "value": null,
+        "known": false,
+        "reason": "not-observed",
+        "group": "runtime",
+        "affectsConsent": true,
+        "source": "synthetic-fixture",
+        "asOf": null
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Candidate",
+      "name": "detect-only without route authority",
+      "value": {
+        "providerId": "example-96",
+        "name": "cand_synthetic_detect_only",
+        "ownership": "gozar-owned",
+        "preferenceRef": "pref_synthetic_1",
+        "rank": 1,
+        "eligible": false,
+        "unmet": [
+          {
+            "requirement": "usage",
+            "actual": "detect-only",
+            "reasonCode": "not_met"
+          }
+        ],
+        "display": {
+          "label": "Example public route",
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
+        },
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": [
+              8443,
+              10000
+            ]
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
+          }
+        },
+        "setup": {
+          "state": "detect-only",
+          "actions": []
+        },
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "candidateToken": null,
+        "expiresAt": null,
+        "availability": {
+          "session": {
+            "state": "detect-only",
+            "reason": "Synthetic observation only"
+          },
+          "attached": {
+            "state": "detect-only",
+            "reason": "Synthetic observation only"
+          },
+          "durable": {
+            "state": "detect-only",
+            "reason": "Synthetic observation only"
+          }
+        },
+        "prerequisites": [],
+        "facts": [],
+        "configuration": {
+          "values": {},
+          "credentials": {},
+          "actions": [],
+          "inputRequirements": [],
+          "revision": "cfg-synthetic-1",
+          "scopeId": "scope-synthetic-1"
+        },
+        "consent": {
+          "scope": {
+            "configurationRevision": "cfg-synthetic-1",
+            "kind": "route",
+            "providerId": "example-96",
+            "query": {
+              "expectedOrigin": null,
+              "reach": "internet",
+              "target": "127.0.0.1:1234",
+              "transport": "https",
+              "usage": {
+                "kind": "attached"
+              }
+            },
+            "registryId": "registry-synthetic-1",
+            "scopeId": "scope-synthetic-1"
+          },
+          "consentFactsDigest": "consent-v1:fd89d64637aa75d369afdf1feef7a94f0b671a7e43dad14e063032361a52e5c9",
+          "facts": [],
+          "disclosures": {
+            "ownership": "gozar-owned",
+            "address": {
+              "conditions": [
+                "reserved name kept by the account"
+              ],
+              "ports": [
+                8443,
+                10000
+              ],
+              "scope": "account",
+              "stability": "stable"
+            },
+            "cost": {
+              "kind": "free",
+              "summary": "No charge"
+            },
+            "disclosure": {
+              "links": [
+                {
+                  "href": "https://provider.example/terms",
+                  "label": "Terms",
+                  "rel": "terms"
+                },
+                {
+                  "href": "https://provider.example/privacy",
+                  "label": "Privacy",
+                  "rel": "privacy"
+                }
+              ],
+              "revision": "disc-synthetic-1",
+              "text": "Example disclosure text for a synthetic provider."
+            },
+            "lifetimes": [
+              "session",
+              "attached",
+              "durable"
+            ],
+            "protocols": {
+              "oauthDcr": true,
+              "sse": true,
+              "streamableHttp": true
+            },
+            "reach": "internet",
+            "supervision": "provider-persistent",
+            "traffic": {
+              "evidenceRef": "evidence-synthetic-1",
+              "metadataVisibleTo": [
+                "provider"
+              ],
+              "providerCanReadPayload": true,
+              "readers": [
+                "provider"
+              ],
+              "tlsTermination": "provider"
+            },
+            "transport": "https"
+          }
+        },
+        "consentFactsDigest": "consent-v1:fd89d64637aa75d369afdf1feef7a94f0b671a7e43dad14e063032361a52e5c9"
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "WatchEvent",
+      "name": "consent_changed with remedy",
+      "value": {
+        "schemaVersion": 1,
+        "sequence": 0,
+        "type": "consent_changed",
+        "route": {
+          "schemaVersion": 2,
+          "handle": {
+            "kind": "durable",
+            "id": "example-main",
+            "generation": 4
+          },
+          "origin": "https://example.invalid",
+          "published": "https://example.invalid",
+          "state": "usable",
+          "ownership": "gozar-owned",
+          "properties": {
+            "reach": "internet",
+            "transport": "https",
+            "traffic": {
+              "tlsTermination": "provider",
+              "providerCanReadPayload": true,
+              "readers": [
+                "provider"
+              ],
+              "metadataVisibleTo": [
+                "provider"
+              ],
+              "evidenceRef": "evidence-synthetic-1"
+            },
+            "address": {
+              "stability": "stable",
+              "scope": "account",
+              "conditions": [
+                "reserved name kept by the account"
+              ],
+              "ports": null
+            },
+            "cost": {
+              "kind": "free",
+              "summary": "No charge"
+            },
+            "needsAccount": true,
+            "lifetimes": [
+              "session",
+              "attached",
+              "durable"
+            ],
+            "supervision": "provider-persistent",
+            "protocols": {
+              "sse": true,
+              "streamableHttp": true,
+              "oauthDcr": true
+            },
+            "proof": {
+              "vantage": "public",
+              "checks": [
+                "tls",
+                "nonce"
+              ]
+            }
+          },
+          "ingress": null,
+          "verification": {
+            "status": "verified",
+            "checkedAt": "2026-11-12T12:00:00.000Z",
+            "vantage": "this-device",
+            "checks": [
+              "nonce"
+            ],
+            "validUntil": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "results": [],
+            "observedAt": "2026-11-12T12:00:00.000Z",
+            "subject": {
+              "origin": "https://example.invalid",
+              "target": "127.0.0.1:8799",
+              "instanceId": "fixture-instance",
+              "bootId": "fixture-boot",
+              "handleGeneration": 4
+            }
+          },
+          "limits": {
+            "recommendedPollIntervalMs": 60000,
+            "idleTimeoutMs": null
+          },
+          "cleanup": {
+            "state": "none",
+            "nextAction": null
+          },
+          "routeState": "verified",
+          "expiresAt": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "hostConfiguration": {
+            "target": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "localPort": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "bindTarget": {
+              "known": false,
+              "reason": "not-observed"
+            },
+            "origin": {
+              "known": false,
+              "reason": "not-observed"
+            }
+          },
+          "facts": [],
+          "actions": [
+            "stop",
+            "edit",
+            "rotate"
+          ],
+          "operationId": null,
+          "binding": {
+            "authority": "unknown",
+            "target": {
+              "known": false,
+              "reason": "unobserved"
+            },
+            "remedy": null
+          }
+        },
+        "oldDigest": "consent-v1:synthetic-old",
+        "newDigest": "consent-v1:synthetic-new",
+        "reason": "Synthetic binding facts changed",
+        "nextAction": {
+          "id": "act_synthetic_binding",
+          "kind": "instructions",
+          "label": "Review the synthetic binding",
+          "digest": "sha256:synthetic-binding",
+          "disclosure": {
+            "revision": "disc-synthetic-1",
+            "text": "Example disclosure text for a synthetic provider.",
+            "links": [
+              {
+                "rel": "terms",
+                "label": "Terms",
+                "href": "https://provider.example/terms"
+              },
+              {
+                "rel": "privacy",
+                "label": "Privacy",
+                "href": "https://provider.example/privacy"
+              }
+            ]
+          },
+          "instructions": "Review the target binding before proceeding."
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Requirements",
+      "name": "tcp transport",
+      "value": {
+        "reach": "internet",
+        "transport": "tcp",
+        "payloadAccess": "allow-provider",
+        "address": "stable",
+        "setup": "allow",
+        "protocols": [
+          "sse",
+          "streamable-http",
+          "oauth-dcr"
+        ]
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Requirements",
+      "name": "tls transport",
+      "value": {
+        "reach": "internet",
+        "transport": "tls",
+        "payloadAccess": "allow-provider",
+        "address": "stable",
+        "setup": "allow",
+        "protocols": [
+          "sse",
+          "streamable-http",
+          "oauth-dcr"
+        ]
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Requirements",
+      "name": "any transport",
+      "value": {
+        "reach": "internet",
+        "transport": "any",
+        "payloadAccess": "allow-provider",
+        "address": "stable",
+        "setup": "allow",
+        "protocols": [
+          "sse",
+          "streamable-http",
+          "oauth-dcr"
+        ]
+      }
     }
   ],
   "invalid": [
@@ -3003,22 +5512,25 @@
       "schema": "route-catalog",
       "shape": "Catalog",
       "name": "unknown schemaVersion",
-      "why": "schemaVersion must be the constant 1; an unknown version fails closed",
+      "why": "schemaVersion must be the constant 2; changing only the version fails closed",
       "value": {
-        "schemaVersion": 2,
+        "schemaVersion": 999,
         "catalogRevision": "catrev_synthetic_1",
         "observedAt": "2026-11-12T12:00:00.000Z",
         "preferenceRevision": 3,
         "candidates": [
           {
+            "providerId": "example-96",
             "name": "cand_synthetic_1",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_1",
             "rank": 1,
             "eligible": true,
             "unmet": [],
             "display": {
               "label": "Example public route",
-              "description": "Example public route (synthetic)"
+              "description": "Example public route (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -3039,14 +5551,12 @@
                 "scope": "account",
                 "conditions": [
                   "reserved name kept by the account"
-                ]
+                ],
+                "ports": null
               },
               "cost": {
                 "kind": "free",
-                "summary": "No charge",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "No charge"
               },
               "needsAccount": true,
               "lifetimes": [
@@ -3059,6 +5569,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -3082,10 +5599,112 @@
               ]
             },
             "candidateToken": "tok_synthetic_eligible_1",
-            "expiresAt": "2026-11-12T12:10:00.000Z"
+            "expiresAt": "2026-11-12T12:10:00.000Z",
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-96",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:201d0217a47beb55c0159c73f905c230b4a2dc67561ea806ed21caab71a8b84b",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [
+                    "reserved name kept by the account"
+                  ],
+                  "ports": null,
+                  "scope": "account",
+                  "stability": "stable"
+                },
+                "cost": {
+                  "kind": "free",
+                  "summary": "No charge"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": "evidence-synthetic-1",
+                  "metadataVisibleTo": [
+                    "provider"
+                  ],
+                  "providerCanReadPayload": true,
+                  "readers": [
+                    "provider"
+                  ],
+                  "tlsTermination": "provider"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:201d0217a47beb55c0159c73f905c230b4a2dc67561ea806ed21caab71a8b84b"
           },
           {
+            "providerId": "example-32",
             "name": "cand_synthetic_2",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_2",
             "rank": 2,
             "eligible": false,
@@ -3093,12 +5712,13 @@
               {
                 "requirement": "address",
                 "actual": "ephemeral",
-                "reasonCode": "address_not_stable"
+                "reasonCode": "not_met"
               }
             ],
             "display": {
               "label": "Example temporary route",
-              "description": "Example temporary route (synthetic)"
+              "description": "Example temporary route (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -3119,14 +5739,12 @@
                 "scope": "session",
                 "conditions": [
                   "address changes on restart"
-                ]
+                ],
+                "ports": null
               },
               "cost": {
                 "kind": "free",
-                "summary": "No charge",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "No charge"
               },
               "needsAccount": true,
               "lifetimes": [
@@ -3139,6 +5757,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -3162,10 +5787,112 @@
               ]
             },
             "candidateToken": null,
-            "expiresAt": null
+            "expiresAt": null,
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-32",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:b537950474ff35b2240fec89e6b7a41a6a03eadc5e08b5df0fac10f9cbdef06c",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [
+                    "address changes on restart"
+                  ],
+                  "ports": null,
+                  "scope": "session",
+                  "stability": "ephemeral"
+                },
+                "cost": {
+                  "kind": "free",
+                  "summary": "No charge"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": "evidence-synthetic-1",
+                  "metadataVisibleTo": [
+                    "provider"
+                  ],
+                  "providerCanReadPayload": true,
+                  "readers": [
+                    "provider"
+                  ],
+                  "tlsTermination": "provider"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:b537950474ff35b2240fec89e6b7a41a6a03eadc5e08b5df0fac10f9cbdef06c"
           },
           {
+            "providerId": "example-51",
             "name": "cand_synthetic_3",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_3",
             "rank": 3,
             "eligible": false,
@@ -3173,12 +5900,13 @@
               {
                 "requirement": "platform",
                 "actual": "darwin",
-                "reasonCode": "unsupported"
+                "reasonCode": "unsupported_platform"
               }
             ],
             "display": {
               "label": "Example route on macOS",
-              "description": "Example route on macOS (synthetic)"
+              "description": "Example route on macOS (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -3199,14 +5927,12 @@
                 "scope": "account",
                 "conditions": [
                   "reserved name kept by the account"
-                ]
+                ],
+                "ports": null
               },
               "cost": {
                 "kind": "free",
-                "summary": "No charge",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "No charge"
               },
               "needsAccount": true,
               "lifetimes": [
@@ -3219,6 +5945,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -3242,17 +5975,120 @@
               ]
             },
             "candidateToken": null,
-            "expiresAt": null
+            "expiresAt": null,
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-51",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:1e85f4c24f35410a321009e9e5d930534ac574246f68280f5c20e4180ea722ad",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [
+                    "reserved name kept by the account"
+                  ],
+                  "ports": null,
+                  "scope": "account",
+                  "stability": "stable"
+                },
+                "cost": {
+                  "kind": "free",
+                  "summary": "No charge"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": "evidence-synthetic-1",
+                  "metadataVisibleTo": [
+                    "provider"
+                  ],
+                  "providerCanReadPayload": true,
+                  "readers": [
+                    "provider"
+                  ],
+                  "tlsTermination": "provider"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:1e85f4c24f35410a321009e9e5d930534ac574246f68280f5c20e4180ea722ad"
           },
           {
+            "providerId": "example-39",
             "name": "cand_synthetic_4",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_4",
             "rank": 4,
             "eligible": true,
             "unmet": [],
             "display": {
               "label": "Example route needing sign-in",
-              "description": "Example route needing sign-in (synthetic)"
+              "description": "Example route needing sign-in (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -3273,14 +6109,12 @@
                 "scope": "account",
                 "conditions": [
                   "reserved name kept by the account"
-                ]
+                ],
+                "ports": null
               },
               "cost": {
                 "kind": "free",
-                "summary": "No charge",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "No charge"
               },
               "needsAccount": true,
               "lifetimes": [
@@ -3293,6 +6127,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -3340,10 +6181,112 @@
               ]
             },
             "candidateToken": null,
-            "expiresAt": null
+            "expiresAt": null,
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-39",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:65758a2e0ea83b77ced769dff36c65272f0c10af507ef055f217651f1cb9ba95",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [
+                    "reserved name kept by the account"
+                  ],
+                  "ports": null,
+                  "scope": "account",
+                  "stability": "stable"
+                },
+                "cost": {
+                  "kind": "free",
+                  "summary": "No charge"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": "evidence-synthetic-1",
+                  "metadataVisibleTo": [
+                    "provider"
+                  ],
+                  "providerCanReadPayload": true,
+                  "readers": [
+                    "provider"
+                  ],
+                  "tlsTermination": "provider"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:65758a2e0ea83b77ced769dff36c65272f0c10af507ef055f217651f1cb9ba95"
           },
           {
+            "providerId": "example-82",
             "name": "cand_synthetic_5",
+            "ownership": "gozar-owned",
             "preferenceRef": "pref_synthetic_5",
             "rank": 5,
             "eligible": false,
@@ -3351,12 +6294,13 @@
               {
                 "requirement": "payloadAccess",
                 "actual": null,
-                "reasonCode": "privacy_unknown"
+                "reasonCode": "unknown"
               }
             ],
             "display": {
               "label": "Example route with unknown privacy",
-              "description": "Example route with unknown privacy (synthetic)"
+              "description": "Example route with unknown privacy (synthetic)",
+              "needs": "Needs nothing beyond this computer."
             },
             "properties": {
               "reach": "internet",
@@ -3371,14 +6315,12 @@
               "address": {
                 "stability": "unknown",
                 "scope": "unknown",
-                "conditions": []
+                "conditions": [],
+                "ports": null
               },
               "cost": {
                 "kind": "unknown",
-                "summary": "Unknown",
-                "currency": null,
-                "amount": null,
-                "period": null
+                "summary": "Unknown"
               },
               "needsAccount": null,
               "lifetimes": [
@@ -3391,6 +6333,13 @@
                 "sse": true,
                 "streamableHttp": true,
                 "oauthDcr": true
+              },
+              "proof": {
+                "vantage": "public",
+                "checks": [
+                  "tls",
+                  "nonce"
+                ]
               }
             },
             "setup": {
@@ -3414,10 +6363,110 @@
               ]
             },
             "candidateToken": null,
-            "expiresAt": null
+            "expiresAt": null,
+            "availability": {
+              "session": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "attached": {
+                "state": "available",
+                "reason": "fixture"
+              },
+              "durable": {
+                "state": "available",
+                "reason": "fixture"
+              }
+            },
+            "prerequisites": [],
+            "facts": [],
+            "configuration": {
+              "values": {},
+              "credentials": {},
+              "actions": [],
+              "inputRequirements": [],
+              "revision": "cfg-synthetic-1",
+              "scopeId": "scope-synthetic-1"
+            },
+            "consent": {
+              "scope": {
+                "configurationRevision": "cfg-synthetic-1",
+                "kind": "route",
+                "providerId": "example-82",
+                "query": {
+                  "expectedOrigin": null,
+                  "reach": "internet",
+                  "target": "127.0.0.1:1234",
+                  "transport": "https",
+                  "usage": {
+                    "kind": "attached"
+                  }
+                },
+                "registryId": "registry-synthetic-1",
+                "scopeId": "scope-synthetic-1"
+              },
+              "consentFactsDigest": "consent-v1:50b15d0fad44e30a670e5ae6d9582b8dd6d8355d881cdcaf21e598e5111a638d",
+              "facts": [],
+              "disclosures": {
+                "ownership": "gozar-owned",
+                "address": {
+                  "conditions": [],
+                  "ports": null,
+                  "scope": "unknown",
+                  "stability": "unknown"
+                },
+                "cost": {
+                  "kind": "unknown",
+                  "summary": "Unknown"
+                },
+                "disclosure": {
+                  "links": [
+                    {
+                      "href": "https://provider.example/terms",
+                      "label": "Terms",
+                      "rel": "terms"
+                    },
+                    {
+                      "href": "https://provider.example/privacy",
+                      "label": "Privacy",
+                      "rel": "privacy"
+                    }
+                  ],
+                  "revision": "disc-synthetic-1",
+                  "text": "Example disclosure text for a synthetic provider."
+                },
+                "lifetimes": [
+                  "session",
+                  "attached",
+                  "durable"
+                ],
+                "protocols": {
+                  "oauthDcr": true,
+                  "sse": true,
+                  "streamableHttp": true
+                },
+                "reach": "internet",
+                "supervision": "provider-persistent",
+                "traffic": {
+                  "evidenceRef": null,
+                  "metadataVisibleTo": [],
+                  "providerCanReadPayload": null,
+                  "readers": [],
+                  "tlsTermination": "unknown"
+                },
+                "transport": "https"
+              }
+            },
+            "consentFactsDigest": "consent-v1:50b15d0fad44e30a670e5ae6d9582b8dd6d8355d881cdcaf21e598e5111a638d"
           }
         ],
-        "noMatch": null
+        "noMatch": null,
+        "features": [
+          "structured-state",
+          "open-facts",
+          "input-requirements",
+          "secret-intake"
+        ]
       }
     },
     {
@@ -3453,9 +6502,9 @@
       "schema": "route-catalog",
       "shape": "RouteView",
       "name": "unknown schemaVersion",
-      "why": "schemaVersion must be the constant 1",
+      "why": "schemaVersion must be the constant 2; changing only the version fails closed",
       "value": {
-        "schemaVersion": 2,
+        "schemaVersion": 999,
         "handle": {
           "kind": "durable",
           "id": "example-main",
@@ -3484,14 +6533,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -3504,19 +6551,107 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
-        "ingress": null,
+        "ingress": {
+          "generation": 2,
+          "verifiedAt": "2026-11-12T12:00:00.000Z",
+          "validUntil": "2026-11-12T12:05:00.000Z",
+          "publicAuthority": "example.invalid",
+          "authorityHandling": "configured-origin",
+          "clientAddress": {
+            "source": "trusted-header",
+            "evidenceRef": "evidence-synthetic-2",
+            "peer": {
+              "kind": "unix-socket",
+              "path": "/private/gozar-state/ingress.sock",
+              "ownerUid": 1000
+            },
+            "header": {
+              "name": "x-forwarded-for",
+              "format": "ip-list",
+              "sanitization": "strip-inbound-and-write",
+              "selection": "rightmost-untrusted",
+              "trustedHops": 1,
+              "trustedProxyCidrs": [
+                "192.0.2.0/24"
+              ]
+            }
+          }
+        },
         "verification": {
           "status": "verified",
-          "checkedAt": "2026-11-12T12:00:00.000Z"
+          "checkedAt": "2026-11-12T12:00:00.000Z",
+          "vantage": "this-device",
+          "checks": [
+            "nonce"
+          ],
+          "validUntil": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "results": [],
+          "observedAt": "2026-11-12T12:00:00.000Z",
+          "subject": {
+            "origin": "https://example.invalid",
+            "target": "127.0.0.1:8799",
+            "instanceId": "fixture-instance",
+            "bootId": "fixture-boot",
+            "handleGeneration": 4
+          }
         },
         "limits": {
           "recommendedPollIntervalMs": 60000,
           "idleTimeoutMs": null
         },
         "cleanup": {
-          "state": "none"
+          "state": "none",
+          "nextAction": null
+        },
+        "routeState": "verified",
+        "expiresAt": {
+          "known": false,
+          "reason": "not-observed"
+        },
+        "hostConfiguration": {
+          "target": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "localPort": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "bindTarget": {
+            "known": false,
+            "reason": "not-observed"
+          },
+          "origin": {
+            "known": false,
+            "reason": "not-observed"
+          }
+        },
+        "facts": [],
+        "actions": [
+          "stop",
+          "edit",
+          "rotate"
+        ],
+        "operationId": null,
+        "binding": {
+          "authority": "unknown",
+          "target": {
+            "known": false,
+            "reason": "unobserved"
+          },
+          "remedy": null
         }
       }
     },
@@ -3548,14 +6683,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -3568,6 +6701,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "supportedKinds": [
@@ -3616,7 +6756,8 @@
           "scope": "account",
           "conditions": [
             "reserved name kept by the account"
-          ]
+          ],
+          "ports": null
         },
         "needsAccount": true,
         "lifetimes": [
@@ -3629,6 +6770,13 @@
           "sse": true,
           "streamableHttp": true,
           "oauthDcr": true
+        },
+        "proof": {
+          "vantage": "public",
+          "checks": [
+            "tls",
+            "nonce"
+          ]
         }
       }
     },
@@ -3656,14 +6804,12 @@
           "scope": "account",
           "conditions": [
             "reserved name kept by the account"
-          ]
+          ],
+          "ports": null
         },
         "cost": {
           "kind": "free",
-          "summary": "No charge",
-          "currency": null,
-          "amount": null,
-          "period": null
+          "summary": "No charge"
         },
         "lifetimes": [
           "session",
@@ -3675,6 +6821,13 @@
           "sse": true,
           "streamableHttp": true,
           "oauthDcr": true
+        },
+        "proof": {
+          "vantage": "public",
+          "checks": [
+            "tls",
+            "nonce"
+          ]
         }
       }
     },
@@ -3695,10 +6848,7 @@
         },
         "cost": {
           "kind": "free",
-          "summary": "No charge",
-          "currency": null,
-          "amount": null,
-          "period": null
+          "summary": "No charge"
         },
         "needsAccount": true,
         "lifetimes": [
@@ -3737,14 +6887,12 @@
           "scope": "account",
           "conditions": [
             "reserved name kept by the account"
-          ]
+          ],
+          "ports": null
         },
         "cost": {
           "kind": "free",
-          "summary": "No charge",
-          "currency": null,
-          "amount": null,
-          "period": null
+          "summary": "No charge"
         },
         "needsAccount": true,
         "lifetimes": [
@@ -3757,6 +6905,13 @@
           "sse": true,
           "streamableHttp": true,
           "oauthDcr": true
+        },
+        "proof": {
+          "vantage": "public",
+          "checks": [
+            "tls",
+            "nonce"
+          ]
         }
       }
     },
@@ -3783,14 +6938,12 @@
           "scope": "account",
           "conditions": [
             "reserved name kept by the account"
-          ]
+          ],
+          "ports": null
         },
         "cost": {
           "kind": "free",
-          "summary": "No charge",
-          "currency": null,
-          "amount": null,
-          "period": null
+          "summary": "No charge"
         },
         "needsAccount": true,
         "lifetimes": [
@@ -3803,6 +6956,13 @@
           "sse": true,
           "streamableHttp": true,
           "oauthDcr": true
+        },
+        "proof": {
+          "vantage": "public",
+          "checks": [
+            "tls",
+            "nonce"
+          ]
         }
       }
     },
@@ -3830,14 +6990,12 @@
           "scope": "account",
           "conditions": [
             "reserved name kept by the account"
-          ]
+          ],
+          "ports": null
         },
         "cost": {
           "kind": "free",
-          "summary": "No charge",
-          "currency": null,
-          "amount": null,
-          "period": null
+          "summary": "No charge"
         },
         "needsAccount": true,
         "lifetimes": [
@@ -3851,7 +7009,14 @@
           "streamableHttp": true,
           "oauthDcr": true
         },
-        "trustedProxy": true
+        "trustedProxy": true,
+        "proof": {
+          "vantage": "public",
+          "checks": [
+            "tls",
+            "nonce"
+          ]
+        }
       }
     },
     {
@@ -3860,14 +7025,17 @@
       "name": "extra unknown property",
       "why": "Candidate is a closed shape",
       "value": {
+        "providerId": "example-19",
         "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_1",
         "rank": 1,
         "eligible": true,
         "unmet": [],
         "display": {
           "label": "Example public route",
-          "description": "Example public route (synthetic)"
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -3888,14 +7056,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -3908,6 +7074,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -4076,7 +7249,7 @@
       "schema": "route-catalog",
       "shape": "Requirements",
       "name": "transport http",
-      "why": "only https can be required",
+      "why": "transport is https|tcp|tls|any; http cannot be required",
       "value": {
         "reach": "internet",
         "transport": "http",
@@ -4130,7 +7303,9 @@
       "name": "ineligible candidate carries a token",
       "why": "no token is issued for an ineligible offer",
       "value": {
+        "providerId": "example-65",
         "name": "cand_synthetic_2",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_2",
         "rank": 2,
         "eligible": false,
@@ -4143,7 +7318,8 @@
         ],
         "display": {
           "label": "Example temporary route",
-          "description": "Example temporary route (synthetic)"
+          "description": "Example temporary route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -4164,14 +7340,12 @@
             "scope": "session",
             "conditions": [
               "address changes on restart"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -4184,6 +7358,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -4216,14 +7397,17 @@
       "name": "missing disclosure",
       "why": "every candidate shows its disclosure",
       "value": {
+        "providerId": "example-6",
         "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_1",
         "rank": 1,
         "eligible": true,
         "unmet": [],
         "display": {
           "label": "Example public route",
-          "description": "Example public route (synthetic)"
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -4244,14 +7428,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -4264,6 +7446,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -4278,16 +7467,19 @@
       "schema": "route-catalog",
       "shape": "Candidate",
       "name": "setup state outside enum",
-      "why": "setup.state is ready|action-required|unsupported|unknown",
+      "why": "setup.state is ready|action-required|unsupported|unknown|detect-only",
       "value": {
+        "providerId": "example-96",
         "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_1",
         "rank": 1,
         "eligible": true,
         "unmet": [],
         "display": {
           "label": "Example public route",
-          "description": "Example public route (synthetic)"
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -4308,14 +7500,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -4328,6 +7518,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -4556,14 +7753,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -4576,12 +7771,23 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "ingress": null,
         "verification": {
           "status": "verified",
-          "checkedAt": "2026-11-12T12:00:00.000Z"
+          "checkedAt": "2026-11-12T12:00:00.000Z",
+          "vantage": "this-device",
+          "checks": [
+            "nonce"
+          ]
         },
         "limits": {
           "recommendedPollIntervalMs": 60000,
@@ -4626,14 +7832,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -4646,6 +7850,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "ingress": null,
@@ -4746,7 +7957,7 @@
       "schema": "route-catalog",
       "shape": "WatchEvent",
       "name": "type outside enum",
-      "why": "type is snapshot|changed|terminal",
+      "why": "type is snapshot|changed|terminal|consent_changed",
       "value": {
         "schemaVersion": 1,
         "sequence": 0,
@@ -4781,14 +7992,12 @@
               "scope": "account",
               "conditions": [
                 "reserved name kept by the account"
-              ]
+              ],
+              "ports": null
             },
             "cost": {
               "kind": "free",
-              "summary": "No charge",
-              "currency": null,
-              "amount": null,
-              "period": null
+              "summary": "No charge"
             },
             "needsAccount": true,
             "lifetimes": [
@@ -4801,12 +8010,23 @@
               "sse": true,
               "streamableHttp": true,
               "oauthDcr": true
+            },
+            "proof": {
+              "vantage": "public",
+              "checks": [
+                "tls",
+                "nonce"
+              ]
             }
           },
           "ingress": null,
           "verification": {
             "status": "verified",
-            "checkedAt": "2026-11-12T12:00:00.000Z"
+            "checkedAt": "2026-11-12T12:00:00.000Z",
+            "vantage": "this-device",
+            "checks": [
+              "nonce"
+            ]
           },
           "limits": {
             "recommendedPollIntervalMs": 60000,
@@ -5218,14 +8438,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5238,6 +8456,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "disclosure": {
@@ -5286,7 +8511,8 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5299,6 +8525,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "supportedKinds": [
@@ -5351,14 +8584,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5371,6 +8602,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "supportedKinds": [
@@ -5422,14 +8660,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5442,6 +8678,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "supportedKinds": [
@@ -5495,14 +8738,17 @@
       "name": "action-required candidate carries a token",
       "why": "a token is issued only when eligible and setup.state is ready; after runSetupAction the app asks the catalog again",
       "value": {
+        "providerId": "example-56",
         "name": "cand_synthetic_4",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_4",
         "rank": 4,
         "eligible": true,
         "unmet": [],
         "display": {
           "label": "Example route needing sign-in",
-          "description": "Example route needing sign-in (synthetic)"
+          "description": "Example route needing sign-in (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -5523,14 +8769,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5543,6 +8787,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -5599,7 +8850,9 @@
       "name": "ineligible ready candidate carries a token (unsupported platform)",
       "why": "no token for an unsupported or ineligible candidate",
       "value": {
+        "providerId": "example-68",
         "name": "cand_synthetic_3",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_3",
         "rank": 3,
         "eligible": false,
@@ -5612,7 +8865,8 @@
         ],
         "display": {
           "label": "Example route on macOS",
-          "description": "Example route on macOS (synthetic)"
+          "description": "Example route on macOS (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -5633,14 +8887,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5653,6 +8905,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -5685,7 +8944,9 @@
       "name": "unmet requirement outside vocabulary",
       "why": "unmet.requirement is a closed list",
       "value": {
+        "providerId": "example-44",
         "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_1",
         "rank": 1,
         "eligible": false,
@@ -5698,7 +8959,8 @@
         ],
         "display": {
           "label": "Example public route",
-          "description": "Example public route (synthetic)"
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -5719,14 +8981,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5739,6 +8999,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -5771,7 +9038,9 @@
       "name": "unmet reasonCode outside vocabulary",
       "why": "unmet.reasonCode is not_met, unknown or unsupported_platform",
       "value": {
+        "providerId": "example-63",
         "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_1",
         "rank": 1,
         "eligible": false,
@@ -5784,7 +9053,8 @@
         ],
         "display": {
           "label": "Example public route",
-          "description": "Example public route (synthetic)"
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -5805,14 +9075,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5825,6 +9093,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -5857,7 +9132,9 @@
       "name": "unmet entry missing actual",
       "why": "actual is required (null when unknown)",
       "value": {
+        "providerId": "example-29",
         "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
         "preferenceRef": "pref_synthetic_1",
         "rank": 1,
         "eligible": false,
@@ -5869,7 +9146,8 @@
         ],
         "display": {
           "label": "Example public route",
-          "description": "Example public route (synthetic)"
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
         },
         "properties": {
           "reach": "internet",
@@ -5890,14 +9168,12 @@
             "scope": "account",
             "conditions": [
               "reserved name kept by the account"
-            ]
+            ],
+            "ports": null
           },
           "cost": {
             "kind": "free",
-            "summary": "No charge",
-            "currency": null,
-            "amount": null,
-            "period": null
+            "summary": "No charge"
           },
           "needsAccount": true,
           "lifetimes": [
@@ -5910,6 +9186,13 @@
             "sse": true,
             "streamableHttp": true,
             "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
           }
         },
         "setup": {
@@ -6254,6 +9537,640 @@
         "code": "route_conflict",
         "message": "x"
       }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Candidate",
+      "name": "missing providerId",
+      "why": "an app selects and stores a candidate by providerId, so it is required",
+      "value": {
+        "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
+        "preferenceRef": "pref_synthetic_1",
+        "rank": 1,
+        "eligible": true,
+        "unmet": [],
+        "display": {
+          "label": "Example public route",
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
+        },
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": [
+              8443,
+              10000
+            ]
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
+          }
+        },
+        "setup": {
+          "state": "ready",
+          "actions": []
+        },
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "candidateToken": "tok_synthetic_eligible_1",
+        "expiresAt": "2026-11-12T12:10:00.000Z"
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Candidate",
+      "name": "display missing needs",
+      "why": "the static needs line is shown whether or not setup is ready",
+      "value": {
+        "providerId": "example-96",
+        "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
+        "preferenceRef": "pref_synthetic_1",
+        "rank": 1,
+        "eligible": true,
+        "unmet": [],
+        "display": {
+          "label": "Example public route",
+          "description": "Example public route (synthetic)"
+        },
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": [
+              8443,
+              10000
+            ]
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
+          }
+        },
+        "setup": {
+          "state": "ready",
+          "actions": []
+        },
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "candidateToken": "tok_synthetic_eligible_1",
+        "expiresAt": "2026-11-12T12:10:00.000Z"
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Candidate",
+      "name": "proof vantage outside enum",
+      "why": "vantage is one of five closed words",
+      "value": {
+        "providerId": "example-96",
+        "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
+        "preferenceRef": "pref_synthetic_1",
+        "rank": 1,
+        "eligible": true,
+        "unmet": [],
+        "display": {
+          "label": "Example public route",
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
+        },
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": [
+              8443,
+              10000
+            ]
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "somewhere",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
+          }
+        },
+        "setup": {
+          "state": "ready",
+          "actions": []
+        },
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "candidateToken": "tok_synthetic_eligible_1",
+        "expiresAt": "2026-11-12T12:10:00.000Z"
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Candidate",
+      "name": "proof check outside enum",
+      "why": "checks are tls, nonce or sse",
+      "value": {
+        "providerId": "example-96",
+        "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
+        "preferenceRef": "pref_synthetic_1",
+        "rank": 1,
+        "eligible": true,
+        "unmet": [],
+        "display": {
+          "label": "Example public route",
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
+        },
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": [
+              8443,
+              10000
+            ]
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "magic"
+            ]
+          }
+        },
+        "setup": {
+          "state": "ready",
+          "actions": []
+        },
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "candidateToken": "tok_synthetic_eligible_1",
+        "expiresAt": "2026-11-12T12:10:00.000Z"
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Candidate",
+      "name": "ports not integers",
+      "why": "ports are integers or null",
+      "value": {
+        "providerId": "example-96",
+        "name": "cand_synthetic_1",
+        "ownership": "gozar-owned",
+        "preferenceRef": "pref_synthetic_1",
+        "rank": 1,
+        "eligible": true,
+        "unmet": [],
+        "display": {
+          "label": "Example public route",
+          "description": "Example public route (synthetic)",
+          "needs": "Needs nothing beyond this computer."
+        },
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": [
+              "8443"
+            ]
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
+          }
+        },
+        "setup": {
+          "state": "ready",
+          "actions": []
+        },
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "candidateToken": "tok_synthetic_eligible_1",
+        "expiresAt": "2026-11-12T12:10:00.000Z"
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "RouteView",
+      "name": "verification missing vantage",
+      "why": "verification says where the last check ran from",
+      "value": {
+        "schemaVersion": 1,
+        "handle": {
+          "kind": "durable",
+          "id": "example-main",
+          "generation": 4
+        },
+        "origin": "https://example.invalid",
+        "published": "https://example.invalid",
+        "state": "usable",
+        "ownership": "gozar-owned",
+        "properties": {
+          "reach": "internet",
+          "transport": "https",
+          "traffic": {
+            "tlsTermination": "provider",
+            "providerCanReadPayload": true,
+            "readers": [
+              "provider"
+            ],
+            "metadataVisibleTo": [
+              "provider"
+            ],
+            "evidenceRef": "evidence-synthetic-1"
+          },
+          "address": {
+            "stability": "stable",
+            "scope": "account",
+            "conditions": [
+              "reserved name kept by the account"
+            ],
+            "ports": null
+          },
+          "cost": {
+            "kind": "free",
+            "summary": "No charge"
+          },
+          "needsAccount": true,
+          "lifetimes": [
+            "session",
+            "attached",
+            "durable"
+          ],
+          "supervision": "provider-persistent",
+          "protocols": {
+            "sse": true,
+            "streamableHttp": true,
+            "oauthDcr": true
+          },
+          "proof": {
+            "vantage": "public",
+            "checks": [
+              "tls",
+              "nonce"
+            ]
+          }
+        },
+        "ingress": {
+          "generation": 2,
+          "verifiedAt": "2026-11-12T12:00:00.000Z",
+          "validUntil": "2026-11-12T12:05:00.000Z",
+          "publicAuthority": "example.invalid",
+          "authorityHandling": "configured-origin",
+          "clientAddress": {
+            "source": "trusted-header",
+            "evidenceRef": "evidence-synthetic-2",
+            "peer": {
+              "kind": "unix-socket",
+              "path": "/private/gozar-state/ingress.sock",
+              "ownerUid": 1000
+            },
+            "header": {
+              "name": "x-forwarded-for",
+              "format": "ip-list",
+              "sanitization": "strip-inbound-and-write",
+              "selection": "rightmost-untrusted",
+              "trustedHops": 1,
+              "trustedProxyCidrs": [
+                "192.0.2.0/24"
+              ]
+            }
+          }
+        },
+        "verification": {
+          "status": "verified",
+          "checkedAt": "2026-11-12T12:00:00.000Z",
+          "checks": [
+            "nonce"
+          ]
+        },
+        "limits": {
+          "recommendedPollIntervalMs": 60000,
+          "idleTimeoutMs": null
+        },
+        "cleanup": {
+          "state": "none"
+        }
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Action",
+      "name": "unknown action kind",
+      "why": "kind must be one of the listed action kinds",
+      "value": {
+        "id": "act_synthetic_1",
+        "kind": "provide-text",
+        "label": "Sign in to the provider",
+        "digest": "sha256:synthetic-action-1",
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "valueLabel": "Public address of your app",
+        "valuePlaceholder": "https://app.example.com",
+        "valueFormat": "https-origin",
+        "required": true
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Requirements",
+      "name": "unknown transport word",
+      "why": "transport is https|tcp|tls|any; http cannot be required",
+      "value": {
+        "reach": "lan",
+        "transport": "http",
+        "payloadAccess": "endpoint-only",
+        "address": "any",
+        "setup": "none",
+        "protocols": []
+      }
+    },
+    {
+      "schema": "route-catalog",
+      "shape": "Action",
+      "name": "required is not a boolean",
+      "why": "required must be a boolean",
+      "value": {
+        "id": "act_synthetic_1",
+        "kind": "provide-value",
+        "label": "Sign in to the provider",
+        "digest": "sha256:synthetic-action-1",
+        "disclosure": {
+          "revision": "disc-synthetic-1",
+          "text": "Example disclosure text for a synthetic provider.",
+          "links": [
+            {
+              "rel": "terms",
+              "label": "Terms",
+              "href": "https://provider.example/terms"
+            },
+            {
+              "rel": "privacy",
+              "label": "Privacy",
+              "href": "https://provider.example/privacy"
+            }
+          ]
+        },
+        "valueLabel": "Public address of your app",
+        "valuePlaceholder": "https://app.example.com",
+        "valueFormat": "https-origin",
+        "required": "yes"
+      }
     }
   ],
   "errorNormalization": {
@@ -6376,6 +10293,11 @@
       "source": "durable-route.mjs",
       "rule": "owner decision: the error code is cleanup_debt; RouteView keeps the uncertain state"
     },
+    "close_failed": {
+      "target": "cleanup_debt",
+      "source": "adapters/providers/ngrok-https-edge/index.mjs",
+      "rule": "a listener that does not confirm closing is left as cleanup debt, never reported as removed"
+    },
     "address_changed": {
       "target": "address_changed",
       "source": "durable-route.mjs"
@@ -6461,6 +10383,10 @@
       "target": "verification_failed",
       "source": "driver.mjs, probe-directory.mjs",
       "rule": "owner decision"
+    },
+    "SDK_REFUSED": {
+      "target": "provider_unavailable",
+      "reason": "A synthetic SDK effect refused creation; raw backend errors are never public."
     }
   },
   "adapterEffectErrors": {
