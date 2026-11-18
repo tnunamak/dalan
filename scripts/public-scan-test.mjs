@@ -93,3 +93,79 @@ test('the scan command: private hits fail only with the deny list; inactive allo
   assert.equal(missing.status, 2, missing.stdout + missing.stderr);
   assert.match(missing.stderr, /cannot read/);
 }));
+
+
+test('two public upstream documentation exceptions are narrow and become stale', () => withDir(dir => {
+  const archiveName = 'vendor/tnunamak-gozar-0.5.0.tgz';
+  const design = 'package/docs/design/durable-routes.md';
+  const coverage = 'package/docs/release-0.4-interface-coverage.md';
+  const designLine = '- macOS host (plan R12) and ngrok operational recipes (slice S1). Durable routes are designed for them but ship first for Tailscale on Linux.';
+  const coverageLine = "HTTP(S)-only executable admission is Lead's 0.4 decision to ship the embedding";
+  const production = JSON.parse(readFileSync(new URL('./public-scan-allowlist.json', import.meta.url), 'utf8'));
+  const paths = [
+    '^vendor/tnunamak-gozar-0[.]5[.]0[.]tgz!package/docs/design/durable-routes[.]md$',
+    '^vendor/tnunamak-gozar-0[.]5[.]0[.]tgz!package/docs/release-0[.]4-interface-coverage[.]md$',
+  ];
+  const entries = production.filter(entry => paths.includes(entry.path));
+  assert.equal(entries.length, 2, 'use exactly the two production exceptions, not a test-only policy');
+  const repo = path.join(dir, 'repo');
+  mkdirSync(path.join(repo, 'scripts'), { recursive: true });
+  mkdirSync(path.join(repo, 'vendor'), { recursive: true });
+  writeFileSync(path.join(repo, 'scripts/public-scan-allowlist.json'), JSON.stringify(entries));
+  execFileSync('git', ['init', '-q', repo]);
+  const source = path.join(dir, 'source');
+  function pack(lines, target = archiveName) {
+    rmSync(source, { recursive: true, force: true });
+    for (const [member, text] of Object.entries(lines)) {
+      mkdirSync(path.dirname(path.join(source, member)), { recursive: true });
+      writeFileSync(path.join(source, member), text + '\n');
+    }
+    execFileSync('tar', ['-czf', path.join(repo, target), '-C', source, 'package']);
+  }
+  const baseline = { [design]: designLine, [coverage]: coverageLine };
+  pack(baseline);
+  execFileSync('git', ['-C', repo, 'add', '.']);
+  const run = env => spawnSync(process.execPath, [script, '--root', repo], {
+    encoding: 'utf8', env: { PATH: process.env.PATH, ...env },
+  });
+  const good = run({});
+  assert.equal(good.status, 0, good.stdout + good.stderr);
+  assert.match(good.stdout, /0 unexplained, 2 allow-listed hits under 2 entries, 0 stale entries/);
+
+  // Keep both exact originals present in each negative probe, so the failure
+  // must be unexplained content rather than a missing exception's stale count.
+  function rejected(label, expected, env = {}) {
+    const result = run(env);
+    assert.equal(result.status, 1, label + '\n' + result.stdout + result.stderr);
+    assert.match(result.stdout, expected);
+    assert.match(result.stdout, /0 stale entries/);
+  }
+  writeFileSync(path.join(repo, 'owned.md'), designLine + '\n' + coverageLine);
+  execFileSync('git', ['-C', repo, 'add', 'owned.md']);
+  rejected('owned file', /2 unexplained/);
+  writeFileSync(path.join(repo, 'owned.md'), 'clean\n');
+
+  pack(baseline, 'vendor/other.tgz');
+  execFileSync('git', ['-C', repo, 'add', 'vendor/other.tgz']);
+  rejected('other archive', /2 unexplained/);
+  pack({ 'package/clean.md': 'clean' }, 'vendor/other.tgz');
+
+  pack({ ...baseline, 'package/docs/another.md': designLine + '\n' + coverageLine });
+  rejected('other member', /2 unexplained/);
+  pack({ [design]: designLine + '\nA new S1 line.', [coverage]: coverageLine + "\nA new Lead's line." });
+  rejected('new lines in permitted members', /2 unexplained/);
+  pack({ [design]: designLine + '\n' + designLine.replace('S1', 'S2'), [coverage]: coverageLine });
+  rejected('changed job code in otherwise identical sentence', /1 unexplained/);
+
+  pack({ [design]: designLine + ' private-host.example', [coverage]: coverageLine + ' secret_tool_name' });
+  writeFileSync(path.join(dir, 'private.txt'), DENYLIST);
+  rejected('private denylist is never bypassed', /2 unexplained/, { DALAN_PUBLIC_SCAN_DENYLIST: path.join(dir, 'private.txt') });
+
+  for (const missing of [design, coverage]) {
+    pack({ ...baseline, [missing]: 'public text changed' });
+    const stale = run({});
+    assert.equal(stale.status, 1, stale.stdout + stale.stderr);
+    assert.match(stale.stdout, /0 unexplained, 1 allow-listed hits under 2 entries, 1 stale entries/);
+    assert.match(stale.stdout, /stale allow-list entry/);
+  }
+}));
