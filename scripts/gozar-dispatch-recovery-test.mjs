@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { fork } from 'node:child_process';
+import { deliveryFixture } from './gozar-admission-recovery-worker.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -208,4 +210,125 @@ test('an unreadable retained handle cannot authorize replay or removal', async t
   await assert.rejects(uninstallService({ home: x.bridge, confirmRouteStop: noAuthority }, x.seams), { code: 'route_not_found' });
   assert.deepEqual(JSON.parse(readFileSync(x.serviceFile)), ref);
   await x.intact();
+});
+
+// These cases deliberately use a contract fake. Counts below are facade deliveries,
+// not physical provider allocations, and do not qualify any never-started code.
+test('service delivery interruption preserves dispatch uncertainty and recovers the same operation', { timeout: 20000 }, async t => {
+  const root = await mkdtemp(path.join(homedir(), '.tmp', 'delivery-'));
+  let child;
+  let exited;
+  t.after(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    if (exited) await exited;
+    await rm(root, { recursive: true, force: true });
+  });
+  child = fork(new URL('./gozar-admission-recovery-worker.mjs', import.meta.url), [root],
+    { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  exited = new Promise(resolve => child.once('exit', resolve));
+  const held = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('service delivery barrier not reached')), 10000);
+    const finish = (error, value) => {
+      clearTimeout(timer);
+      child.off('message', message);
+      child.off('exit', earlyExit);
+      child.off('error', failed);
+      if (error) reject(error); else resolve(value);
+    };
+    const message = value => value.type === 'service-delivery-held'
+      ? finish(null, value) : finish(new Error('worker did not reach held delivery: ' + JSON.stringify(value)));
+    const earlyExit = () => finish(new Error('worker exited before service delivery barrier'));
+    const failed = error => finish(error);
+    child.on('message', message);
+    child.once('exit', earlyExit);
+    child.once('error', failed);
+  });
+  const x = deliveryFixture(root);
+  const before = readFileSync(x.pointer, 'utf8');
+  assert.equal(held.pointer.phase, 'dispatching');
+  assert.equal(held.pointer.handle, undefined);
+  assert.equal(x.read().requests.length, 1);
+  await assert.rejects(installService(x.service, x.seams), /already running/);
+  await assert.rejects(uninstallService({ home: x.bridge, confirmRouteStop: async () => assert.fail('held install owns lock') },
+    x.seams), /already running/);
+  assert.equal(readFileSync(x.pointer, 'utf8'), before);
+  child.kill('SIGKILL');
+  await exited;
+
+  const empty = deliveryFixture(root, { observation: 'empty' });
+  await assert.rejects(uninstallService({ home: x.bridge, confirmRouteStop: async () => assert.fail('absence is not a stop subject') },
+    empty.seams), /unconfirmed|identify/);
+  assert.equal(readFileSync(x.pointer, 'utf8'), before);
+  const duplicate = deliveryFixture(root, { observation: 'duplicate' });
+  await assert.rejects(installService(x.service, duplicate.seams), { code: 'route_conflict' });
+  await assert.rejects(uninstallService({ home: x.bridge, confirmRouteStop: async () => assert.fail('ambiguous stop') },
+    duplicate.seams), { code: 'route_conflict' });
+  assert.equal(readFileSync(x.pointer, 'utf8'), before);
+
+  // An unavailable observation forces same-ID replay; returning an error with
+  // the facade's previously returned view must persist that exact handle.
+  const retry = deliveryFixture(root, { observation: 'empty', errorAfterReturn: true });
+  await assert.rejects(installService(x.service, retry.seams), { code: 'provider_unavailable' });
+  const saved = JSON.parse(readFileSync(x.pointer, 'utf8'));
+  assert.equal(saved.operationId, held.returned.operationId);
+  assert.deepEqual(saved.handle, held.returned.handle);
+  assert.equal(saved.phase, undefined);
+  assert.deepEqual(x.read().requests, [saved.operationId, saved.operationId]);
+  await assert.rejects(uninstallService({ home: x.bridge, confirmRouteStop: async subject => {
+    assert.deepEqual(subject, held.returned.handle); return false;
+  } }, x.seams), /approval/);
+  assert.deepEqual(JSON.parse(readFileSync(x.pointer, 'utf8')), saved);
+  assert.deepEqual(x.read().closes, []);
+  await uninstallService({ home: x.bridge, confirmRouteStop: async subject => {
+    assert.deepEqual(subject, held.returned.handle); return true;
+  } }, x.seams);
+  assert.equal(existsSync(x.pointer), false);
+  assert.deepEqual(x.read().closes, [held.returned.handle]);
+  assert.deepEqual(x.read().sentinel, { owner: 'neighbor', id: 'foreign-do-not-close' });
+  t.diagnostic('Contract-fake service delivery interruption only: two facade calls, no physical-allocation claim. Hosted old-trial cleanup excluded; all five installed never-started mappings remain unqualified.');
+});
+
+test('service facade delivery release remembers the returned handle before service readiness', { timeout: 15000 }, async t => {
+  const root = await mkdtemp(path.join(homedir(), '.tmp', 'delivery-return-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let release, reached;
+  const gate = new Promise(resolve => { release = resolve; });
+  const barrier = new Promise(resolve => { reached = resolve; });
+  const x = deliveryFixture(root, { hold: async view => { reached(view); await gate; } });
+  // Attach rejection handling immediately; a pre-barrier failure must not hang.
+  const run = installService(x.service, x.seams).then(
+    () => ({ ok: true }), error => ({ error }));
+  let timer;
+  try {
+    const view = await Promise.race([barrier, run.then(result => {
+      throw result.error ?? new Error('install finished before delivery barrier');
+    }), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('delivery barrier timed out')), 5000);
+    })]);
+    clearTimeout(timer);
+    const pending = JSON.parse(readFileSync(x.pointer, 'utf8'));
+    assert.equal(pending.phase, 'dispatching');
+    assert.equal(pending.operationId, view.operationId);
+    assert.equal(pending.handle, undefined);
+    await assert.rejects(installService(x.service, x.seams), /already running/);
+    release();
+    const result = await run;
+    assert.match(result.error?.message ?? '', /did not start on its admin socket/);
+    const saved = JSON.parse(readFileSync(x.pointer, 'utf8'));
+    assert.deepEqual(saved.handle, view.handle);
+    assert.equal(saved.operationId, view.operationId);
+    assert.equal(saved.phase, undefined);
+    assert.deepEqual(x.read().requests, [view.operationId]);
+    await assert.rejects(uninstallService({ home: x.bridge, confirmRouteStop: async () => false }, x.seams), /approval/);
+    assert.deepEqual(x.read().closes, []);
+    await uninstallService({ home: x.bridge, confirmRouteStop: async handle => {
+      assert.deepEqual(handle, view.handle); return true;
+    } }, x.seams);
+    assert.deepEqual(x.read().closes, [view.handle]);
+    assert.deepEqual(x.read().sentinel, { owner: 'neighbor', id: 'foreign-do-not-close' });
+  } finally {
+    clearTimeout(timer);
+    release();
+    await run;
+  }
 });
