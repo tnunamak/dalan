@@ -293,10 +293,19 @@ test('service delivery interruption preserves dispatch uncertainty and recovers 
 test('service facade delivery release remembers the returned handle before service readiness', { timeout: 15000 }, async t => {
   const root = await mkdtemp(path.join(homedir(), '.tmp', 'delivery-return-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  let release, reached;
+  let release, reached, delivered, readiness = 0;
   const gate = new Promise(resolve => { release = resolve; });
   const barrier = new Promise(resolve => { reached = resolve; });
   const x = deliveryFixture(root, { hold: async view => { reached(view); await gate; } });
+  x.seams.waitForSocket = async () => {
+    readiness++;
+    assert.ok(delivered, 'readiness follows delivery release');
+    const pointer = JSON.parse(readFileSync(x.pointer, 'utf8'));
+    assert.deepEqual(pointer.handle, delivered.handle, 'custody is on disk before readiness');
+    assert.equal(pointer.operationId, delivered.operationId);
+    assert.equal(pointer.phase, undefined);
+    return false;
+  };
   // Attach rejection handling immediately; a pre-barrier failure must not hang.
   const run = installService(x.service, x.seams).then(
     () => ({ ok: true }), error => ({ error }));
@@ -308,6 +317,7 @@ test('service facade delivery release remembers the returned handle before servi
       timer = setTimeout(() => reject(new Error('delivery barrier timed out')), 5000);
     })]);
     clearTimeout(timer);
+    delivered = view;
     const pending = JSON.parse(readFileSync(x.pointer, 'utf8'));
     assert.equal(pending.phase, 'dispatching');
     assert.equal(pending.operationId, view.operationId);
@@ -316,6 +326,7 @@ test('service facade delivery release remembers the returned handle before servi
     release();
     const result = await run;
     assert.match(result.error?.message ?? '', /did not start on its admin socket/);
+    assert.equal(readiness, 1, 'the custody checkpoint was reached before readiness failed');
     const saved = JSON.parse(readFileSync(x.pointer, 'utf8'));
     assert.deepEqual(saved.handle, view.handle);
     assert.equal(saved.operationId, view.operationId);
@@ -328,6 +339,7 @@ test('service facade delivery release remembers the returned handle before servi
     } }, x.seams);
     assert.deepEqual(x.read().closes, [view.handle]);
     assert.deepEqual(x.read().sentinel, { owner: 'neighbor', id: 'foreign-do-not-close' });
+    t.diagnostic('Sentinel is inert fixture data; this case proves exact-handle close, not neighboring-route discovery.');
   } finally {
     clearTimeout(timer);
     release();
