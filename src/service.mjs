@@ -12,10 +12,11 @@ import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { loadCapacity } from './projects.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
-import { buildQuery, closeExactRoute, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, isPublished, registerExternalService, resolveGozar, resolveRouteWord, retainedRoute, routeFailure } from './gozar-routes.mjs';
+import { buildQuery, closeExactRoute, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, isPublished, registerExternalService, resolveGozar, resolveRouteWord, observeRetainedRoute, routeFailure, routeNotDispatched } from './gozar-routes.mjs';
 import { routeCustodyPath } from './route-custody.mjs';
 import { muteableTerminal, runRouteSetup } from './route-setup.mjs';
 import { readRouteSetting } from './route-setting.mjs';
+import { acquirePrivateLock } from './service-update-lock.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
 import { launchdLabels, launchAgentsDir, servicePlist, updatePlist, preflightAgentFile, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist, isLoaded } from './service-launchd.mjs';
@@ -125,27 +126,16 @@ function readPendingInstall(file) {
   let value;
   try { value = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  if (!path.isAbsolute(value?.home ?? '') || typeof value.operationId !== 'string' ||
+  if (typeof value?.home !== 'string' || !path.isAbsolute(value.home) || typeof value.operationId !== 'string' ||
       !Number.isInteger(value.port) || value.port < 1024 || value.port > 65535) fail('The pending service route reference is invalid.');
   return value;
 }
 
-function reserveInstallReference(file, reference) {
-  const parent = path.dirname(file);
-  fs.mkdirSync(parent, { mode: 0o700, recursive: true });
-  if (reference.handle) {
-    if (readPendingInstall(file)?.operationId !== reference.operationId) fail('The pending service route reference changed.');
-    writeAtomic(file, JSON.stringify(reference));
-    return;
-  }
-  const staged = file + '.' + randomBytes(12).toString('hex');
-  try {
-    writeAtomic(staged, JSON.stringify(reference));
-    try { fs.linkSync(staged, file); }
-    catch (error) { if (error.code === 'EEXIST') fail('Another install retained a Gozar operation. Retry using that exact reference.'); throw error; }
-    const fd = fs.openSync(parent, 'r');
-    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-  } finally { fs.rmSync(staged, { force: true }); }
+async function withRouteInstallLock(env, home, action) {
+  const file = pendingInstallPath(env, home);
+  fs.mkdirSync(path.dirname(file), { mode: 0o700, recursive: true });
+  const unlock = acquirePrivateLock(file + '.lock.sqlite', 'another service install or uninstall is already running');
+  try { return await action(); } finally { unlock(); }
 }
 
 function readReceipt(home) {
@@ -405,14 +395,18 @@ function assertGozarStatePath(env) {
 
 export async function installService(o, seams = {}) {
   const env = seams.env ?? process.env;
+  if (!path.isAbsolute(o.home) || !SAFE_PATH.test(o.home)) fail('--home must be an absolute service-safe path');
+  return o.writeUnitsOnly ? installServiceLocked(o, seams) : withRouteInstallLock(env, o.home, () => installServiceLocked(o, seams));
+}
+
+async function installServiceLocked(o, seams) {
+  const env = seams.env ?? process.env;
   const platform = seams.platform ?? process.platform;
   if (!['linux', 'darwin'].includes(platform)) fail('dalan service install needs Linux with a systemd user manager or macOS with launchd');
   const mac = platform === 'darwin';
-  if (!path.isAbsolute(o.home) || !SAFE_PATH.test(o.home)) fail('--home must be an absolute service-safe path');
   assertRealDirectoryPath(path.dirname(o.home), { owner: true });
   assertRealDirectoryPath(o.home, { owner: true });
-  // Every check up to the route allocation below only reads. A public route is allocated after the last of them passes, so a
-  // read-only preflight refusal leaves no route behind. Later writes or startup can still fail.
+  // A public route is allocated after the preflight checks pass. Later writes or startup can still fail.
   const adminSocket = path.join(defaultPath(o.home, '.local/share/dot-bridge'), 'admin.sock');
   const socketBytes = Buffer.byteLength(adminSocket), socketLimit = socketPathLimit(platform);
   if (socketBytes > socketLimit) fail(`--home is too long: the bridge's admin socket ${adminSocket} would be ${socketBytes} bytes, and the limit on ${mac ? 'macOS' : 'Linux'} is ${socketLimit} bytes. Use a shorter --home.`);
@@ -502,19 +496,22 @@ export async function installService(o, seams = {}) {
   const setup = seams.setup && (candidate => seams.setup({ gozar, candidate, home: routeHome, env }));
   const allocateRoute = async origin => {
     if (pending) {
-      const view = await retainedRoute(gozar, pending);
-      if (view.cleanup.state === 'confirmed') fail('The retained Gozar operation has been closed. Run dalan service uninstall for this home before starting a new install.');
-      if (view.hostConfiguration?.target?.known && view.hostConfiguration.target.value !== o.target.value) fail('The retained route targets a different local listener.');
-      return view;
+      const observed = await observeRetainedRoute(gozar, pending);
+      if (observed.state === 'recorded') {
+        const { view } = observed;
+        if (view.cleanup.state === 'confirmed') fail('The retained Gozar operation has been closed. Run dalan service uninstall for this home before starting a new install.');
+        if (view.hostConfiguration?.target?.known && view.hostConfiguration.target.value !== o.target.value) fail('The retained route targets a different local listener.');
+        return view;
+      }
     }
     const wanted = buildQuery({ home: routeHome, target: o.target.value, usage: { kind: 'durable', routeId: saved?.routeId ?? 'dalan-main' },
       route: o.route ?? saved?.routeName ?? undefined, origin, address: 'stable' });
     const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
     const remember = ref => {
       pending = { ...ref, port: o.port };
-      reserveInstallReference(pendingPath, pending);
+      writeAtomic(pendingPath, JSON.stringify(pending));
     };
-    return ensureDurableRoute({ gozar, query, pick, consent, setup, remember });
+    return ensureDurableRoute({ gozar, query, pick, consent, setup, remember, recovery: pending });
   };
   if (allocate) {
     const view = await allocateRoute(saved?.origin ?? undefined);
@@ -582,21 +579,31 @@ export async function installService(o, seams = {}) {
 // Stop the service and its update job, delete the generated definitions and the public route, and forget the default home.
 // The home itself (secrets, grants, data) stays; delete it by hand if you also want that gone.
 export async function uninstallService({ home, confirmRouteStop }, seams = {}) {
-  const env = seams.env ?? process.env, platform = seams.platform ?? process.platform, mac = platform === 'darwin';
+  const env = seams.env ?? process.env;
   home = path.resolve(home);
+  return withRouteInstallLock(env, home, () => uninstallServiceLocked({ home, confirmRouteStop }, seams));
+}
+
+async function uninstallServiceLocked({ home, confirmRouteStop }, seams) {
+  const env = seams.env ?? process.env, platform = seams.platform ?? process.platform, mac = platform === 'darwin';
   const receipt = readReceipt(home);
   const pendingPath = pendingInstallPath(env, home);
   const pending = readPendingInstall(pendingPath);
   if (receipt && (!receipt.unit || receipt.home !== home)) fail(`no Dalan service is installed for ${home}`);
   const removed = [];
   if (pending && !receipt?.route_handle) {
-    const gozar = seams.gozar ?? await resolveGozar({ env, home: pending.home });
-    const view = await retainedRoute(gozar, pending);
-    if (!confirmRouteStop || !await confirmRouteStop(view.handle)) fail('Public route stop requires explicit approval for the saved handle.');
-    const result = view.cleanup.state === 'confirmed' ? { removed: true } : await closeExactRoute(gozar, { ...pending, handle: view.handle });
-    if (!result.removed) fail(`Public route removal is unconfirmed. Retained the install operation. ${result.detail}`);
+    const gozar = routeNotDispatched(pending) ? null : seams.gozar ?? await resolveGozar({ env, home: pending.home });
+    const observed = await observeRetainedRoute(gozar, pending);
+    if (observed.state === 'unobserved') fail('Gozar has not confirmed whether the retained operation started. Cleanup is unconfirmed; the reference was kept.');
+    const view = observed.view;
+    const subject = view?.handle ?? { operationId: pending.operationId };
+    if (!confirmRouteStop || !await confirmRouteStop(subject)) fail('The saved route or pending operation requires explicit approval.');
+    if (view && (view.state !== 'released' || view.cleanup.state !== 'confirmed')) {
+      const result = await closeExactRoute(gozar, { ...pending, handle: view.handle });
+      if (!result.removed) fail(`Public route removal is unconfirmed. Retained the install operation. ${result.detail}`);
+    }
     fs.rmSync(pendingPath, { force: true });
-    removed.push('public route released');
+    removed.push(view ? 'public route released' : 'pending route operation cancelled before dispatch');
     if (!receipt) return { home, removed, kept: 'No service home was created.', moved_to: null };
   }
   if (!receipt) fail(`no Dalan service is installed for ${home}`);
@@ -682,7 +689,9 @@ export async function serviceMain(argv, seams = {}) {
       if (!process.stdin.isTTY) return false;
       const { createInterface } = await import('node:readline/promises');
       const rl = createInterface({ input: process.stdin, output: process.stderr });
-      try { return /^y(es)?$/i.test((await rl.question(`Remove Gozar route ${handle.kind} ${handle.id} (generation ${handle.generation})? [y/N] `)).trim()); }
+      const question = handle.operationId ? `Cancel prepared Gozar operation ${handle.operationId}? [y/N] `
+        : `Remove Gozar route ${handle.kind} ${handle.id} (generation ${handle.generation})? [y/N] `;
+      try { return /^y(es)?$/i.test((await rl.question(question)).trim()); }
       finally { rl.close(); }
     });
     const result = await uninstallService({ home: parsed['--home'] ?? serviceHomeFor(seams.env ?? process.env), confirmRouteStop }, seams);

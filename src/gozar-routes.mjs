@@ -127,23 +127,16 @@ export function explainRouteError(error) {
 // ---- a session route (`dalan try --public`) --------------------------------------------------------------------------------------------
 // `consent(candidate)` shows the disclosure and resolves true only on an explicit yes. The route lasts for the trial and is closed with it.
 // An allocated origin can configure the local app. Only a current, published view can be handed off.
-export async function startSessionRoute({ gozar, query, consent, signal, wait = 'verified', pick = pickCandidate, remember, setup }) {
+export async function startSessionRoute({ gozar, query, consent, signal, wait = 'verified', pick = pickCandidate, remember, setup, recovery }) {
   signal?.throwIfAborted();
-  query = { ...query, operationId: query.operationId ?? randomUUID() };
+  query = { ...query, operationId: recovery?.operationId ?? query.operationId ?? randomUUID() };
   const { candidate, catalog } = await chooseRoute({ gozar, query, pick, setup });
   signal?.throwIfAborted();
   if (!await consent(candidate, catalog)) throw Object.assign(new RouteError('consent_required', 'No public route was started because consent was not given.'), { tryKind: 'consent' });
   signal?.throwIfAborted();
-  remember?.({ home: query.home, operationId: query.operationId });
-  let view;
-  try {
-    view = await gozar.expose({ ...query, approval: approvalFor(candidate), wait });
-  } catch (error) {
-    if (error.route?.handle) remember?.({ home: query.home, operationId: query.operationId, handle: error.route.handle });
-    throw error;
-  }
+  const view = await dispatchRouteOperation(query, recovery, remember,
+    request => gozar.expose({ ...request, approval: approvalFor(candidate), wait }));
   const handle = view?.handle;
-  if (handle) remember?.({ home: query.home, operationId: query.operationId, handle });
   let url; try { url = new URL(view?.origin); } catch { /* rejected below */ }
   if (!handle || !url || url.protocol !== 'https:' || url.origin !== view.origin || (wait === 'verified' && !isPublished(view))) {
     throw routeFailure(view, 'Gozar did not return a verified HTTPS origin for this route.');
@@ -174,23 +167,69 @@ export async function waitForPublication({ gozar, home, handle, origin, signal, 
   throw routeFailure(latest, 'Gozar could not prove that the route reaches this bridge.');
 }
 
-export async function retainedRoute(gozar, { home, operationId, handle }) {
-  if (handle) return gozar.routeStatus({ home, handle });
+// Only a durable host write before the dispatch fence proves the SDK was never called.
+export const routeNotDispatched = ref => ref.phase === 'prepared' && !ref.handle;
+
+export async function observeRetainedRoute(gozar, ref) {
+  const { home, operationId, handle } = ref;
+  if (handle) {
+    try {
+      const view = await gozar.routeStatus({ home, handle });
+      if (!sameRouteHandle(view.handle, handle)) throw new RouteError('route_conflict', 'Gozar returned a different route handle.');
+      return { state: 'recorded', view };
+    } catch (error) { if (!operationId || error.code !== 'route_not_found') throw error; }
+  }
+  if (routeNotDispatched(ref)) return { state: 'not-started' };
   const { routes } = await gozar.listRoutes({ home, owner: OWNER });
   const matches = routes.filter(route => route.operationId === operationId);
-  if (matches.length !== 1) throw new RouteError('route_conflict', 'Gozar could not identify exactly one retained route for the operation.');
-  return matches[0];
+  if (matches.length > 1) throw new RouteError('route_conflict', 'More than one Gozar route matches the retained operation.');
+  if (!matches.length) {
+    if (handle) throw new RouteError('route_not_found', 'Gozar could not read the retained handle. Its reference was kept.');
+    return { state: 'unobserved' };
+  }
+  const [view] = matches;
+  if (handle && !sameRouteHandle(view.handle, handle)) {
+    throw new RouteError('route_conflict', 'The retained operation was observed at a different route generation.');
+  }
+  return { state: 'recorded', view };
 }
+
+const PRE_ALLOCATION_REFUSALS = new Set(['candidate_stale', 'consent_expired', 'consent_mismatch', 'consent_required', 'consent_unknown']);
+
+async function dispatchRouteOperation(query, recovery, remember, dispatch) {
+  const { home, operationId } = query;
+  if (!remember || !operationId) return dispatch(query);
+  const ref = { home, operationId };
+  const neverDispatched = !recovery || routeNotDispatched(recovery);
+  if (!recovery) remember({ ...ref, phase: 'prepared' });
+  remember({ ...ref, phase: 'dispatching' });
+  try {
+    const view = await dispatch(query);
+    if (view?.handle) remember({ ...ref, handle: view.handle });
+    return view;
+  } catch (error) {
+    if (error.route?.handle) remember({ ...ref, handle: error.route.handle });
+    else if (neverDispatched && PRE_ALLOCATION_REFUSALS.has(error.code)) {
+      // The SDK returns its retained view for refusals after reservation.
+      remember({ ...ref, phase: 'prepared' });
+    }
+    throw error;
+  }
+}
+
+const sameRouteHandle = (left, right) => left?.kind === right.kind && left?.id === right.id && left?.generation === right.generation;
 
 export async function closeExactRoute(gozar, { home, operationId, handle }) {
   try {
     if (!handle) {
-      const retained = await retainedRoute(gozar, { home, operationId });
+      const observed = await observeRetainedRoute(gozar, { home, operationId });
+      if (observed.state !== 'recorded') return { removed: false, detail: 'Gozar has not confirmed whether the retained operation started.' };
+      const retained = observed.view;
       if (retained.state === 'released' && retained.cleanup.state === 'confirmed') return { removed: true };
       handle = retained.handle;
     }
     const closed = await gozar.closeRoute({ home, handle, mode: 'remove' });
-    if (closed.handle?.kind !== handle.kind || closed.handle?.id !== handle.id || closed.handle?.generation !== handle.generation) {
+    if (!sameRouteHandle(closed.handle, handle)) {
       return { removed: false, detail: 'Gozar returned cleanup evidence for a different handle.' };
     }
     if (closed.state === 'released' && closed.published === null && closed.cleanup.state === 'confirmed') return { removed: true };
@@ -260,22 +299,18 @@ function noCandidateError(catalog) {
 
 // ---- durable routes and external services ----------------------------------------------------------------------------------------------
 // A durable route is never closed by an app exit. The first allocation asks once (the pin keeps the consent); a later call reuses it.
-export async function ensureDurableRoute({ gozar, query, consent, reconsent = false, pick = pickCandidate, setup, remember }) {
-  try { return await gozar.ensureRoute({ ...query, ...(reconsent ? { reconsent: true } : {}) }); }
-  catch (error) { if (!['consent_required', 'setup_required'].includes(error?.code)) throw error; }
+export async function ensureDurableRoute({ gozar, query, consent, reconsent = false, pick = pickCandidate, setup, remember, recovery }) {
+  const options = reconsent ? { reconsent: true } : {};
+  if (!recovery) {
+    try { return await gozar.ensureRoute({ ...query, ...options }); }
+    catch (error) { if (!['consent_required', 'setup_required'].includes(error?.code)) throw error; }
+  }
   const { candidate, catalog } = await chooseRoute({ gozar, query, pick, setup });
   if (!await consent(candidate, catalog)) throw Object.assign(new RouteError('consent_required', 'The route was not started because consent was not given.'), { tryKind: 'consent' });
-  const operationId = remember ? randomUUID() : undefined;
-  if (operationId) remember({ home: query.home, operationId });
-  let view;
-  try {
-    view = await gozar.ensureRoute({ ...query, ...(operationId && { operationId }), approval: approvalFor(candidate), ...(reconsent ? { reconsent: true } : {}) });
-  } catch (error) {
-    if (operationId && error.route?.handle) remember({ home: query.home, operationId, handle: error.route.handle });
-    throw error;
-  }
-  if (operationId && view.handle) remember({ home: query.home, operationId, handle: view.handle });
-  return view;
+  const operationId = recovery?.operationId ?? (remember ? randomUUID() : undefined);
+  const request = operationId ? { ...query, operationId } : query;
+  return dispatchRouteOperation(request, recovery, remember,
+    approved => gozar.ensureRoute({ ...approved, approval: approvalFor(candidate), ...options }));
 }
 
 // Registers the owner's own origin (a route the owner runs) and reads it back through the same view as any other route.

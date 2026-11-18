@@ -58,6 +58,7 @@
   "node scripts/workspace-inspection-cleanup-test.mjs",
   "node --test scripts/dalan-setup-test.mjs",
   "node --test scripts/gozar-installed-setup-test.mjs",
+  "node --test scripts/gozar-dispatch-recovery-test.mjs",
   "timeout --kill-after=5s 120s nice -n 10 node scripts/neutral-worker-e2e.mjs",
   "node --test scripts/package-contents-test.mjs",
   "timeout --kill-after=5s 150s nice -n 10 node --test scripts/host-budgets-test.mjs",

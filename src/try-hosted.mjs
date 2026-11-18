@@ -14,7 +14,7 @@ import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
 import { PAIRING_MINUTES, writeAtomic } from './as-files.mjs';
 import { verifyPublicReady, watchPublicIdentity } from './try-exposure.mjs';
-import { RouteError, closeExactRoute, monitorRoute, waitForPublication, resolveRouteWord, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
+import { RouteError, closeExactRoute, observeRetainedRoute, routeNotDispatched, monitorRoute, waitForPublication, resolveRouteWord, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
 import { muteableTerminal, runRouteSetup } from './route-setup.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
@@ -117,7 +117,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   errorContext.shellHome = shellQuote(home); errorContext.logFile = logFile; errorContext.shellLog = shellQuote(logFile);
   errorContext.tryFlags = ` --public${options.route === undefined ? '' : ` --route ${shellQuote(options.route)}`}`;
   const freshRestartHome = path.join(realHome, '.local/share', `dalan-hosted-${randomBytes(3).toString('hex')}`);
-  const retry = () => commandLine(restartCommand({ cli, home, freshHome: freshRestartHome, shellQuote, route: options.route, stable: stableAddress }));
+  const retry = (keepReference = false) => commandLine(restartCommand({ cli, home, freshHome: freshRestartHome, shellQuote, route: options.route, stable: stableAddress || keepReference }));
   errorContext.freshTrialCommand = retry().trim();
 
   // A bridge or ssh that an earlier trial left behind (its process was killed without cleanup) is ended first; only a recorded, matching process is touched.
@@ -202,8 +202,13 @@ export async function runHosted({ options, env, out, input, signal, errorContext
 
   let gozar, route = null, routeStopped = null, cleaned = true;
   const referenceFile = path.join(home, '.route-reference.json');
-  let routeRef;
-  const remember = ref => { writeAtomic(referenceFile, JSON.stringify(ref)); routeRef = ref; };
+  let routeRef, dispatchedHere = false;
+  const remember = ref => {
+    const entry = { ...ref, port: bindPort };
+    writeAtomic(referenceFile, JSON.stringify(entry));
+    routeRef = entry;
+    if (ref.phase === 'dispatching') dispatchedHere = true;
+  };
   let identityWatcher = null;
   let trialEndsAt = null;
   let releaseHome;
@@ -211,17 +216,30 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   try {
     say(durable ? REAL_NOTICE(true) : TRIAL_NOTICE);
     say('Checking public routes…');
-    const routeHome = saved?.gozarHome ?? gozarHomeFor(env);
+    const configuredHome = saved?.gozarHome ?? gozarHomeFor(env);
+    try {
+      routeRef = JSON.parse(fs.readFileSync(referenceFile, 'utf8'));
+      errorContext.freshTrialCommand = retry(true).trim();
+      if (typeof routeRef?.home !== 'string' || !path.isAbsolute(routeRef.home) || typeof routeRef.operationId !== 'string') {
+        throw new RouteError('route_conflict', 'The saved trial route reference is invalid.');
+      }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const routeHome = routeRef?.home ?? configuredHome;
     gozar = deps.gozar ?? await resolveGozar({ env, home: routeHome });
-    try { routeRef = JSON.parse(fs.readFileSync(referenceFile, 'utf8')); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (routeRef) {
-      const result = await closeExactRoute(gozar, routeRef);
-      if (!result.removed) throw new RouteError('cleanup_debt', result.detail);
-      fs.unlinkSync(referenceFile);
-      routeRef = null;
+      const observed = await observeRetainedRoute(gozar, routeRef);
+      if (observed.state === 'recorded') {
+        const { view } = observed;
+        const result = view.state === 'released' && view.cleanup.state === 'confirmed' ? { removed: true }
+          : await closeExactRoute(gozar, { ...routeRef, handle: view.handle });
+        if (!result.removed) throw new RouteError('cleanup_debt', result.detail);
+        fs.unlinkSync(referenceFile);
+        routeRef = null;
+      } else if (durable || (options.port && routeRef.port && options.port !== routeRef.port)) {
+        throw new RouteError('route_conflict', 'Resume the saved trial operation with its original route mode and port.');
+      }
     }
-    bindPort = await (deps.pickPort ?? choosePort)({ requested: options.port, stored: durable ? 8789 : null, skip: new Set() });
+    bindPort = await (deps.pickPort ?? choosePort)({ requested: options.port, stored: routeRef?.port ?? (durable ? 8789 : null), skip: new Set() });
     errorContext.bindPort = bindPort;
     signal?.throwIfAborted();
     trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
@@ -258,7 +276,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       if (durable) {
         const view = await ensureDurableRoute({ gozar, query, consent, pick, setup });
         route = monitorRoute({ gozar, home: query.home, view, remove: false });
-      } else route = await startSessionRoute({ gozar, query, consent, signal, wait: 'allocated', pick, remember, setup });
+      } else route = await startSessionRoute({ gozar, query, consent, signal, wait: 'allocated', pick, remember, setup, recovery: routeRef });
       if (!durable) stableAddress = route.view?.properties?.address?.stability === 'stable';
     }
     catch (error) {
@@ -432,8 +450,9 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     fs.rmSync(path.join(home, 'resource-url'), { force: true });
     if (errorContext.started && !exited) await dalan(['connect', 'revoke', HOSTED_WORKER], { abortable: false }).catch(() => {});
     if (route) routeStopped = await route.stop().catch(error => ({ removed: false, detail: safeDiagnostic(error.message, 240) }));
-    else if (routeRef) routeStopped = await closeExactRoute(gozar, routeRef);
+    else if (dispatchedHere && routeRef && !routeNotDispatched(routeRef)) routeStopped = await closeExactRoute(gozar, routeRef);
     if (routeRef && routeStopped?.removed) fs.rmSync(referenceFile, { force: true });
+    if (routeRef && !routeStopped?.removed) errorContext.freshTrialCommand = retry(true).trim();
     await stopServer();
     // The connector URL and the bridge's secrets are no use after the trial and stay on disk for nobody.
     removeTrialSecrets(home, configDir, { keepConfig: stableAddress });
@@ -443,7 +462,8 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   }
   if (!cleaned) throw new RouteError('cleanup_debt', 'Gozar could not confirm route removal.');
   if (route) say(durable ? 'Bridge stopped. The saved route remains.' : 'Public route removed. Bridge stopped.');
-  else if (!route) say('No public route was started. Bridge stopped.');
+  else if (routeRef) say('Bridge stopped. The saved route operation is retained.');
+  else say('No public route was started. Bridge stopped.');
   say(`Trial history kept at ${home}`);
-  say(`To run it again: ${retry().trim()}`);
+  say(`To run it again: ${retry(!!routeRef && !routeStopped?.removed).trim()}`);
 }
