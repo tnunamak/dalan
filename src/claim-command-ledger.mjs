@@ -27,7 +27,7 @@ export function createClaimCommands({db,authorize,clock=Date.now,maxLeaseMs=3600
     if(result.changes!==1)fail('revision_conflict');
     return expected+1;
   }
-  function execute(command,mutate) {
+  function execute(command,mutate,{leaseCapMs=maxLeaseMs}={}) {
     tx();
     const {job,subject,worker,claim,epoch,operation,key,expectedRevision,args}=command;
     if(![job,subject,worker,claim,operation,key].every(str)||!nat(epoch)||epoch<1||!nat(expectedRevision)||typeof mutate!=='function')fail('invalid_command');
@@ -38,7 +38,8 @@ export function createClaimCommands({db,authorize,clock=Date.now,maxLeaseMs=3600
     const old=db.prepare('SELECT identity,result FROM claim_command_receipts WHERE job=? AND command_key=?').get(job,key);
     if(old){if(old.identity!==identity)fail('command_conflict');return JSON.parse(old.result);}
     const decision=decide({revision:revision(job)},{expectedRevision,operation,args},{now,maxLeaseMs});
-    const {leaseUntil}=decision;
+    // Keep the requested duration in command identity while applying owner policy to the deadline.
+    const leaseUntil=decision.leaseUntil===undefined?undefined:Math.min(decision.leaseUntil,now+leaseCapMs);
     // No arbitrary worker callback: parent injects the trusted Store mutation.
     const nextRevision=advance(job,decision.effects[0].expectedRevision);
     const value=mutate({command,now,revision:nextRevision,...(leaseUntil===undefined?{}:{leaseUntil})});
