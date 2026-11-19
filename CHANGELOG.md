@@ -6,6 +6,11 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 - **Relationships, work and authority have separate lifetimes.** Ending a worker relationship refuses new jobs while existing jobs, questions and results remain available under their own permissions and expiry.
 - **Inspect relationships and permissions from the CLI.** `dalan relationships list` shows active and ended relationships, and `dalan relationships end ID` ends one. `dalan grants` lists permissions with each permission's enforcing component and expiry.
+- **Public routes now go through Gozar 0.5.1.** `dalan service install`, `dalan try` and `dalan setup` ask Gozar which routes meet the requirements, show the setup steps and ask for approval in the terminal before anything is created. `--route NAME` is now optional on install. Dalan installs the service and writes the connector URL only after Gozar verifies the route.
+- **An interrupted install or uninstall can be retried.** Dalan saves the setup operation ID before it asks Gozar to act. A retry asks for fresh consent on that same ID, and `dalan setup --cancel OPERATION_ID` cancels a prepared operation after you approve each offered action. If Gozar has not confirmed the outcome, Dalan keeps the reference so you can finish cleanup.
+- **A public trial withdraws its connector URL while Gozar re-checks the route.** The URL comes back only after Gozar verifies the same address. When the route reaches a terminal state, the trial ends and closes its exact route handle.
+- **An existing HTTPS address needs a matching Gozar offer.** Gozar must confirm that you own the infrastructure and that the origin and listener match the request. You keep the reverse proxy and its configuration; Dalan does not edit them.
+- Upgrade note: if Gozar asks to migrate configuration, keep the old installation and its route records, close the old route with that installation first, and enter credentials only at Gozar's approval prompts. See [upgrade](docs/dalan-upgrade.md#route-credentials-and-existing-services).
 
 ## 0.8.0
 
