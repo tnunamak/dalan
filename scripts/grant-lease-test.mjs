@@ -82,7 +82,7 @@ try {
   try {
     const row=id=>capped.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id);
     const submit=(id,worker,protocol=false)=>capped.submit({...payload(id),...(protocol?{protocol:{profile:'job-v0',source:'test',scope:'test',policy:'test',destination:'test',retain_until_ms:now+24*hour}}:{})},{mode:'none'},null,'owner',false,null,'normal',null,null,null,worker,'worker');
-    for(const [id,worker,requested,expected] of [['muse-default','muse',undefined,cap],['muse-long','muse',hour,cap],['muse-short','muse',60000,60000],['dot-default','dot',undefined,hour],['dot-short','dot',120000,120000]]) {
+    for(const [id,worker,requested,expected] of [['muse-default','muse',undefined,cap],['muse-long','muse',hour,cap],['muse-short','muse',60000,60000],['uncapped-default','dot',undefined,hour],['uncapped-short','dot',120000,120000]]) {
       submit(id,worker);
       capped.claim(id,'run','local-principal',10,null,worker,id,requested);
       assert.equal(row(id).lease_ms,expected,id);
@@ -99,7 +99,7 @@ try {
     assert.equal(capped.sweepStaleLeases().includes('muse-default'),true);
     assert.equal(row('muse-default').state,'abandoned');
     assert.equal(capped.db.prepare('SELECT status FROM assignments WHERE request_id=?').get('muse-default').status,'queued');
-    assert.equal(row('dot-default').state,'active','uncapped worker keeps its slot');
+    assert.equal(row('uncapped-default').state,'active','uncapped worker keeps its slot');
 
     submit('muse-protocol','muse',true);
     const native=capped.claim('muse-protocol','native','local-principal',10,null,'muse','native',hour,{key:'claim',revision:1});
