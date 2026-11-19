@@ -100,6 +100,7 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `scripts/integrator-safety-test.mjs` | 14, 15 |
 | `scripts/integrator-verifier-test.mjs` | 13 |
 | `scripts/integrator-worktree-filter-context-test.mjs` | 12 |
+| `scripts/lease-deadline-clock-origin-test.mjs` | 10 |
 | `scripts/lease-deadline-restart-test.mjs` | 8 |
 | `scripts/lease-migrated-null-deadline-test.mjs` | 7 |
 | `scripts/legacy-acquisition-guidance-test.mjs` | 12 |

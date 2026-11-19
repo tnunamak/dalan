@@ -1512,14 +1512,14 @@ export class Store {
     const deadline=Date.parse(activity??this.stamp())+leaseMs;
     if(!protocolNat(deadline))protocolError('invalid_lease');
     this.db.prepare('UPDATE claims SET lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=?')
-      .run(iso(deadline),this.leaseBootId,this.leaseBootId?this.monotonicNow()+leaseMs:null,id);
+      .run(iso(deadline),this.leaseBootId,this.monotonicDeadlineFor(deadline),id);
   }
   renewClaim(id,claimId,leaseMs,ctx,subject='local-principal',worker='dot',connectionId=null) {
     return this.transaction(()=>{
       const receipt=this.protocolMutationInTransaction(id,claimId,subject,worker,
       {...ctx,operation:'renew',args:{leaseMs}},({leaseUntil})=>{
         this.db.prepare('UPDATE claims SET lease_ms=?,lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=? AND claim_id=?')
-          .run(leaseMs,iso(leaseUntil),this.leaseBootId,this.leaseBootId?this.monotonicNow()+leaseMs:null,id,claimId);
+          .run(leaseMs,iso(leaseUntil),this.leaseBootId,this.monotonicDeadlineFor(leaseUntil),id,claimId);
         const claim=this.assertClaim(id,claimId,subject,worker);
         this.protocolEventInTransaction(id,'renewed',{lease_ms:leaseMs,lease_deadline_at:iso(leaseUntil)},claim.epoch);
         return {request_id:id,claim_id:claimId,epoch:claim.epoch,lease_expires_at:iso(leaseUntil)};
@@ -1903,9 +1903,10 @@ export class Store {
   }
   refreshClaimActivity(id,claimId) {
     const at=this.stamp(), claim=this.db.prepare('SELECT lease_ms FROM claims WHERE request_id=? AND claim_id=?').get(id,claimId);
+    const deadline=Date.parse(at)+(claim?.lease_ms??this.limits.leaseMs);
     if(this.isProtocolJob(id)) this.db.prepare('UPDATE claims SET last_claim_activity_at=? WHERE request_id=? AND claim_id=?').run(at,id,claimId);
     else this.db.prepare('UPDATE claims SET last_claim_activity_at=?,lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=? AND claim_id=?')
-      .run(at,iso(Date.parse(at)+(claim?.lease_ms??this.limits.leaseMs)),this.leaseBootId,this.leaseBootId?this.monotonicNow()+(claim?.lease_ms??this.limits.leaseMs):null,id,claimId);
+      .run(at,iso(deadline),this.leaseBootId,this.monotonicDeadlineFor(deadline),id,claimId);
   }
   // The active, unexpired claim this worker holds under claimId, or null. A missing or expired claim is left to the caller's own error.
   liveHeldClaim(id,claimId,subject,worker) {
@@ -1961,6 +1962,8 @@ export class Store {
     return result?{failure_type:result.type,failure_type_source:result.source,check_failed_observed:checkFailedObserved}:{failure_type:'unknown',failure_type_source:'unknown',check_failed_observed:checkFailedObserved};
   }
   claimLeaseMs(claim) { return claim.lease_ms??this.limits.leaseMs; }
+  // The monotonic deadline for a wall deadline already persisted: both are read from one instant, so a stall between two clock reads cannot make the enforced deadline later than the advertised one.
+  monotonicDeadlineFor(wallDeadlineMs) { return this.leaseBootId?this.monotonicNow()+(wallDeadlineMs-this.nowMs()):null; }
   leaseMonotonicDeadline(claim) {
     const deadline=Number(claim.lease_deadline_monotonic_ms);
     return this.leaseBootId&&claim.lease_boot_id===this.leaseBootId&&Number.isFinite(deadline)?deadline:null;

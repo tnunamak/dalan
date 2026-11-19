@@ -115,6 +115,7 @@
   "node scripts/notify-ledger-reconcile-test.mjs",
   "node scripts/notify-ledger-admin-test.mjs",
   "node scripts/lease-deadline-restart-test.mjs",
+  "node scripts/lease-deadline-clock-origin-test.mjs",
   "node scripts/lease-migrated-null-deadline-test.mjs",
   "node --test scripts/state-machine-audit-test.mjs",
   "node --test scripts/state-machine-review-test.mjs",
