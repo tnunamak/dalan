@@ -20,6 +20,29 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
   let child, errors = '', failRestart = false;
   const installOptions = { home, origin: 'https://update.example.test', port: 18791, target: '127.0.0.1:18791', workers: ['fern', 'muse'], enableWorkspace: true, enableT3: true, autoUpdate: false };
   const env = { ...process.env, XDG_CONFIG_HOME: path.join(root, 'xdg') };
+  const reviewed = [];
+  const approvals = [];
+  const fakeGozar = createFakeGozar();
+  const gozar = new Proxy({}, {
+    get(_target, key) {
+      const fake = fakeGozar;
+      if (key !== 'ensureRoute') {
+        const member = fake[key];
+        return typeof member === 'function' ? member.bind(fake) : member;
+      }
+      return async request => {
+        const digest = request.approval?.consentFactsDigest;
+        assert.ok(digest && reviewed.includes(digest), 'the fixture must review this exact disclosure before allocation');
+        approvals.push(digest);
+        return fake.ensureRoute(request);
+      };
+    },
+  });
+  const consent = async candidate => {
+    assert.ok(candidate.consentFactsDigest, 'the offered route has a disclosure digest');
+    reviewed.push(candidate.consentFactsDigest);
+    return true;
+  };
   const cli = args => {
     const result = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args, '--json'], {
       env: { ...env, DALAN_HOME: home }, encoding: 'utf8', timeout: 10000,
@@ -68,7 +91,9 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
     return candidate;
   }
   try {
-    await installService(installOptions, { env, platform: 'linux', repo, gozar: createFakeGozar(), spawn: (command) => ({ status: 0, stdout: command === 'gozar' ? JSON.stringify({ schemaVersion: 1, route: { origin: installOptions.origin, target: installOptions.target, verification: { status: 'verified' } } }) : '' }), waitForSocket: async () => true });
+    await installService(installOptions, { env, platform: 'linux', repo, gozar, consent, spawn: (command) => ({ status: 0, stdout: command === 'gozar' ? JSON.stringify({ schemaVersion: 1, route: { origin: installOptions.origin, target: installOptions.target, verification: { status: 'verified' } } }) : '' }), waitForSocket: async () => true });
+    assert.equal(reviewed.length, 1, 'the initial install asks for consent');
+    assert.deepEqual(approvals, reviewed, 'the initial allocation consumes the reviewed digest');
     await start();
     const receipt = JSON.parse(fs.readFileSync(path.join(defaultPath(home, '.config/dot-bridge'), 'service-install.json')));
     const originalVersion = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'))).version;
