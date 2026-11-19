@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.mjs';
+import { parseWorkers } from '../src/workers.mjs';
 import { dropEmptyPost54FixtureState } from '../src/test-support/pre-worker-fixture.mjs';
 
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR??os.tmpdir(),'dalan-bridge-grant-lease-'));
@@ -74,6 +75,44 @@ try {
   assert.throws(()=>store.claim('req_persist','successor','local-principal',6,null,'dot',null,100),/uncertain_delivery/);
   assert.deepEqual(store.db.prepare('SELECT claim_id,epoch,lease_ms,state FROM claims WHERE request_id=?').get('req_persist'),before,'uncertain delivery guard changed the prior grant');
   assert.throws(()=>store.progress('req_persist',persisted.claim_id,'expired authority','local-principal'),/lease_expired/,'old authority remained usable at its deadline');
+  // Worker policy caps the persisted lease, including sliding and explicit renewal.
+  const cap=900000, hour=3600000;
+  const capped=new Store(path.join(root,'worker-cap.db'),{now:()=>now,limits:{leaseMs:hour,workerClaimLeaseMs:{muse:cap}},
+    workers:parseWorkers({workers:{dot:{connections:[{issuer:'issuer',subject:'dot',client_id:'dot'}]},muse:{connections:[{issuer:'issuer',subject:'muse',client_id:'muse'}]}}})});
+  try {
+    const row=id=>capped.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id);
+    const submit=(id,worker,protocol=false)=>capped.submit({...payload(id),...(protocol?{protocol:{profile:'job-v0',source:'test',scope:'test',policy:'test',destination:'test',retain_until_ms:now+24*hour}}:{})},{mode:'none'},null,'owner',false,null,'normal',null,null,null,worker,'worker');
+    for(const [id,worker,requested,expected] of [['muse-default','muse',undefined,cap],['muse-long','muse',hour,cap],['muse-short','muse',60000,60000],['uncapped-default','dot',undefined,hour],['uncapped-short','dot',120000,120000]]) {
+      submit(id,worker);
+      capped.claim(id,'run','local-principal',10,null,worker,id,requested);
+      assert.equal(row(id).lease_ms,expected,id);
+      assert.equal(Date.parse(row(id).lease_deadline_at),now+expected,id);
+    }
+    const held=row('muse-default');
+    now+=30000;
+    capped.touchClaim('muse-default',held.claim_id,'local-principal','muse');
+    assert.equal(row('muse-default').lease_ms,cap);
+    assert.equal(Date.parse(row('muse-default').lease_deadline_at),now+cap,'ordinary claim-bearing tool activity renews capped lease');
+    now+=cap-1;
+    assert.equal(capped.sweepStaleLeases().includes('muse-default'),false);
+    now+=1;
+    assert.equal(capped.sweepStaleLeases().includes('muse-default'),true);
+    assert.equal(row('muse-default').state,'abandoned');
+    assert.equal(capped.db.prepare('SELECT status FROM assignments WHERE request_id=?').get('muse-default').status,'queued');
+    assert.equal(row('uncapped-default').state,'active','uncapped worker keeps its slot');
+
+    submit('muse-protocol','muse',true);
+    const native=capped.claim('muse-protocol','native','local-principal',10,null,'muse','native',hour,{key:'claim',revision:1});
+    assert.equal(row('muse-protocol').lease_ms,cap);
+    now+=30000;
+    const ctx={key:'renew',revision:native.revision};
+    const renewed=capped.renewClaim('muse-protocol',native.claim_id,hour,ctx,'local-principal','muse');
+    assert.equal(row('muse-protocol').lease_ms,cap);
+    assert.equal(Date.parse(row('muse-protocol').lease_deadline_at),now+cap);
+    assert.equal(renewed.leaseUntil,now+cap,'explicit renewal receipt matches capped deadline');
+    assert.deepEqual(capped.renewClaim('muse-protocol',native.claim_id,hour,ctx,'local-principal','muse'),renewed);
+    assert.throws(()=>capped.renewClaim('muse-protocol',native.claim_id,hour-1,ctx,'local-principal','muse'),/command_conflict/,'cap must not collapse distinct command identities');
+  } finally { capped.db.close(); }
   console.log('grant-lease-test ok: defaults, validation, retries, deadline takeover, persistence, schema-52 migration and regrant guard');
 } finally {
   try { store?.db.close(); } catch {}
