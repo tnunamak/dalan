@@ -80,6 +80,7 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `scripts/deadman-publication-crash-test.mjs` | 9 |
 | `scripts/deadman-readonly-status-test.mjs` | 10 |
 | `scripts/doctor-auth-test.mjs` | 15 |
+| `scripts/finish-handoff-test.mjs` | 13 |
 | `scripts/generic-client-journey-e2e.mjs` | 16 |
 | `scripts/generic-profile-test.mjs` | 12 |
 | `scripts/gozar-migration-e2e.mjs` | 21 |

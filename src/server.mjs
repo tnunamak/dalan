@@ -623,6 +623,78 @@ const listGuidance='Claim every listed assignment you can start now, up to free_
 const claimMoreGuidance='If free_lanes > 0 and work is queued, claim more now.';
 // A finishing lane takes the next queued item itself; an error on any claim means the list changed, so list again.
 const finishNextGuidance=next=>`Claim ${next[0].request_id} yourself before you end this run, then keep claiming up to free lanes. After any claim error such as assignment_expired, call list_pending and claim from that list.`;
+// A worker with finish_handoff gets its next job inside the finish reply, or waits a bounded time for work.
+// The claim is the worker's own `claim` call, run by the bridge: same policy, preflight, scope, pause, capacity and
+// connection checks, one claim per job. The claim carries acquisition_id handoff-<finished claim_id>, so a repeated
+// finish gets the same job back, and a second finish by the same claimant name, which would otherwise count as an
+// exact retry of the first claim, is refused that job and takes the next one.
+const HANDOFF_LEASE_MS=600000,HANDOFF_POLL_MS=500,HANDOFF_MAX_ATTEMPTS=5;
+const nap=(ms,signal)=>new Promise(resolve=>{
+  const done=()=>{clearTimeout(timer);signal?.removeEventListener('abort',done);resolve();};
+  const timer=setTimeout(done,ms);
+  signal?.addEventListener('abort',done,{once:true});
+});
+// One handoff per finished claim at a time: a retried finish that arrives while the first is still waiting or
+// claiming queues behind it, then finds the first one's grant instead of taking a second job.
+const handoffsInFlight=new Map();
+async function handOffNextJob(args) {
+  const key=`${args.principal.worker}\0${args.principal.subject}\0${args.claimId}`;
+  while(handoffsInFlight.has(key)) await handoffsInFlight.get(key);
+  const run=runHandoff(args).finally(()=>handoffsInFlight.delete(key));
+  handoffsInFlight.set(key,run);
+  return run;
+}
+// Returns {job}, {empty,waited_ms} or {} (no handoff: the caller keeps the old hint). Never throws: the finish is stored.
+async function runHandoff({principal,requestId,claimId,waitMs,signal}) {
+  try {
+    const {worker,subject}=principal;
+    const held=store.db.prepare('SELECT claimant FROM claims WHERE request_id=? AND claim_id=?').get(requestId,claimId);
+    if(!held) return {};
+    const acquisition_id=`handoff-${claimId}`,lease_ms=Math.min(HANDOFF_LEASE_MS,store.limits.leaseMs);
+    const claim=async next=>{
+      try {
+        const job=await tool('claim',{request_id:next,claimant:held.claimant,acquisition_id,lease_ms},principal,undefined,signal);
+        return job&&typeof job.error!=='string'&&job.claim_id?job:null;
+      } catch { return null; }
+    };
+    // A repeated finish gets back the job its first reply carried. If that job is gone (finished, expired), this finish
+    // already had its handoff: it takes no second job.
+    const prior=store.db.prepare("SELECT c.request_id,c.state,a.status FROM claims c JOIN assignments a USING(request_id) WHERE c.worker=? AND c.subject=? AND c.acquisition_id=?").get(worker,subject,acquisition_id);
+    if(prior) { const job=prior.state==='active'&&prior.status==='claimed'?await claim(prior.request_id):null; return job?{job}:{}; }
+    const started=Date.now(),tried=new Set();
+    let sawQueued=false;
+    for(;;) {
+      if(signal?.aborted||store.paused()) return {};
+      const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
+      if(free_lanes<=0) return {};
+      if(store.hasQueuedFor([worker])) {
+        sawQueued=true;
+        const pick=()=>(store.nextQueued(free_lanes+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id));
+        // A lost race or an unclaimable head moves on to the next job; an unclaimable queue ends in the old hint.
+        for(let fresh=pick();fresh.length&&tried.size<HANDOFF_MAX_ATTEMPTS;fresh=pick()) {
+          tried.add(fresh[0].request_id);
+          const job=await claim(fresh[0].request_id);
+          if(job) return {job};
+        }
+        if(tried.size) return {};
+      }
+      const left=started+waitMs-Date.now();
+      if(left<=0) return sawQueued?{}:{empty:true,waited_ms:Date.now()-started};
+      await nap(Math.min(HANDOFF_POLL_MS,left),signal);
+    }
+  } catch(error) { log({kind:'finish_handoff_error',request_id:requestId,reason:redactNote(String(error?.message??error))}); return {}; }
+}
+async function finishReply(reply,{principal,requestId,claimId,signal}) {
+  const setting=workers.workers.get(principal.worker)?.finishHandoff;
+  if(setting&&reply.receipt_id&&!store.isProtocolJob(requestId)) {
+    const {job,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,signal});
+    log({kind:'finish_handoff',request_id:requestId,next_request_id:job?.request_id??null,result:job?'claimed':empty?'empty':'none',waited_ms:waited_ms??0});
+    const {next_queued,next_action,...rest}=reply;
+    if(job) return {...rest,next_job:job,guidance:`Your next job ${job.request_id} is already claimed for you; its claim result is in next_job. Work on it now, in this turn, and call finish for it. ${job.lease_expires_at?`Its lease ends at ${job.lease_expires_at}`:'Its lease is short'}; every tool call on it renews the lease.`};
+    if(empty) return {...rest,queue_empty:true,waited_ms,guidance:waited_ms>=1000?`No job was queued for ${Math.round(waited_ms/1000)} seconds. Nothing is claimed for you. End this run; a new assignment wakes you.`:'No job is queued. Nothing is claimed for you. End this run; a new assignment wakes you.'};
+  }
+  return reply.next_queued?.length&&!store.paused()?{...reply,guidance:finishNextGuidance(reply.next_queued)}:reply;
+}
 // A loader failure carries host paths or quotes the file. Every caller of this policy gets the Store's fixed error instead.
 function repoPolicyFor(assignment) {
   try { return currentRepoPolicy(); }
@@ -717,7 +789,7 @@ async function submitPolicy(body,req,dryRun) {
 }
 
 // Record the call on the claim it names (one UPDATE); a thrown error or a structured {error} result is kept as the last tool error.
-async function tool(name,a,principal,notifyMeta) {
+async function tool(name,a,principal,notifyMeta,signal) {
   if(!toolNames.has(name)) throw new Error('unknown tool');
   // Refuse hidden names before audits, lease touches, sweeps or repository preparation.
   if(name==='claim'&&typeof a?.request_id==='string'&&store.hasAssignment(a.request_id)&&store.mayAct(principal.worker,a.request_id)&&
@@ -726,7 +798,7 @@ async function tool(name,a,principal,notifyMeta) {
   }
   let error=null;
   try {
-    const result=await dispatchTool(name,a,principal,notifyMeta);
+    const result=await dispatchTool(name,a,principal,notifyMeta,signal);
     if(typeof result?.error==='string') error=redactNote(result.error);
     return result;
   } catch(e) { error=redactNote(String(e?.message??e)); if(e.destination&&typeof a?.request_id==='string')notifyAttachedWaiter(a.request_id); throw e; }
@@ -737,7 +809,7 @@ async function tool(name,a,principal,notifyMeta) {
     }
   }
 }
-async function dispatchTool(name,a,principal,notifyMeta) {
+async function dispatchTool(name,a,principal,notifyMeta,signal) {
   const t3Audit=(t3Tools.has(name)||notifyTools.has(name))?await loadT3Audit():null;
   if(t3Audit) t3Audit.admitT3Audit(store.db,principal.worker,principal.subject);
   store.recordWorkerCall(principal.subject,toolNames.has(name)?name:'unknown',principal.worker);
@@ -952,8 +1024,7 @@ async function dispatchTool(name,a,principal,notifyMeta) {
         if(crashAt('after_report_persistence',a.request_id)) process.exit(73);
         notifyAttachedWaiter(requestId);
         if(repaired.marks.summary_derived||repaired.marks.summary_truncated) log({kind:'finish_summary_repaired',request_id:requestId,...repaired.marks});
-        const marked={...receipt,...repaired.marks};
-        return receipt.next_queued?.length&&!store.paused()?{...marked,guidance:finishNextGuidance(receipt.next_queued)}:marked; }
+        return finishReply({...receipt,...repaired.marks},{principal,requestId,claimId,signal}); }
     case 'list_files': await workspace.makeRoom(id(a.request_id));workspaceFence();return workspace.list(id(a.request_id),id(a.claim_id,'claim_id'),subject,a.path,a.limit??200,worker,a.cursor);
     case 'read_file': await workspace.makeRoom(id(a.request_id));workspaceFence();return workspace.read(id(a.request_id),id(a.claim_id,'claim_id'),subject,a.path,a.start_line??1,a.max_lines??200,worker);
     case 'apply_patch': await workspace.makeRoom(id(a.request_id));workspaceFence();return workspace.apply(id(a.request_id),id(a.claim_id,'claim_id'),subject,a.patch,worker);
@@ -993,7 +1064,7 @@ function publicErrorText(error,what) {
   log({kind:'request_error',what,error_id:errorId,detail:safeDiagnostic(error?.stack??error,4000)});
   return `Error executing ${what} (error id ${errorId}; details are in the request log)`;
 }
-async function dispatch(message,principal) {
+async function dispatch(message,principal,signal) {
   const p=message.params??{};
   switch(message.method) {
     case 'server/discover': return {ttlMs:0,cacheScope:'private',supportedVersions:['2026-07-28'],capabilities:{tools:{},events:{}},_meta:{'io.modelcontextprotocol/serverInfo':serverInfo}};
@@ -1002,7 +1073,7 @@ async function dispatch(message,principal) {
     // Modern catalogs are process-wide. A worker's capability controls tools/call authority, not its cached schemas.
     // legacy-v46 keeps its pinned per-worker surface for compatibility.
     case 'tools/list': return {ttlMs:0,cacheScope:'private',tools:catalogProfile==='legacy-v46'?tools.filter(t=>!(t3Tools.has(t.name)||notifyTools.has(t.name))||hasCapability(workers,principal.worker,'t3')):tools};
-    case 'tools/call': { try { return {content:[{type:'text',text:JSON.stringify(redactOutput(await tool(p.name,p.arguments??{},principal,notifyTools.has(p.name)?p._meta:undefined)))}],isError:false}; } catch(e) { const error={content:[{type:'text',text:publicErrorText(e,`tool ${toolNames.has(p.name)?p.name:'unknown'}`)}],isError:true};if(oauth&&e.message==='insufficient_scope')error._meta={'mcp/www_authenticate':[[challenge(oauth,scopeFor(p.name)),'error="insufficient_scope"','error_description="Required scope is missing"'].join(', ')]};return error; } }
+    case 'tools/call': { try { return {content:[{type:'text',text:JSON.stringify(redactOutput(await tool(p.name,p.arguments??{},principal,notifyTools.has(p.name)?p._meta:undefined,signal)))}],isError:false}; } catch(e) { const error={content:[{type:'text',text:publicErrorText(e,`tool ${toolNames.has(p.name)?p.name:'unknown'}`)}],isError:true};if(oauth&&e.message==='insufficient_scope')error._meta={'mcp/www_authenticate':[[challenge(oauth,scopeFor(p.name)),'error="insufficient_scope"','error_description="Required scope is missing"'].join(', ')]};return error; } }
     case 'events/list': return {events:[event]};
     case 'events/subscribe': if(oauth)needScope(principal,'dalan.read');return subscribe(p,principal);
     case 'events/unsubscribe': { if(oauth)needScope(principal,'dalan.read');if(!validEventParams(p)) throw new Error('invalid subscription'); store.unsubscribe(subId(p.delivery.url,principal.subject,principal.worker)); return {}; }
@@ -1045,7 +1116,9 @@ const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)
     if(!Object.hasOwn(rpc,'id')) { res.writeHead(202); res.end(); return; }
     outcome.state.phase='dispatch';
     const eventStream=readEnv('DALAN_TRIAL_SSE')==='1'&&req.method==='POST'&&acceptsMcpEventStream(req.headers.accept)?beginMcpEventStream(res):null;
-    try { json(res,200,{jsonrpc:'2.0',id:rpc.id,result:{resultType:'complete',...await dispatch(rpc,principal)}},eventStream); }
+    // A tool that waits (finish with finish_handoff) stops when the client leaves, so nothing is claimed for nobody.
+    const clientGone=new AbortController();res.once('close',()=>clientGone.abort());if(res.destroyed)clientGone.abort();
+    try { json(res,200,{jsonrpc:'2.0',id:rpc.id,result:{resultType:'complete',...await dispatch(rpc,principal,clientGone.signal)}},eventStream); }
     catch(e) { json(res,200,rpcError(rpc.id,e.code||-32602,publicErrorText(e,'request'),e.data),eventStream); }
     // Response-byte accounting for the throttle and the break ledger; the response is already written, so a failure only logs.
     if(outcome.state.tool) try { store.recordResponseBytes(principal.subject,outcome.state.tool,outcome.state.response_bytes,principal.worker); } catch(e) { log({kind:'response_bytes_error',call_id:outcome.state.call_id,reason:e.message}); }

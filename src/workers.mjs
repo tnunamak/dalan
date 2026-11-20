@@ -18,6 +18,17 @@ export function ensureWorkerRelationship(db,worker,pattern='outbound_only') {
     SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM relationships WHERE counterpart_ref=?)`)
     .run(`rel_${randomUUID()}`,JSON.stringify(['requester']),worker,pattern,'unknown','none',new Date().toISOString(),worker);
 }
+// finish_handoff: true | {wait_ms}. A finishing worker is handed its next job in the reply, or waits up to wait_ms for one.
+// ChatGPT documents no tool-call timeout and users report about 60 s, so the wait stays well below that.
+export const FINISH_HANDOFF_WAIT_MS=20000, FINISH_HANDOFF_MAX_WAIT_MS=45000;
+function parseFinishHandoff(value,name) {
+  if(value===undefined||value===false) return null;
+  if(value===true) return {waitMs:FINISH_HANDOFF_WAIT_MS};
+  object(value,['wait_ms']);
+  const waitMs=value.wait_ms===undefined?FINISH_HANDOFF_WAIT_MS:value.wait_ms;
+  if(!Number.isInteger(waitMs)||waitMs<0||waitMs>FINISH_HANDOFF_MAX_WAIT_MS) fail(`${name}.finish_handoff.wait_ms must be an integer from 0 to ${FINISH_HANDOFF_MAX_WAIT_MS}`);
+  return {waitMs};
+}
 const repoPart=/^[A-Za-z0-9_.-]+$/;
 function validRepoName(repo) {
   if(typeof repo!=='string'||repo.split('/').length!==2) return false;
@@ -68,7 +79,8 @@ export function parseWorkers(value,{builtin=false,builtinConnectionIds}={}) {
     if(name==='pool'||name==='unknown') fail(`worker name "${name}" is reserved and unsupported`);
     if(!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) fail('invalid worker name');
     if(Object.hasOwn(config??{},'pool')) fail(`${name}.pool is not supported`);
-    object(config,['connections','capabilities','guidance','repos','repo_access','denied_repos','destination','workspaceAllowed','adapter']);
+    object(config,['connections','capabilities','guidance','repos','repo_access','denied_repos','destination','workspaceAllowed','adapter','finish_handoff']);
+    const finishHandoff=parseFinishHandoff(config.finish_handoff,name);
     if(Object.hasOwn(config,'adapter')&&(typeof config.adapter!=='string'||!Object.hasOwn(ADAPTER_QUALIFICATIONS,config.adapter))) fail(`${name}.adapter must name a qualified adapter: ${Object.keys(ADAPTER_QUALIFICATIONS).join(', ')}`);
     const repoSettings=normalizeRepoSettings(config,name);
     if(config.guidance!==undefined&&config.guidance!=='resume') fail(`${name}.guidance may only be "resume"`);
@@ -88,7 +100,7 @@ export function parseWorkers(value,{builtin=false,builtinConnectionIds}={}) {
     if(config.workspaceAllowed!==undefined&&typeof config.workspaceAllowed!=='boolean') fail(`${name}.workspaceAllowed must be boolean`);
     const caps=config.capabilities??[];
     if(!Array.isArray(caps)||caps.some(c=>c!=='t3')) fail('capabilities may only contain t3');
-    workers.set(name,{connections,capabilities:new Set(caps),...(config.adapter!==undefined?{adapter:config.adapter}:{}),...(config.workspaceAllowed!==undefined?{workspaceAllowed:config.workspaceAllowed}:{}),...(config.guidance?{guidance:config.guidance}:{}),...repoSettings,
+    workers.set(name,{connections,capabilities:new Set(caps),...(config.adapter!==undefined?{adapter:config.adapter}:{}),...(config.workspaceAllowed!==undefined?{workspaceAllowed:config.workspaceAllowed}:{}),...(config.guidance?{guidance:config.guidance}:{}),...(finishHandoff?{finishHandoff}:{}),...repoSettings,
       ...(Object.hasOwn(config,'destination')?{destination:parseDestinationDeclaration(config.destination)}:{})});
   }
   if(!workers.size) fail('workers must not be empty');
