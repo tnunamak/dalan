@@ -337,8 +337,10 @@ export async function runHosted({ options, env, out, input, signal, errorContext
         if (handoffEnabled) say('Gozar withdrew route proof. Waiting for verification of the same address.');
       }
     });
-    const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS, say, signal });
-    if (!ready.ready) { const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
+    // A local handoff failure the route watcher already recorded is the cause; a readiness failure it raced with is a symptom.
+    const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS, say, signal })
+      .catch(error => { if (!stopRequested()) checkHandoff(); throw error; });
+    if (!ready.ready) { if (!stopRequested()) checkHandoff(); const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
     say("Public HTTPS, OAuth discovery and the authorization server's metadata verified.");
 
     if (!durable) {

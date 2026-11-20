@@ -52,7 +52,7 @@ globalThis.fetch = (input, init = {}) => {
 function fakeRoute({ legacyOnExpose } = {}) {
   const gozar = createFakeGozar();
   const record = { gatePort: null, origin: null, servers: [], hosts: [], get started() { return gozar.fake.state.effects.filter(e => e.type === 'expose' || e.type === 'ensure').length; },
-    get stopped() { return gozar.fake.state.effects.filter(e => e.type === 'close').length; }, id: null, die() { gozar.fake.change(record.id, { state: 'lost', published: null }); } };
+    get stopped() { return gozar.fake.state.effects.filter(e => e.type === 'close').length; }, id: null, die() { gozar.fake.change(record.id, { state: 'lost', published: null }); }, change(patch) { gozar.fake.change(record.id, patch); } };
   const relayFor = async (origin, target) => {
     const gatePort = Number(target.split(':').pop());
     record.gatePort = gatePort; record.origin = origin;
@@ -92,7 +92,7 @@ async function withTrialPort(home, start) {
 }
 
 // ---- a hosted run ------------------------------------------------------------------------------------------------------
-async function hostedRun(name, { argv = [], gozar, clock, fetchImpl, route: savedRoute, trialMs, noHome, consentAnswer = 'y\n', watchPublicIdentity: watchIdentity } = {}) {
+async function hostedRun(name, { argv = [], gozar, gozarFor, clock, fetchImpl, route: savedRoute, trialMs, noHome, consentAnswer = 'y\n', watchPublicIdentity: watchIdentity } = {}) {
   const home = path.join(tmp, name);
   const route = fakeRoute();
   if (savedRoute) writeRouteSetting(savedRoute, { XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`) });
@@ -104,7 +104,7 @@ async function hostedRun(name, { argv = [], gozar, clock, fetchImpl, route: save
   run.finished = withTrialPort(home, port => runTry({
     argv: ['--public', ...(noHome ? [] : ['--home', home]), '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), XDG_STATE_HOME: path.join(tmp, `state-${name}`) },
     out, input: run.input, signal: run.controller.signal, errorContext: run.errorContext, clock,
-    hosted: { interactive: true, gozar: gozar ?? route.gozar, serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, ...(watchIdentity ? { watchPublicIdentity: watchIdentity } : {}), ...(trialMs ? { trialMs } : {}) },
+    hosted: { interactive: true, gozar: gozar ?? gozarFor?.(route.gozar) ?? route.gozar, serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, ...(watchIdentity ? { watchPublicIdentity: watchIdentity } : {}), ...(trialMs ? { trialMs } : {}) },
   })).then(() => ({}), error => ({ error })).finally(() => route.closeAll());
   run.gozar = route.gozar;
   run.until = async (pattern, ms = 60_000) => {
@@ -492,6 +492,63 @@ test('a public address that never answers as this bridge stops the trial before 
   const result = await run.finished;
   assert.match(result.error?.message ?? '', /The public route is not ready \(.*\); the trial is stopping\./);
   assert.doesNotMatch(run.out, /Connector name:/);
+  assert.equal(run.route.stopped, 1);
+});
+
+// Startup readiness is held open while the route watcher either records a local handoff failure or does not, then readiness is released.
+async function heldReadiness(name, { localFailure, stopWhileHeld = false, release }) {
+  const gate = Promise.withResolvers(), watcherClosed = Promise.withResolvers();
+  let held = false, rejectNow = false, run;
+  const fetchImpl = async () => {
+    if (!held) {
+      held = true;
+      if (localFailure) {
+        // A directory at the handoff path makes the watcher's unpublished-proof cleanup fail locally.
+        fs.mkdirSync(path.join(run.home, 'resource-url', 'occupied'), { recursive: true });
+        run.route.change({ published: null });
+      }
+      await gate.promise;
+      if (release === 'reject') rejectNow = true;
+    }
+    return new Response('', { status: 503 });
+  };
+  let now = 0;
+  const clock = { now: () => now, sleep: async ms => { if (rejectNow) throw new Error('synthetic readiness failure'); now += ms; } };
+  const gozarFor = base => ({ ...base, watchRoutes: async function* (request) { try { yield* base.watchRoutes(request); } finally { watcherClosed.resolve(); } } });
+  run = await hostedRun(name, { clock, fetchImpl, gozarFor });
+  try {
+    while (!held) await sleepMs(10);
+    // The obstruction was transient: once the watcher has recorded its failure, ordinary cleanup can succeed.
+    if (localFailure) { await watcherClosed.promise; await sleepMs(0); fs.rmSync(path.join(run.home, 'resource-url'), { recursive: true, force: true }); }
+    if (stopWhileHeld) run.controller.abort();
+    gate.resolve();
+    return { run, result: await run.finished };
+  } finally { gate.resolve(); await run.close(); }
+}
+
+for (const release of ['false', 'reject']) {
+  test(`a recorded local handoff failure wins over a ${release === 'false' ? 'false' : 'rejected'} startup readiness result`, async () => {
+    const { run, result } = await heldReadiness(`held-handoff-${release}`, { localFailure: true, release });
+    assert.equal(result.error?.tryKind, 'handoff');
+    assert.equal(result.error.message, 'Could not update the trial connection handoff.');
+    assert.ok(result.error.cause, 'the internal cause is kept');
+    assert.doesNotMatch(result.error.message, /resource-url|not ready|synthetic/);
+    assert.doesNotMatch(run.out, /Connector name:/, 'no URL is shown');
+    assert.equal(run.route.stopped, 1, 'the route is closed once');
+  });
+
+  test(`without a local handoff failure a ${release === 'false' ? 'false' : 'rejected'} startup readiness result keeps the route error`, async () => {
+    const { run, result } = await heldReadiness(`held-route-${release}`, { localFailure: false, release });
+    if (release === 'false') { assert.equal(result.error?.tryKind, 'route'); assert.match(result.error.message, /The public route is not ready/); }
+    else assert.equal(result.error?.message, 'synthetic readiness failure');
+    assert.notEqual(result.error?.tryKind, 'handoff');
+    assert.equal(run.route.stopped, 1);
+  });
+}
+
+test('a deliberate stop during held startup readiness is not reported as a handoff failure', async () => {
+  const { run, result } = await heldReadiness('held-stop', { localFailure: true, stopWhileHeld: true, release: 'false' });
+  assert.notEqual(result.error?.tryKind, 'handoff');
   assert.equal(run.route.stopped, 1);
 });
 
