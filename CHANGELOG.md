@@ -4,6 +4,11 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+## 0.8.1
+
+- Cap claim leases per worker (`worker_claim_lease_ms` in limits.json) without changing the MCP catalog, so a worker whose sessions end early (Muse) frees its slot sooner (#44).
+- Typed control events and held-wake display (#40); a revises link and stale guard for corrected jobs (#41); separate relationship, work and authority lifetimes (#33).
+
 - **Relationships, work and authority have separate lifetimes.** Ending a worker relationship refuses new jobs while existing jobs, questions and results remain available under their own permissions and expiry.
 - **Inspect relationships and permissions from the CLI.** `dalan relationships list` shows active and ended relationships, and `dalan relationships end ID` ends one. `dalan grants` lists permissions with each permission's enforcing component and expiry.
 
