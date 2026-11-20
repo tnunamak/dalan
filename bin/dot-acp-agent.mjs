@@ -11,7 +11,7 @@ import { acquireLock, LockBusyError } from '../integrations/t3/acp-kit/src/lock.
 import { createRefuse, cancelBudgetMs, CANCEL_CLEANUP_MS } from '../integrations/t3/acp-kit/src/errors.mjs';
 import { detectPresentPatches } from '../src/patch-apply.mjs';
 import {
-  paths, adminRequest, transient, sha256, parsePrompt, attemptId, ownerToken, readOrCreateSecret, bridgeRefusal,
+  paths, adminRequest, transient, sha256, parsePrompt, attemptId, retryExpiredAssignment, ownerToken, readOrCreateSecret, bridgeRefusal,
   prepareAssignment, sizeRefusal, withoutNote, Refusal, verdictRefusal, CONTINUE_PROMPT, promptText, isBuild, buildResultText, decideHint, runBuildProseCheck, adminArtifact,
 } from '../src/acp-bridge.mjs';
 
@@ -88,7 +88,8 @@ async function readRow(rid) {
 // submitted, so the worker never gets the same brief twice:
 //   no row                     -> check eligibility, submit
 //   row with another brief     -> refuse (one root token must not serve two briefs)
-//   row cancelled or expired   -> next attempt id `<root>_r<n>`
+//   row cancelled by expiry    -> next attempt id `<root>_r<n>`
+//   other cancellation         -> refuse; do not submit another attempt
 //   row queued/claimed/finished-> attach; the wait returns the result or keeps waiting
 async function acquire(s, parsed) {
   const briefHash = sha256(parsed.brief);
@@ -100,7 +101,7 @@ async function acquire(s, parsed) {
     if (row) {
       const storedHash = row.assignment.acp_brief_hash ?? sha256(withoutNote(row.assignment.brief ?? ''));
       if (storedHash !== briefHash) throw new Refusal(`token ${parsed.requestRoot} was already used with a different brief`);
-      if (row.status === 'cancelled') continue;
+      if (retryExpiredAssignment(row)) continue;
       return { root: parsed.requestRoot, rid, attempt, briefHash, validUntil: row.assignment.valid_until ?? null, notes: [], startedAt: Date.now() };
     }
     const status = await call('/status', null);

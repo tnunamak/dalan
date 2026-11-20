@@ -97,7 +97,7 @@ export function parsePrompt(prompt) {
   // Without a token the identity is the text after the T3 preamble, so a resend with or without a role maps to one request.
   return { brief, root, requestRoot: root ?? `acp-${sha256(text).slice(0, 24)}` };
 }
-// Attempt 1 is the root itself. After a cancelled or expired row the next attempt is `<root>_r<n>` (the bridge accepts only
+// Attempt 1 is the root itself. After an expiry cancellation the next attempt is `<root>_r<n>` (the bridge accepts only
 // [-\w] in a request id, so the doc's `#` separator cannot be used).
 export const attemptId = (root, n) => {
   const id = n === 1 ? root : `${root}_r${n}`;
@@ -109,7 +109,14 @@ export const attemptId = (root, n) => {
 export class Refusal extends Error {
   constructor(message, failure_type = 'admission_refused', extra = {}) { super(message); this.failure_type = failure_type; Object.assign(this, extra); }
 }
-// The words a requester reads for a typed refusal: each reason with its fix, plus the byte accounting when a limit is the cause.
+
+// Owner cancellation and unknown reasons are terminal; only expiry is retryable.
+export function retryExpiredAssignment(row) {
+  if (row.status !== 'cancelled') return false;
+  if (row.cancelled_reason === 'expired') return true;
+  throw new Refusal('The assignment was cancelled and will not be retried.');
+}
+
 export function verdictRefusal(order) {
   const lines = (order.reasons ?? []).map(r => `${r.message}${r.candidates?.length ? ` (did you mean ${r.candidates.join(' or ')}?)` : ''}. Fix: ${r.fix}`);
   const retry = order.verdict === 'defer' && order.retry_after_seconds ? ` Retry in about ${Math.round(order.retry_after_seconds / 60) || 1} min.` : '';
