@@ -332,12 +332,7 @@ test('try refuses the real home before creating anything, and leaves a foreign d
   assert.deepEqual(fs.readdirSync(foreign), ['keep.txt']);
   assert.equal(fs.statSync(foreign).mode & 0o777, 0o755, 'a refused directory keeps its mode');
 
-  // A path too long for the admin socket fails early with a reason, and creates nothing.
-  const long = path.join(tmp, 'x'.repeat(110), 'trial');
-  const tooLong = run(['--home', long]);
-  assert.equal(tooLong.status, 1);
-  assert.match(tooLong.stderr, /too long for the bridge's admin socket/);
-  assert.ok(!fs.existsSync(path.join(tmp, 'x'.repeat(110))));
+  // A long home is no problem: the admin socket gets a short path (scripts/admin-socket-path-test.mjs).
 });
 
 test('DALAN_HOME selects the bridge home for other commands, relative paths included, and help lists try', () => {

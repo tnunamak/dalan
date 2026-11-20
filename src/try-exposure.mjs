@@ -1,6 +1,5 @@
 // The public-route checks for `dalan try --public`. Routes themselves come from Gozar (gozar-routes.mjs); this file holds what Dalan
-// owns around them: the loopback gate a route forwards to, and the readiness and identity checks run on the public origin.
-import http from 'node:http';
+// owns around them: the OAuth readiness and identity checks run on the public origin.
 import { safeDiagnostic } from './diagnostic.mjs';
 export { processCommand } from './process-inspection.mjs';
 
@@ -19,38 +18,6 @@ export function lineBuffer(onLine, max = 65_536) {
   };
   push.end = () => { if (buf) onLine(buf); buf = ''; };
   return push;
-}
-
-// ---- the gate ----------------------------------------------------------------------------------------------------------
-// The route forwards to this listener, never to the bridge. A tunnel reports its address only after it starts, and the
-// bridge needs that address at `init`, so the route must exist first. The gate answers 503 until the bridge is up, forwards to the
-// one bridge port after that, and answers 503 again once closed. Nothing else on the computer is ever reachable through the route.
-export async function createGate() {
-  let upstream = null, publicHost = null;
-  // A fresh connection per request: a kept-alive socket that the bridge closed in the meantime would fail the next request with a 502
-  // that the bridge never sees.
-  const agent = new http.Agent({ keepAlive: false });
-  const server = http.createServer((req, res) => {
-    if (!upstream) { res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '2' }); res.end('starting\n'); return; }
-    // A route may forward with Host set to this loopback gate. Restore only that exact transport host to the
-    // allocated public host; preserve other hosts and Origin for the bridge's identity checks.
-    const headers = publicHost && req.headers.host === `127.0.0.1:${server.address().port}` ? { ...req.headers, host: publicHost } : req.headers;
-    const forward = http.request({ agent, host: '127.0.0.1', port: upstream, method: req.method, path: req.url, headers }, answer => {
-      res.writeHead(answer.statusCode, answer.headers);
-      answer.pipe(res);
-    });
-    forward.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
-    res.on('close', () => forward.destroy());
-    req.pipe(forward);
-  });
-  server.headersTimeout = 10_000; server.requestTimeout = 60_000;
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  return {
-    port: server.address().port,
-    open(port, { publicOrigin } = {}) { upstream = port; publicHost = publicOrigin ? new URL(publicOrigin).host : null; },
-    shut() { upstream = null; },
-    async close() { upstream = null; server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); },
-  };
 }
 
 // A trial constraint, not an OAuth rule: RFC 8414 lets an authorization server live on another origin. A trial's bridge serves its own

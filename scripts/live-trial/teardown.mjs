@@ -168,7 +168,7 @@ async function main() {
   const home = path.resolve(args['--home']);
   const manifest = readManifest(home);
   const exposure = await closeRecordedRoute(manifest);
-  console.log(exposure ? `route=removed local_port=${exposure.local_port}` : 'route=not-recorded');
+  console.log(exposure ? `route=removed local_port=${manifest.port}` : 'route=not-recorded');
   const operatorHome = testOperatorHome ? path.resolve(testOperatorHome) : os.userInfo().homedir;
   const token = args['--token-stdin'] ? await readStdin() : '';
   if (token && !/^[A-Za-z0-9_-]{20,128}$/.test(token)) fail('stdin did not contain one opaque access token');

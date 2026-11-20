@@ -7,12 +7,16 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
 import { defaultPath } from './paths.mjs';
-import { socketPathLimit } from './admin-socket.mjs';
+import { adminSocketPath } from './admin-socket.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { loadCapacity } from './projects.mjs';
 import { parseArgs } from '../scripts/live-trial/common.mjs';
-import { buildQuery, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, registerExternalService, resolveGozar, resolveRouteWord } from './gozar-routes.mjs';
+import { buildQuery, closeExactRoute, ensureDurableRoute, explainRouteError, describeCandidate, describeDisclosure, gozarHomeFor, isPublished, requireExternalRoute, resolveGozar, resolveRouteWord, observeRetainedRoute, routeFailure, routeNotDispatched } from './gozar-routes.mjs';
+import { routeCustodyPath } from './route-custody.mjs';
+import { muteableTerminal, runRouteSetup } from './route-setup.mjs';
+import { readRouteSetting } from './route-setting.mjs';
+import { acquirePrivateLock } from './service-update-lock.mjs';
 import { autoUpdateUnits, setAutoUpdate } from './service-auto-update.mjs';
 import { serviceHomeFor, readDefaultHome, recordDefaultHome, forgetDefaultHome, DEFAULT_SERVICE_HOME } from './default-home.mjs';
 import { launchdLabels, launchAgentsDir, servicePlist, updatePlist, preflightAgentFile, writeAgentFile, loadAgent, unloadAgent, removeAgents, lintPlist, isLoaded } from './service-launchd.mjs';
@@ -54,7 +58,7 @@ function validateTopology({ port, target, lanPort = null, verifyCmd }) {
 function parseOptions(argv, env) {
   const parsed = parseArgs(argv, {
     values: ['--home', '--public-url', '--port', '--target', '--worker', '--verify-cmd', '--route', '--lan-port'],
-    flags: ['--write-units-only', '--enable-workspace', '--enable-t3', '--auto-update', '--no-auto-update', '--yes', '--json', '--help'],
+    flags: ['--write-units-only', '--enable-workspace', '--enable-t3', '--auto-update', '--no-auto-update', '--json', '--help'],
   });
   if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
   if (parsed['--help']) return { help: true };
@@ -63,7 +67,6 @@ function parseOptions(argv, env) {
   if (!SAFE_PATH.test(home)) fail('--home contains characters that cannot be written safely in a service definition');
   // `--route NAME` alone is the one-command install: Gozar supplies the public address and Dalan picks a loopback port.
   const auto = parsed['--public-url'] === undefined && parsed['--port'] === undefined && parsed['--target'] === undefined;
-  if (auto && parsed['--route'] === undefined) fail('pass --route NAME to publish through Gozar, or --public-url, --port and --target for a proxy you already run');
   if (auto && (parsed['--lan-port'] !== undefined || parsed['--verify-cmd'] !== undefined)) fail('--lan-port and --verify-cmd belong with an explicit --public-url, --port and --target');
   const origin = auto ? null : parseOrigin(parsed['--public-url']);
   const port = auto ? null : Number(parsed['--port']);
@@ -84,7 +87,7 @@ function parseOptions(argv, env) {
   const route = parsed['--route'];
   if (route !== undefined && (!route || route.startsWith('-'))) fail('--route must name a Gozar route');
   return { home, auto, homeExplicit: parsed['--home'] !== undefined, origin, port, target, lanPort, enableWorkspace: parsed['--enable-workspace'] === true, enableT3: parsed['--enable-t3'] === true, workers, verifyCmd: parsed['--verify-cmd'] ?? null,
-    route, yes: parsed['--yes'] === true, autoUpdate: parsed['--auto-update'] ? true : parsed['--no-auto-update'] ? false : undefined,
+    route, autoUpdate: parsed['--auto-update'] ? true : parsed['--no-auto-update'] ? false : undefined,
     writeUnitsOnly: parsed['--write-units-only'] === true, json: parsed['--json'] === true };
 }
 
@@ -112,6 +115,27 @@ function nodePath(execPath) {
     try { if (fs.realpathSync(candidate) === real) return candidate; } catch { /* candidate is not installed */ }
   }
   return execPath;
+}
+
+function pendingInstallPath(env, home) {
+  const config = env.XDG_CONFIG_HOME || path.join(env.HOME ?? os.homedir(), '.config');
+  return path.join(config, 'dalan', 'route-installs', createHash('sha256').update(home).digest('hex') + '.json');
+}
+
+function readPendingInstall(file) {
+  let value;
+  try { value = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  if (typeof value?.home !== 'string' || !path.isAbsolute(value.home) || typeof value.operationId !== 'string' ||
+      !Number.isInteger(value.port) || value.port < 1024 || value.port > 65535) fail('The pending service route reference is invalid.');
+  return value;
+}
+
+async function withRouteInstallLock(env, home, action) {
+  const file = pendingInstallPath(env, home);
+  fs.mkdirSync(path.dirname(file), { mode: 0o700, recursive: true });
+  const unlock = acquirePrivateLock(file + '.lock.sqlite', 'another service install or uninstall is already running');
+  try { return await action(); } finally { unlock(); }
 }
 
 function readReceipt(home) {
@@ -304,7 +328,6 @@ function prepareHome(o, profile) {
   const secret = /^BRIDGE_PATH_SECRET=([a-f0-9]{64})\n?$/.exec(envText)?.[1];
   if (!envInfo.isFile() || envInfo.isSymbolicLink() || (envInfo.mode & 0o777) !== 0o600 || !secret) fail(`${envFile} is not a private bridge secret file`);
   const resourceFile = path.join(o.home, 'resource-url');
-  writePrivate(resourceFile, `${o.origin}/${secret}/mcp\n`);
   return { config, resourceFile, secret };
 }
 
@@ -372,25 +395,32 @@ function assertGozarStatePath(env) {
 
 export async function installService(o, seams = {}) {
   const env = seams.env ?? process.env;
+  if (!path.isAbsolute(o.home) || !SAFE_PATH.test(o.home)) fail('--home must be an absolute service-safe path');
+  return o.writeUnitsOnly ? installServiceLocked(o, seams) : withRouteInstallLock(env, o.home, () => installServiceLocked(o, seams));
+}
+
+async function installServiceLocked(o, seams) {
+  const env = seams.env ?? process.env;
   const platform = seams.platform ?? process.platform;
   if (!['linux', 'darwin'].includes(platform)) fail('dalan service install needs Linux with a systemd user manager or macOS with launchd');
   const mac = platform === 'darwin';
-  if (!path.isAbsolute(o.home) || !SAFE_PATH.test(o.home)) fail('--home must be an absolute service-safe path');
   assertRealDirectoryPath(path.dirname(o.home), { owner: true });
   assertRealDirectoryPath(o.home, { owner: true });
-  // Every check up to the route allocation below only reads. A public route is allocated after the last of them passes, so a
-  // read-only preflight refusal leaves no route behind. Later writes or startup can still fail.
-  const adminSocket = path.join(defaultPath(o.home, '.local/share/dot-bridge'), 'admin.sock');
-  const socketBytes = Buffer.byteLength(adminSocket), socketLimit = socketPathLimit(platform);
-  if (socketBytes > socketLimit) fail(`--home is too long: the bridge's admin socket ${adminSocket} would be ${socketBytes} bytes, and the limit on ${mac ? 'macOS' : 'Linux'} is ${socketLimit} bytes. Use a shorter --home.`);
-  let gozar = null, allocate = false;
+  // A public route is allocated after the preflight checks pass. Later writes or startup can still fail.
+  const saved = o.auto && o.route === undefined ? readRouteSetting(env) : null;
+  const gozarHome = saved?.gozarHome ?? gozarHomeFor(env);
+  const external = !o.auto;
+  const pendingPath = pendingInstallPath(env, o.home);
+  const persisted = readReceipt(o.home);
+  let pending = readPendingInstall(pendingPath);
+  let gozar, allocated, allocate = false;
   if (o.auto) {
     // The one-command install: reuse the port and address a previous run recorded, or pick a free port now and ask Gozar for
     // the address once every check has passed.
-    const prior = readReceipt(o.home);
+    const prior = persisted;
     if (prior?.origin && prior.port) o = { ...o, origin: prior.origin, port: prior.port, target: parseTarget(prior.target) };
     else {
-      const port = await (seams.freePort ?? firstFreePort)(8789);
+      const port = pending?.port ?? await (seams.freePort ?? firstFreePort)(8789);
       o = { ...o, origin: null, port, target: parseTarget(`127.0.0.1:${port}`) };
       allocate = true;
     }
@@ -398,6 +428,9 @@ export async function installService(o, seams = {}) {
   const target = parseTarget(typeof o.target === 'string' ? o.target : `${o.target?.host}:${o.target?.port}`);
   o = { ...o, target };
   validateTopology(o);
+  if (external && !o.writeUnitsOnly && o.target.port !== o.port) {
+    fail('Route proof requires the target and Dalan listener to use the same port. A custom verification command cannot publish the address.');
+  }
   const profile = profileFor(o.home, o.workers ?? []);
   assertRealDirectoryPath(path.dirname(profile.file));
   const unitDir = mac ? launchAgentsDir(env) : path.join(env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.join(os.homedir(), '.config'), 'systemd/user');
@@ -449,26 +482,50 @@ export async function installService(o, seams = {}) {
     if (mac) for (const [filename, text] of Object.entries(files)) writeAgentFile(path.join(unitDir, filename), text); else writeUnits(unitDir, files);
     return { schema_version: 1, home: o.home, unit: mac ? labels.service : `${name}.service`, units: Object.keys(files), target: o.target.value, started: false, route: null };
   }
-  gozar ??= seams.gozar ?? await resolveGozar();
-  assertGozarStatePath(env);
+  gozar = seams.gozar ?? await resolveGozar({ env, home: persisted?.gozar_home ?? pending?.home ?? gozarHome, custody: persisted?.route_custody });
+  assertGozarStatePath({ ...env, GOZAR_HOME: persisted?.gozar_home ?? pending?.home ?? gozarHome });
   const needsEnrollmentRestart = replaceLegacyUnit || !!previous && (!previous.repo || previous.enrollment_pending === true);
   const spawn = seams.spawn ?? spawnSync;
   if (!mac) {
     try { runCommand('systemctl', ['--user', 'show-environment'], { env, spawn }); }
     catch (error) { fail(`the user systemd manager is not reachable (${error.message}). Run \`systemctl --user status\` to see why; a login session or \`loginctl enable-linger\` may be needed.`); }
   }
-  let allocated = null;
-  if (allocate) {
-    const wanted = buildQuery({ home: gozarHomeFor(env), target: o.target.value, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, address: 'stable' });
+  const routeHome = previous?.gozar_home ?? pending?.home ?? gozarHome;
+  const custody = previous?.route_custody ?? routeCustodyPath({ HOME: os.homedir(), ...env }, routeHome);
+  const consent = seams.consent ?? (async () => fail('A durable route needs your explicit approval in a terminal.'));
+  const setup = seams.setup && (candidate => seams.setup({ gozar, candidate, home: routeHome, env }));
+  const allocateRoute = async origin => {
+    const remember = ref => {
+      const next = { ...ref, port: o.port };
+      writeAtomic(pendingPath, JSON.stringify(next));
+      pending = next;
+    };
+    if (pending) {
+      const observed = await observeRetainedRoute(gozar, pending);
+      if (observed.state === 'recorded') {
+        const { view } = observed;
+        if (view.cleanup.state === 'confirmed') fail('The retained Gozar operation has been closed. Run dalan service uninstall for this home before starting a new install.');
+        if (view.hostConfiguration?.target?.known && view.hostConfiguration.target.value !== o.target.value) fail('The retained route targets a different local listener.');
+        if (view.operationId !== pending.operationId || !view.handle) fail('The retained Gozar view does not identify the original operation and handle.');
+        // Observation recovery needs the same durable pointer as dispatch delivery,
+        // before a receipt or service-start failure can split those two records.
+        remember({ home: pending.home, operationId: pending.operationId, handle: view.handle });
+        return view;
+      }
+    }
+    const wanted = buildQuery({ home: routeHome, target: o.target.value, usage: { kind: 'durable', routeId: saved?.routeId ?? 'dalan-main' },
+      route: o.route ?? saved?.routeName ?? undefined, origin, address: 'stable' });
     const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
-    const view = await ensureDurableRoute({ gozar, query, pick, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
+    return ensureDurableRoute({ gozar, query, pick, consent, setup, remember, recovery: pending, external });
+  };
+  if (allocate) {
+    const view = await allocateRoute(saved?.origin ?? undefined);
+    if (!view.origin) throw routeFailure(view, 'Gozar has not allocated an address for this service.');
     o = { ...o, origin: parseOrigin(view.origin) };
-    // Gozar's reply does not say whether this call created the route or reused one that already existed (from `dalan setup`, or
-    // another install), so a failure below never closes it. The receipt keeps its handle, and `dalan service uninstall` releases it.
-    allocated = view.handle ?? null;
+    allocated = view.handle;
   }
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  if (!homeScope.hasReceipt) writePrivate(receiptFile, `${JSON.stringify({ ...installReceipt(o.home, configDir, o, profile.workers), repo, node, unit_dir: unitDir, auto_update: autoUpdate, platform, route: o.route ?? null, ...(allocated ? { route_handle: allocated } : {}) }, null, 2)}\n`);
+  if (!homeScope.hasReceipt) writePrivate(receiptFile, `${JSON.stringify({ ...installReceipt(o.home, configDir, o, profile.workers), repo, node, unit_dir: unitDir, auto_update: autoUpdate, platform, route: o.route ?? saved?.routeName ?? null, gozar_home: routeHome, route_custody: custody, ...(allocated ? { route_handle: allocated } : {}) }, null, 2)}\n`);
   if (!hasCurrent) fs.symlinkSync(repo, current);
   const homeFiles = prepareHome(o, profile);
   if (needsEnrollmentRestart) {
@@ -495,22 +552,28 @@ export async function installService(o, seams = {}) {
     if (needsEnrollmentRestart) runCommand('systemctl', ['--user', 'restart', `${name}.service`], { env, spawn });
   }
   const dataDir = defaultPath(o.home, '.local/share/dot-bridge');
-  const ready = await (seams.waitForSocket ?? socketIsReady)(path.join(dataDir, 'admin.sock'), seams.socketTimeoutMs ?? 30000);
+  const ready = await (seams.waitForSocket ?? socketIsReady)(adminSocketPath(dataDir), seams.socketTimeoutMs ?? 30000);
   if (!ready) fail(`Dalan did not start on its admin socket; the service and home remain for inspection: ${mac ? `tail ${path.join(o.home, 'logs', 'bridge.err.log')}` : `systemctl --user status ${name}.service`}`);
-  const gozarHome = gozarHomeFor(env);
   let routeReply;
-  if (o.route !== undefined) {
-    // A named Gozar route: Gozar allocates or adopts it and pins the origin; nothing here interprets the name.
-    const wanted = buildQuery({ home: gozarHome, target: o.target.value, usage: { kind: 'durable', routeId: 'dalan-main' }, route: o.route, origin: o.origin, address: 'stable' });
-    const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
-    const view = await ensureDurableRoute({ gozar, query, pick, consent: seams.consent ?? (async () => fail('A durable route needs your approval; run `dalan setup --route NAME` first, then retry.')) });
-    if (view.origin !== o.origin) fail(`Gozar pinned ${view.origin}, not the requested ${o.origin}; the bridge is running but its route needs repair`);
-    routeReply = view;
-  } else {
-    routeReply = (await registerExternalService({ gozar, home: gozarHome, origin: o.origin, target: o.target.value, ...(o.verifyCmd ? { verifyCmd: o.verifyCmd } : {}) })).route;
+  const existingHandle = allocated ?? previous?.route_handle;
+  try {
+    routeReply = existingHandle ? await gozar.routeStatus({ home: routeHome, handle: existingHandle }) : await allocateRoute(o.origin);
+    if (external) requireExternalRoute(routeReply, o.origin, o.target.value);
+    if (routeReply.origin !== o.origin) throw routeFailure(routeReply, 'Gozar returned a different address from the saved service origin.');
+  } catch (error) {
+    fs.rmSync(homeFiles.resourceFile, { force: true });
+    throw error;
   }
-  if (routeReply.verification?.status !== 'verified') fail(`Gozar did not verify the route; the bridge is running and the route needs repair: ${JSON.stringify(routeReply).slice(0, 1500)}`);
-  { const done = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); if (routeReply.handle && JSON.stringify(done.route_handle) !== JSON.stringify(routeReply.handle)) writeAtomic(receiptFile, `${JSON.stringify({ ...done, route_handle: routeReply.handle }, null, 2)}\n`); }
+  const done = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  if (routeReply.handle && (JSON.stringify(done.route_handle) !== JSON.stringify(routeReply.handle) || done.gozar_home !== routeHome || done.route_custody !== custody)) {
+    writeAtomic(receiptFile, `${JSON.stringify({ ...done, route_handle: routeReply.handle, gozar_home: routeHome, route_custody: custody }, null, 2)}\n`);
+  }
+  if (pending && readPendingInstall(pendingPath)?.operationId === pending.operationId) fs.rmSync(pendingPath, { force: true });
+  if (!isPublished(routeReply)) {
+    fs.rmSync(homeFiles.resourceFile, { force: true });
+    throw routeFailure(routeReply, 'Gozar did not verify the route; the bridge is running and the route needs repair.');
+  }
+  writeAtomic(homeFiles.resourceFile, `${routeReply.published}/${homeFiles.secret}/mcp\n`);
   await setAutoUpdate({ home: o.home, enabled: autoUpdate }, { ...seams, env, spawn, platform });
   if (!env.DALAN_HOME) recordDefaultHome(o.home, env);
   if (needsEnrollmentRestart) {
@@ -518,23 +581,59 @@ export async function installService(o, seams = {}) {
     delete enrolled.enrollment_pending;
     writeAtomic(receiptFile, `${JSON.stringify(enrolled, null, 2)}\n`);
   }
-  return { schema_version: 1, origin: routeReply.published ?? o.origin, home: o.home, unit: mac ? labels.service : `${name}.service`, already_installed: homeScope.hasReceipt && !needsEnrollmentRestart, units: Object.keys(files), port: o.port,
+  return { schema_version: 1, origin: routeReply.published, home: o.home, unit: mac ? labels.service : `${name}.service`, already_installed: homeScope.hasReceipt && !needsEnrollmentRestart, units: Object.keys(files), port: o.port,
     workers: profile.workers, public_url: `${o.origin}/<secret>/mcp`, resource_url_file: homeFiles.resourceFile,
     target: o.target.value, started: true, route: routeReply, auto_update: autoUpdate };
 }
 
 // Stop the service and its update job, delete the generated definitions and the public route, and forget the default home.
 // The home itself (secrets, grants, data) stays; delete it by hand if you also want that gone.
-export async function uninstallService({ home }, seams = {}) {
-  const env = seams.env ?? process.env, platform = seams.platform ?? process.platform, mac = platform === 'darwin';
+export async function uninstallService({ home, confirmRouteStop }, seams = {}) {
+  const env = seams.env ?? process.env;
   home = path.resolve(home);
+  return withRouteInstallLock(env, home, () => uninstallServiceLocked({ home, confirmRouteStop }, seams));
+}
+
+async function uninstallServiceLocked({ home, confirmRouteStop }, seams) {
+  const env = seams.env ?? process.env, platform = seams.platform ?? process.platform, mac = platform === 'darwin';
   const receipt = readReceipt(home);
-  if (!receipt?.unit || receipt.home !== home) fail(`no Dalan service is installed for ${home}`);
+  const pendingPath = pendingInstallPath(env, home);
+  const pending = readPendingInstall(pendingPath);
+  if (receipt && (!receipt.unit || receipt.home !== home)) fail(`no Dalan service is installed for ${home}`);
   const removed = [];
+  if (pending && !receipt?.route_handle) {
+    const gozar = routeNotDispatched(pending) ? null : seams.gozar ?? await resolveGozar({ env, home: pending.home });
+    const observed = await observeRetainedRoute(gozar, pending);
+    if (observed.state === 'unobserved') fail('Gozar has not confirmed whether the retained operation started. Cleanup is unconfirmed; the reference was kept.');
+    const view = observed.view;
+    const subject = view?.handle ?? { operationId: pending.operationId };
+    if (!confirmRouteStop || !await confirmRouteStop(subject)) fail('The saved route or pending operation requires explicit approval.');
+    if (view && (view.state !== 'released' || view.cleanup.state !== 'confirmed')) {
+      const result = await closeExactRoute(gozar, { ...pending, handle: view.handle });
+      if (!result.removed) fail(`Public route removal is unconfirmed. Retained the install operation. ${result.detail}`);
+    }
+    fs.rmSync(pendingPath, { force: true });
+    removed.push(view ? 'public route released' : 'pending route operation cancelled before dispatch');
+    if (!receipt) return { home, removed, kept: 'No service home was created.', moved_to: null };
+  }
+  if (!receipt) fail(`no Dalan service is installed for ${home}`);
   const unitDir = receipt.unit_dir;
   if (!unitDir || !path.isAbsolute(unitDir)) fail('the service receipt names no unit directory');
   // Verify both jobs before removing either plist or disabling automatic updates.
   if (mac) for (const label of Object.values(launchdLabels(receipt.unit))) isLoaded(label, seams.launchd);
+  if (receipt.route_handle) {
+    const home = receipt.gozar_home ?? gozarHomeFor(env);
+    const gozar = seams.gozar ?? await resolveGozar({ env, home, custody: receipt.route_custody });
+    if (!confirmRouteStop || !await confirmRouteStop(receipt.route_handle)) fail('Public route stop requires explicit approval for the saved handle.');
+    const result = await closeExactRoute(gozar, { home, handle: receipt.route_handle });
+    if (!result.removed) fail(`Public route removal is unconfirmed. Retained the service receipt. ${result.detail}`);
+    const file = path.join(defaultPath(receipt.home, '.config/dot-bridge'), 'service-install.json');
+    const next = { ...receipt };
+    delete next.route_handle;
+    writeAtomic(file, `${JSON.stringify(next, null, 2)}\n`);
+    if (pending?.handle && JSON.stringify(pending.handle) === JSON.stringify(receipt.route_handle)) fs.rmSync(pendingPath, { force: true });
+    removed.push('public route released');
+  }
   if (receipt.auto_update) { try { await setAutoUpdate({ home, enabled: false }, { ...seams, env, platform }); removed.push('automatic updates off'); } catch (error) { if (mac) throw error; removed.push(`update job not removed: ${error.message}`); } }
   if (mac) removed.push(...removeAgents({ unit: receipt.unit, unit_dir: unitDir }, seams.launchd));
   else {
@@ -543,13 +642,6 @@ export async function uninstallService({ home }, seams = {}) {
     if (units.length) { spawn('systemctl', ['--user', 'disable', '--now', ...units], { encoding: 'utf8', env }); }
     for (const unit of units) { fs.rmSync(path.join(unitDir, unit)); removed.push(`removed ${path.join(unitDir, unit)}`); }
     spawn('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8', env });
-  }
-  if (receipt.route_handle) {
-    try {
-      const gozar = seams.gozar ?? await resolveGozar();
-      const closed = await gozar.closeRoute({ home: gozarHomeFor(env), handle: receipt.route_handle, mode: 'remove' });
-      removed.push(`public route ${closed.state}`);
-    } catch (error) { removed.push(`public route not removed: ${explainRouteError(error).line}`); }
   }
   forgetDefaultHome(home, env);
   // The home holds secrets, grants and data, so it is moved aside, never deleted. A new install then starts from a fresh home at the same path.
@@ -596,14 +688,23 @@ export async function serviceMain(argv, seams = {}) {
     return result;
   }
   if (action === 'help' || action === '--help' || !action) {
-    (seams.out ?? console.log)('Usage: dalan service install --worker NAME --route NAME [--yes] [--home DIR] [--enable-workspace] [--enable-t3] [--auto-update|--no-auto-update]\n       dalan service install --public-url https://HOST --port N --target HOST:PORT [--home DIR] [--lan-port N] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]   (an address you already serve)\n       dalan service uninstall [--home DIR]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Runs under systemd on Linux and launchd on macOS.');
+    (seams.out ?? console.log)('Usage: dalan service install --worker NAME [--route NAME] [--home DIR] [--enable-workspace] [--enable-t3] [--auto-update|--no-auto-update]\n       dalan service install --public-url https://HOST --port N --target HOST:PORT [--home DIR] [--lan-port N] [--worker NAME ...] [--verify-cmd COMMAND] [--write-units-only]   (an address you already serve)\n       dalan service uninstall [--home DIR]\n       dalan service migrate-workers --home DIR --source workers.json [--source workers.json ...]\n       dalan service update [--check|--yes] [--retry] [--home DIR] [--json]\n       dalan service auto-update on|off [--home DIR]\n       dalan service status [--home DIR] [--json]\n       dalan service recover --home DIR [--quiet]\nNew installs check daily with jitter. Catalog changes stage until --yes authorizes a connector refresh. --check reports availability without installing. Runs under systemd on Linux and launchd on macOS.');
     return null;
   }
   if (action === 'uninstall') {
     const parsed = parseArgs(args, { values: ['--home'], flags: ['--json', '--help'] });
     if (parsed['--help']) return serviceMain(['help'], seams);
     if (parsed._.length) fail(`unexpected argument ${parsed._[0]}`);
-    const result = await uninstallService({ home: parsed['--home'] ?? serviceHomeFor(seams.env ?? process.env) }, seams);
+    const confirmRouteStop = seams.confirmRouteStop ?? (async handle => {
+      if (!process.stdin.isTTY) return false;
+      const { createInterface } = await import('node:readline/promises');
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      const question = handle.operationId ? `Cancel prepared Gozar operation ${handle.operationId}? [y/N] `
+        : `Remove Gozar route ${handle.kind} ${handle.id} (generation ${handle.generation})? [y/N] `;
+      try { return /^y(es)?$/i.test((await rl.question(question)).trim()); }
+      finally { rl.close(); }
+    });
+    const result = await uninstallService({ home: parsed['--home'] ?? serviceHomeFor(seams.env ?? process.env), confirmRouteStop }, seams);
     const out = seams.out ?? console.log;
     if (parsed['--json']) out(JSON.stringify(result)); else { for (const line of result.removed) out(line); out(`Kept: ${result.kept}`); }
     return result;
@@ -612,15 +713,29 @@ export async function serviceMain(argv, seams = {}) {
   const o = parseOptions(args, seams.env ?? process.env);
   if (o.help) return serviceMain(['help'], seams);
   const out0 = seams.out ?? console.log;
-  // Gozar describes the route it would open; the owner approves it once (the answer is kept with the route). `--yes` approves what was printed.
+  // Route consent is collected after showing the exact review returned by Gozar.
   const consent = seams.consent ?? (async candidate => {
     out0(describeCandidate(candidate).join('\n')); out0(describeDisclosure(candidate).join('\n'));
-    if (o.yes) return true;
-    if (!process.stdin.isTTY) { out0('Run this in a terminal to approve the route, or add --yes after reading the description above.'); return false; }
+    if (!process.stdin.isTTY) { out0('Run this in a terminal to approve the route.'); return false; }
     const rl = (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout });
     try { return /^y(es)?$/i.test((await rl.question('Use this route? [y/N] ')).trim()); } finally { rl.close(); }
   });
-  const result = await installService(o, { ...seams, consent });
+  const setup = async request => {
+    const tty = process.stdin.isTTY && process.stdout.isTTY;
+    if (!tty) return request.candidate.setup.state === 'ready';
+    const { createInterface } = await import('node:readline/promises');
+    const terminal = muteableTerminal(process.stdin, process.stdout);
+    const rl = createInterface({ input: process.stdin, output: terminal.output, terminal: terminal.terminal });
+    try {
+      return await runRouteSetup({ ...request, say: out0, ask: message => rl.question(message), async askSecret(label) {
+        process.stdout.write(`${label} (hidden): `);
+        terminal.mute(true);
+        try { return Buffer.from(await rl.question('')); }
+        finally { terminal.mute(false); process.stdout.write('\n'); }
+      }, handoff: href => process.stdout.write(`${href}\n`) });
+    } finally { rl.close(); }
+  };
+  const result = await installService(o, { ...seams, consent, setup });
   if (o.json) (seams.out ?? console.log)(JSON.stringify(result));
   else {
     const out = seams.out ?? console.log;

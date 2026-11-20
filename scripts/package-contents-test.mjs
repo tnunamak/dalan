@@ -11,7 +11,16 @@ const repo = path.resolve(import.meta.dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf8'));
 const packed = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
 const entry = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
-const files = new Set(entry.files.map(file => file.path));
+const dependencies = entry.files.filter(file => file.path.startsWith('node_modules/')).map(file => file.path);
+const candidate = pkg.dependencies['@tnunamak/gozar'].startsWith('file:vendor/');
+test('the temporary candidate is the only bundled dependency', () => {
+  if (candidate) {
+    assert.ok(dependencies.includes('node_modules/@tnunamak/gozar/package.json'));
+    assert.ok(dependencies.includes('node_modules/@tnunamak/gozar/packages/gozar-core/generated/gozar_core_bg.wasm'));
+    assert.ok(dependencies.every(file => file.startsWith('node_modules/@tnunamak/gozar/')));
+  } else assert.deepEqual(dependencies, []);
+});
+const files = new Set(entry.files.map(file => file.path).filter(file => !dependencies.includes(file)));
 
 function markdownDestinations(source) {
   const destinations = [];

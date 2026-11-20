@@ -1,7 +1,7 @@
-// A contract-faithful fake of the frozen Gozar route exports (contract/route-contract-c0 @ 91b41a1), for tests only.
+// Test fake for the pinned public route contract.
 // It is built from the pinned fixture (src/test-support/gozar-contract.json): every shape it returns starts from a fixture example, every
 // request it accepts is checked against the closed shapes (the fixture's invalid cases are rejected), and every error it throws uses one
-// of the 21 frozen codes. It encodes the real runtime's visible rules: single-use consent tokens bound to the request, ensure without a
+// of the frozen codes. It encodes the real runtime's visible rules: single-use consent tokens bound to the request, ensure without a
 // pin or approval fails with consent_required, adopt changes no provider state and needs a fenced handover, session close checks the
 // handle generation. The real runtime is not under test here: that integration is unproven until Gozar's runtime lands.
 import fs from 'node:fs';
@@ -38,8 +38,9 @@ export function checkUsage(u) {
   else if (u.kind === 'attached') only(u, ['kind'], 'usage');
   else fail('invalid_input', 'usage.kind is invalid');
 }
-const checkApproval = a => { if (!isRecord(a) || typeof a.candidateToken !== 'string' || typeof a.disclosureRevision !== 'string') fail('invalid_input', 'approval binds a token and a disclosure revision'); only(a, ['candidateToken', 'disclosureRevision'], 'approval'); };
-const QUERY_KEYS = ['schemaVersion', 'owner', 'target', 'usage', 'requirements', 'home', 'route', 'origin', 'intent', 'migrationRef'];
+const checkApproval = a => { if (!isRecord(a) || typeof a.candidateToken !== 'string' || typeof a.disclosureRevision !== 'string') fail('invalid_input', 'approval binds a token and a disclosure revision'); only(a, ['candidateToken', 'disclosureRevision', 'kind', 'consentFactsDigest'], 'approval');
+  if (a.kind !== 'route' || typeof a.consentFactsDigest !== 'string') fail('invalid_input', 'approval binds current route consent'); };
+const QUERY_KEYS = ['schemaVersion', 'owner', 'target', 'usage', 'requirements', 'home', 'route', 'origin', 'intent', 'migrationRef', 'operationId', 'providerId'];
 export function checkQuery(q, extraKeys = []) {
   if (!isRecord(q)) fail('invalid_input', 'a request is an object');
   if (q.schemaVersion !== 1) fail('invalid_input', 'schemaVersion must be the constant 1');
@@ -72,7 +73,7 @@ export const requestChecks = { query: checkQuery, ensure: checkEnsure, adopt: ch
 
 // ---- the fake -------------------------------------------------------------------------------------------------------------------------
 // options.routeNames: names the fake knows (any other name: route_not_found). A name picks that candidate; no name leaves all.
-export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand_stable', home: 'cand_stable' }, legacy = null, now = () => Date.parse('2026-11-12T12:00:00.000Z'), verifyTarget = async () => {} } = {}) {
+export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand_stable', home: 'cand_stable' }, legacy = null, providerIds = {}, now = () => Date.parse('2026-11-12T12:00:00.000Z'), verifyTarget = async () => {} } = {}) {
   const state = {
     calls: [], effects: [], tokens: new Map(), sessions: new Map(), pins: new Map(), externals: new Map(), tombstones: new Set(),
     legacy: legacy && { ...legacy, owner: 'legacy', reachable: true }, nextToken: 1, nextRoute: 1, waiters: new Map(), provider: { writes: 0 },
@@ -93,12 +94,18 @@ export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand
       { ...ephemeral, name: 'cand_ephemeral', preferenceRef: 'pref_ephemeral' },
       { ...setup, name: 'cand_setup', preferenceRef: 'pref_setup' },
     ];
-    return query.route === undefined ? out : out.filter(x => x.name === routeNames[query.route]);
+    if (query.origin && query.usage.kind === 'durable' && query.intent !== 'adopt') {
+      out.push({ ...stable, name: 'cand_external', preferenceRef: 'pref_external', ownership: 'external-owned' });
+    }
+    return out.map(candidate => providerIds[candidate.name] ? { ...candidate, providerId: providerIds[candidate.name] } : candidate)
+      .filter(candidate => (query.route === undefined || candidate.name === routeNames[query.route]) &&
+        (query.providerId === undefined || candidate.providerId === query.providerId));
   };
   const disclosureRevision = 'disc-fake-1';
   const bind = q => JSON.stringify([q.owner, q.home, q.target, q.usage, q.intent ?? 'create', q.requirements, q.route ?? null, q.origin ?? null, q.migrationRef ?? null, disclosureRevision]);
   async function catalog(q) {
     calls('catalogRoutes'); checkQuery(q);
+    if (q.providerId !== undefined && !candidates(q).length) fail('route_not_found', 'no such catalog ID');
     if (q.route !== undefined && !(q.route in routeNames)) fail('route_not_found', `no route named ${JSON.stringify(q.route)}`);
     const list = candidates(q).map((cand, index) => {
       const unmet = [];
@@ -118,13 +125,18 @@ export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand
         candidateToken = `tok_fake_${state.nextToken++}`; expiresAt = new Date(now() + 600_000).toISOString();
         state.tokens.set(candidateToken, { binding: bind(q), expiresAt: now() + 600_000, candidate: cand.name });
       }
-      return { ...cand, rank: index + 1, eligible, unmet, setup: { ...cand.setup, state: setupState }, disclosure: { ...cand.disclosure, revision: disclosureRevision }, candidateToken, expiresAt };
+      const consentFactsDigest = 'fixture-route-review';
+      const consent = { ...cand.consent, consentFactsDigest,
+        disclosures: { ...cand.consent.disclosures, ownership: cand.ownership ?? 'gozar-owned' },
+        scope: { ...cand.consent.scope, query: { ...cand.consent.scope.query, expectedOrigin: q.origin ?? null, target: q.target, usage: q.usage } } };
+      return { ...cand, consent, consentFactsDigest, rank: index + 1, eligible, unmet, setup: { ...cand.setup, state: setupState }, disclosure: { ...cand.disclosure, revision: disclosureRevision }, candidateToken, expiresAt };
     });
     const none = !list.some(x => x.eligible);
-    return { schemaVersion: 1, catalogRevision: `catrev_fake_${state.calls.length}`, observedAt: new Date(now()).toISOString(), preferenceRevision: 0, candidates: list,
+    return { ...example('Catalog', 'no match'), catalogRevision: `catrev_fake_${state.calls.length}`, observedAt: new Date(now()).toISOString(), preferenceRevision: 0, candidates: list,
       noMatch: none && list.every(x => x.setup.state !== 'action-required') ? { code: 'requirements_unsatisfied', requirements: ['address'] } : null };
   }
   function redeem(q, approval) {
+    if (approval.kind !== 'route' || approval.consentFactsDigest !== 'fixture-route-review') fail('consent_mismatch', 'route consent has no current disclosure digest');
     const t = state.tokens.get(approval.candidateToken);
     if (!t) fail('consent_unknown', 'unknown or already used approval');
     state.tokens.delete(approval.candidateToken); // single use, even on mismatch
@@ -138,6 +150,7 @@ export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand
     redeem(q, q.approval);
     const id = `sess-${state.nextRoute++}`, origin = newOrigin();
     const route = { id, kind: q.usage.kind, generation: 1, origin, view: view(q.usage.kind, id, 1, origin, { properties: { ...example('RouteView').properties, address: { stability: 'ephemeral', scope: 'session', conditions: ['changes on restart'] } } }), closed: false };
+    if (q.operationId) route.view.operationId = q.operationId;
     state.sessions.set(id, route); state.effects.push({ type: 'expose', id, target: q.target, lifetimeMs: q.usage.lifetimeMs ?? null });
     return structuredClone(route.view);
   }
@@ -158,14 +171,21 @@ export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand
     calls('closeRoute'); checkRef(ref);
     if (ref.mode !== 'remove') fail('invalid_input', 'mode must be remove');
     const { handle } = ref;
+    if (handle.kind === 'external') {
+      const ext = state.externals.get(handle.id);
+      if (!ext) fail('route_not_found', 'no such external route');
+      if (handle.generation !== ext.handle.generation) fail('route_conflict', 'the handle is stale');
+      state.externals.delete(handle.id);
+      return { ...ext, state: 'released', published: null, cleanup: { state: 'confirmed' } };
+    }
     if (handle.kind === 'durable') { // a durable route is released only by an explicit uninstall
       const pin = state.pins.get(handle.id); if (!pin) fail('route_not_found', 'no such durable route');
       state.effects.push({ type: 'close-durable', id: handle.id }); state.pins.delete(handle.id);
-      return { ...pin.view, state: 'released', published: null, cleanup: { state: 'none' } };
+      return { ...pin.view, state: 'released', published: null, cleanup: { state: 'confirmed' } };
     }
     const route = state.sessions.get(handle.id); if (!route) fail('route_not_found', 'no such route');
     if (route.generation !== handle.generation) fail('route_conflict', 'the handle is stale');
-    route.closed = true; route.view = { ...route.view, state: 'released', published: null, cleanup: state.cleanupDebt ? { state: 'debt', message: state.cleanupDebt } : { state: 'none' } };
+    route.closed = true; route.view = { ...route.view, state: 'released', published: null, cleanup: state.cleanupDebt ? { state: 'unconfirmed', message: state.cleanupDebt } : { state: 'confirmed' } };
     state.effects.push({ type: 'close', id: handle.id });
     emit(handle.id, route.view);
     return structuredClone(route.view);
@@ -184,7 +204,7 @@ export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand
         w.wake = null;
         while (w.queue.length) {
           const v = w.queue.shift();
-          const terminal = v.state === 'released' || v.published === null;
+          const terminal = v.state === 'released';
           yield { schemaVersion: 1, sequence: sequence++, type: terminal ? 'terminal' : 'changed', route: v };
           if (terminal) return;
         }
@@ -203,9 +223,18 @@ export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand
       return structuredClone(pin.view);
     }
     if (q.approval === undefined) fail('consent_required', 'a first allocation needs one displayed approval');
-    redeem(q, q.approval);
+    const approved = redeem(q, q.approval);
     const origin = q.origin ?? newOrigin();
+    if (approved.candidate === 'cand_external') {
+      const external = view('external', origin, 1, origin, { ownership: 'external-owned',
+        hostConfiguration: { target: { known: true, value: q.target } }, ...(q.operationId && { operationId: q.operationId }) });
+      external.verification.subject = { origin, target: q.target, handleGeneration: 1 };
+      state.externals.set(origin, external);
+      state.effects.push({ type: 'ensure-external', origin, target: q.target });
+      return structuredClone(external);
+    }
     const v = view('durable', routeId, 1, origin);
+    if (q.operationId) v.operationId = q.operationId;
     state.pins.set(routeId, { generation: 1, view: v, requirements: q.requirements }); state.effects.push({ type: 'ensure', routeId, origin, target: q.target });
     return structuredClone(v);
   }
@@ -253,15 +282,10 @@ export function createFakeGozar({ platform = 'linux', routeNames = { work: 'cand
     state.effects.push({ type: 'hand-back-confirm', routeId: req.routeId });
     return { schemaVersion: 1, routeId: req.routeId, handedBack: true, claim: { opaque: true } };
   }
-  async function addService({ origin, target }) {
-    calls('addService'); state.effects.push({ type: 'addService', origin, target });
-    const v = example('RouteView', 'external-owned, unknown privacy'); Object.assign(v, { handle: { kind: 'external', id: origin, generation: 1 }, origin, published: origin });
-    state.externals.set(origin, v);
-    return { schemaVersion: 1, route: { origin, target, verification: { status: 'verified' } } };
-  }
   async function runSetupAction({ actionId }) { calls('runSetupAction'); state.effects.push({ type: 'setup', actionId }); state.setupDone = true; return { schemaVersion: 1, state: 'complete', nextAction: null, catalogRevision: 'catrev_fake_setup' }; }
   const api = {
-    catalogRoutes: catalog, detect: catalog, ensureRoute, adoptRoute, expose, routeStatus, closeRoute, watchRoutes, inspectLegacyRoute, releaseRoute, confirmHandBack, runSetupAction, addService,
+    catalogRoutes: catalog, detect: catalog, ensureRoute, adoptRoute, expose, routeStatus, closeRoute, watchRoutes, inspectLegacyRoute, releaseRoute, confirmHandBack, runSetupAction,
+    async listRoutes() { return { routes: [...[...state.sessions.values(), ...state.pins.values()].map(entry => structuredClone(entry.view)), ...Array.from(state.externals.values(), structuredClone)] }; },
     async getRoutePreferences() { calls('getRoutePreferences'); return { schemaVersion: 1, scope: 'user', revision: 0, adapterPreference: [], onUnavailable: 'ask' }; },
     async statusServices() { calls('statusServices'); return { schemaVersion: 1, routes: [...state.externals.values()] }; },
   };

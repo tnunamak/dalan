@@ -7,12 +7,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { portFromListeningBanner, reservedPort } from '../src/test-support/port.mjs';
 import { defaultPath } from '../src/paths.mjs';
 import { acceptsMcpEventStream, beginMcpEventStream, mcpResponseText } from '../src/mcp-sse.mjs';
 import { createBuiltinHttpServer } from '../src/builtin-http.mjs';
-import { createGate } from '../src/try-exposure.mjs';
+import { createTestingGozar, fakeRegistry } from '@tnunamak/gozar/testing';
+import { approvalFor, buildQuery, pickCandidate } from '../src/gozar-routes.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tempRoot = process.env.DOT_BRIDGE_TEST_TMP ?? path.join(os.homedir(), '.tmp');
@@ -169,19 +171,46 @@ globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? ${
     setTimeout(() => stream.finish(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { resultType: 'complete', protocolVersion: '2025-11-25' } })), 5);
   });
   await new Promise(resolve => chainBackend.listen(0, '127.0.0.1', resolve));
-  const gate = await createGate();
-  let publicRelay = null;
-  try {
-    gate.open(chainBackend.address().port);
-    publicRelay = http.createServer((req, res) => {
-      const forward = http.request({ host: '127.0.0.1', port: gate.port, method: req.method, path: req.url, headers: req.headers }, answer => {
-        res.writeHead(answer.statusCode, answer.headers);
-        answer.pipe(res);
+  // This provider has no access outside the fixture. Gozar supplies the real middle hop.
+  const sdkRoot = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'sg-'));
+  const registry = await fakeRegistry({ id: 'edge-' + randomUUID().slice(0, 8), kinds: ['attached'],
+    reach: 'internet', protocols: [], dir: sdkRoot });
+  let publicRelay;
+  const harness = await createTestingGozar({ manifest: registry.manifest, root: registry.root, effects: [
+    { kind: 'process-runtime', operation: 'open', async handle({ origin, target }) {
+      const gatePort = Number(target.split(':').at(-1));
+      publicRelay = http.createServer((req, res) => {
+        const forward = http.request({ host: '127.0.0.1', port: gatePort, method: req.method, path: req.url, headers: req.headers }, answer => {
+          res.writeHead(answer.statusCode, answer.headers);
+          answer.pipe(res);
+        });
+        forward.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+        res.on('close', () => forward.destroy());
+        req.pipe(forward);
       });
-      forward.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
-      req.pipe(forward);
-    });
-    await new Promise(resolve => publicRelay.listen(0, '127.0.0.1', resolve));
+      await new Promise(resolve => publicRelay.listen(0, '127.0.0.1', resolve));
+      return { handle: 'relay', origin };
+    } },
+    { kind: 'process-runtime', operation: 'read', async handle() { return { present: publicRelay?.listening === true }; } },
+    { kind: 'process-runtime', operation: 'close', async handle({ handle }) {
+      assert.equal(handle, 'relay');
+      await new Promise(resolve => { publicRelay.close(resolve); publicRelay.closeAllConnections(); });
+      return { closed: true };
+    } },
+    { kind: 'network', operation: 'fetch', async handle({ url }) {
+      const address = `http://127.0.0.1:${publicRelay.address().port}${new URL(url).pathname}`;
+      const response = await fetch(address);
+      return { status: response.status, headers: Object.fromEntries(response.headers),
+        chunks: [{ data: Buffer.from(await response.arrayBuffer()).toString('base64'), delayMs: 0 }] };
+    } },
+  ] });
+  try {
+    const query = buildQuery({ home: path.join(sdkRoot, 'g'), target: `127.0.0.1:${chainBackend.address().port}`, usage: { kind: 'attached' } });
+    query.requirements.protocols = [];
+    const candidate = pickCandidate(await harness.gozar.catalogRoutes(query));
+    const view = await harness.gozar.expose({ ...query, approval: approvalFor(candidate), wait: 'verified' });
+    assert.equal(view.verification.status, 'verified');
+    assert.ok(view.verification.checks.includes('nonce'));
     const publicUrl = `http://127.0.0.1:${publicRelay.address().port}/${secret}/mcp`;
     for (let i = 0; i < 5; i++) {
       const init = await fetch(publicUrl, { method: 'POST', headers: { connection: 'close', accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
@@ -197,11 +226,15 @@ globalThis.setInterval = (fn, ms, ...args) => realInterval(fn, ms === 20000 ? ${
       assert.equal(await notification.text(), '');
     }
   } finally {
-    publicRelay?.closeAllConnections();
-    if (publicRelay) await new Promise(resolve => publicRelay.close(resolve));
-    await gate.close();
-    chainBackend.closeAllConnections();
-    await new Promise(resolve => chainBackend.close(resolve));
+    try { await harness.close(); }
+    finally {
+      if (publicRelay?.listening) {
+        await new Promise(resolve => { publicRelay.close(resolve); publicRelay.closeAllConnections(); });
+      }
+      chainBackend.closeAllConnections();
+      await new Promise(resolve => chainBackend.close(resolve));
+      fs.rmSync(sdkRoot, { recursive: true, force: true });
+    }
   }
 
   const scopedStore=new Store(defaultPath(home, '.local/share/dot-bridge/bridge.db'));

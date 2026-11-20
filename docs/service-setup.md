@@ -2,9 +2,7 @@
 
 Install Dalan once to keep your MCP agent connected to your Mac or Linux computer. You do not need to run the trial first.
 
-Before you begin, install Node.js 24 or newer and Tailscale with Funnel enabled. Your agent's account must allow custom MCP connectors. The basic install commands below are the same on macOS and Linux; forwarding to a non-loopback target is Linux-only.
-
-**Tailscale prerequisite.** `--route tailscale` publishes through Tailscale Funnel, which your tailnet administrator must allow (a `funnel` entry in the tailnet access controls; HTTPS and MagicDNS must be on too). If Funnel is not allowed, Dalan stops before it publishes anything and tells you which setup step is missing, or prints Tailscale's own refusal. Enable Funnel once at <https://tailscale.com/kb/1223/funnel>, then run the command again. Other routes need no Tailscale setting; `dalan setup` lists them.
+Before you begin, install Node.js 24 or newer. Your agent's account must allow custom MCP connectors. The basic install commands below are the same on macOS and Linux; forwarding to a non-loopback target is Linux-only.
 
 <a id="owner-setup"></a>
 
@@ -14,11 +12,13 @@ This example names your worker `assistant`. Choose another lowercase name if you
 
 ```sh
 npm install -g @tnunamak/dalan
-dalan service install --worker assistant --route tailscale
+dalan service install --worker assistant
 dalan connect start --worker assistant
 ```
 
-Dalan installs a background service, chooses a free port and remembers its settings. No environment variables or manual server process are needed.
+Dalan chooses a free port and asks Gozar which routes meet its requirements. Review the setup steps and approve the route in the terminal. Dalan installs the background service and writes the connector URL after Gozar verifies the route.
+
+Run `dalan setup` to save a route choice for future public runs. To resume cleanup, run `dalan setup --cancel OPERATION_ID` with the setup operation ID printed in the terminal. Review each offered action separately. Removing a resource, revoking its authorization and disconnecting a locally stored credential have separate effects.
 
 Add the private connector URL shown by Dalan to the agent's MCP settings. Start sign-in in that client, then check the pending request:
 ```sh
@@ -46,7 +46,7 @@ The authentication check tests the public route and sign-in flow, not whether an
 
 ### More workers and advanced setup
 
-To configure several workers, repeat the flag in the install command, for example `dalan service install --worker assistant --worker reviewer --route tailscale`, and pair each separately. A worker name starts with a lowercase letter, uses lowercase letters, digits, hyphens or underscores, and is at most 32 characters; `pool` and `unknown` are reserved.
+To configure several workers, repeat the flag in the install command, for example `dalan service install --worker assistant --worker reviewer`, and pair each separately. A worker name starts with a lowercase letter, uses lowercase letters, digits, hyphens or underscores, and is at most 32 characters; `pool` and `unknown` are reserved.
 
 ### Pairing details
 
@@ -69,7 +69,7 @@ If you already serve a stable HTTPS address through your own reverse proxy, regi
 dalan service install --worker assistant --public-url https://PUBLIC_HOST --port PORT --target TARGET_IP:TARGET_PORT
 ```
 
-Gozar records and verifies an origin-to-target route that your reverse proxy already serves; it does not edit the proxy. Prepare the proxy first so the public origin forwards to the address in `--target`, an IPv4 address and port such as `192.168.1.20:8792`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. TLS ends at the proxy. Keep the secret path out of proxy logs.
+Run this command in a terminal and approve the matching owner-managed offer shown by Gozar. Gozar records and verifies the existing origin and listener. You retain the proxy and its configuration. Prepare the proxy first so the public origin forwards to the address in `--target`, an IPv4 address and port such as `192.168.1.20:8792`. Preserve the public `Host` header. The bridge rejects requests with another Host, including requests that try to replace it with `X-Forwarded-Host`. TLS ends at the proxy. Keep the secret path out of proxy logs.
 
 The proxy must forward these routes without removing their prefixes, methods, query strings, authorization headers or cookies:
 
@@ -83,7 +83,7 @@ The proxy must forward these routes without removing their prefixes, methods, qu
 | `/signal/*` | Answers wake hooks when configured. |
 | `/.well-known/gozar/service` | Answers the Gozar check, with its query string. |
 
-An unauthenticated request to `/admin` on the public origin must return 404. The Dalan process listens on `127.0.0.1:PORT`. On Linux, when the target is another address on this computer, pass `--lan-port N`; the service then opens the target address and forwards it to the loopback listener. Use a distinct non-wildcard address, not 0.0.0.0, which collides with loopback. macOS refuses other targets: use `--target 127.0.0.1:PORT` with the same port as `--port`. If Gozar runs on this computer and reaches loopback directly, use `--target 127.0.0.1:PORT`. Challenge verification binds the receiving socket port to the declared target port. Translating to a different numeric port needs an explicit, trusted `--verify-cmd COMMAND`. If the origin filters the Gozar verifier by source IP, pass the same option. Install succeeds only when Gozar returns a verified route.
+An unauthenticated request to `/admin` on the public origin must return 404. The Dalan process listens on `127.0.0.1:PORT`. On Linux, when the target is another address on this computer, pass `--lan-port N`; the service then opens the target address and forwards it to the loopback listener. Use a distinct non-wildcard address, not 0.0.0.0, which collides with loopback. macOS refuses other targets: use `--target 127.0.0.1:PORT` with the same port as `--port`. If Gozar runs on this computer and reaches loopback directly, use `--target 127.0.0.1:PORT`. Challenge verification binds the receiving socket port to the declared target port. Keep the target port and the Dalan listener port equal for route proof. A custom check supplied with `--verify-cmd COMMAND` cannot grant permission to publish a connector URL.
 
 ### Migrate an older bridge
 
@@ -189,7 +189,7 @@ The `dalan` command on your PATH runs the version the service uses. Set `DALAN_N
 dalan service uninstall
 ```
 
-This stops and removes the service, its update timer or agent and its public route. It never deletes data: the private home, keys and state move to `<home>.removed-<date>`, and the command prints that path. Delete that directory yourself when you want the data gone. A modified service definition may need inspection instead of automatic removal. The full list of things an uninstall must remove (homes, trial home, client entries) is in [operations](operations.md#remove-an-installation).
+Confirm the exact Gozar route handle when prompted. The command removes the service and its update timer or agent after Gozar confirms route cleanup. It never deletes data: the private home, keys and state move to `<home>.removed-<date>`, and the command prints that path. Delete that directory yourself when you want the data gone. A modified service definition may need inspection instead of automatic removal. The full list of things an uninstall must remove (homes, trial home, client entries) is in [operations](operations.md#remove-an-installation).
 
 ## Legacy
 

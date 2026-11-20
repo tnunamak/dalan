@@ -39,10 +39,10 @@ test('on/off persist the preference and control only this timer', async () => {
   const f = fixture(), calls = [];
   try {
     const spawn = (cmd, args) => { calls.push([cmd, ...args]); return { status: 0 }; };
-    await setAutoUpdate({ home: f.home, enabled: false }, { spawn });
+    await setAutoUpdate({ home: f.home, enabled: false }, { spawn, platform: 'linux' });
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json'))).auto_update, false);
     assert(calls.some(call => call.join(' ') === 'systemctl --user disable --now dalan-123-update.timer'));
-    await setAutoUpdate({ home: f.home, enabled: true }, { spawn });
+    await setAutoUpdate({ home: f.home, enabled: true }, { spawn, platform: 'linux' });
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json'))).auto_update, true);
     assert(calls.some(call => call.join(' ') === 'systemctl --user enable --now dalan-123-update.timer'));
     assert(!calls.some(call => call.includes('dalan-123.service')), 'preference changes do not restart bridge');
@@ -61,9 +61,9 @@ test('a killed updater releases the shared preference lock', { timeout: 10000 },
       child.stdout.once('data', resolve);
       child.once('exit', () => reject(new Error('lock holder exited before acquiring')));
     });
-    await assert.rejects(setAutoUpdate({ home: f.home, enabled: false }, { spawn: () => ({ status: 0 }) }), /already running/);
+    await assert.rejects(setAutoUpdate({ home: f.home, enabled: false }, { spawn: () => ({ status: 0 }), platform: 'linux' }), /already running/);
     child.kill('SIGKILL'); await exited;
-    await setAutoUpdate({ home: f.home, enabled: false }, { spawn: () => ({ status: 0 }) });
+    await setAutoUpdate({ home: f.home, enabled: false }, { spawn: () => ({ status: 0 }), platform: 'linux' });
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json'))).auto_update, false);
   } finally { child.kill('SIGKILL'); await exited; fs.rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -74,12 +74,37 @@ test('new installs default on, retries preserve opt-out, explicit opt-in works',
   const calls = [];
   const env = { ...process.env, XDG_CONFIG_HOME: path.join(f.root, 'xdg') };
   const options = { home: f.home, origin: 'https://bridge.example.test', port: 18789, target: '127.0.0.1:18789', workers: ['fern'] };
-  const seams = { env, platform: 'linux', gozar: createFakeGozar(), spawn: (cmd, args) => {
+  const reviewed = [];
+  const approvals = [];
+  const fakeGozar = createFakeGozar();
+  const gozar = new Proxy({}, {
+    get(_target, key) {
+      const fake = fakeGozar;
+      if (key !== 'ensureRoute') {
+        const member = fake[key];
+        return typeof member === 'function' ? member.bind(fake) : member;
+      }
+      return async request => {
+        const digest = request.approval?.consentFactsDigest;
+        assert.ok(digest && reviewed.includes(digest), 'the fixture must review this exact disclosure before allocation');
+        approvals.push(digest);
+        return fake.ensureRoute(request);
+      };
+    },
+  });
+  const consent = async candidate => {
+    assert.ok(candidate.consentFactsDigest, 'the offered route has a disclosure digest');
+    reviewed.push(candidate.consentFactsDigest);
+    return true;
+  };
+  const seams = { env, platform: 'linux', gozar, consent, spawn: (cmd, args) => {
     calls.push([cmd, ...args]);
     return { status: 0, stdout: cmd === 'gozar' ? JSON.stringify({ schemaVersion: 1, route: { origin: options.origin, target: options.target, verification: { status: 'verified' } } }) : '' };
   }, waitForSocket: async () => true };
   try {
     const installed = await installService(options, seams);
+    assert.equal(reviewed.length, 1, 'the initial install asks for consent');
+    assert.deepEqual(approvals, reviewed, 'the initial allocation consumes the reviewed digest');
     assert.equal(installed.auto_update, true);
     assert(fs.lstatSync(path.join(f.home, 'current')).isSymbolicLink());
     const receipt = JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json')));

@@ -8,8 +8,8 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import {
-  FROZEN_CODES as DALAN_CODES, RouteError, approvalFor, buildQuery, canonicalHost, dalanRequirements, describeCandidate, ensureDurableRoute, explainRouteError,
-  normalizeRequestHost, pickCandidate, registerExternalService, resolveGozar, startSessionRoute, targetFor,
+  FROZEN_CODES as DALAN_CODES, RouteError, approvalFor, buildQuery, canonicalHost, dalanRequirements, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError,
+  normalizeRequestHost, pickCandidate, resolveGozar, startSessionRoute, targetFor,
 } from '../src/gozar-routes.mjs';
 import { FROZEN_CODES, FakeGozarError, createFakeGozar, requestChecks } from '../src/test-support/gozar-fake.mjs';
 import { parseTryArgs } from '../src/try.mjs';
@@ -27,12 +27,12 @@ const yes = async () => true;
 const INVENTED = 'zq-invented-7';
 
 // ---- the pin -------------------------------------------------------------------------------------------------------------------------
-test('the contract fixture is the frozen C0 file, byte for byte', () => {
-  assert.equal(createHash('sha256').update(fs.readFileSync(FIXTURE)).digest('hex'), 'a72c1b8db6a1e6ef35c2ae35193627c5c6e03ec3782a1b743771fb04d60e1488');
+test('the contract fixture matches the pinned SDK source byte for byte', () => {
+  assert.equal(createHash('sha256').update(fs.readFileSync(FIXTURE)).digest('hex'), '78ecf0e148868b96bfd50e43a2ef1c4a8f63116e9b3c7b7b13d8c017a49fd2c3');
 });
 
-test('Dalan knows the same 21 error codes the contract freezes, and no others', () => {
-  assert.equal(fixture.frozenErrorCodes.length, 21);
+test('Dalan knows the same 31 error codes the contract freezes, and no others', () => {
+  assert.equal(fixture.frozenErrorCodes.length, 31);
   assert.deepEqual([...DALAN_CODES], fixture.frozenErrorCodes);
   assert.deepEqual(FROZEN_CODES, fixture.frozenErrorCodes);
   assert.throws(() => new FakeGozarError('provider_failed', 'x'), /not a frozen Gozar error code/);
@@ -117,7 +117,8 @@ test('`dalan service install --route NAME` forwards NAME to a durable ensure; wi
   const result = await installService({ ...base, home: path.join(tmp, 'svc2') }, seam(external));
   assert.equal(result.started, true);
   assert.equal(result.route.origin, 'https://own.example');
-  assert.ok(external.fake.state.calls.includes('addService'));
+  assert.ok(external.fake.state.calls.includes('ensureRoute'));
+  assert.deepEqual(external.fake.state.effects, [{ type: 'ensure-external', origin: base.origin, target: base.target }]);
 });
 
 // ---- sessions end with the trial; durable routes outlive it -------------------------------------------------------------------------
@@ -166,7 +167,12 @@ test('a stopped-by-user route needs fresh consent: reconsent alone is not enough
 });
 
 test('the route watch reports a changed address as rotated and a lost route as lost, and ends the trial\'s wait', async () => {
-  for (const [patch, reason] of [[{ state: 'address_changed', published: 'https://other.route.invalid' }, 'rotated'], [{ state: 'lost', published: null }, 'lost']]) {
+  for (const [patch, reason] of [
+    [{ state: 'address_changed', published: 'https://other.route.invalid' }, 'rotated'],
+    [{ state: 'lost', published: null }, 'lost'],
+    [{ state: 'unverified', published: null, routeState: 'expired' }, 'lost'],
+    [{ state: 'unverified', published: null, expiresAt: { known: true, value: '2000-01-01T00:00:00Z' } }, 'lost'],
+  ]) {
     const gozar = createFakeGozar();
     const route = await startSessionRoute({ gozar, query: buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 5000 } }), consent: yes });
     gozar.fake.change(route.handle.id, patch);
@@ -176,20 +182,51 @@ test('the route watch reports a changed address as rotated and a lost route as l
   }
 });
 
-test('a route Gozar has not verified yet is pending, not lost; a later loss still ends the wait', async () => {
+test('a nonterminal first watch snapshot can reprove the same route before a terminal release', async () => {
   const gozar = createFakeGozar();
-  const original = gozar.watchRoutes;
-  gozar.watchRoutes = async function* (args) {
-    for await (const event of original(args)) {
-      yield event.type === 'snapshot' ? { ...event, route: { ...event.route, state: 'unverified', published: null, verification: { status: 'unverified', checkedAt: null } } } : event;
-    }
+  const events = [];
+  gozar.watchRoutes = async function* ({ home, handle }) {
+    const original = await gozar.routeStatus({ home, handle });
+    events.push('unverified snapshot');
+    yield { type: 'snapshot', route: { ...original, state: 'unverified', published: null, verification: { status: 'unverified' } } };
+    events.push('reproved');
+    yield { type: 'changed', route: original };
+    events.push('released');
+    yield { type: 'terminal', route: { ...original, state: 'released', published: null } };
   };
   const route = await startSessionRoute({ gozar, query: buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 5000 } }), consent: yes });
-  const early = await Promise.race([route.exited, new Promise(resolve => setTimeout(() => resolve('pending'), 300))]);
-  assert.equal(early, 'pending', 'an unverified first snapshot does not end the trial');
-  gozar.fake.change(route.handle.id, { state: 'lost', published: null });
   assert.equal(await route.exited, 'lost');
+  assert.deepEqual(events, ['unverified snapshot', 'reproved', 'released']);
+  assert.equal(gozar.fake.state.effects.filter(effect => effect.type === 'expose').length, 1);
   await route.stop();
+});
+
+test('invalid session startup removes the exact allocation only when no caller remembers it', async () => {
+  const query = buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 5000 } });
+  for (const mode of ['no-reference', 'retained', 'cleanup-debt']) {
+    const gozar = createFakeGozar();
+    const expose = gozar.expose, closeRoute = gozar.closeRoute;
+    let handle;
+    gozar.expose = async req => {
+      const view = await expose(req);
+      handle = view.handle;
+      return { ...view, state: 'unverified', published: null };
+    };
+    gozar.closeRoute = async req => {
+      assert.deepEqual(req, { home: HOME, handle, mode: 'remove' });
+      return closeRoute(req);
+    };
+    const references = [];
+    if (mode === 'cleanup-debt') gozar.fake.setCleanupDebt('route is still present');
+    await assert.rejects(startSessionRoute({ gozar, query, consent: yes,
+      ...(mode === 'retained' && { remember: ref => references.push(ref) }) }), error => {
+      if (mode !== 'cleanup-debt') return error.code === 'verification_failed';
+      assert.deepEqual(error.handle, handle);
+      return error.code === 'cleanup_debt';
+    });
+    assert.equal(gozar.fake.state.effects.filter(effect => effect.type === 'close').length, mode === 'retained' ? 0 : 1);
+    if (mode === 'retained') assert.deepEqual(references.at(-1).handle, handle);
+  }
 });
 
 test('stop reports cleanup debt and a replaced route honestly, and offers no provider command', async () => {
@@ -211,11 +248,33 @@ test('a Ctrl-C during startup closes the route that was just made', async () => 
   assert.equal(gozar.fake.state.effects.filter(e => e.type === 'close').length, 1);
 });
 
-test('external services are registered and read back through the same route view', async () => {
+test('only a scoped external offer can be reviewed for an existing HTTPS origin', async () => {
   const gozar = createFakeGozar();
-  const { view } = await registerExternalService({ gozar, home: HOME, origin: 'https://own.example', target: '127.0.0.1:8789' });
+  const query = buildQuery({ home: HOME, origin: 'https://own.example', target: '127.0.0.1:8789',
+    usage: { kind: 'durable', routeId: 'own' }, address: 'stable' });
+  const view = await ensureDurableRoute({ gozar, query, external: true, consent: async candidate => {
+    assert.equal(candidate.ownership, 'external-owned');
+    assert.equal(candidate.consent.disclosures.ownership, 'external-owned');
+    assert.equal(candidate.consent.scope.query.expectedOrigin, query.origin);
+    assert.equal(candidate.consent.scope.query.target, query.target);
+    return true;
+  } });
   assert.equal(view.ownership, 'external-owned');
   assert.equal(view.handle.kind, 'external');
+  const catalog = gozar.catalogRoutes;
+  for (const change of [
+    consent => ({ ...consent, scope: { ...consent.scope, query: { ...consent.scope.query, target: '127.0.0.1:1' } } }),
+    consent => ({ ...consent, disclosures: { ...consent.disclosures, ownership: 'gozar-owned' } }),
+  ]) {
+    gozar.catalogRoutes = async request => {
+      const result = await catalog(request);
+      return { ...result, candidates: result.candidates.map(candidate => candidate.ownership === 'external-owned'
+        ? { ...candidate, consent: change(candidate.consent) } : candidate) };
+    };
+    await assert.rejects(ensureDurableRoute({ gozar, query, external: true, consent: async () => assert.fail('no matching offer') }),
+      { code: 'requirements_unsatisfied' });
+  }
+  assert.equal(gozar.fake.state.effects.length, 1, 'an exact origin without the exact listener grants no effect');
 });
 
 // ---- Host --------------------------------------------------------------------------------------------------------------------------------
@@ -239,7 +298,7 @@ test('Host: the default port written out is the same authority; every other host
 
 // ---- the bundled package -----------------------------------------------------------------------------------------------------------------
 test('installed bundled resolution: the package inside Dalan\'s own tree wins; a Gozar without the contract is runtime_missing with its version', async () => {
-  const good = await resolveGozar({ importer: async () => createFakeGozar() });
+  const good = await resolveGozar({ env: { HOME: tmp } });
   assert.equal(typeof good.catalogRoutes, 'function');
   await assert.rejects(() => resolveGozar({ importer: async () => ({ createServiceVerifier() {} }), resolvePackage: () => path.join(tmp, 'gozar-old-package.json') }), error => error.code === 'runtime_missing' && /missing catalogRoutes/.test(error.message));
   fs.writeFileSync(path.join(tmp, 'gozar-old-package.json'), JSON.stringify({ version: '0.1.0' }));
@@ -284,4 +343,15 @@ test('a candidate is described from returned data only: reach, readers, stabilit
   const catalog = await gozar.catalogRoutes(buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 1 } }));
   const text = catalog.candidates.flatMap((c, i) => describeCandidate(c, i)).join('\n');
   for (const word of ['reach:', 'traffic readers:', 'address:', 'cost:', 'account needed:', 'lifetimes:', 'setup:']) assert.match(text, new RegExp(word));
+});
+
+test('approval displays typed cost, including paid zero and known free or unknown terms', () => {
+  for (const [cost, text] of [
+    [{ kind: 'paid', summary: 'Introductory price', amount: 0, currency: 'USD', period: 'month' }, 'Introductory price (0 USD per month)'],
+    [{ kind: 'free', summary: 'Included' }, 'free, Included'],
+    [{ kind: 'unknown', summary: 'Provider has not reported the price' }, 'unknown, Provider has not reported the price'],
+  ]) {
+    const candidate = { disclosure: { text: 'Terms', links: [] }, consent: { disclosures: { cost } } };
+    assert.equal(describeDisclosure(candidate)[0], `Cost for this approval: ${text}`);
+  }
 });

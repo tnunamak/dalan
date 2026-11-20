@@ -12,9 +12,11 @@ import { waitForChildExit } from './child-exit.mjs';
 import { createLineMasker, safeDiagnostic } from './diagnostic.mjs';
 import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
-import { PAIRING_MINUTES } from './as-files.mjs';
-import { createGate, verifyPublicReady, watchPublicIdentity } from './try-exposure.mjs';
-import { RouteError, resolveRouteWord, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
+import { adminSocketPath } from './admin-socket.mjs';
+import { PAIRING_MINUTES, writeAtomic } from './as-files.mjs';
+import { verifyPublicReady, watchPublicIdentity } from './try-exposure.mjs';
+import { RouteError, closeExactRoute, observeRetainedRoute, routeNotDispatched, monitorRoute, waitForPublication, resolveRouteWord, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
+import { muteableTerminal, runRouteSetup } from './route-setup.mjs';
 import { readRouteSetting } from './route-setting.mjs';
 import { childRegistry, registerChild, sweepChildren } from './child-registry.mjs';
 
@@ -69,7 +71,8 @@ export const REAL_NOTICE = fromSetup => `Using a stable route${fromSetup ? ', th
 
 // Reads answers from one terminal reader and closes it, so the trial's own reader starts clean.
 export async function chooseMode({ input, out, signal }) {
-  const lines = readline.createInterface({ input });
+  const terminal = muteableTerminal(input, out);
+  const lines = readline.createInterface({ input, terminal: terminal.terminal, output: terminal.output });
   let ended = false;
   lines.once('close', () => { ended = true; });
   const ask = question => ended || signal?.aborted ? Promise.resolve(null) : new Promise(resolve => {
@@ -102,7 +105,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const say = line => out.write(`${terminalSafe(line)}\n`);
   // With no --route, a route saved by `dalan setup` is used as a durable route; an explicit --route name is a session route for this trial.
   const saved = options.route === undefined ? readRouteSetting(env) : null;
-  const durable = saved !== null && saved.origin !== null;
+  const durable = saved !== null && saved.routeId !== null;
   const realHome = fs.realpathSync(os.homedir());
   let stableAddress = durable; // a session route learns its stability from Gozar once it exists
   const home = prepareHome(options.home ?? env.DALAN_HOME ?? path.join(realHome, '.local/share', durable ? 'dalan-hosted' : `dalan-hosted-${randomBytes(3).toString('hex')}`), realHome);
@@ -115,7 +118,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   errorContext.shellHome = shellQuote(home); errorContext.logFile = logFile; errorContext.shellLog = shellQuote(logFile);
   errorContext.tryFlags = ` --public${options.route === undefined ? '' : ` --route ${shellQuote(options.route)}`}`;
   const freshRestartHome = path.join(realHome, '.local/share', `dalan-hosted-${randomBytes(3).toString('hex')}`);
-  const retry = () => commandLine(restartCommand({ cli, home, freshHome: freshRestartHome, shellQuote, route: options.route, stable: stableAddress }));
+  const retry = (keepReference = false) => commandLine(restartCommand({ cli, home, freshHome: freshRestartHome, shellQuote, route: options.route, stable: stableAddress || keepReference }));
   errorContext.freshTrialCommand = retry().trim();
 
   // A bridge or ssh that an earlier trial left behind (its process was killed without cleanup) is ended first; only a recorded, matching process is touched.
@@ -123,13 +126,14 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const leftovers = await sweepChildren({ registry }).catch(() => []);
   if (leftovers.length) out.write(`Ended ${leftovers.length} process${leftovers.length === 1 ? '' : 'es'} left by an earlier trial.\n`);
   // A home that already has a bridge or another trial's profile is never reused silently.
-  const adminSock = defaultPath(home, '.local/share/dot-bridge', 'admin.sock');
+  const adminSock = adminSocketPath(defaultPath(home, '.local/share/dot-bridge'));
   if (await socketAnswers(adminSock)) throw Object.assign(new Error('the bridge for this home is already running; stop it with Ctrl-C in its terminal first, or choose a new --home'), { tryKind: 'already_running' });
   let freshHome = true, storedOrigin = null;
   try { freshHome = !JSON.parse(fs.readFileSync(path.join(configDir, 'workers.json'), 'utf8')).workers?.[HOSTED_WORKER]; if (freshHome) throw new Error(`${home} holds another trial's worker profile; choose a new --home`); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   try { storedOrigin = new URL(JSON.parse(fs.readFileSync(path.join(configDir, 'as.json'), 'utf8')).public_url).origin; } catch { /* a new home */ }
 
-  const lines = readline.createInterface({ input });
+  const terminal = muteableTerminal(input, out);
+  const lines = readline.createInterface({ input, terminal: terminal.terminal, output: terminal.output });
   let inputEnded = false;
   lines.once('close', () => { inputEnded = true; });
   const stopRequested = () => signal?.aborted || inputEnded;
@@ -141,6 +145,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     if (routeDied) return;
     routeDied = true;
     routeLossReason = reason;
+    if (reason !== 'handoff_failed') fs.rmSync(path.join(home, 'resource-url'), { force: true });
     resolveRouteGone();
   };
   // The trial's lifetime is a real timer, not a check in the polling loop, so it also ends an unanswered question or a wait after a result.
@@ -160,7 +165,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
 
   const baseEnv = {
     ...Object.fromEntries(['PATH', 'TMPDIR', 'LANG', 'NODE_OPTIONS'].filter(k => env[k] !== undefined).map(k => [k, env[k]])),
-    HOME: home, DALAN_AUTH_MODE: 'builtin', DALAN_TRIAL_SSE: '1', ...(deps.serverEnv ?? {}),
+    HOME: home, DALAN_AUTH_MODE: 'builtin', DALAN_TRIAL_SSE: '1', DALAN_GOZAR_SERVICE: '1', ...(deps.serverEnv ?? {}),
   };
   let bindPort = null;
   // `abortable: false` is for cleanup: Ctrl-C must not cancel the revocation.
@@ -196,7 +201,15 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     return true;
   };
 
-  let gate = null, route = null, routeStopped = null, cleaned = true;
+  let gozar, route = null, routeStopped = null, cleaned = true;
+  const referenceFile = path.join(home, '.route-reference.json');
+  let routeRef, dispatchedHere = false;
+  const remember = ref => {
+    const entry = { ...ref, port: bindPort };
+    writeAtomic(referenceFile, JSON.stringify(entry));
+    routeRef = entry;
+    if (ref.phase === 'dispatching') dispatchedHere = true;
+  };
   let identityWatcher = null;
   let trialEndsAt = null;
   let releaseHome;
@@ -204,29 +217,67 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   try {
     say(durable ? REAL_NOTICE(true) : TRIAL_NOTICE);
     say('Checking public routes…');
-    gate = await createGate();
+    const configuredHome = saved?.gozarHome ?? gozarHomeFor(env);
+    try {
+      routeRef = JSON.parse(fs.readFileSync(referenceFile, 'utf8'));
+      errorContext.freshTrialCommand = retry(true).trim();
+      if (typeof routeRef?.home !== 'string' || !path.isAbsolute(routeRef.home) || typeof routeRef.operationId !== 'string') {
+        throw new RouteError('route_conflict', 'The saved trial route reference is invalid.');
+      }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const routeHome = routeRef?.home ?? configuredHome;
+    gozar = deps.gozar ?? await resolveGozar({ env, home: routeHome });
+    if (routeRef) {
+      const observed = await observeRetainedRoute(gozar, routeRef);
+      if (observed.state === 'recorded') {
+        const { view } = observed;
+        const result = view.state === 'released' && view.cleanup.state === 'confirmed' ? { removed: true }
+          : await closeExactRoute(gozar, { ...routeRef, handle: view.handle });
+        if (!result.removed) throw new RouteError('cleanup_debt', result.detail);
+        fs.unlinkSync(referenceFile);
+        routeRef = null;
+      } else if (durable || (options.port && routeRef.port && options.port !== routeRef.port)) {
+        throw new RouteError('route_conflict', 'Resume the saved trial operation with its original route mode and port.');
+      }
+    }
+    bindPort = await (deps.pickPort ?? choosePort)({ requested: options.port, stored: routeRef?.port ?? (durable ? 8789 : null), skip: new Set() });
+    errorContext.bindPort = bindPort;
     signal?.throwIfAborted();
     trialEndsAt = trialMs === null ? null : clock.now() + trialMs;
     // Gozar answers the owner's questions; Dalan only shows what it returned and asks once.
-    const consent = async candidate => {
-      say(describeCandidate(candidate).join('\n')); say(describeDisclosure(candidate).join('\n')); say('Use this route? [y/N]');
+    const askRoute = question => {
+      say(question);
       return new Promise(resolve => {
-        if (inputEnded || signal?.aborted) { resolve(false); return; }
-        const finish = answer => { lines.off('line', onLine); lines.off('close', onClose); signal?.removeEventListener('abort', onClose); resolve(['y', 'yes'].includes(String(answer ?? '').trim().toLowerCase())); };
+        if (inputEnded || signal?.aborted) { resolve(null); return; }
+        const finish = answer => { lines.off('line', onLine); lines.off('close', onClose); signal?.removeEventListener('abort', onClose); resolve(answer); };
         const onLine = answer => finish(answer);
         const onClose = () => finish(null);
         lines.once('line', onLine); lines.once('close', onClose); signal?.addEventListener('abort', onClose, { once: true });
       });
     };
+    const consent = async candidate => {
+      say(describeCandidate(candidate).join('\n'));
+      say(describeDisclosure(candidate).join('\n'));
+      return /^y(es)?$/i.test(String(await askRoute('Use this route? [y/N]') ?? '').trim());
+    };
+    const setup = candidate => runRouteSetup({ gozar, candidate, home: routeHome, env, say, ask: askRoute,
+      ...(terminal.terminal && {
+        async askSecret(label) {
+          terminal.mute(true);
+          try { return Buffer.from(await askRoute(`${label} (hidden):`) ?? ''); }
+          finally { terminal.mute(false); out.write('\n'); }
+        },
+        handoff(href) { out.write(`${href}\n`); },
+      }),
+    });
     try {
-      const gozar = deps.gozar ?? await resolveGozar();
-      const wanted = buildQuery({ home: saved?.gozarHome ?? gozarHomeFor(env), target: `127.0.0.1:${gate.port}`, route: options.route ?? saved?.routeName ?? undefined,
-        usage: durable ? { kind: 'durable', routeId: saved.routeId } : { kind: 'session', lifetimeMs: trialMs }, ...(durable ? { origin: saved.origin, address: 'stable' } : {}) });
+      const wanted = buildQuery({ home: routeHome, target: `127.0.0.1:${bindPort}`, route: options.route ?? saved?.routeName ?? undefined,
+        usage: durable ? { kind: 'durable', routeId: saved.routeId } : { kind: 'session', lifetimeMs: trialMs }, ...(durable ? { ...(saved.origin ? { origin: saved.origin } : {}), address: 'stable' } : {}) });
       const { query, pick } = await resolveRouteWord({ gozar, query: wanted });
       if (durable) {
-        const view = await ensureDurableRoute({ gozar, query, consent, pick });
-        route = { origin: view.origin, exited: null, endedBecause: () => null, stop: async () => ({ removed: true }) }; // an app exit never closes a durable route
-      } else route = await startSessionRoute({ gozar, query, consent, signal, wait: 'allocated', pick });
+        const view = await ensureDurableRoute({ gozar, query, consent, pick, setup });
+        route = monitorRoute({ gozar, home: query.home, view, remove: false });
+      } else route = await startSessionRoute({ gozar, query, consent, signal, wait: 'allocated', pick, remember, setup, recovery: routeRef });
       if (!durable) stableAddress = route.view?.properties?.address?.stability === 'stable';
     }
     catch (error) {
@@ -241,8 +292,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       throw error;
     }
     if (route.exited) route.exited.then(() => markRouteLost(route.endedBecause() ?? 'route_lost'));
+    const checkHandoff = () => {
+      const error = route.handoffFailure?.();
+      if (error) { error.tryKind = 'handoff'; throw error; }
+    };
     const origin = route.origin;
-    say('Public route ready.');
     if (storedOrigin && storedOrigin !== origin) {
       const error = new Error(`this home was set up for ${storedOrigin}, but the new public address is ${origin}. A new address is a new sign-in identity. Start a fresh trial instead with: ${retry().trim()}`);
       error.tryKind = 'identity';
@@ -251,8 +305,6 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     signal?.throwIfAborted();
 
     say('Starting isolated trial…');
-    bindPort = await (deps.pickPort ?? choosePort)({ requested: options.port, stored: null, skip: new Set() });
-    errorContext.bindPort = bindPort;
     if (freshHome) await dalan(['init', '--worker', HOSTED_WORKER, '--public-url', origin]);
     startServer();
     if (!await waitForListening()) {
@@ -266,13 +318,30 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     const mcpUrl = `${origin}/${secret}/mcp`;
     const shownResource = `${origin}/<secret>/mcp`;
     const urlFile = path.join(home, 'resource-url');
-    fs.rmSync(urlFile, { force: true });
-    fs.writeFileSync(urlFile, `${mcpUrl}\n`, { mode: 0o600 });
-    fs.chmodSync(urlFile, 0o600);
-
-    gate.open(bindPort, { publicOrigin: origin });
-    const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS, say, signal });
-    if (!ready.ready) { const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
+    try { await waitForPublication({ gozar, home: routeHome, handle: route.handle, origin, signal, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS }); }
+    catch (error) {
+      const { fix } = explainRouteError(error);
+      if (fix) say(`Next: ${fix}`);
+      throw error;
+    }
+    let sdkPublished = false, handoffEnabled = false;
+    let publication = Promise.withResolvers();
+    const writeHandoff = () => writeAtomic(urlFile, `${mcpUrl}\n`);
+    void route.watchPublished(available => {
+      sdkPublished = available;
+      if (available) {
+        if (handoffEnabled && !routeDied && !stopRequested()) writeHandoff();
+        publication.resolve();
+      } else {
+        fs.rmSync(urlFile, { force: true });
+        publication = Promise.withResolvers();
+        if (handoffEnabled) say('Gozar withdrew route proof. Waiting for verification of the same address.');
+      }
+    });
+    // A local handoff failure the route watcher already recorded is the cause; a readiness failure it raced with is a symptom.
+    const ready = await verifyPublicReady({ origin, secret, fetchImpl: deps.fetchImpl ?? fetch, clock, timeoutMs: deps.readyMs ?? PUBLIC_READY_MS, say, signal })
+      .catch(error => { if (!stopRequested()) checkHandoff(); throw error; });
+    if (!ready.ready) { if (!stopRequested()) checkHandoff(); const error = new Error(`The public route is not ready (${ready.last}); the trial is stopping.`); error.tryKind = 'route'; throw error; }
     say("Public HTTPS, OAuth discovery and the authorization server's metadata verified.");
 
     if (!durable) {
@@ -283,9 +352,12 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       identityWatcher.lost.then(loss => markRouteLost(loss.reason));
       const watcherReady = await identityWatcher.ready;
       if (!watcherReady) markRouteLost('identity_changed');
+      checkHandoff();
       if (routeDied) throw Object.assign(new Error('The temporary demo link changed or stopped responding during startup; the trial is stopping.'), { tryKind: 'route_lost' });
     }
 
+    checkHandoff();
+    if (routeDied) throw Object.assign(new Error('Gozar withdrew the public route during startup.'), { tryKind: 'route_lost' });
     await dalan(['connect', 'start', '--worker', HOSTED_WORKER]);
     const requestId = `req_${randomUUID()}`;
     const phrase = `${REPORT} ${randomBytes(4).toString('hex')}`;
@@ -301,6 +373,17 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       routeGone = Promise.race([routeGone, expiry]);
     }
     const trialLeft = () => trialEndsAt === null ? '' : ` Local shutdown limit: ${timeLeft(trialEndsAt - clock.now())}. The temporary link can stop earlier.`;
+    const proofDeadline = AbortSignal.timeout(deps.readyMs ?? PUBLIC_READY_MS);
+    const proofTimedOut = new Promise(resolve => proofDeadline.addEventListener('abort', resolve, { once: true }));
+    while (!sdkPublished && !routeDied && !stopRequested() && !trialOver() && !proofDeadline.aborted) {
+      await Promise.race([publication.promise, untilStopRequested(), proofTimedOut]);
+    }
+    if (stopRequested()) return;
+    checkHandoff();
+    if (routeDied) throw Object.assign(new Error('Gozar withdrew the public route during startup.'), { tryKind: 'route_lost' });
+    if (!sdkPublished || trialOver()) throw Object.assign(new Error('Gozar did not verify the same public address before the handoff deadline.'), { tryKind: 'route' });
+    handoffEnabled = true;
+    writeHandoff();
     if (trialEndsAt !== null) say(`This trial has a local shutdown limit of ${timeLeft(trialEndsAt - clock.now())}; the temporary link can stop earlier or without warning. Run \`dalan setup\` to choose a stable route. Setup does not install a background service.`);
     say('');
     say(handoffText({ url: mcpUrl }));
@@ -318,16 +401,21 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     }[stage]);
     const stillCurrent = async attempt => (await pendingNow()).pending.some(p => p.code === attempt.code && !p.superseded);
     const approve = async attempt => {
-      if (routeDied || !await stillCurrent(attempt) || routeDied) return false;
+      if (!sdkPublished || routeDied || !await stillCurrent(attempt) || !sdkPublished || routeDied) return false;
       try { return JSON.parse(await dalan(['connect', 'approve', attempt.code, '--worker', HOSTED_WORKER, '--replace', '--json'])).result ?? true; }
       catch (error) { if (routeDied) return false; if (exited || await stillCurrent(attempt)) throw error; return false; }
     };
     // Help is read from the same input as the answers: a line that is not an answer is checked for it.
     let asking = false;
-    lines.on('line', line => { if (line.trim().toLowerCase() === 'help' && !asking) { if (stage === 'approved') { showPrompt(); return; } say(`${STEPS.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n(The connector URL is in ${urlFile}.)`); } });
+    lines.on('line', line => { if (line.trim().toLowerCase() === 'help' && !asking) {
+      if (!sdkPublished) { say('Waiting for Gozar to verify the public route.'); return; }
+      if (stage === 'approved') { showPrompt(); return; }
+      say(`${STEPS.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n(The connector URL is in ${urlFile}.)`);
+    } });
     const askOnce = async question => { asking = true; try { return await ask(question); } finally { asking = false; } };
 
     while (!exited && !stopRequested() && !routeDied && !trialOver()) {
+      if (!sdkPublished) { await Promise.race([publication.promise, untilStopRequested()]); continue; }
       const current = await job();
       if (current.status === 'finished') {
         const result = String(current.report?.result ?? '');
@@ -362,6 +450,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
           const answer = await askOnce('Approve this connection? [y/N] ');
           remindAt = Math.max(remindAt, clock.now() + DIAGNOSE_AFTER_MS);
           if (answer?.trim().toLowerCase() === 'y' && !routeDied) {
+            if (!sdkPublished) {
+              seen.delete(attempt.code);
+              say('The route is waiting for proof. Approval was not recorded.');
+              break;
+            }
             const result = await approve(attempt);
             if (routeDied) {
               break;
@@ -381,6 +474,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       if (retryNow) { retryNow = false; continue; }
       await Promise.race([clock.sleep(POLL_MS), untilStopRequested()]);
     }
+    if (!stopRequested()) checkHandoff();
     if (routeDied && !stopRequested()) {
       const changed = routeLossReason === 'rotated' || routeLossReason === 'identity_changed';
       const error = new Error(`The temporary demo link ${changed ? 'changed its address' : 'stopped responding'}. The connector cannot use this URL; the trial is stopping. Its saved reports stay in the trial Home.`);
@@ -395,20 +489,25 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     lines.close();
     clearTimeout(expireTimer);
     await identityWatcher?.stop();
-    // Close forwarding first, then end the connection while the bridge can still answer, then remove the route and stop the bridge.
-    gate?.shut();
+    // Withdraw handoff, revoke the trial's app credentials, then close the retained route.
+    try { fs.rmSync(path.join(home, 'resource-url'), { force: true }); }
+    catch (error) { if (!route?.handoffFailure?.()) throw error; }
     if (errorContext.started && !exited) await dalan(['connect', 'revoke', HOSTED_WORKER], { abortable: false }).catch(() => {});
-    if (route) routeStopped = await route.stop().catch(error => ({ removed: false, detail: error.message }));
+    if (route) routeStopped = await route.stop().catch(error => ({ removed: false, detail: safeDiagnostic(error.message, 240) }));
+    else if (dispatchedHere && routeRef && !routeNotDispatched(routeRef)) routeStopped = await closeExactRoute(gozar, routeRef);
+    if (routeRef && routeStopped?.removed) fs.rmSync(referenceFile, { force: true });
+    if (routeRef && !routeStopped?.removed) errorContext.freshTrialCommand = retry(true).trim();
     await stopServer();
-    await gate?.close();
     // The connector URL and the bridge's secrets are no use after the trial and stay on disk for nobody.
     removeTrialSecrets(home, configDir, { keepConfig: stableAddress });
     releaseHome();
     cleaned = routeStopped ? routeStopped.removed : true;
-    if (!cleaned) { process.exitCode = 1; out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n`); }
+    if (!cleaned) out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n`);
   }
-  if (route && cleaned) say('Public route removed. Bridge stopped.');
-  else if (!route) say('No public route was started. Bridge stopped.');
+  if (!cleaned) throw new RouteError('cleanup_debt', 'Gozar could not confirm route removal.');
+  if (route) say(durable ? 'Bridge stopped. The saved route remains.' : 'Public route removed. Bridge stopped.');
+  else if (routeRef) say('Bridge stopped. The saved route operation is retained.');
+  else say('No public route was started. Bridge stopped.');
   say(`Trial history kept at ${home}`);
-  say(`To run it again: ${retry().trim()}`);
+  say(`To run it again: ${retry(!!routeRef && !routeStopped?.removed).trim()}`);
 }

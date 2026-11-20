@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { defaultPath } from '../src/paths.mjs';
+import { adminSocketPath } from '../src/admin-socket.mjs';
 import { readEnv } from '../src/env.mjs';
 // One command that turns a fresh worker bridge into a durable service: a systemd user service on Linux, a launchd
 // LaunchAgent on macOS. Separate from scripts/live-trial/setup.mjs on purpose: that script starts a throwaway process
@@ -13,59 +14,10 @@ import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from './live-trial/common.mjs';
-import { loadKeys } from '../src/as-files.mjs';
+import { loadKeys, writeAtomic } from '../src/as-files.mjs';
+import { routeCustodyPath } from '../src/route-custody.mjs';
 import { writeWorkerInstructions } from '../src/worker-instructions.mjs';
-import https from 'node:https';
-import { Resolver } from 'node:dns/promises';
-import { buildQuery, ensureDurableRoute, gozarHomeFor, resolveGozar, describeCandidate, describeDisclosure } from '../src/gozar-routes.mjs';
-
-// ---- checking the public address ---------------------------------------------------------------------------------------------------
-// Public DNS through three resolvers in parallel (one can keep a negative-cached NXDOMAIN for a new name for >10 min).
-const PUBLIC_DNS_SERVERS = ['1.1.1.1', '8.8.8.8', '9.9.9.9'];
-const DNS_WAIT_MS = 600_000, DNS_PROGRESS_MS = 30_000, HTTPS_WAIT_MS = 120_000;
-function makePublicResolver(resolvers = PUBLIC_DNS_SERVERS.map(server => { const resolver = new Resolver({ timeout: 3000, tries: 1 }); resolver.setServers([server]); return { server, resolver }; })) {
-  return name => new Promise(resolve => {
-    let pending = resolvers.length;
-    const settle = () => { if (--pending === 0) resolve(null); };
-    for (const { server, resolver } of resolvers) resolver.resolve4(name).then(addresses => (addresses[0] ? resolve({ address: addresses[0], server }) : settle()), settle);
-  });
-}
-// GET /admin pinned to the address DNS returned. The bridge answers 404 on its unauthenticated path.
-function fetchPinned(url, address, { timeoutMs = 15_000 } = {}) {
-  const u = new URL(url);
-  return new Promise((resolve, reject) => {
-    const req = https.request({ hostname: u.hostname, port: u.port || 443, path: '/admin', method: 'GET', timeout: timeoutMs,
-      lookup: (_host, options, cb) => (options?.all ? cb(null, [{ address, family: 4 }]) : cb(null, address, 4)) }, res => { res.resume(); resolve(res.statusCode); });
-    req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
-    req.end();
-  });
-}
-export async function verifyPublic({ url, dnsName, resolve4, request = fetchPinned, sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now, timeoutMs = DNS_WAIT_MS, intervalMs = 5_000, progressMs = DNS_PROGRESS_MS, log = console.log }) {
-  const secs = ms => Math.round(ms / 1000);
-  const start = now(), end = start + timeoutMs;
-  let nextProgress = progressMs, found = null;
-  while (!found) {
-    found = await resolve4(dnsName);
-    if (found) break;
-    const elapsed = now() - start;
-    if (elapsed >= nextProgress && elapsed < timeoutMs) { log(`waiting for public DNS of ${dnsName} … ${secs(elapsed)} s / ${secs(timeoutMs)} s`); nextProgress += progressMs; }
-    if (now() >= end) break;
-    await sleep(intervalMs);
-  }
-  if (!found) { log(`FAIL public DNS: no A record for ${dnsName} from 1.1.1.1, 8.8.8.8 or 9.9.9.9 after ${secs(timeoutMs)} s. Next: run \`dig @8.8.8.8 ${dnsName} A\` (also try @1.1.1.1 and @9.9.9.9), check the route's state with Gozar, then retry.`); return false; }
-  log(`PASS public DNS: ${dnsName} -> ${found.address} (via ${found.server})`);
-  const httpsEnd = now() + HTTPS_WAIT_MS;
-  let nextHttpsProgress = now() + progressMs, last;
-  for (;;) {
-    try { const code = await request(url, found.address); if (code === 404) break; last = `GET /admin returned ${code}, expected 404 from the bridge`; } catch (e) { last = e.message; }
-    if (now() >= httpsEnd) { log(`FAIL public HTTPS: ${last} (still failing after ${secs(HTTPS_WAIT_MS)} s). Likely cause: the route is not active yet, or a different service answers on this address. Next: check the route's state with Gozar and the local port, then retry.`); return false; }
-    if (now() >= nextHttpsProgress) { log(`waiting for public HTTPS of ${dnsName} … last result: ${last}`); nextHttpsProgress += progressMs; }
-    await sleep(intervalMs);
-  }
-  log('PASS public HTTPS: GET /admin returned 404 from the bridge');
-  return true;
-}
+import { buildQuery, ensureDurableRoute, gozarHomeFor, isPublished, observeRetainedRoute, reconcileRouteOperationId, requireExternalRoute, resolveGozar, describeCandidate, describeDisclosure, routeFailure } from '../src/gozar-routes.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/; // no space, quote, %, $ or newline: the value goes into a unit or plist as is
@@ -127,9 +79,8 @@ function parseOptions(argv, platform) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('--port N is required (1024-65535)');
   const node = stableNode(process.execPath);
   const repo = REPO.replace(/\/$/, '');
-  // Unix socket paths are limited (104 bytes on macOS, 108 on Linux); the owner socket lives under the bridge home.
-  const socketPath = defaultPath(home,'.local/share/dot-bridge/admin.sock');
-  if (Buffer.byteLength(socketPath) >= 104) fail(`--home is too long: the owner socket path would be ${Buffer.byteLength(socketPath)} bytes (limit 103); choose a shorter home`);
+  // Unix socket paths are limited (104 bytes on macOS, 108 on Linux); a long home gets a short socket path instead.
+  const socketPath = adminSocketPath(defaultPath(home,'.local/share/dot-bridge'));
   for (const [label, value] of [['--home', home], ['node path', node], ['repo path', repo]]) {
     if (!SAFE_PATH.test(value)) fail(`${label} contains a character that is not safe in a unit file: ${JSON.stringify(value)}`);
   }
@@ -246,6 +197,7 @@ function unitFiles(o) {
     `Environment=HOME=${o.home}`,
     'Environment=NODE_ENV=production',
     'Environment=DALAN_AUTH_MODE=builtin',
+    'Environment=DALAN_GOZAR_SERVICE=1',
     ...(o.repoTools ? ['Environment=DALAN_ENABLE_WORKSPACE=1'] : []),
     `Environment=DALAN_PORT=${o.port}`,
     `Environment=PATH=${servicePath(o.node)}`,
@@ -298,7 +250,7 @@ function servicePath(node) {
 function plistText(o) {
   const name = `dot-bridge-${o.worker}`;
   const logs = path.join(o.home, 'logs');
-  const env = { HOME: o.home, NODE_ENV: 'production', DALAN_AUTH_MODE: 'builtin', ...(o.repoTools ? { DALAN_ENABLE_WORKSPACE: '1' } : {}), DALAN_PORT: String(o.port), PATH: servicePath(o.node) };
+  const env = { HOME: o.home, NODE_ENV: 'production', DALAN_AUTH_MODE: 'builtin', DALAN_GOZAR_SERVICE: '1', ...(o.repoTools ? { DALAN_ENABLE_WORKSPACE: '1' } : {}), DALAN_PORT: String(o.port), PATH: servicePath(o.node) };
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -369,15 +321,12 @@ function writeHome(o, platform, initHome = runDotWorkerInit) {
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     const init = initHome({ ...o, home: stage });
     if (init.status !== 0) fail(`dalan init failed (exit ${init.status}): ${String(init.stderr).trim().split('\n').at(-1)}`);
-    // Create the path secret now so the private resource URL file exists before the first start. The server keeps an existing env file.
+    // Reserve the path secret before startup. Publication writes the connector URL after proof.
     const envFile = path.join(configDir, 'env');
     if (!fs.existsSync(envFile)) writeExclusive(envFile, `BRIDGE_PATH_SECRET=${randomBytes(32).toString('hex')}\n`, 0o600, 'bridge environment file');
     fs.chmodSync(envFile, 0o600);
     const secret = /^BRIDGE_PATH_SECRET=([a-f0-9]{64})$/m.exec(fs.readFileSync(envFile, 'utf8'))?.[1];
     if (!secret) fail('bridge path secret is missing or invalid');
-    const urlFile = path.join(stage, 'resource-url');
-    fs.writeFileSync(urlFile, `${o.publicUrl}/${secret}/mcp\n`, { mode: 0o600 });
-    fs.chmodSync(urlFile, 0o600);
     writeWorkerInstructions(stage);
     try { fs.mkdirSync(o.home, { mode: 0o700 }); }
     catch (error) {
@@ -478,7 +427,7 @@ function assertNoSystemdOverrides(unit,env) {
 }
 
 function publicRetryCommand(o,url) {
-  return `node ${path.join(o.repo,'scripts/worker-bridge-setup.mjs')} --retry-public-check --worker ${o.worker} --public-url ${url} --port ${o.port} --home ${o.home}${o.repoTools?'':' --no-repo-tools'}`;
+  return `node ${path.join(o.repo,'scripts/worker-bridge-setup.mjs')} --retry-public-check --worker ${o.worker} --public-url ${url} --port ${o.port} --home ${o.home}${o.lan?` --lan-forward ${o.lan.address}:${o.lan.port}`:''}${o.repoTools?'':' --no-repo-tools'}`;
 }
 
 function recoveryCommand(o) {
@@ -640,6 +589,8 @@ function removeUnit(o, { platform, env, log, spawn = spawnSync, holderProbe = ho
   if (o.purge && homeExists && !isBridgeHome(o.home, o.worker)) fail(`${o.home} is not a bridge home for worker ${o.worker}; refusing to purge it`);
   if (!present.length && !(o.purge && homeExists)) { log(`Nothing to remove for worker ${o.worker}.`); return; }
   if (o.purge && homeExists) {
+    const ref = readWorkerRouteReference(o.home, defaultPath(o.home, '.config/dot-bridge', 'route-reference.json'));
+    if (ref && !ref.handle) fail('The worker has a pending Gozar route operation. Keep the home and retry the public check to recover its exact route before purging.');
     const { named: users, unreadable } = unitsNamingHome(unitDir, o.home, present);
     if (unreadable.length) fail(`${unreadable.join(', ')} could not be read, so it is not known whether a service that uses ${o.home} is defined there. Nothing was removed. Make ${unreadable.length > 1 ? 'them' : 'it'} readable (or delete ${unreadable.length > 1 ? 'them' : 'it'} once the service is stopped), then run this command again.`);
     if (users.length) {
@@ -742,17 +693,14 @@ function verifyRetryTarget(o, { platform, env }) {
   const workers=JSON.parse(readOwnedFile(o.home,workersFile,'worker profile'));
   const as=JSON.parse(readOwnedFile(o.home,asFile,'issuer config'));
   const envText=readOwnedFile(o.home,envFile,'bridge environment');
-  const resource=readOwnedFile(o.home,urlFile,'resource URL').trim();
+  const resource=fs.existsSync(urlFile) ? readOwnedFile(o.home,urlFile,'resource URL').trim() : null;
   readOwnedFile(o.home,keysFile,'signing key');
   readOwnedFile(o.home,cookieKeysFile,'cookie keys');
   const secretMatch=/^BRIDGE_PATH_SECRET=([a-f0-9]{64})\n?$/.exec(envText);
   if(!secretMatch) fail('--retry-public-check refused: the saved bridge path secret is missing or invalid');
   loadKeys(configDir);
   if(!Object.hasOwn(workers.workers??{},o.worker)) fail(`--retry-public-check refused: ${o.home} has no worker profile named ${o.worker}`);
-  let saved;
-  try { saved=new URL(resource); } catch { fail('--retry-public-check refused: the saved resource URL is invalid'); }
-  if(saved.origin!==o.publicUrl||saved.pathname!==`/${saved.pathname.split('/')[1]}/mcp`||!/^\/[a-f0-9]{64}\/mcp$/.test(saved.pathname)) fail('--retry-public-check refused: --public-url does not match this home resource URL');
-  if(saved.pathname!==`/${secretMatch[1]}/mcp`) fail('--retry-public-check refused: the saved resource URL does not match this home path secret');
+  if (resource && resource !== `${o.publicUrl}/${secretMatch[1]}/mcp`) fail('--retry-public-check refused: the saved resource URL does not match this home and issuer');
   if(as.public_url!==o.publicUrl) fail('--retry-public-check refused: --public-url does not match this home issuer');
   const dir=unitDirFor(platform,env), unit=platform==='darwin'?path.join(dir,`${launchLabel(o.worker)}.plist`):path.join(dir,`dot-bridge-${o.worker}.service`);
   const configRoot=platform==='darwin'?(env.HOME||os.homedir()):(env.XDG_CONFIG_HOME&&path.isAbsolute(env.XDG_CONFIG_HOME)?env.XDG_CONFIG_HOME:path.join(os.homedir(),'.config'));
@@ -762,9 +710,19 @@ function verifyRetryTarget(o, { platform, env }) {
   // Accept only the previous generator's equivalent setting names; retain every
   // other byte check so a customized service cannot become a retry target.
   const compatibleText=text.replace(/^Environment=DOT_BRIDGE_(AUTH_MODE|ENABLE_WORKSPACE|PORT)=/gm,'Environment=DALAN_$1=').replace(/<key>DOT_BRIDGE_(AUTH_MODE|ENABLE_WORKSPACE|PORT)<\/key>/g,'<key>DALAN_$1</key>');
-  if(compatibleText!==expected) fail(`--retry-public-check refused: ${unit} does not exactly match the generated worker, HOME, executable, working directory and port`);
-  if(platform==='linux') assertNoSystemdOverrides(unit,env);
-  return { url:o.publicUrl, dnsName:saved.hostname };
+  const oldExpected = expected.replace('Environment=DALAN_GOZAR_SERVICE=1\n', '').replace('    <key>DALAN_GOZAR_SERVICE</key>\n    <string>1</string>\n', '');
+  if(compatibleText!==expected && compatibleText!==oldExpected) fail(`--retry-public-check refused: ${unit} does not exactly match the generated worker, HOME, executable, working directory and port`);
+  if (platform === 'linux') {
+    assertNoSystemdOverrides(unit, env);
+    const generated = unitFiles(o).files;
+    for (const suffix of ['lan.socket', 'lan.service']) {
+      const name = `dot-bridge-${o.worker}-${suffix}`, file = path.join(dir, name);
+      if (o.lan ? readOwnedFile(configRoot, file, 'forwarding unit') !== generated[name] : fs.existsSync(file)) {
+        fail('--retry-public-check refused: --lan-forward must match the generated forwarding units');
+      }
+    }
+  }
+  return { url: o.publicUrl, secret: secretMatch[1], urlFile, configDir };
 }
 
 // `--start` returns as soon as the service manager accepts the unit, but the bridge needs a moment more before its admin
@@ -791,7 +749,7 @@ function waitForStartedBridge(o, env, platform, waitForSocket) {
   fail(`the service was started but the bridge did not answer on its admin socket ${o.socketPath} within ${Math.round(budget / 1000)} s. Read the service log with ${where}. Generated state is left in place; remove this install with: ${recoveryCommand(o)}`);
 }
 
-function runUnlocked(argv, { platform = process.platform, env = process.env, log = console.log, verifyPublic: verify = verifyPublic, resolve4 = makePublicResolver(), initHome, spawn = spawnSync, waitForSocket = waitForAdminSocket, holderProbe } = {}, parsed = null) {
+function runUnlocked(argv, { platform = process.platform, env = process.env, log = console.log, gozar: suppliedGozar, consent, initHome, spawn = spawnSync, waitForSocket = waitForAdminSocket, holderProbe } = {}, parsed = null) {
   const o = parsed ?? parseOptions(argv, platform);
   if (o.help) {
     log('usage: node scripts/worker-bridge-setup.mjs --worker NAME --public-url https://HOST --port N [--home DIR] [--lan-forward ADDR:PORT] [--write-units-only] [--start] [--no-repo-tools]');
@@ -811,12 +769,9 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
   const unitDir = unitDirFor(platform, env);
   const { files, enable } = linux ? unitFiles(o) : { files: darwin ? { [`${launchLabel(o.worker)}.plist`]: plistText(o) } : {}, enable: [] };
 
-  if(o.retryPublicCheck) {
-    const {url,dnsName}=verifyRetryTarget(o,{platform,env});
-    if(readEnv('DALAN_EXPOSE_SKIP_PUBLIC_CHECK',env)==='1') { log('SKIPPED public check (DALAN_EXPOSE_SKIP_PUBLIC_CHECK=1; tests only)'); return; }
-    return verify({url,dnsName,resolve4,log}).then(ok=>{
-      if(!ok) fail(`public verification failed; the service, home and keys were left in place. Retry after the public route is ready with: ${publicRetryCommand(o,url)}. To remove this install: ${recoveryCommand(o)}`);
-    });
+  if (o.retryPublicCheck) {
+    const { url, secret, urlFile, configDir } = verifyRetryTarget(o, { platform, env });
+    return publishWorkerRoute({ o, env, gozar: suppliedGozar, url, secret, urlFile, configDir, log, consent });
   }
 
   // Check everything before the first write so a refusal leaves nothing behind.
@@ -829,13 +784,23 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
   if (unitDir) for (const f of Object.keys(files)) if (fs.existsSync(path.join(unitDir, f))) fail(`${path.join(unitDir, f)} already exists; refusing to overwrite it`);
   if (darwin && !lintPlist(files[`${launchLabel(o.worker)}.plist`], env)) log('plutil not found: skipped the plist lint');
   // --route: Gozar allocated or adopted the route before this point (see run()); only the public address is used here.
-  const exposure = o.route !== undefined ? { route: o.route, url: o.publicUrl, dnsName: new URL(o.publicUrl).hostname } : null;
+  const exposure = o.routeView;
 
   if (o.start) checkStartReadiness(platform, env);
+  if (o.route !== undefined && !exposure) {
+    if (o.writeUnitsOnly) fail('--write-units-only requires --public-url; it does not start a route.');
+    return allocateRoute(o, { env, gozar: suppliedGozar, consent, log }).then(gozar => runUnlocked(argv,
+      { platform, env, log, gozar, consent, initHome, spawn, waitForSocket, holderProbe }, o));
+  }
   if (o.start) warnIfLingeringDisabled(platform, env, log, spawn);
 
   let urlFile = path.join(o.home, 'resource-url');
-  if (!o.writeUnitsOnly) { urlFile = writeHome(o, platform, initHome); log(`Home ready: ${o.home} (mode 0700), worker ${o.worker}, issuer ${o.publicUrl}`); }
+  const configDir = defaultPath(o.home, '.config/dot-bridge');
+  if (!o.writeUnitsOnly) {
+    urlFile = writeHome(o, platform, initHome);
+    if (exposure) writeAtomic(path.join(configDir, 'route-reference.json'), JSON.stringify(o.routeRef));
+    log(`Home ready: ${o.home} (mode 0700), worker ${o.worker}`);
+  }
 
   const uid = process.getuid?.();
   if (!unitDir) {
@@ -865,9 +830,7 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
       log(`To stop: ${stop}`);
     } else log(`Not started. To start:\n  launchctl bootstrap ${domain} ${plist}\nTo stop:\n  ${stop}`);
   }
-  if (exposure) log(`Route: ${exposure.url} -> http://127.0.0.1:${o.port} (Gozar route ${exposure.route})`);
   if (o.lan) log(`LAN forwarder: ${o.lan.address}:${o.lan.port} -> 127.0.0.1:${o.port}. Point the reverse proxy there; anything on that network can reach it.`);
-  log(`Resource URL file (private, mode 0600): ${urlFile}`);
   const dw = `dalan() { HOME=${shellQuote(o.home)} ${shellQuote(o.node)} ${shellQuote(path.join(o.repo, 'bin/dalan.mjs'))} "$@"; }`;
   log('Owner commands (run after the service is up):');
   log(`  ${dw}`);
@@ -875,40 +838,93 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
   log('  dalan connect pending');
   log(`  dalan connect approve CODE --worker ${o.worker}`);
   log('  dalan connect signal-token    # save wake URL privately for hook-driven workers; print path; --rotate replaces it');
-  if (!exposure) return undefined;
-  // Public check only after the bridge starts. Returns a promise; the entry point awaits it and exits 1 on failure.
-  const { dnsName, url } = exposure;
-  if (!o.start) {
-    log(`Public check runs with --start. By hand: dig @8.8.8.8 ${dnsName} A (or @1.1.1.1, @9.9.9.9) ; curl -sS -o /dev/null -w '%{http_code}' ${url}/admin  (expect 404)`);
-    return undefined;
+  if (o.writeUnitsOnly) return;
+  if (!o.start || (!exposure && !consent && !process.stdin.isTTY)) {
+    log(`With the bridge running, approve and verify the public route in a terminal: ${publicRetryCommand(o, o.publicUrl)}`);
+    return;
   }
-  if (readEnv('DALAN_EXPOSE_SKIP_PUBLIC_CHECK',env) === '1') { log('SKIPPED public check (DALAN_EXPOSE_SKIP_PUBLIC_CHECK=1; tests only)'); return undefined; }
-  return verify({ url, dnsName, resolve4, log }).then(ok => {
-    if (!ok) fail(`public verification failed; the service, home and keys were left in place. Retry the check with: ${publicRetryCommand(o,url)}. To remove this install: ${recoveryCommand(o)}`);
+  const secret = /^BRIDGE_PATH_SECRET=([a-f0-9]{64})$/m.exec(fs.readFileSync(path.join(configDir, 'env'), 'utf8'))?.[1];
+  return publishWorkerRoute({ o, env, gozar: suppliedGozar, url: o.publicUrl, secret, urlFile, configDir, log, consent });
+}
+
+function readWorkerRouteReference(home, file) {
+  try { fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const ref = JSON.parse(readOwnedFile(home, file, 'Gozar route reference'));
+  if (typeof ref?.home !== 'string' || !path.isAbsolute(ref.home) || (!ref.handle && typeof ref.operationId !== 'string')) {
+    fail('The saved Gozar route reference is invalid.');
+  }
+  return ref;
+}
+
+export function workerRouteReference(home, retained, view, custody) {
+  const operationId = reconcileRouteOperationId(retained?.operationId, view.operationId);
+  return {
+    home, handle: view.handle, custody,
+    ...(typeof operationId === 'string' && operationId.length ? { operationId } : {}),
+  };
+}
+
+export async function publishWorkerRoute({ o, env, gozar, url, secret, urlFile, configDir, log, consent = routeConsent(log), readReference = readWorkerRouteReference, write = writeAtomic }) {
+  const reference = path.join(configDir, 'route-reference.json');
+  let ref = readReference(o.home, reference);
+  const home = ref?.home ?? gozarHomeFor(env);
+  const custody = ref?.custody ?? routeCustodyPath({ HOME: os.homedir(), ...env }, home);
+  const target = o.lan ? `${o.lan.address}:${o.lan.port}` : `127.0.0.1:${o.port}`;
+  const external = !ref?.handle || ref.handle.kind === 'external';
+  const remember = value => {
+    const next = { ...value, custody };
+    write(reference, JSON.stringify(next));
+    ref = next;
+  };
+  gozar ??= await resolveGozar({ env, home, custody });
+  const observed = ref && await observeRetainedRoute(gozar, ref);
+  const view = observed?.state === 'recorded' ? observed.view : await ensureDurableRoute({
+    gozar, query: buildQuery({ home, origin: url, target, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${o.worker}` } }),
+    consent, remember, recovery: ref, external: true,
   });
+  if (!ref?.handle || (!ref.operationId && view.operationId)) remember(workerRouteReference(home, ref, view, custody));
+  if (external) requireExternalRoute(view, url, target);
+  if (!isPublished(view) || view.published !== url) {
+    const error = routeFailure(view, `Gozar could not verify the public route. The service and home were left in place. Retry the check with: ${publicRetryCommand(o, url)}. To remove this install: ${recoveryCommand(o)}`);
+    if (error.nextAction) log(error.nextAction.instructions ?? error.nextAction.label);
+    throw error;
+  }
+  // This is the final atomic write; failures before it own no published URL file.
+  write(urlFile, `${view.published}/${secret}/mcp\n`);
+  log(`Resource URL file (private, mode 0600): ${urlFile}`);
+}
+
+function routeConsent(log) {
+  return async candidate => {
+    for (const line of [...describeCandidate(candidate), ...describeDisclosure(candidate)]) log(line);
+    if (!process.stdin.isTTY) fail('This route needs your approval. Run the command in a terminal.');
+    const rl = (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout });
+    try { return /^y(es)?$/i.test((await rl.question('Use this route? [y/N] ')).trim()); }
+    finally { rl.close(); }
+  };
 }
 
 // With --route, Gozar allocates (or finds) the durable route first; its origin is the bridge's public address. Nothing is written
 // before Gozar answers, and an owner who declines leaves nothing behind.
 async function allocateRoute(parsed, seams) {
   const env = seams.env ?? process.env;
-  const gozar = seams.gozar ?? await resolveGozar();
-  const query = buildQuery({ home: gozarHomeFor(env), target: `127.0.0.1:${parsed.port}`, route: parsed.route, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${parsed.worker}` } });
-  const consent = seams.consent ?? (async candidate => {
-    if (!process.stdin.isTTY) fail('this route needs your approval; run this in a terminal, or run `dalan setup --route NAME` first');
-    for (const line of [...describeCandidate(candidate), ...describeDisclosure(candidate)]) console.log(line);
-    const rl = (await import('node:readline')).createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise(resolve => rl.question('Use this route? [y/N] ', resolve)); rl.close();
-    return ['y', 'yes'].includes(answer.trim().toLowerCase());
-  });
-  parsed.publicUrl = (await ensureDurableRoute({ gozar, query, consent })).origin;
+  const home = gozarHomeFor(env);
+  const gozar = seams.gozar ?? await resolveGozar({ env, home });
+  const query = buildQuery({ home, target: `127.0.0.1:${parsed.port}`, route: parsed.route, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${parsed.worker}` } });
+  const consent = seams.consent ?? routeConsent(seams.log ?? console.log);
+  const view = await ensureDurableRoute({ gozar, query, consent });
+  if (!view.origin) throw routeFailure(view, 'Gozar has not supplied the bridge address.');
+  parsed.publicUrl = view.origin;
+  parsed.routeView = view;
+  parsed.routeRef = workerRouteReference(home, null, view, routeCustodyPath({ HOME: os.homedir(), ...env }, home));
+  return gozar;
 }
 
 export function run(argv, seams = {}) {
   if (argv.includes('--help')) return runUnlocked(argv, seams);
   // Reject malformed arguments before creating the per-home lock directory.
   const parsed = parseOptions(argv, seams.platform ?? process.platform);
-  if (parsed.route !== undefined) return allocateRoute(parsed, seams).then(() => runLocked(argv, seams, parsed));
+
   return runLocked(argv, seams, parsed);
 }
 

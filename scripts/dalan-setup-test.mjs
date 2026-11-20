@@ -24,16 +24,18 @@ const session = ({ gozar = createFakeGozar(), answers = [], interactive = true, 
   return { env, gozar, get out() { return out; }, run: () => runSetup({ env, out: stream, input, interactive, gozar, gozarHome: GOZAR_HOME, argv }) };
 };
 
-test('one question; yes saves a version-2 setting with only the pinned origin and the requirements', async () => {
-  const s = session({ answers: ['y'] });
+test('one question; yes stages a version-2 route choice before a bridge exists', async () => {
+  const providerId = 'fixture-opaque-76';
+  const s = session({ answers: ['y'], gozar: createFakeGozar({ providerIds: { cand_stable: providerId } }) });
   const result = await s.run();
   assert.equal((s.out.match(/\[y\/N\]/g) ?? []).length, 1);
   assert.equal(result.changed, true);
   const saved = readRouteSetting(s.env);
   assert.equal(saved.version, 2);
   assert.equal(saved.routeId, 'dalan-main');
-  assert.equal(saved.routeName, null);
-  assert.match(saved.origin, /^https:\/\//);
+  assert.equal(saved.routeName, providerId);
+  assert.equal(saved.origin, null);
+  assert.equal(s.gozar.fake.state.pins.size, 0, 'setup cannot allocate a route before the bridge starts');
   assert.deepEqual(Object.keys(saved).sort(), ['bridgeHome', 'gozarHome', 'origin', 'requirements', 'routeId', 'routeName', 'version']);
   assert.equal(fs.statSync(routeSettingPath(s.env)).mode & 0o777, 0o600);
   assert.equal(s.out.match(/^Next:/gm).length, 1, 'one line, once');

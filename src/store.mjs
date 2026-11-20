@@ -305,11 +305,14 @@ export class Store {
     this.leaseBootId=options.bootId??(options.now?null:systemBootId());
     if(options.elapsedNow) {
       const epoch=wallNow(),elapsed=options.elapsedNow();
-      this.nowMs=()=>Math.floor(epoch+options.elapsedNow()-elapsed);
+      this.nowMs=()=>Math.floor(epoch+(options.elapsedNow()-elapsed));
+      this.monotonicForWallDeadline=deadline=>elapsed+(deadline-epoch);
     } else if(options.now) this.nowMs=options.now;
     else {
       const epoch=Date.now(),elapsed=process.hrtime.bigint();
       this.nowMs=()=>Math.floor(epoch+Number(process.hrtime.bigint()-elapsed)/1e6);
+      // The wall clock advertises whole milliseconds; retain sub-millisecond elapsed precision.
+      this.monotonicForWallDeadline=deadline=>Number(elapsed+BigInt(deadline-epoch)*1000000n)/1e6;
     }
     this.capacity=options.capacity??6;
     this.backgroundMaxInFlight=options.backgroundMaxInFlight??4;
@@ -1517,7 +1520,7 @@ export class Store {
     const deadline=Date.parse(activity??this.stamp())+leaseMs;
     if(!protocolNat(deadline))protocolError('invalid_lease');
     this.db.prepare('UPDATE claims SET lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=?')
-      .run(iso(deadline),this.leaseBootId,this.leaseBootId?this.monotonicNow()+leaseMs:null,id);
+      .run(iso(deadline),this.leaseBootId,this.monotonicDeadlineFor(deadline),id);
   }
   workerClaimLeaseCap(worker) {
     const caps=this.limits.workerClaimLeaseMs;
@@ -1535,7 +1538,7 @@ export class Store {
       const receipt=this.protocolMutationInTransaction(id,claimId,subject,worker,
       {...ctx,operation:'renew',args:{leaseMs:requestedLeaseMs}},({leaseUntil})=>{
         this.db.prepare('UPDATE claims SET lease_ms=?,lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=? AND claim_id=?')
-          .run(leaseMs,iso(leaseUntil),this.leaseBootId,this.leaseBootId?this.monotonicNow()+leaseMs:null,id,claimId);
+          .run(leaseMs,iso(leaseUntil),this.leaseBootId,this.monotonicDeadlineFor(leaseUntil),id,claimId);
         const claim=this.assertClaim(id,claimId,subject,worker);
         this.protocolEventInTransaction(id,'renewed',{lease_ms:leaseMs,lease_deadline_at:iso(leaseUntil)},claim.epoch);
         return {request_id:id,claim_id:claimId,epoch:claim.epoch,lease_expires_at:iso(leaseUntil)};
@@ -1920,9 +1923,10 @@ export class Store {
   refreshClaimActivity(id,claimId) {
     const at=this.stamp(), claim=this.db.prepare('SELECT lease_ms,worker FROM claims WHERE request_id=? AND claim_id=?').get(id,claimId);
     const leaseMs=Math.min(claim?.lease_ms??this.limits.leaseMs,this.workerClaimLeaseCap(claim?.worker));
+    const deadline=Date.parse(at)+leaseMs;
     if(this.isProtocolJob(id)) this.db.prepare('UPDATE claims SET last_claim_activity_at=? WHERE request_id=? AND claim_id=?').run(at,id,claimId);
     else this.db.prepare('UPDATE claims SET last_claim_activity_at=?,lease_ms=?,lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=? AND claim_id=?')
-      .run(at,leaseMs,iso(Date.parse(at)+leaseMs),this.leaseBootId,this.leaseBootId?this.monotonicNow()+leaseMs:null,id,claimId);
+      .run(at,leaseMs,iso(deadline),this.leaseBootId,this.monotonicDeadlineFor(deadline),id,claimId);
   }
   // The active, unexpired claim this worker holds under claimId, or null. A missing or expired claim is left to the caller's own error.
   liveHeldClaim(id,claimId,subject,worker) {
@@ -1978,6 +1982,14 @@ export class Store {
     return result?{failure_type:result.type,failure_type_source:result.source,check_failed_observed:checkFailedObserved}:{failure_type:'unknown',failure_type_source:'unknown',check_failed_observed:checkFailedObserved};
   }
   claimLeaseMs(claim) { return claim.lease_ms??this.limits.leaseMs; }
+  // Invert the logical wall clock's origin without taking another clock sample.
+  // A caller supplying only a wall clock has no shared origin; retain its existing fallback.
+  monotonicDeadlineFor(wallDeadlineMs) {
+    if(!this.leaseBootId) return null;
+    return this.monotonicForWallDeadline
+      ? this.monotonicForWallDeadline(wallDeadlineMs)
+      : this.monotonicNow()+(wallDeadlineMs-this.nowMs());
+  }
   leaseMonotonicDeadline(claim) {
     const deadline=Number(claim.lease_deadline_monotonic_ms);
     return this.leaseBootId&&claim.lease_boot_id===this.leaseBootId&&Number.isFinite(deadline)?deadline:null;

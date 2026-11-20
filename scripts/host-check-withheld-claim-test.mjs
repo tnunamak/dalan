@@ -55,7 +55,9 @@ const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 20
 const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'withheld-claim-test', use: 'sig' };
 const jwks = http.createServer((req, res) => res.end(JSON.stringify({ keys: [jwk] })));
 await new Promise(resolve => jwks.listen(jwksPort, '127.0.0.1', resolve));
-const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_T3_DRY_RUN: '1', DALAN_HOST_CHECKS: '1', DOT_BRIDGE_WORKSPACE_ROOT: path.join(home, 'work'), DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE: repo };
+// DALAN_MIN_FREE_BYTES is set for this service only. This scenario checks withheld-scope admission, not pressure eviction;
+// on a small fixture filesystem the default 30 GiB floor would start unrelated mirror cleanup that races the test's own mirror fetch.
+const env = { ...process.env, DALAN_MIN_FREE_BYTES: '0', HOME: home, DOT_BRIDGE_PORT: String(port), DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_T3_DRY_RUN: '1', DALAN_HOST_CHECKS: '1', DOT_BRIDGE_WORKSPACE_ROOT: path.join(home, 'work'), DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE: repo };
 const service = spawn(process.execPath, ['src/server.mjs'], { cwd: path.resolve(new URL('..', import.meta.url).pathname), env, stdio: ['ignore', 'pipe', 'pipe'] });
 let ready = false, stderr = '';
 service.stdout.on('data', b => { if (String(b).includes('MCP listening')) ready = true; });

@@ -3,6 +3,7 @@ import {routingPolicy,PULL_PAGE_PREFIX} from './pull-queue.mjs';
 import {inspect} from 'node:util';
 import { loopbackRequestAllowed } from './loopback.mjs';
 import { normalizeRequestHost } from './gozar-routes.mjs';
+import { watchServicePublication } from './route-publication.mjs';
 import { defaultPath,workspaceRoot,rootWarnings } from './paths.mjs';
 import { readEnv } from './env.mjs';
 import http from 'node:http';
@@ -45,7 +46,7 @@ import { logShutdownSignals } from './shutdown-signal.mjs';
 import { ADVERTISED_SCOPES, legacyScopeNames, wireScope } from './scopes.mjs';
 import { acquireAsOwner, loadAsConfig, loadKeys } from './as-files.mjs';
 import { createSignal } from './signal.mjs';
-import { adminSocketPathError } from './admin-socket.mjs';
+import { adminSocketPathError, adminSocketPath, ensureAdminSocketDir } from './admin-socket.mjs';
 import { createToolRegistry, createT3PostHandler, RegistryError } from './tool-registry.mjs';
 import { createServiceVerifier } from '@tnunamak/gozar';
 import { acceptsMcpEventStream, beginMcpEventStream } from './mcp-sse.mjs';
@@ -57,7 +58,8 @@ const home = os.homedir();
 const configDir = defaultPath(home,'.config/dot-bridge');
 const dataDir = defaultPath(home,'.local/share/dot-bridge');
 const stateDir = defaultPath(home,'.local/state/dot-bridge');
-const socketPathError=adminSocketPathError(path.join(dataDir,'admin.sock'));
+const socket=adminSocketPath(dataDir);
+const socketPathError=adminSocketPathError(socket);
 if(socketPathError) throw socketPathError;
 const pathWarnings=rootWarnings(home); // Capture before startup creates any files.
 const loopback=readEnv('DALAN_LOOPBACK')==='1';
@@ -167,7 +169,6 @@ if(t3ToolsEnabled) await loadT3Audit();
 // A valid but unallocated ID preserves each tool's existing absent-request errors. Never accept it as an owner target.
 const absentId=`req_${randomUUID()}`;
 if(store.hasAssignment(absentId)) throw new Error('absent gate id collision');
-const socket = path.join(dataDir, 'admin.sock');
 const log = createRequestLog(path.join(stateDir, 'requests.jsonl'));
 logShutdownSignals(log);
 // The owner-side tool registry. It has no MCP surface here: changing it never changes tools/list.
@@ -1627,6 +1628,7 @@ function maintain() {
   } catch(error) { log({kind:'maintenance_error',reason:error.message}); }
 }
 const runDrain=createDrainRunner(drain,log);
+ensureAdminSocketDir(socket);
 try { fs.unlinkSync(socket); } catch(e) { if(e.code!=='ENOENT') throw e; }
 const adminListening=new Promise(resolve=>adminServer.listen(socket,()=>{fs.chmodSync(socket,0o600);console.log(`admin socket ${socket}`);resolve();}));
 // Built-in mode sits behind a tunnel on this computer: only loopback may reach the listener.
@@ -1635,6 +1637,9 @@ const publicListening=new Promise(resolve=>publicServer.listen(port,bindHost,()=
 // Every background writer starts only when no update window is open, so a candidate restarted inside the window changes no state
 // the rollback snapshot would discard. Outside a window this runs at once, in the same order as before.
 function startBackground() {
+  if (verifyService && as && readEnv('DALAN_TRIAL_SSE') !== '1') void publicListening.then(() => watchServicePublication({
+    home, configDir, origin: new URL(as.publicUrl).origin, secret, canWrite: () => !updateWindowOpen(),
+  }));
   store.recoverSends();
 // Cleanup removes worktrees and dependency caches; it starts only after both servers listen, and
 // cleanupExpired is async and single-flight, so neither startup nor the hourly tick blocks requests.

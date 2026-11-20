@@ -14,13 +14,15 @@ import { createFakeGozar } from '../../src/test-support/gozar-fake.mjs';
 const HOME = path.join(os.tmpdir(), 'unused-gozar-home-for-fake');
 const started = async gozar => {
   const route = await startSessionRoute({ gozar, consent: async () => true, query: buildQuery({ home: HOME, target: targetFor(8787), route: undefined, usage: { kind: 'session', lifetimeMs: 60_000 } }) });
-  return { route, record: exposureRecord({ view: route.view, home: HOME, localPort: 8787, lifetimeMs: 60_000, now: () => 0 }) };
+  return { route, record: exposureRecord({ view: route.view, home: HOME }) };
 };
 
-test('the manifest record names the handle, home, origin, port and deadline; anything else is refused', async () => {
+test('new manifests retain the exact route handle and Gozar home', async () => {
   const { record } = await started(createFakeGozar());
   assert.equal(validateExposure(record, 8787), record);
-  assert.equal(record.deadline_at, new Date(60_000).toISOString());
+  assert.deepEqual(Object.keys(record).sort(), ['gozar_home', 'handle', 'kind']);
+  const legacy = { ...record, origin: 'https://known.example', local_port: 8787, deadline_at: new Date(60_000).toISOString() };
+  assert.equal(validateExposure(legacy, 8787), legacy);
   for (const bad of [null, [], { ...record, kind: 'x' }, { ...record, handle: { kind: 'session', id: '', generation: 1 } }, { ...record, handle: { ...record.handle, generation: 0 } },
     { ...record, gozar_home: 'relative' }, { ...record, origin: 'http://insecure.invalid' }, { ...record, local_port: 9 }, { ...record, deadline_at: 'soon' }]) assert.throws(() => validateExposure(bad, 8787));
 });
@@ -32,7 +34,7 @@ test('teardown closes exactly the recorded handle and reads it back', async () =
   assert.equal(gozar.fake.state.effects.filter(e => e.type === 'close').length, 1);
   assert.equal((await closeAndVerifyRoute(record, '/trial', { gozar })).state, 'released', 'a second teardown is safe');
   const missing = { ...gozar, closeRoute: async () => { throw Object.assign(new Error('x'), { code: 'route_not_found' }); } };
-  assert.deepEqual(await closeAndVerifyRoute(record, '/trial', { gozar: missing }), { state: 'gone' });
+  await assert.rejects(closeAndVerifyRoute(record, '/trial', { gozar: missing }), /shutdown was not verified/);
 });
 
 test('unconfirmed removal stops teardown with instructions that name no provider command', async () => {
@@ -41,7 +43,7 @@ test('unconfirmed removal stops teardown with instructions that name no provider
   const { record } = await started(gozar);
   await assert.rejects(() => closeAndVerifyRoute(record, '/trial', { gozar }), error => /not verified/.test(error.message) && /cleanup debt/.test(error.message) && /Gozar/.test(error.message) && !/gozar (expose|stop|route)\b/.test(error.message));
   const broken = { ...createFakeGozar(), closeRoute: async () => { throw Object.assign(new Error('x'), { code: 'busy' }); } };
-  await assert.rejects(() => closeAndVerifyRoute(record, '/trial', { gozar: broken }), /close failed: busy/);
+  await assert.rejects(() => closeAndVerifyRoute(record, '/trial', { gozar: broken }), /Gozar is busy/);
 });
 
 test('setup refuses an HTTPS public URL without --route, and --lifetime-seconds without --route', () => {

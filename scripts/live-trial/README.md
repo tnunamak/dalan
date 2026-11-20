@@ -11,14 +11,14 @@ Client compatibility must be verified with the chosen connector. For ChatGPT and
 Choose a Gozar route whose public HTTPS origin you know. `dalan setup` lists what Gozar can offer on this computer; the origin of the route you choose is the `--public-url`. Read what `dalan setup` shows for that route before you approve it: whether the address is stable or temporary, and whether the route operator can read traffic.
 
 ```sh
-DALAN_LIVE_TRIAL_APPROVE_ROUTE=1 node scripts/live-trial/setup.mjs \
+node scripts/live-trial/setup.mjs \
   --worker fixture-a \
   --public-url https://<route-origin> \
   --port 8787 \
   --route ROUTE
 ```
 
-Setup starts the bridge on loopback, then asks Gozar to open `ROUTE` to the bridge's local port. It records the route in the manifest. If Gozar allocates an origin other than `--public-url`, setup closes the route and stops. The route lasts four hours unless you set `--lifetime-seconds` (1 to 86400); Gozar ends it at that deadline even if teardown never runs. Setup refuses `--route` without an HTTPS `--public-url`, and an HTTPS `--public-url` without `--route`, so that teardown can always identify the public route. `DALAN_LIVE_TRIAL_APPROVE_ROUTE=1` records that you approved the route.
+Setup starts the bridge on loopback, then asks Gozar to open `ROUTE` to the bridge's local port. It records the route in the manifest. If Gozar allocates an origin other than `--public-url`, setup closes the route and stops. The route lasts four hours unless you set `--lifetime-seconds` (1 to 86400); Gozar ends it at that deadline even if teardown never runs. Setup refuses `--route` without an HTTPS `--public-url`, and an HTTPS `--public-url` without `--route`, so that teardown can always identify the public route. Approve the exact route review in the terminal. Keep this command running while using the route. Ctrl-C closes the recorded route and stops the bridge.
 
 Setup prints the disposable home path and the path to a mode-0600 file that holds the MCP resource URL. Setup never prints the resource URL. Read that private file when you configure fixture-a. The resource URL is the only URL to paste into fixture-a; it discovers the OAuth endpoints. The legacy `--reveal-resource-url` flag is unsupported and is rejected before setup creates anything.
 

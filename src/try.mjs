@@ -19,7 +19,7 @@ import { registerSecret } from './redaction.mjs';
 import { PAIRING_MINUTES, untrusted } from './as-files.mjs';
 import { beginPairing, DEMO_REDIRECT, workJob, workRepositoryJob } from './demo-worker.mjs';
 import { writeWorkerInstructions } from './worker-instructions.mjs';
-import { SOCKET_PATH_LIMIT } from './admin-socket.mjs';
+import { adminSocketPath, adminSocketPathError } from './admin-socket.mjs';
 import { waitForChildExit } from './child-exit.mjs';
 
 
@@ -55,7 +55,7 @@ async function alternateTrial(preferPort) {
   for (const base of [fs.realpathSync(os.homedir()), fs.realpathSync(os.tmpdir())]) {
     for (let n = 2; n < 100; n++) {
       const home = path.join(base, `.dalan-trial-${n}`);
-      if (fs.existsSync(home) || Buffer.byteLength(defaultPath(home, '.local/share/dot-bridge', 'admin.sock')) > SOCKET_PATH_LIMIT) continue;
+      if (fs.existsSync(home) || adminSocketPathError(adminSocketPath(defaultPath(home, '.local/share/dot-bridge')))) continue;
       return { home, port: await free(null) };
     }
   }
@@ -214,8 +214,6 @@ function prepareHome(candidate, realHome) {
       throw new Error(`${home} already holds files that a trial did not create (it could be a real Dalan home); choose a new or empty directory with --home DIR`);
     }
   }
-  const socket = defaultPath(home, '.local/share/dot-bridge', 'admin.sock');
-  if (Buffer.byteLength(socket) > SOCKET_PATH_LIMIT) throw new Error(`the trial home path is too long for the bridge's admin socket (${Buffer.byteLength(socket)} bytes, limit ${SOCKET_PATH_LIMIT}); choose a shorter --home DIR`);
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   fs.chmodSync(home, 0o700);
   fs.writeFileSync(path.join(home, MARKER), 'created by `dalan try`\n', { mode: 0o600 });
@@ -288,7 +286,7 @@ export async function runTry({ argv = [], env = process.env, out = process.stdou
   let storedPort = null;
   try { storedPort = Number(new URL(JSON.parse(fs.readFileSync(path.join(configDir, 'as.json'), 'utf8')).public_url).port) || null; } catch { /* a new home */ }
   // This home's own bridge already holds its port. Say so before anything below touches the running trial's grant or files.
-  if (storedPort && !await portFree(storedPort) && await socketAnswers(defaultPath(home, '.local/share/dot-bridge', 'admin.sock'))) {
+  if (storedPort && !await portFree(storedPort) && await socketAnswers(adminSocketPath(defaultPath(home, '.local/share/dot-bridge')))) {
     const error = new Error(`the trial bridge for this home is already running on http://127.0.0.1:${storedPort}. Use it from another terminal (export DALAN_HOME=${shellHome}), or stop it with Ctrl-C in its terminal first.`);
     error.tryKind = 'already_running';
     throw error;

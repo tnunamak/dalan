@@ -44,7 +44,6 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | --- | --- |
 | `scripts/acp-prose-check-test.mjs` | 10, 109 |
 | `scripts/adapter-conformance-test.mjs` | 19, 20 |
-| `scripts/admin-socket-path-test.mjs` | 35 |
 | `scripts/admission-measure-test.mjs` | 8 |
 | `scripts/admission-measure.mjs` | 84 |
 | `scripts/answer-journal-e2e.mjs` | 20, 23 |
@@ -101,6 +100,7 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `scripts/integrator-safety-test.mjs` | 14, 15 |
 | `scripts/integrator-verifier-test.mjs` | 13 |
 | `scripts/integrator-worktree-filter-context-test.mjs` | 12 |
+| `scripts/lease-deadline-clock-origin-test.mjs` | 10 |
 | `scripts/lease-deadline-restart-test.mjs` | 8 |
 | `scripts/lease-migrated-null-deadline-test.mjs` | 7 |
 | `scripts/legacy-acquisition-guidance-test.mjs` | 12 |
@@ -139,6 +139,7 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `scripts/regrant-effects-e2e.mjs` | 12 |
 | `scripts/regrant-waiter-fencing-test.mjs` | 32 |
 | `scripts/remote-loopback-callback-test.mjs` | 47, 56 |
+| `scripts/route-setup-discard-test.mjs` | 10 |
 | `scripts/sandbox-probe-e2e.mjs` | 27 |
 | `scripts/sandbox-source-exemption-test.mjs` | 10 |
 | `scripts/schema-fixture-guard-test.mjs` | 10 |
@@ -171,6 +172,7 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `scripts/work-order-test.mjs` | 6 |
 | `scripts/worker-bridge-setup.mjs` | 89, 105, 228, 231, 758 |
 | `scripts/worker-isolation-test.mjs` | 22 |
+| `scripts/worker-route-reference-test.mjs` | 54 |
 | `scripts/worker-repo-cache-test.mjs` | 7 |
 | `scripts/worker-repo-policy-e2e.mjs` | 14 |
 | `scripts/workspace-disk-test.mjs` | 8 |
@@ -191,15 +193,15 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `src/prepared-node-modules.mjs` | 10 |
 | `src/projects.mjs` | 15, 90 |
 | `src/route-setting.mjs` | 14 |
-| `src/server.mjs` | 56 |
+| `src/server.mjs` | 57 |
 | `src/service-launchd.mjs` | 23 |
 | `src/service-update-gate.mjs` | 9 |
-| `src/service-update-runtime.mjs` | 249 |
+| `src/service-update-runtime.mjs` | 250 |
 | `src/service-update.mjs` | 118 |
 | `src/service.mjs` | 109, 347, 403 |
 | `src/store.mjs` | 149, 252, 253 |
 | `src/submission-policy.mjs` | 101 |
 | `src/t3-transport.mjs` | 30 |
-| `src/try-hosted.mjs` | 106 |
-| `src/try.mjs` | 55, 84, 273 |
+| `src/try-hosted.mjs` | 109 |
+| `src/try.mjs` | 55, 84, 271 |
 | `src/workers.mjs` | 170, 179 |

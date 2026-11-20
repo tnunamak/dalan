@@ -8,12 +8,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { bridgeHealth } from '../src/host-health.mjs';
+import { adminSocketPath } from '../src/admin-socket.mjs';
 
 const root = defaultPath(os.homedir(),'.local/share/dot-bridge');
 const healthFile = readEnv('DALAN_HEALTH_FILE') || path.join(root, 'health.json');
 const temporary = `${healthFile}.${process.pid}`;
 try {
-  const health = await bridgeHealth({ socketPath: path.join(root, 'admin.sock'), drainerFile: readEnv('DALAN_DRAINER_HEALTH_FILE') });
+  const health = await bridgeHealth({ socketPath: adminSocketPath(root), drainerFile: readEnv('DALAN_DRAINER_HEALTH_FILE') });
   fs.writeFileSync(temporary, JSON.stringify(health) + '\n', { mode: 0o600 });
   fs.renameSync(temporary, healthFile);
   const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./dot-deadman.mjs', import.meta.url)), 'heartbeat'], {
