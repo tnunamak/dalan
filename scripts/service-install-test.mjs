@@ -308,13 +308,14 @@ assert.deepEqual(calls, [], 'missing Gozar refuses before starting or enabling a
   assert.match(missingLan.stderr, /requires --lan-port/);
 
 
-  const samePortHome = path.join(root, 'same-port-cli');
-  const samePortCli = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), 'service', 'install',
-    '--home', samePortHome, '--public-url', 'https://cli.example.test', '--port', '8798',
-    '--target', '127.0.0.2:8798', '--lan-port', '8798', '--worker', 'dot', '--write-units-only', '--json'], { env, encoding: 'utf8' });
-  assert.equal(samePortCli.status, 0, samePortCli.stderr);
-  const samePortResult = JSON.parse(samePortCli.stdout);
+  // A target other than 127.0.0.1 (a systemd socket proxy) exists on Linux only; macOS refuses it.
   if (process.platform === 'linux') {
+    const samePortHome = path.join(root, 'same-port-cli');
+    const samePortCli = spawnSync(process.execPath, [path.join(repo, 'bin/dalan.mjs'), 'service', 'install',
+      '--home', samePortHome, '--public-url', 'https://cli.example.test', '--port', '8798',
+      '--target', '127.0.0.2:8798', '--lan-port', '8798', '--worker', 'dot', '--write-units-only', '--json'], { env, encoding: 'utf8' });
+    assert.equal(samePortCli.status, 0, samePortCli.stderr);
+    const samePortResult = JSON.parse(samePortCli.stdout);
     assert.equal(samePortResult.units.length, 5);
     assert.match(fs.readFileSync(path.join(unitDir, samePortResult.unit.replace('.service', '-target.socket')), 'utf8'), /ListenStream=127\.0\.0\.2:8798/);
   } else console.log(`SKIP systemd socket units of the CLI: this is ${process.platform}`);
