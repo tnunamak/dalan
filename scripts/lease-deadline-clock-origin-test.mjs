@@ -18,14 +18,26 @@ let store;
 try {
   store=new Store(path.join(root,'bridge.db'),{now:()=>start,elapsedNow:tick,bootId:'test-boot',limits:{leaseMs:60000}});
   const row=id=>store.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id);
-  // Move the clock to the instant the worker was told the grant ends, then ask whether the grant is still live.
-  const atAdvertisedDeadline=id=>{const delta=Date.parse(row(id).lease_deadline_at)-store.nowMs();elapsed+=delta;return store.leaseExpired(row(id));};
+  const assertBoundary=(id,label)=>{
+    const grant=row(id);
+    assert.equal(store.get(id).claim.lease_expires_at,grant.lease_deadline_at);
+    const delta=Date.parse(grant.lease_deadline_at)-store.nowMs();
+    assert.ok(delta>1,`${label}: setup must leave a live lease`);
+    elapsed+=delta-0.25;
+    assert.equal(store.leaseExpired(grant),false,`${label}: expired before advertised deadline`);
+    elapsed+=0.25;
+    assert.equal(store.leaseExpired(grant),true,`${label}: remained live at advertised deadline`);
+    elapsed+=0.25;
+    assert.equal(store.leaseExpired(grant),true,`${label}: remained live after advertised deadline`);
+    // Each later fixture starts on an integer clock tick.
+    elapsed+=0.75;
+  };
 
   store.submit(payload('claim-stall'),{mode:'none'},null,'owner');
   step=3;
   store.claim('claim-stall','worker','s1',1,null,'dot',null,lease);
   step=0;
-  assert.equal(atAdvertisedDeadline('claim-stall'),true,'a claim must stop being authoritative at the deadline it advertised, even if the process stalled while granting it');
+  assertBoundary('claim-stall','short grant with stalled clock');
 
   store.submit(payload('activity-stall'),{mode:'none'},null,'owner');
   step=0;
@@ -33,15 +45,23 @@ try {
   step=3;
   store.touchClaim('activity-stall',row('activity-stall').claim_id,'s2','dot');
   step=0;
-  assert.equal(atAdvertisedDeadline('activity-stall'),true,'activity that extends a lease must stop being authoritative at the deadline it advertised, even if the process stalled while renewing');
+  assertBoundary('activity-stall','legacy touch with stalled clock');
+
+  const renewId='renew-stall', subject='s-renew';
+  store.submit({...payload(renewId),protocol:{profile:'job-v0',source:'fixture',scope:'fixture',
+    policy:'fixture',destination:'fixture',retain_until_ms:start+60000}},{mode:'none'},null,'owner');
+  const original=store.claim(renewId,'worker',subject,1,null,'dot','renew-acq',lease,{key:'grant',revision:1});
+  step=3;
+  const renewed=store.renewClaim(renewId,original.claim_id,240,{key:'renew',revision:original.revision},subject,'dot');
+  step=0;
+  assert.notEqual(renewed.lease_expires_at,original.lease_expires_at);
+  assert.equal(renewed.lease_expires_at,row(renewId).lease_deadline_at);
+  assertBoundary(renewId,'explicit protocol renewal with stalled clock');
 
   // Without a stall the two deadlines still agree, and one tick before the deadline the grant is live.
   store.submit(payload('no-stall'),{mode:'none'},null,'owner');
   store.claim('no-stall','worker','s3',1,null,'dot',null,lease);
-  elapsed+=Date.parse(row('no-stall').lease_deadline_at)-store.nowMs()-1;
-  assert.equal(store.leaseExpired(row('no-stall')),false,'one millisecond before the advertised deadline the grant is still live');
-  elapsed+=1;
-  assert.equal(store.leaseExpired(row('no-stall')),true,'at the advertised deadline the grant is expired');
+  assertBoundary('no-stall','short grant without stall');
   console.log('lease-deadline-clock-origin ok');
 } finally {
   try{store?.db.close();}catch{}
