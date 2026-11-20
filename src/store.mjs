@@ -301,11 +301,14 @@ export class Store {
     this.leaseBootId=options.bootId??(options.now?null:systemBootId());
     if(options.elapsedNow) {
       const epoch=wallNow(),elapsed=options.elapsedNow();
-      this.nowMs=()=>Math.floor(epoch+options.elapsedNow()-elapsed);
+      this.nowMs=()=>Math.floor(epoch+(options.elapsedNow()-elapsed));
+      this.monotonicForWallDeadline=deadline=>elapsed+(deadline-epoch);
     } else if(options.now) this.nowMs=options.now;
     else {
       const epoch=Date.now(),elapsed=process.hrtime.bigint();
       this.nowMs=()=>Math.floor(epoch+Number(process.hrtime.bigint()-elapsed)/1e6);
+      // The wall clock advertises whole milliseconds; retain sub-millisecond elapsed precision.
+      this.monotonicForWallDeadline=deadline=>Number(elapsed+BigInt(deadline-epoch)*1000000n)/1e6;
     }
     this.capacity=options.capacity??6;
     this.backgroundMaxInFlight=options.backgroundMaxInFlight??4;
@@ -1962,8 +1965,14 @@ export class Store {
     return result?{failure_type:result.type,failure_type_source:result.source,check_failed_observed:checkFailedObserved}:{failure_type:'unknown',failure_type_source:'unknown',check_failed_observed:checkFailedObserved};
   }
   claimLeaseMs(claim) { return claim.lease_ms??this.limits.leaseMs; }
-  // The monotonic deadline for a wall deadline already persisted: both are read from one instant, so a stall between two clock reads cannot make the enforced deadline later than the advertised one.
-  monotonicDeadlineFor(wallDeadlineMs) { return this.leaseBootId?this.monotonicNow()+(wallDeadlineMs-this.nowMs()):null; }
+  // Invert the logical wall clock's origin without taking another clock sample.
+  // A caller supplying only a wall clock has no shared origin; retain its existing fallback.
+  monotonicDeadlineFor(wallDeadlineMs) {
+    if(!this.leaseBootId) return null;
+    return this.monotonicForWallDeadline
+      ? this.monotonicForWallDeadline(wallDeadlineMs)
+      : this.monotonicNow()+(wallDeadlineMs-this.nowMs());
+  }
   leaseMonotonicDeadline(claim) {
     const deadline=Number(claim.lease_deadline_monotonic_ms);
     return this.leaseBootId&&claim.lease_boot_id===this.leaseBootId&&Number.isFinite(deadline)?deadline:null;
