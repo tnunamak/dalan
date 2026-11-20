@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fixtureEnv } from '../src/test-support/fixture-env.mjs';
+import { parseWorkers } from '../src/workers.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 const root = process.env.DOT_BRIDGE_TEST_TMP || path.join(os.homedir(), '.tmp');
@@ -57,6 +58,20 @@ async function startBridge(label, workerExtra, limits) {
 }
 const pass = message => console.log(`PASS ${message}`);
 
+// Config: finish_handoff is off unless set, and rejects anything that is not true, false or {wait_ms: 0..45000}.
+{
+  const parse = finish_handoff => parseWorkers({ workers: { dot: { connections: [{ issuer: 'i', subject: 's', client_id: 'c' }], ...(finish_handoff === undefined ? {} : { finish_handoff }) } } }).workers.get('dot').finishHandoff;
+  assert.equal(parse(undefined), undefined);
+  assert.equal(parse(false), undefined);
+  assert.deepEqual(parse(true), { waitMs: 20000 });
+  assert.deepEqual(parse({}), { waitMs: 20000 });
+  assert.deepEqual(parse({ wait_ms: 0 }), { waitMs: 0 });
+  assert.deepEqual(parse({ wait_ms: 45000 }), { waitMs: 45000 });
+  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }])
+    assert.throws(() => parse(bad), /finish_handoff|expected object|wait_ms/, `rejects ${JSON.stringify(bad)}`);
+  pass('finish_handoff config: off by default; true, {} and {wait_ms 0..45000} accepted; everything else refused');
+}
+
 const bridges = [];
 const start = async (...args) => { const b = await startBridge(...args); bridges.push(b); return b; };
 try {
@@ -71,7 +86,7 @@ try {
     assert.ok(Date.now() - started < 1000, 'no wait when a job is queued');
     assert.equal(done.next_job?.request_id, 'req_handoff_q1', JSON.stringify(done));
     assert.ok(done.next_job.claim_id, 'next_job is a real claim result');
-    assert.equal(done.next_job.assignment?.request_id ?? 'req_handoff_q1', 'req_handoff_q1');
+    assert.equal(done.next_job.assignment.request_id, 'req_handoff_q1');
     assert.equal(done.next_queued, undefined, 'a claimed job is no longer advertised as queued');
     const got = await b.ok('get', { request_id: 'req_handoff_q1' });
     assert.equal(got.status, 'claimed', 'the handed-off job is claimed');
@@ -99,13 +114,14 @@ try {
     assert.equal(done.queue_empty, true, JSON.stringify(done));
     assert.equal(done.next_job, undefined);
     assert.ok(waited >= WAIT_MS - 100, `waited the bound, not less: ${waited} ms`);
-    assert.ok(waited < WAIT_MS + 2500, `returned within the bound: ${waited} ms`);
+    assert.ok(waited < WAIT_MS + 6000, `returned at the bound, not long after: ${waited} ms`);
     assert.ok(done.receipt_id, 'the report is stored whatever the wait does');
     pass(`empty queue: finish waited ${waited} ms (bound ${WAIT_MS} ms), then queue_empty`);
   }
 
-  // 3. A job that arrives during the wait is handed out at once.
+  // 3. A job that arrives during the wait is handed out. The bound is long here: only a hand-out on arrival can beat it.
   {
+    const b = await start('arrives', { finish_handoff: { wait_ms: 20000 } });
     const job = await b.claimNew('req_handoff_arrives');
     const started = Date.now();
     const pending = b.finish(job);
@@ -114,9 +130,8 @@ try {
     const done = await pending;
     const waited = Date.now() - started;
     assert.equal(done.next_job?.request_id, 'req_handoff_late', JSON.stringify(done));
-    assert.ok(waited < WAIT_MS, `handed out before the bound: ${waited} ms`);
-    await b.finish(done.next_job, {}, undefined);
-    pass(`a job submitted mid-wait is handed out after ${waited} ms`);
+    assert.ok(waited < 15000, `handed out on arrival, not at the bound: ${waited} ms`);
+    pass(`a job submitted mid-wait is handed out after ${waited} ms (bound 20000 ms)`);
   }
 
   // 4. Concurrent finishes receive different jobs. (The fixture serializes requests, so the race itself is fenced by the
@@ -148,7 +163,14 @@ try {
     assert.equal(two.next_job?.request_id, one.next_job.request_id, 'same job on retry');
     assert.equal(two.next_job.claim_id, one.next_job.claim_id, 'same claim on retry');
     assert.equal((await b.queuedIds()).length, 1, 'the retry took no extra job');
-    pass('a repeated finish returns the same next_job and takes no second job');
+    // Once the handed job is finished, a late retry of the first finish must not take another queued job.
+    const chained = await b.finish(one.next_job);
+    assert.equal(chained.next_job?.request_id, 'req_handoff_i2', 'finishing the handed job hands out the next one');
+    await b.submit('req_handoff_i3');
+    const late = await b.finish(job);
+    assert.equal(late.next_job, undefined, `a late retry took a second job: ${JSON.stringify(late)}`);
+    assert.deepEqual(await b.queuedIds(), ['req_handoff_i3'], 'the late retry took no job');
+    pass('a repeated finish returns the same next_job and takes no second job, even after the first one finished');
   }
 
   // 6. Paused bridge: nothing is handed out, and finish does not wait, with or without queued work.

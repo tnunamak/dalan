@@ -25,7 +25,7 @@ function parseFinishHandoff(value,name) {
   if(value===undefined||value===false) return null;
   if(value===true) return {waitMs:FINISH_HANDOFF_WAIT_MS};
   object(value,['wait_ms']);
-  const waitMs=value.wait_ms??FINISH_HANDOFF_WAIT_MS;
+  const waitMs=value.wait_ms===undefined?FINISH_HANDOFF_WAIT_MS:value.wait_ms;
   if(!Number.isInteger(waitMs)||waitMs<0||waitMs>FINISH_HANDOFF_MAX_WAIT_MS) fail(`${name}.finish_handoff.wait_ms must be an integer from 0 to ${FINISH_HANDOFF_MAX_WAIT_MS}`);
   return {waitMs};
 }
