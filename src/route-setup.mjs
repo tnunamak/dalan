@@ -119,7 +119,12 @@ async function drive({ gozar, ref, view, say, ask, askSecret, handoff, cancellin
       finally {
         // Delete unused intake, including refusals. Gozar protects the handles already referenced by the operation or configuration.
         try { await gozar.discardSecret({ home: ref.home, handle: stored.handle }); }
-        catch (error) { if (error.code !== 'secret_in_use') throw error; }
+        catch (error) {
+          if (error?.code !== 'secret_in_use') {
+            // Disposal is separate from the step result. Do not expose backend details or claim deletion.
+            try { say('Unused setup input cleanup is unconfirmed.'); } catch { /* Reporting cannot replace the step outcome. */ }
+          }
+        }
       }
     } else if (action.kind === 'provide-value') {
       const options = action.step.options;

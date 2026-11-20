@@ -144,7 +144,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     if (routeDied) return;
     routeDied = true;
     routeLossReason = reason;
-    fs.rmSync(path.join(home, 'resource-url'), { force: true });
+    if (reason !== 'handoff_failed') fs.rmSync(path.join(home, 'resource-url'), { force: true });
     resolveRouteGone();
   };
   // The trial's lifetime is a real timer, not a check in the polling loop, so it also ends an unanswered question or a wait after a result.
@@ -291,6 +291,10 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       throw error;
     }
     if (route.exited) route.exited.then(() => markRouteLost(route.endedBecause() ?? 'route_lost'));
+    const checkHandoff = () => {
+      const error = route.handoffFailure?.();
+      if (error) { error.tryKind = 'handoff'; throw error; }
+    };
     const origin = route.origin;
     if (storedOrigin && storedOrigin !== origin) {
       const error = new Error(`this home was set up for ${storedOrigin}, but the new public address is ${origin}. A new address is a new sign-in identity. Start a fresh trial instead with: ${retry().trim()}`);
@@ -345,9 +349,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       identityWatcher.lost.then(loss => markRouteLost(loss.reason));
       const watcherReady = await identityWatcher.ready;
       if (!watcherReady) markRouteLost('identity_changed');
+      checkHandoff();
       if (routeDied) throw Object.assign(new Error('The temporary demo link changed or stopped responding during startup; the trial is stopping.'), { tryKind: 'route_lost' });
     }
 
+    checkHandoff();
     if (routeDied) throw Object.assign(new Error('Gozar withdrew the public route during startup.'), { tryKind: 'route_lost' });
     await dalan(['connect', 'start', '--worker', HOSTED_WORKER]);
     const requestId = `req_${randomUUID()}`;
@@ -370,6 +376,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       await Promise.race([publication.promise, untilStopRequested(), proofTimedOut]);
     }
     if (stopRequested()) return;
+    checkHandoff();
     if (routeDied) throw Object.assign(new Error('Gozar withdrew the public route during startup.'), { tryKind: 'route_lost' });
     if (!sdkPublished || trialOver()) throw Object.assign(new Error('Gozar did not verify the same public address before the handoff deadline.'), { tryKind: 'route' });
     handoffEnabled = true;
@@ -464,6 +471,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
       if (retryNow) { retryNow = false; continue; }
       await Promise.race([clock.sleep(POLL_MS), untilStopRequested()]);
     }
+    if (!stopRequested()) checkHandoff();
     if (routeDied && !stopRequested()) {
       const changed = routeLossReason === 'rotated' || routeLossReason === 'identity_changed';
       const error = new Error(`The temporary demo link ${changed ? 'changed its address' : 'stopped responding'}. The connector cannot use this URL; the trial is stopping. Its saved reports stay in the trial Home.`);
@@ -479,7 +487,8 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     clearTimeout(expireTimer);
     await identityWatcher?.stop();
     // Withdraw handoff, revoke the trial's app credentials, then close the retained route.
-    fs.rmSync(path.join(home, 'resource-url'), { force: true });
+    try { fs.rmSync(path.join(home, 'resource-url'), { force: true }); }
+    catch (error) { if (!route?.handoffFailure?.()) throw error; }
     if (errorContext.started && !exited) await dalan(['connect', 'revoke', HOSTED_WORKER], { abortable: false }).catch(() => {});
     if (route) routeStopped = await route.stop().catch(error => ({ removed: false, detail: safeDiagnostic(error.message, 240) }));
     else if (dispatchedHere && routeRef && !routeNotDispatched(routeRef)) routeStopped = await closeExactRoute(gozar, routeRef);

@@ -139,6 +139,7 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `scripts/regrant-effects-e2e.mjs` | 12 |
 | `scripts/regrant-waiter-fencing-test.mjs` | 32 |
 | `scripts/remote-loopback-callback-test.mjs` | 47, 56 |
+| `scripts/route-setup-discard-test.mjs` | 10 |
 | `scripts/sandbox-probe-e2e.mjs` | 27 |
 | `scripts/sandbox-source-exemption-test.mjs` | 10 |
 | `scripts/schema-fixture-guard-test.mjs` | 10 |
@@ -171,6 +172,7 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `scripts/work-order-test.mjs` | 6 |
 | `scripts/worker-bridge-setup.mjs` | 89, 105, 228, 231, 758 |
 | `scripts/worker-isolation-test.mjs` | 22 |
+| `scripts/worker-route-reference-test.mjs` | 54 |
 | `scripts/worker-repo-cache-test.mjs` | 7 |
 | `scripts/worker-repo-policy-e2e.mjs` | 14 |
 | `scripts/workspace-disk-test.mjs` | 8 |

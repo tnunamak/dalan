@@ -278,7 +278,7 @@ export async function closeExactRoute(gozar, { home, operationId, handle }) {
 export function monitorRoute({ gozar, home, view, candidate, remove = true }) {
   const { handle, origin } = view;
   const watch = new AbortController();
-  let reason = null, resolveEnded;
+  let reason = null, resolveEnded, handoffFailure = null;
   const exited = new Promise(resolve => { resolveEnded = resolve; });
   const end = why => { if (reason === null) reason = why; resolveEnded(reason); };
   let watcher;
@@ -290,14 +290,22 @@ export function monitorRoute({ gozar, home, view, candidate, remove = true }) {
         const ending = routeEnding(route, type, origin);
         if (ending) { end(ending); return; }
         const next = isPublished(route);
-        if (published !== next) { published = next; onProof(next); }
+        if (published !== next) {
+          published = next;
+          try { await onProof(next); }
+          catch (cause) {
+            handoffFailure = new Error('Could not update the trial connection handoff.', { cause });
+            end('handoff_failed');
+            return;
+          }
+        }
       }
       if (!watch.signal.aborted) end('lost');
     } catch { if (!watch.signal.aborted) end('lost'); }
   })();
   let stopped = null;
   return {
-    origin, handle, view, candidate, exited, watchPublished, endedBecause: () => reason,
+    origin, handle, view, candidate, exited, watchPublished, endedBecause: () => reason, handoffFailure: () => handoffFailure,
     stop() {
       stopped ??= (async () => {
         watch.abort();

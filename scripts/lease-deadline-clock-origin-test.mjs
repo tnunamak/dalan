@@ -42,9 +42,11 @@ try {
   store.submit(payload('activity-stall'),{mode:'none'},null,'owner');
   step=0;
   store.claim('activity-stall','worker','s2',1,null,'dot',null,lease);
+  const activityDeadlineBefore=Date.parse(row('activity-stall').lease_deadline_at);
   step=3;
   store.touchClaim('activity-stall',row('activity-stall').claim_id,'s2','dot');
   step=0;
+  assert.ok(Date.parse(row('activity-stall').lease_deadline_at)>activityDeadlineBefore,'legacy activity advances the persisted deadline');
   assertBoundary('activity-stall','legacy touch with stalled clock');
 
   const renewId='renew-stall', subject='s-renew';
