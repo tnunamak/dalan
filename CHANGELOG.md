@@ -4,6 +4,8 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **`finish` can hand a worker its next job (opt in per worker).** A worker whose session ends after each `finish` leaves work queued. Set `"finish_handoff": true` (or `{"wait_ms": N}`, 0 to 45000, default 20000) for the worker in `workers.json`. After the report is stored, the `finish` reply carries `next_job`: the oldest queued job, claimed through the normal `claim` path with a 10-minute lease. If nothing is queued, `finish` waits up to `wait_ms` for work, then returns `queue_empty`. A paused bridge, a closed client connection or a claim error ends the wait with the old `next_queued` hint, and the stored report is never affected. A repeated `finish` returns the same `next_job`. Off by default.
+
 ## 0.8.1
 
 - Cap claim leases per worker (`worker_claim_lease_ms` in limits.json) without changing the MCP catalog, so a worker whose sessions end early (Muse) frees its slot sooner (#44).

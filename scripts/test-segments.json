@@ -371,6 +371,7 @@
   "node scripts/t3-top-level-tools-test.mjs",
   "node scripts/t3-top-level-tools-noref-test.mjs",
   "node scripts/finish-keeps-result-test.mjs",
+  "node scripts/finish-handoff-test.mjs",
   "node scripts/finish-advertised-schema-test.mjs",
   "node scripts/builtin-as-complete-crash-test.mjs",
   "node scripts/public-scan.mjs",
