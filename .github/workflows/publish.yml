@@ -42,7 +42,12 @@ jobs:
             exit 1
           fi
       - run: npm ci
-      - run: npm run test:fast
+      # `npm run test:fast` is the whole 388-segment suite (over an hour), which
+      # CONTRIBUTING.md runs locally before every merge. A tag marks a merged
+      # commit, so this gate runs the release checks: the public-content scan and
+      # the package-contents and release-metadata tests.
+      - run: npm run scan:public
+      - run: node --test scripts/package-contents-test.mjs scripts/release-metadata-test.mjs
       - name: Publish
         if: github.ref_type == 'tag'
         run: npm publish --provenance --access public
