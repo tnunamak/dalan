@@ -634,8 +634,18 @@ const nap=(ms,signal)=>new Promise(resolve=>{
   const timer=setTimeout(done,ms);
   signal?.addEventListener('abort',done,{once:true});
 });
+// One handoff per finished claim at a time: a retried finish that arrives while the first is still waiting or
+// claiming queues behind it, then finds the first one's grant instead of taking a second job.
+const handoffsInFlight=new Map();
+async function handOffNextJob(args) {
+  const key=`${args.principal.worker}\0${args.principal.subject}\0${args.claimId}`;
+  while(handoffsInFlight.has(key)) await handoffsInFlight.get(key);
+  const run=runHandoff(args).finally(()=>handoffsInFlight.delete(key));
+  handoffsInFlight.set(key,run);
+  return run;
+}
 // Returns {job}, {empty,waited_ms} or {} (no handoff: the caller keeps the old hint). Never throws: the finish is stored.
-async function handOffNextJob({principal,requestId,claimId,waitMs,signal}) {
+async function runHandoff({principal,requestId,claimId,waitMs,signal}) {
   try {
     const {worker,subject}=principal;
     const held=store.db.prepare('SELECT claimant FROM claims WHERE request_id=? AND claim_id=?').get(requestId,claimId);
@@ -652,11 +662,13 @@ async function handOffNextJob({principal,requestId,claimId,waitMs,signal}) {
     const prior=store.db.prepare("SELECT c.request_id,c.state,a.status FROM claims c JOIN assignments a USING(request_id) WHERE c.worker=? AND c.subject=? AND c.acquisition_id=?").get(worker,subject,acquisition_id);
     if(prior) { const job=prior.state==='active'&&prior.status==='claimed'?await claim(prior.request_id):null; return job?{job}:{}; }
     const started=Date.now(),tried=new Set();
+    let sawQueued=false;
     for(;;) {
       if(signal?.aborted||store.paused()) return {};
       const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
       if(free_lanes<=0) return {};
       if(store.hasQueuedFor([worker])) {
+        sawQueued=true;
         const pick=()=>(store.nextQueued(free_lanes+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id));
         // A lost race or an unclaimable head moves on to the next job; an unclaimable queue ends in the old hint.
         for(let fresh=pick();fresh.length&&tried.size<HANDOFF_MAX_ATTEMPTS;fresh=pick()) {
@@ -667,7 +679,7 @@ async function handOffNextJob({principal,requestId,claimId,waitMs,signal}) {
         if(tried.size) return {};
       }
       const left=started+waitMs-Date.now();
-      if(left<=0) return {empty:true,waited_ms:Date.now()-started};
+      if(left<=0) return sawQueued?{}:{empty:true,waited_ms:Date.now()-started};
       await nap(Math.min(HANDOFF_POLL_MS,left),signal);
     }
   } catch(error) { log({kind:'finish_handoff_error',request_id:requestId,reason:redactNote(String(error?.message??error))}); return {}; }
@@ -678,7 +690,7 @@ async function finishReply(reply,{principal,requestId,claimId,signal}) {
     const {job,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,signal});
     log({kind:'finish_handoff',request_id:requestId,next_request_id:job?.request_id??null,result:job?'claimed':empty?'empty':'none',waited_ms:waited_ms??0});
     const {next_queued,next_action,...rest}=reply;
-    if(job) return {...rest,next_job:job,guidance:`Your next job ${job.request_id} is already claimed for you; its claim result is in next_job. Work on it now, in this turn, and call finish for it. Its lease is ${Math.round(Math.min(HANDOFF_LEASE_MS,store.limits.leaseMs)/60000)} minutes and every tool call on it renews the lease.`};
+    if(job) return {...rest,next_job:job,guidance:`Your next job ${job.request_id} is already claimed for you; its claim result is in next_job. Work on it now, in this turn, and call finish for it. ${job.lease_expires_at?`Its lease ends at ${job.lease_expires_at}`:'Its lease is short'}; every tool call on it renews the lease.`};
     if(empty) return {...rest,queue_empty:true,waited_ms,guidance:waited_ms>=1000?`No job was queued for ${Math.round(waited_ms/1000)} seconds. Nothing is claimed for you. End this run; a new assignment wakes you.`:'No job is queued. Nothing is claimed for you. End this run; a new assignment wakes you.'};
   }
   return reply.next_queued?.length&&!store.paused()?{...reply,guidance:finishNextGuidance(reply.next_queued)}:reply;

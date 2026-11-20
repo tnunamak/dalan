@@ -173,6 +173,22 @@ try {
     pass('a repeated finish returns the same next_job and takes no second job, even after the first one finished');
   }
 
+  // 5b. A retry that arrives while the first finish is still waiting gets the first one's job, not a second job.
+  {
+    const b = await start('retry-wait', { finish_handoff: { wait_ms: 20000 } });
+    const job = await b.claimNew('req_handoff_rw');
+    const first = b.finish(job);
+    await sleep(300);
+    const retry = b.finish(job);
+    await sleep(300);
+    for (const id of ['req_handoff_rw1', 'req_handoff_rw2']) await b.submit(id);
+    const [one, two] = await Promise.all([first, retry]);
+    assert.ok(one.next_job && two.next_job, `both replies carry a job: ${JSON.stringify([one, two])}`);
+    assert.equal(two.next_job.claim_id, one.next_job.claim_id, 'the retry got the first finish\'s claim');
+    assert.equal((await b.queuedIds()).length, 1, 'only one job was taken');
+    pass('a finish retried during the wait gets the same job; no second job is taken');
+  }
+
   // 6. Paused bridge: nothing is handed out, and finish does not wait, with or without queued work.
   {
     const b = await start('paused', { finish_handoff: { wait_ms: WAIT_MS } }, { max_claimed_outer_assignments: 2 });
