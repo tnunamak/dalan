@@ -856,37 +856,41 @@ function readWorkerRouteReference(home, file) {
   return ref;
 }
 
-async function publishWorkerRoute({ o, env, gozar, url, secret, urlFile, configDir, log, consent = routeConsent(log) }) {
-  try {
-    const reference = path.join(configDir, 'route-reference.json');
-    let ref = readWorkerRouteReference(o.home, reference);
-    const home = ref?.home ?? gozarHomeFor(env);
-    const custody = ref?.custody ?? routeCustodyPath({ HOME: os.homedir(), ...env }, home);
-    const target = o.lan ? `${o.lan.address}:${o.lan.port}` : `127.0.0.1:${o.port}`;
-    const external = !ref?.handle || ref.handle.kind === 'external';
-    const remember = value => {
-      const next = { ...value, custody };
-      writeAtomic(reference, JSON.stringify(next));
-      ref = next;
-    };
-    gozar ??= await resolveGozar({ env, home, custody });
-    const observed = ref && await observeRetainedRoute(gozar, ref);
-    const view = observed?.state === 'recorded' ? observed.view : await ensureDurableRoute({
-      gozar, query: buildQuery({ home, origin: url, target, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${o.worker}` } }),
-      consent, remember, recovery: ref, external: true,
-    });
-    if (!ref?.handle) remember({ home, operationId: view.operationId, handle: view.handle });
-    if (external) requireExternalRoute(view, url, target);
-    if (!isPublished(view) || view.published !== url) {
-      const error = routeFailure(view, `Gozar could not verify the public route. The service and home were left in place. Retry the check with: ${publicRetryCommand(o, url)}. To remove this install: ${recoveryCommand(o)}`);
-      if (error.nextAction) log(error.nextAction.instructions ?? error.nextAction.label);
-      throw error;
-    }
-    writeAtomic(urlFile, `${view.published}/${secret}/mcp\n`);
-  } catch (error) {
-    fs.rmSync(urlFile, { force: true });
+export function workerRouteReference(home, retained, view, custody) {
+  const operationId = retained?.operationId ?? view.operationId;
+  return {
+    home, handle: view.handle, custody,
+    ...(typeof operationId === 'string' && operationId.length ? { operationId } : {}),
+  };
+}
+
+export async function publishWorkerRoute({ o, env, gozar, url, secret, urlFile, configDir, log, consent = routeConsent(log), readReference = readWorkerRouteReference, write = writeAtomic }) {
+  const reference = path.join(configDir, 'route-reference.json');
+  let ref = readReference(o.home, reference);
+  const home = ref?.home ?? gozarHomeFor(env);
+  const custody = ref?.custody ?? routeCustodyPath({ HOME: os.homedir(), ...env }, home);
+  const target = o.lan ? `${o.lan.address}:${o.lan.port}` : `127.0.0.1:${o.port}`;
+  const external = !ref?.handle || ref.handle.kind === 'external';
+  const remember = value => {
+    const next = { ...value, custody };
+    write(reference, JSON.stringify(next));
+    ref = next;
+  };
+  gozar ??= await resolveGozar({ env, home, custody });
+  const observed = ref && await observeRetainedRoute(gozar, ref);
+  const view = observed?.state === 'recorded' ? observed.view : await ensureDurableRoute({
+    gozar, query: buildQuery({ home, origin: url, target, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${o.worker}` } }),
+    consent, remember, recovery: ref, external: true,
+  });
+  if (!ref?.handle || (!ref.operationId && view.operationId)) remember(workerRouteReference(home, ref, view, custody));
+  if (external) requireExternalRoute(view, url, target);
+  if (!isPublished(view) || view.published !== url) {
+    const error = routeFailure(view, `Gozar could not verify the public route. The service and home were left in place. Retry the check with: ${publicRetryCommand(o, url)}. To remove this install: ${recoveryCommand(o)}`);
+    if (error.nextAction) log(error.nextAction.instructions ?? error.nextAction.label);
     throw error;
   }
+  // This is the final atomic write; failures before it own no published URL file.
+  write(urlFile, `${view.published}/${secret}/mcp\n`);
   log(`Resource URL file (private, mode 0600): ${urlFile}`);
 }
 
@@ -912,7 +916,7 @@ async function allocateRoute(parsed, seams) {
   if (!view.origin) throw routeFailure(view, 'Gozar has not supplied the bridge address.');
   parsed.publicUrl = view.origin;
   parsed.routeView = view;
-  parsed.routeRef = { home, handle: view.handle, custody: routeCustodyPath({ HOME: os.homedir(), ...env }, home) };
+  parsed.routeRef = workerRouteReference(home, null, view, routeCustodyPath({ HOME: os.homedir(), ...env }, home));
   return gozar;
 }
 
