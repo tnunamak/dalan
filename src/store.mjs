@@ -111,7 +111,7 @@ const storedMeta=(meta,legacy)=>({...meta,objective_key:storedObjectiveKey(meta.
 function submitIntentDigest(identity,delivery,environmentId,review,priority,meta,targetWorker,execution,requiredCapabilities,destinationRevision=null,legacyFixNames=true) {
   return hash(JSON.stringify(canonical({payload:identity,delivery,environmentId:environmentId??'',review:!!review,priority,meta:storedMeta(normalizeMeta(meta),legacyFixNames),targetWorker,execution,requiredCapabilities,...(destinationRevision===null?{}:{destination_revision:destinationRevision})})));
 }
-const defaultRedeliveryLimits={intervalMs:600000,maxCount:3,silenceMs:1200000,claimIdleWarningMs:900000,leaseMs:3600000,laneCapacity:6,rewakeMs:90000,rewakeWindowMs:7200000,rewakeStaleMs:1200000,breakSilenceMs:1200000,breakProbeMs:1800000,maxClaimsPerHour:90,maxToolCallsPerHour:1000,maxToolCallsPer24h:10000,maxResponseBytesPerHour:8000000,maxResponseBytesPer24h:100000000};
+const defaultRedeliveryLimits={intervalMs:600000,maxCount:3,silenceMs:1200000,claimIdleWarningMs:900000,leaseMs:3600000,workerClaimLeaseMs:{},laneCapacity:6,rewakeMs:90000,rewakeWindowMs:7200000,rewakeStaleMs:1200000,breakSilenceMs:1200000,breakProbeMs:1800000,maxClaimsPerHour:90,maxToolCallsPerHour:1000,maxToolCallsPer24h:10000,maxResponseBytesPerHour:8000000,maxResponseBytesPer24h:100000000};
 const HOUR=3600000, iso=ms=>new Date(ms).toISOString();
 export const QUEUE_WINDOW=Object.freeze({minSamples:5,factor:3,minMs:15*60000,maxMs:12*HOUR});
 const queueKindSql=canonicalKindSql("COALESCE(a.task_kind,json_extract(a.payload,'$.task_kind'),CASE WHEN a.review=1 THEN 'review' ELSE json_extract(a.payload,'$.execution_scope') END,'unknown')");
@@ -166,6 +166,10 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   const leaseMs=leaseKey?value[leaseKey]:defaultRedeliveryLimits.leaseMs;
   if(!Number.isInteger(silenceMs)||silenceMs<60000||silenceMs>86400000) throw new Error('invalid pause_suspected_silence_ms');
   if(!Number.isInteger(leaseMs)||leaseMs<60000||leaseMs>604800000) throw new Error(`invalid ${leaseKey}`);
+  const workerClaimLeaseMs=value.worker_claim_lease_ms??{};
+  if(value.worker_claim_lease_ms===null||typeof workerClaimLeaseMs!=='object'||Array.isArray(workerClaimLeaseMs)||
+    Object.entries(workerClaimLeaseMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<60000||ms>604800000))
+    throw new Error('invalid worker_claim_lease_ms');
   // Denominator of utilization metrics: how many lanes the worker can work in parallel. Independent of the claim cap (max_claimed_outer_assignments).
   // worker_* limits keys are the current names; the dot_* names are read as aliases so existing files keep working.
   const laneCapacity=value.worker_lane_capacity??value.dot_lane_capacity??defaultRedeliveryLimits.laneCapacity;
@@ -197,7 +201,7 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(!Number.isInteger(maxResponseBytesPerHour)||maxResponseBytesPerHour<100000||maxResponseBytesPerHour>1000000000) throw new Error('invalid max_response_bytes_per_hour');
   const maxResponseBytesPer24h=value.max_response_bytes_per_24h??defaultRedeliveryLimits.maxResponseBytesPer24h;
   if(!Number.isInteger(maxResponseBytesPer24h)||maxResponseBytesPer24h<1000000||maxResponseBytesPer24h>10000000000) throw new Error('invalid max_response_bytes_per_24h');
-  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
+  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
 }
 
 // Gates that cap one rolling hour. They hold background work before agent-requested work (see rollingUsage).
@@ -1508,7 +1512,8 @@ export class Store {
     if(!ctx||typeof ctx.key!=='string'||!ctx.key||!protocolNat(ctx.revision)||typeof mutate!=='function')protocolError('command_context_required');
     if(ctx.epoch!==undefined&&ctx.epoch!==claim.epoch)protocolError('stale_authority');
     return this.protocolCommands().execute({job:id,subject,worker,claim:claimId,epoch:claim.epoch,
-      key:ctx.key,expectedRevision:ctx.revision,operation:ctx.operation,args:ctx.args},mutate);
+      key:ctx.key,expectedRevision:ctx.revision,operation:ctx.operation,args:ctx.args},mutate,
+      {leaseCapMs:this.workerClaimLeaseCap(worker)});
   }
   setClaimDeadlineInTransaction(id,leaseMs) {
     const activity=this.db.prepare('SELECT last_claim_activity_at FROM claims WHERE request_id=?').get(id)?.last_claim_activity_at;
@@ -1517,10 +1522,21 @@ export class Store {
     this.db.prepare('UPDATE claims SET lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=?')
       .run(iso(deadline),this.leaseBootId,this.monotonicDeadlineFor(deadline),id);
   }
+  workerClaimLeaseCap(worker) {
+    const caps=this.limits.workerClaimLeaseMs;
+    return caps&&Object.hasOwn(caps,worker)?caps[worker]:Infinity;
+  }
+  cappedClaimLeaseMs(leaseMs,worker) {
+    if(!Number.isInteger(leaseMs)||leaseMs<1||leaseMs>this.limits.leaseMs) throw new Error(`invalid lease_ms: must be an integer from 1 to ${this.limits.leaseMs}`);
+    return Math.min(leaseMs,this.workerClaimLeaseCap(worker));
+  }
   renewClaim(id,claimId,leaseMs,ctx,subject='local-principal',worker='dot',connectionId=null) {
+    if(!Number.isInteger(leaseMs)||leaseMs<1||leaseMs>this.limits.leaseMs)protocolError('invalid_lease');
+    const requestedLeaseMs=leaseMs;
+    leaseMs=Math.min(leaseMs,this.workerClaimLeaseCap(worker));
     return this.transaction(()=>{
       const receipt=this.protocolMutationInTransaction(id,claimId,subject,worker,
-      {...ctx,operation:'renew',args:{leaseMs}},({leaseUntil})=>{
+      {...ctx,operation:'renew',args:{leaseMs:requestedLeaseMs}},({leaseUntil})=>{
         this.db.prepare('UPDATE claims SET lease_ms=?,lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=? AND claim_id=?')
           .run(leaseMs,iso(leaseUntil),this.leaseBootId,this.monotonicDeadlineFor(leaseUntil),id,claimId);
         const claim=this.assertClaim(id,claimId,subject,worker);
@@ -1905,11 +1921,12 @@ export class Store {
     this.refreshClaimActivity(id,claimId);
   }
   refreshClaimActivity(id,claimId) {
-    const at=this.stamp(), claim=this.db.prepare('SELECT lease_ms FROM claims WHERE request_id=? AND claim_id=?').get(id,claimId);
-    const deadline=Date.parse(at)+(claim?.lease_ms??this.limits.leaseMs);
+    const at=this.stamp(), claim=this.db.prepare('SELECT lease_ms,worker FROM claims WHERE request_id=? AND claim_id=?').get(id,claimId);
+    const leaseMs=Math.min(claim?.lease_ms??this.limits.leaseMs,this.workerClaimLeaseCap(claim?.worker));
+    const deadline=Date.parse(at)+leaseMs;
     if(this.isProtocolJob(id)) this.db.prepare('UPDATE claims SET last_claim_activity_at=? WHERE request_id=? AND claim_id=?').run(at,id,claimId);
-    else this.db.prepare('UPDATE claims SET last_claim_activity_at=?,lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=? AND claim_id=?')
-      .run(at,iso(deadline),this.leaseBootId,this.monotonicDeadlineFor(deadline),id,claimId);
+    else this.db.prepare('UPDATE claims SET last_claim_activity_at=?,lease_ms=?,lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=? AND claim_id=?')
+      .run(at,leaseMs,iso(deadline),this.leaseBootId,this.monotonicDeadlineFor(deadline),id,claimId);
   }
   // The active, unexpired claim this worker holds under claimId, or null. A missing or expired claim is left to the caller's own error.
   liveHeldClaim(id,claimId,subject,worker) {
@@ -2494,7 +2511,7 @@ export class Store {
   }
   claimInTransaction(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,connectionId=null) {
     if(!this.db.isTransaction)protocolError('transaction_required');
-    if(!Number.isInteger(leaseMs)||leaseMs<1||leaseMs>this.limits.leaseMs) throw new Error(`invalid lease_ms: must be an integer from 1 to ${this.limits.leaseMs}`);
+    leaseMs=this.cappedClaimLeaseMs(leaseMs,worker);
     if(acquisitionId!==null&&(typeof acquisitionId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(acquisitionId))) throw new Error('invalid acquisition_id: use 1-128 letters, digits, underscores or hyphens');
     if(!this.mayAct(worker,id)) throw new Error('assignment not found');
     if (this.paused()) throw new Error(pausedClaimMessage);
