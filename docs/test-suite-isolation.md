@@ -44,7 +44,6 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | --- | --- |
 | `scripts/acp-prose-check-test.mjs` | 10, 109 |
 | `scripts/adapter-conformance-test.mjs` | 19, 20 |
-| `scripts/admin-socket-path-test.mjs` | 35 |
 | `scripts/admission-measure-test.mjs` | 8 |
 | `scripts/admission-measure.mjs` | 84 |
 | `scripts/answer-journal-e2e.mjs` | 20, 23 |
@@ -193,15 +192,15 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `src/prepared-node-modules.mjs` | 10 |
 | `src/projects.mjs` | 15, 90 |
 | `src/route-setting.mjs` | 14 |
-| `src/server.mjs` | 56 |
+| `src/server.mjs` | 57 |
 | `src/service-launchd.mjs` | 23 |
 | `src/service-update-gate.mjs` | 9 |
-| `src/service-update-runtime.mjs` | 249 |
+| `src/service-update-runtime.mjs` | 250 |
 | `src/service-update.mjs` | 118 |
 | `src/service.mjs` | 109, 347, 403 |
 | `src/store.mjs` | 149, 252, 253 |
 | `src/submission-policy.mjs` | 101 |
 | `src/t3-transport.mjs` | 30 |
-| `src/try-hosted.mjs` | 106 |
-| `src/try.mjs` | 55, 84, 273 |
+| `src/try-hosted.mjs` | 109 |
+| `src/try.mjs` | 55, 84, 271 |
 | `src/workers.mjs` | 170, 179 |

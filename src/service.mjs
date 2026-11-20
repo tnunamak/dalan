@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
 import { defaultPath } from './paths.mjs';
-import { socketPathLimit } from './admin-socket.mjs';
+import { adminSocketPath } from './admin-socket.mjs';
 import { initAsFiles, writeAtomic } from './as-files.mjs';
 import { parseWorkers } from './workers.mjs';
 import { loadCapacity } from './projects.mjs';
@@ -407,9 +407,6 @@ async function installServiceLocked(o, seams) {
   assertRealDirectoryPath(path.dirname(o.home), { owner: true });
   assertRealDirectoryPath(o.home, { owner: true });
   // A public route is allocated after the preflight checks pass. Later writes or startup can still fail.
-  const adminSocket = path.join(defaultPath(o.home, '.local/share/dot-bridge'), 'admin.sock');
-  const socketBytes = Buffer.byteLength(adminSocket), socketLimit = socketPathLimit(platform);
-  if (socketBytes > socketLimit) fail(`--home is too long: the bridge's admin socket ${adminSocket} would be ${socketBytes} bytes, and the limit on ${mac ? 'macOS' : 'Linux'} is ${socketLimit} bytes. Use a shorter --home.`);
   const saved = o.auto && o.route === undefined ? readRouteSetting(env) : null;
   const gozarHome = saved?.gozarHome ?? gozarHomeFor(env);
   const external = !o.auto;
@@ -555,7 +552,7 @@ async function installServiceLocked(o, seams) {
     if (needsEnrollmentRestart) runCommand('systemctl', ['--user', 'restart', `${name}.service`], { env, spawn });
   }
   const dataDir = defaultPath(o.home, '.local/share/dot-bridge');
-  const ready = await (seams.waitForSocket ?? socketIsReady)(path.join(dataDir, 'admin.sock'), seams.socketTimeoutMs ?? 30000);
+  const ready = await (seams.waitForSocket ?? socketIsReady)(adminSocketPath(dataDir), seams.socketTimeoutMs ?? 30000);
   if (!ready) fail(`Dalan did not start on its admin socket; the service and home remain for inspection: ${mac ? `tail ${path.join(o.home, 'logs', 'bridge.err.log')}` : `systemctl --user status ${name}.service`}`);
   let routeReply;
   const existingHandle = allocated ?? previous?.route_handle;

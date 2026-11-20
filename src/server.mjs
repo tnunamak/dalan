@@ -46,7 +46,7 @@ import { logShutdownSignals } from './shutdown-signal.mjs';
 import { ADVERTISED_SCOPES, legacyScopeNames, wireScope } from './scopes.mjs';
 import { acquireAsOwner, loadAsConfig, loadKeys } from './as-files.mjs';
 import { createSignal } from './signal.mjs';
-import { adminSocketPathError } from './admin-socket.mjs';
+import { adminSocketPathError, adminSocketPath, ensureAdminSocketDir } from './admin-socket.mjs';
 import { createToolRegistry, createT3PostHandler, RegistryError } from './tool-registry.mjs';
 import { createServiceVerifier } from '@tnunamak/gozar';
 import { acceptsMcpEventStream, beginMcpEventStream } from './mcp-sse.mjs';
@@ -58,7 +58,8 @@ const home = os.homedir();
 const configDir = defaultPath(home,'.config/dot-bridge');
 const dataDir = defaultPath(home,'.local/share/dot-bridge');
 const stateDir = defaultPath(home,'.local/state/dot-bridge');
-const socketPathError=adminSocketPathError(path.join(dataDir,'admin.sock'));
+const socket=adminSocketPath(dataDir);
+const socketPathError=adminSocketPathError(socket);
 if(socketPathError) throw socketPathError;
 const pathWarnings=rootWarnings(home); // Capture before startup creates any files.
 const loopback=readEnv('DALAN_LOOPBACK')==='1';
@@ -168,7 +169,6 @@ if(t3ToolsEnabled) await loadT3Audit();
 // A valid but unallocated ID preserves each tool's existing absent-request errors. Never accept it as an owner target.
 const absentId=`req_${randomUUID()}`;
 if(store.hasAssignment(absentId)) throw new Error('absent gate id collision');
-const socket = path.join(dataDir, 'admin.sock');
 const log = createRequestLog(path.join(stateDir, 'requests.jsonl'));
 logShutdownSignals(log);
 // The owner-side tool registry. It has no MCP surface here: changing it never changes tools/list.
@@ -1555,6 +1555,7 @@ function maintain() {
   } catch(error) { log({kind:'maintenance_error',reason:error.message}); }
 }
 const runDrain=createDrainRunner(drain,log);
+ensureAdminSocketDir(socket);
 try { fs.unlinkSync(socket); } catch(e) { if(e.code!=='ENOENT') throw e; }
 const adminListening=new Promise(resolve=>adminServer.listen(socket,()=>{fs.chmodSync(socket,0o600);console.log(`admin socket ${socket}`);resolve();}));
 // Built-in mode sits behind a tunnel on this computer: only loopback may reach the listener.

@@ -75,8 +75,6 @@ function ensureFreshHome(home) {
     fs.mkdirSync(absolute, { recursive: true, mode: 0o700 });
   }
   fs.chmodSync(absolute, 0o700);
-  const socket = defaultPath(absolute,'.local/share/dot-bridge/admin.sock');
-  if (Buffer.byteLength(socket) >= 104) fail('--home makes the macOS owner socket path too long; choose a shorter path');
   return absolute;
 }
 

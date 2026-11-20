@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { defaultPath } from './paths.mjs';
+import { adminSocketPath } from './admin-socket.mjs';
 import { initAsFiles } from './as-files.mjs';
 
 const PACKAGE = '@tnunamak/dalan';
@@ -163,7 +164,7 @@ function expectedProbe(home, receipt, repo) {
 }
 
 export async function probeService(home, _receipt, options = {}) {
-  const socketPath = defaultPath(home, '.local/share/dot-bridge', 'admin.sock');
+  const socketPath = adminSocketPath(defaultPath(home, '.local/share/dot-bridge'));
   const operator = fs.readFileSync(defaultPath(home, '.config/dot-bridge', 'operator.key'), 'utf8').trim();
   if (!operator || operator.length > 1024) fail('service operator key is invalid');
   const timeout = options.timeout ?? TIMEOUT;

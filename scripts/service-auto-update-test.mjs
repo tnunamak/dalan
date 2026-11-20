@@ -39,10 +39,10 @@ test('on/off persist the preference and control only this timer', async () => {
   const f = fixture(), calls = [];
   try {
     const spawn = (cmd, args) => { calls.push([cmd, ...args]); return { status: 0 }; };
-    await setAutoUpdate({ home: f.home, enabled: false }, { spawn });
+    await setAutoUpdate({ home: f.home, enabled: false }, { spawn, platform: 'linux' });
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json'))).auto_update, false);
     assert(calls.some(call => call.join(' ') === 'systemctl --user disable --now dalan-123-update.timer'));
-    await setAutoUpdate({ home: f.home, enabled: true }, { spawn });
+    await setAutoUpdate({ home: f.home, enabled: true }, { spawn, platform: 'linux' });
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json'))).auto_update, true);
     assert(calls.some(call => call.join(' ') === 'systemctl --user enable --now dalan-123-update.timer'));
     assert(!calls.some(call => call.includes('dalan-123.service')), 'preference changes do not restart bridge');
@@ -61,9 +61,9 @@ test('a killed updater releases the shared preference lock', { timeout: 10000 },
       child.stdout.once('data', resolve);
       child.once('exit', () => reject(new Error('lock holder exited before acquiring')));
     });
-    await assert.rejects(setAutoUpdate({ home: f.home, enabled: false }, { spawn: () => ({ status: 0 }) }), /already running/);
+    await assert.rejects(setAutoUpdate({ home: f.home, enabled: false }, { spawn: () => ({ status: 0 }), platform: 'linux' }), /already running/);
     child.kill('SIGKILL'); await exited;
-    await setAutoUpdate({ home: f.home, enabled: false }, { spawn: () => ({ status: 0 }) });
+    await setAutoUpdate({ home: f.home, enabled: false }, { spawn: () => ({ status: 0 }), platform: 'linux' });
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.config, 'service-install.json'))).auto_update, false);
   } finally { child.kill('SIGKILL'); await exited; fs.rmSync(f.root, { recursive: true, force: true }); }
 });

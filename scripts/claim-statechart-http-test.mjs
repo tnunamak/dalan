@@ -1,3 +1,4 @@
+import { adminSocketPath } from '../src/admin-socket.mjs';
 import assert from 'node:assert/strict';
 import {test,after} from 'node:test';
 import fs from 'node:fs';
@@ -71,7 +72,7 @@ async function fixture(t) {
     auth.upsert('AccessToken',token,{jti:token,kind:'AccessToken',accountId:'owner',clientId:c.client_id,grantId:c.grantId,aud:resource,scope:'dot-bridge.read dot-bridge.work',iat,exp:iat+3600},3600);
     return {...c,token};
   }
-  function admin(route,body) {return new Promise((resolve,reject)=>{const req=http.request({socketPath:path.join(data,'admin.sock'),path:route,method:'POST',headers:{'content-type':'application/json'}},res=>{let s='';res.on('data',b=>s+=b);res.on('error',reject);res.on('end',()=>{try{assert.equal(res.statusCode,200,'admin '+route+' HTTP '+res.statusCode);resolve(JSON.parse(s));}catch(error){reject(error);}});});req.on('error',reject);req.setTimeout(IO_MS,()=>req.destroy(new Error('admin '+route+' timed out')));const timer=setTimeout(()=>req.destroy(new Error('admin '+route+' deadline')),IO_MS);req.once('close',()=>clearTimeout(timer));req.end(JSON.stringify(body));});}
+  function admin(route,body) {return new Promise((resolve,reject)=>{const req=http.request({socketPath:adminSocketPath(data),path:route,method:'POST',headers:{'content-type':'application/json'}},res=>{let s='';res.on('data',b=>s+=b);res.on('error',reject);res.on('end',()=>{try{assert.equal(res.statusCode,200,'admin '+route+' HTTP '+res.statusCode);resolve(JSON.parse(s));}catch(error){reject(error);}});});req.on('error',reject);req.setTimeout(IO_MS,()=>req.destroy(new Error('admin '+route+' timed out')));const timer=setTimeout(()=>req.destroy(new Error('admin '+route+' deadline')),IO_MS);req.once('close',()=>clearTimeout(timer));req.end(JSON.stringify(body));});}
   // One MCP tool call. Never throws on a refusal: the result keeps the HTTP status, the JSON-RPC error and the tool error
   // apart, so a test cannot mistake HTTP 500 or an invalid token for a handled refusal.
   async function rpc(c,name,args={},{url=resource,token=c.token}={}) {

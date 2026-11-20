@@ -14,7 +14,7 @@ import { redactLogEntry } from './redaction.mjs';
 import { submissionLimits } from './submission-policy.mjs';
 import { readOrCreateSecret, ownerToken } from '../integrations/t3/acp-kit/src/capability.mjs';
 import { CONTINUE_PROMPT, promptText, unwrapUserRequest, isT3RuntimeBlock, parseIdentity } from '../integrations/t3/acp-kit/src/t3-envelope.mjs';
-import { adminSocketPathError } from './admin-socket.mjs';
+import { adminSocketPathError, adminSocketPath } from './admin-socket.mjs';
 
 // Shared with external ACP adapters: integrations/t3/acp-kit.
 export { readOrCreateSecret, ownerToken, CONTINUE_PROMPT, promptText, unwrapUserRequest, isT3RuntimeBlock };
@@ -25,7 +25,7 @@ const idPattern = /^[-\w]{8,128}$/;
 export function paths(env = process.env) {
   const home = os.homedir();
   return {
-    socket: env.DOT_ACP_SOCKET || defaultPath(home,'.local/share/dot-bridge/admin.sock'),
+    socket: env.DOT_ACP_SOCKET || adminSocketPath(defaultPath(home,'.local/share/dot-bridge')),
     secretFile: env.DOT_ACP_SECRET_FILE || defaultPath(home,'.config/dot-bridge/acp-secret'),
     stateDir: env.DOT_ACP_STATE_DIR || defaultPath(home,'.local/state/dot-bridge/acp'),
   };

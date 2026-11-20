@@ -12,6 +12,7 @@ import { waitForChildExit } from './child-exit.mjs';
 import { createLineMasker, safeDiagnostic } from './diagnostic.mjs';
 import { registerSecret } from './redaction.mjs';
 import { defaultPath } from './paths.mjs';
+import { adminSocketPath } from './admin-socket.mjs';
 import { PAIRING_MINUTES, writeAtomic } from './as-files.mjs';
 import { verifyPublicReady, watchPublicIdentity } from './try-exposure.mjs';
 import { RouteError, closeExactRoute, observeRetainedRoute, routeNotDispatched, monitorRoute, waitForPublication, resolveRouteWord, buildQuery, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError, gozarHomeFor, resolveGozar, startSessionRoute } from './gozar-routes.mjs';
@@ -125,7 +126,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   const leftovers = await sweepChildren({ registry }).catch(() => []);
   if (leftovers.length) out.write(`Ended ${leftovers.length} process${leftovers.length === 1 ? '' : 'es'} left by an earlier trial.\n`);
   // A home that already has a bridge or another trial's profile is never reused silently.
-  const adminSock = defaultPath(home, '.local/share/dot-bridge', 'admin.sock');
+  const adminSock = adminSocketPath(defaultPath(home, '.local/share/dot-bridge'));
   if (await socketAnswers(adminSock)) throw Object.assign(new Error('the bridge for this home is already running; stop it with Ctrl-C in its terminal first, or choose a new --home'), { tryKind: 'already_running' });
   let freshHome = true, storedOrigin = null;
   try { freshHome = !JSON.parse(fs.readFileSync(path.join(configDir, 'workers.json'), 'utf8')).workers?.[HOSTED_WORKER]; if (freshHome) throw new Error(`${home} holds another trial's worker profile; choose a new --home`); } catch (error) { if (error.code !== 'ENOENT') throw error; }

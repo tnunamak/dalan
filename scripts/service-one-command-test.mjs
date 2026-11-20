@@ -239,27 +239,17 @@ try {
       assert.equal(fs.existsSync(home), false, `${why}: no home is created`);
       assert.equal(fs.existsSync(unitDirOf(box)), false, `${why}: no unit file is written`);
     };
-    // The admin socket path must fit the platform limit (bytes, without the terminating NUL): exactly at the limit passes the check.
+    // A home whose standard admin socket path is over the platform limit is not refused: the socket gets a short path.
     for (const [platform, limit, name] of [['linux', 107, 'sl'], ['darwin', 103, 'sm']]) {
-      for (const extra of [0, 1]) {
+      for (const extra of [0, 1, 40]) {
         const box = seamsFor(`${name}${extra}`, platform);
         const suffix = Buffer.byteLength(path.join(box.userHome, '/.local/share/dalan/admin.sock'));
         const home = path.join(box.userHome, 'h'.repeat(limit + extra - suffix - 1));
         assert.equal(Buffer.byteLength(path.join(home, '.local/share/dalan/admin.sock')), limit + extra);
         const reached = new Error('the socket check passed');
         let ports = 0;
-        const attempt = installService(options(box, { home }), { ...box.seams, freePort: async () => { ports++; throw reached; } });
-        if (extra === 0) { await assert.rejects(attempt, error => error === reached); assert.equal(ports, 1); }
-        else {
-          await assert.rejects(attempt, error => {
-            assert.ok(error.message.includes(`would be ${limit + 1} bytes`), error.message);
-            assert.ok(error.message.includes(`limit on ${platform === 'darwin' ? 'macOS' : 'Linux'} is ${limit} bytes`), error.message);
-            assert.ok(error.message.includes('shorter --home'), error.message);
-            return true;
-          });
-          assert.equal(ports, 0, 'a home that is too long is refused before anything else');
-        }
-        untouched(box, home, `socket ${platform} +${extra}`);
+        await assert.rejects(installService(options(box, { home }), { ...box.seams, freePort: async () => { ports++; throw reached; } }), error => error === reached);
+        assert.equal(ports, 1, `socket ${platform} +${extra}: the home is accepted`);
       }
     }
     // An unreachable user systemd manager is named, with the command that shows why, before any route is allocated.

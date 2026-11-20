@@ -36,7 +36,7 @@ import { cliCommand } from '../src/cli-name.mjs';
 import { applyPatch, listPatchFiles, patchMatchesWorktree, worktreeRoot } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, ensureWorkerRelationship, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
-import { adminSocketPathError } from '../src/admin-socket.mjs';
+import { adminSocketPathError, adminSocketPath } from '../src/admin-socket.mjs';
 import { answerThroughJournal } from '../src/answer-journal.mjs';
 // An answer reply that takes longer than this counts as lost; the journaled envelope is sent again.
 const ANSWER_TIMEOUT_MS=30000;
@@ -48,7 +48,7 @@ console.error=(...parts)=>writeStderr(...parts.map(part=>typeof part==='string'?
 
 let endNote=null;
 const args = process.argv.slice(2), command = args.shift(), json = args.includes('--json');
-const home=os.homedir(), root=defaultPath(home,'.local/share/dot-bridge'), socket=path.join(root,'admin.sock'), receipts=path.join(root,'receipts');
+const home=os.homedir(), root=defaultPath(home,'.local/share/dot-bridge'), socket=adminSocketPath(root), receipts=path.join(root,'receipts');
 function missingProfileWarning(worker,policy) {
   if(policy?.source==='admitted-history')return `worker "${worker}" uses a persisted exact repository list; no identity profile was created`;
   return `worker "${worker}" has no workers.json; repository jobs are denied until an explicit repository allow-list is configured (docs/operations.md#legacy-repository-policy-migration)`;

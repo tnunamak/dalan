@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { defaultPath } from '../src/paths.mjs';
+import { adminSocketPath } from '../src/admin-socket.mjs';
 import { readEnv } from '../src/env.mjs';
 // One command that turns a fresh worker bridge into a durable service: a systemd user service on Linux, a launchd
 // LaunchAgent on macOS. Separate from scripts/live-trial/setup.mjs on purpose: that script starts a throwaway process
@@ -78,9 +79,8 @@ function parseOptions(argv, platform) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('--port N is required (1024-65535)');
   const node = stableNode(process.execPath);
   const repo = REPO.replace(/\/$/, '');
-  // Unix socket paths are limited (104 bytes on macOS, 108 on Linux); the owner socket lives under the bridge home.
-  const socketPath = defaultPath(home,'.local/share/dot-bridge/admin.sock');
-  if (Buffer.byteLength(socketPath) >= 104) fail(`--home is too long: the owner socket path would be ${Buffer.byteLength(socketPath)} bytes (limit 103); choose a shorter home`);
+  // Unix socket paths are limited (104 bytes on macOS, 108 on Linux); a long home gets a short socket path instead.
+  const socketPath = adminSocketPath(defaultPath(home,'.local/share/dot-bridge'));
   for (const [label, value] of [['--home', home], ['node path', node], ['repo path', repo]]) {
     if (!SAFE_PATH.test(value)) fail(`${label} contains a character that is not safe in a unit file: ${JSON.stringify(value)}`);
   }
