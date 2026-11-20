@@ -1,0 +1,48 @@
+name: Publish
+
+# Publishes to npm when a version tag is pushed. Authentication is npm trusted
+# publishing (OIDC): there is no NPM_TOKEN secret. The trusted publisher must be
+# configured once on npmjs.com for this workflow file (publish.yml).
+#
+# A pull request that edits this file runs the checks and tests but does not
+# publish: the tag check and publish steps run only for tag pushes.
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - .github/workflows/publish.yml
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@11
+      - run: npm --version
+      - name: Tag must equal v + package.json version
+        if: github.ref_type == 'tag'
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version ($expected)." >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run test:fast
+      - name: Publish
+        if: github.ref_type == 'tag'
+        run: npm publish --provenance --access public
