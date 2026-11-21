@@ -16,6 +16,8 @@ import { approvalFacts, approvalRecord, describeClient } from './client-approval
 export const SCOPES = ADVERTISED_SCOPES;
 export const ACCOUNT = 'owner';
 const ACCESS_TOKEN_TTL = 3600;
+// A consumed refresh token presented this soon after rotation is a concurrent holder, not a replay (Auth0 reuse interval, Okta grace period).
+const REUSE_WINDOW_MS = 10 * 60 * 1000;
 const OFF = Object.freeze({ enabled: false });
 const html = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 export { untrusted };
@@ -107,7 +109,8 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     scopes: [...ACCEPTED_SCOPES],
     pkce: { required: () => true }, // S256 is the only method the library supports
     ttl: { AuthorizationCode: 600, AccessToken: ACCESS_TOKEN_TTL, RefreshToken: 30 * 86400, Grant: 90 * 86400, Interaction: LIFETIMES.interaction, Session: LIFETIMES.session, IdToken: LIFETIMES.idToken, ClientCredentials: 600, DeviceCode: 600 },
-    rotateRefreshToken: true,
+    // A reuse inside the window answers with the current head and must not rotate it again.
+    rotateRefreshToken: async ctx => !ctx.dalanReuseHead,
     // A connection is the owner's approval, not a browser login: its tokens must not die with the pairing session.
     // oidc-provider's default binds them to the session unless the client asks for offline_access. Revocation stays per connection.
     expiresWithSession: async () => false,
@@ -171,7 +174,20 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
           const receipt = source.consumed && store.refreshReceipt(tokenValue);
           const retry = receipt && receipt.grant_id === source.grantId && receipt.value.clientId === clientId &&
             receipt.value.params === fingerprint && store.refreshValid(source.grantId, clientId, receipt.value.response.refresh_token);
-          if (source.consumed && !retry) return await handler(ctx);
+          if (source.consumed && !retry) {
+            // A concurrent holder of the same connection may present a token that was consumed moments ago. Inside the window,
+            // answer with a fresh access token and the current head, without rotating. Past it, the provider revokes the grant.
+            const age = now() - source.consumed * 1000;
+            const head = age <= REUSE_WINDOW_MS && source.clientId === clientId ? store.refreshHead(source.grantId) : undefined;
+            if (head && store.refreshValid(source.grantId, clientId, head) && source.exp * 1000 > Date.now()) {
+              ctx.dalanReuseHead = head;
+              ctx.oidc.params.refresh_token = head;
+              await handler(ctx);
+              log({ kind: 'as_refresh_reuse_tolerated', age_ms: age });
+              return;
+            }
+            return await handler(ctx);
+          }
           const exchange = { reads: [], writes: [], retryToken: retry ? tokenValue : undefined };
           try { await store.refreshExchange.run(exchange, () => handler(ctx)); }
           catch (error) {

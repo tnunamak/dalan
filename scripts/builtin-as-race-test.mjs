@@ -109,24 +109,47 @@ await check('R2', 'concurrent duplicate refresh returns one live successor', asy
   assert.deepEqual(results[0].body, results[1].body);
   assert.equal(await live(results[0].body.access_token), true);
 });
-await check('G2', 'grace is absolute and replay after expiry revokes', async () => {
+await check('G2', 'grace is absolute and replay after the reuse window revokes', async () => {
   const c = await connected('duet');
   const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
   const request = { grant_type: 'refresh_token', refresh_token: first.body.refresh_token };
   const rotated = await token(c.clientId, request); assert.equal(rotated.status, 200);
   offset = 4000; assert.equal((await token(c.clientId, request)).status, 200);
-  offset = 6000; const replay = await token(c.clientId, request); offset = 0;
+  offset = 11 * 60 * 1000; const replay = await token(c.clientId, request); offset = 0;
   assert.equal(replay.status, 400); assert.equal(replay.body.error, 'invalid_grant');
   assert.equal(await live(rotated.body.access_token), false);
 });
-await check('G3', 'ancestor reuse revokes after successor rotates', async () => {
+await check('G3', 'ancestor reuse inside the window returns the head; after the window it revokes', async () => {
   const c = await connected('duet');
   const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
   const request = { grant_type: 'refresh_token', refresh_token: first.body.refresh_token };
   const rotated = await token(c.clientId, request);
   const next = await token(c.clientId, { ...request, refresh_token: rotated.body.refresh_token }); assert.equal(next.status, 200);
-  assert.equal((await token(c.clientId, request)).status, 400);
+  offset = 60 * 1000;
+  const tolerated = await token(c.clientId, request); assert.equal(tolerated.status, 200);
+  assert.equal(tolerated.body.refresh_token, next.body.refresh_token);
+  assert.notEqual(tolerated.body.access_token, next.body.access_token);
+  assert.equal(await live(next.body.access_token), true); assert.equal(await live(tolerated.body.access_token), true);
+  offset = 11 * 60 * 1000;
+  assert.equal((await token(c.clientId, request)).status, 400); offset = 0;
   assert.equal(await live(next.body.access_token), false);
+});
+await check('G5', 'Muse pattern: a stale second holder gets the head, the grant stays live', async () => {
+  const c = await connected('duet');
+  const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
+  const t0 = first.body.refresh_token;
+  const h1 = await token(c.clientId, { grant_type: 'refresh_token', refresh_token: t0 }); assert.equal(h1.status, 200);
+  offset = 86 * 1000;
+  const h2 = await token(c.clientId, { grant_type: 'refresh_token', refresh_token: h1.body.refresh_token }); assert.equal(h2.status, 200);
+  offset = 124 * 1000;
+  const stale = await token(c.clientId, { grant_type: 'refresh_token', refresh_token: t0 });
+  assert.equal(stale.status, 200); assert.equal(stale.body.refresh_token, h2.body.refresh_token);
+  // The head still works and the tolerated reply did not rotate it.
+  const h3 = await token(c.clientId, { grant_type: 'refresh_token', refresh_token: h2.body.refresh_token }); offset = 0;
+  assert.equal(h3.status, 200);
+  assert.equal(await live(h3.body.access_token), true);
+  const row = JSON.stringify(as.store.db.prepare('SELECT * FROM refresh_heads').all());
+  assert.ok(!row.includes(h2.body.refresh_token) && !row.includes(h3.body.refresh_token));
 });
 await check('G4', 'receipt survives restart and contains no plaintext tokens', async () => {
   const c = await connected('duet');
@@ -139,7 +162,7 @@ await check('G4', 'receipt survives restart and contains no plaintext tokens', a
   as.close(); as = makeAs();
   const retry = await token(c.clientId, request); assert.equal(retry.status, 200); assert.deepEqual(retry.body, rotated.body);
 });
-await check('G5', 'failure before commit leaves original token usable', async () => {
+await check('G5b', 'failure before commit leaves original token usable', async () => {
   const c = await connected('duet');
   const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
   const request = { grant_type: 'refresh_token', refresh_token: first.body.refresh_token };
@@ -168,6 +191,8 @@ await check('G7', 'wrong client and changed parameters cannot receive a receipt'
     if (field === 'scope') changed = { ...request, scope: 'dot-bridge.read' };
     if (field === 'resource') changed = { ...request, resource: 'https://other.example/mcp' };
     const result = await token(other, changed);
+    // A narrowed scope inside the reuse window is a legitimate stale holder: it gets the head, never a wider token than it asked for.
+    if (field === 'scope') { assert.equal(result.status, 200); assert.equal(result.body.scope, 'dot-bridge.read'); continue; }
     assert.notEqual(result.status, 200, field);
     assert.notEqual(result.body.refresh_token, rotated.body.refresh_token, field);
   }

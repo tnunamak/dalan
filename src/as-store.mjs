@@ -55,6 +55,8 @@ export class AsStore {
       CREATE INDEX IF NOT EXISTS oidc_expiry ON oidc(expires_at) WHERE expires_at IS NOT NULL;
       CREATE TABLE IF NOT EXISTS refresh_receipts(
         grant_id TEXT PRIMARY KEY, token_id TEXT NOT NULL, deadline INTEGER NOT NULL, payload TEXT NOT NULL) WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS refresh_heads(
+        grant_id TEXT PRIMARY KEY, payload TEXT NOT NULL) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS static_clients(client_id TEXT PRIMARY KEY) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS connections(
         connection_id TEXT PRIMARY KEY, worker TEXT NOT NULL, grant_id TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL,
@@ -196,6 +198,11 @@ export class AsStore {
     if (!row || row.deadline <= this.now()) return undefined;
     return { ...row, value: JSON.parse(this.#open(row.payload, `refresh-receipt:${row.grant_id}`)) };
   }
+  // The grant's current head refresh token, sealed. Used only to answer a stale holder inside the reuse window.
+  refreshHead(grantId) {
+    const row = this.db.prepare('SELECT payload FROM refresh_heads WHERE grant_id=?').get(grantId);
+    return row ? this.#open(row.payload, `refresh-head:${grantId}`) : undefined;
+  }
   refreshValid(grantId, clientId, successor) {
     const connection = this.connectionByGrant(grantId);
     const grant = this.find('Grant', grantId);
@@ -226,6 +233,8 @@ export class AsStore {
       this.db.prepare('DELETE FROM refresh_receipts WHERE deadline<=? OR grant_id=?').run(this.now(), grantId);
       this.db.prepare('INSERT INTO refresh_receipts VALUES(?,?,?,?)').run(grantId, this.#id('RefreshToken', token), deadline,
         this.#seal(JSON.stringify({ clientId, params, response }), `refresh-receipt:${grantId}`));
+      this.db.prepare('INSERT INTO refresh_heads VALUES(?,?) ON CONFLICT(grant_id) DO UPDATE SET payload=excluded.payload')
+        .run(grantId, this.#seal(response.refresh_token, `refresh-head:${grantId}`));
     });
   }
 
@@ -268,6 +277,7 @@ export class AsStore {
   #revokeGrantRows(grantId, reason, now = this.now()) {
     this.db.prepare('DELETE FROM oidc WHERE grant_id=?').run(grantId);
     this.db.prepare("DELETE FROM oidc WHERE model='Grant' AND id=?").run(grantId);
+    this.db.prepare('DELETE FROM refresh_heads WHERE grant_id=?').run(grantId);
     this.db.prepare('UPDATE connections SET revoked_at=?,revoked_reason=? WHERE grant_id=? AND revoked_at IS NULL').run(now, reason, grantId);
   }
   // The one revocation path: tokens, codes and the Grant record go, and the connection row is marked. Idempotent.
@@ -311,6 +321,7 @@ export class AsStore {
   purge() {
     const now = this.now();
     this.db.prepare('DELETE FROM refresh_receipts WHERE deadline<=?').run(now);
+    this.db.prepare('DELETE FROM refresh_heads WHERE grant_id NOT IN (SELECT grant_id FROM connections WHERE revoked_at IS NULL)').run();
     const expired = this.db.prepare('DELETE FROM oidc WHERE expires_at IS NOT NULL AND expires_at<=?').run(now).changes;
     // Registered clients that never got a connection are dropped after a day: anonymous registration must not grow without bound.
     const stale = this.db.prepare(`DELETE FROM oidc WHERE model='Client' AND created_at<? AND id NOT IN (SELECT client_id FROM static_clients) AND id NOT IN (SELECT client_id FROM connections)
