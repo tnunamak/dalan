@@ -24,3 +24,32 @@ test('revision and lease decisions use supplied time', () => {
   assert.throws(() => decide({ revision: 2 }, command, { now: 10, maxLeaseMs: 6 }), { code: 'invalid_lease' });
   assert.throws(() => decide({ revision: Number.MAX_SAFE_INTEGER }, { ...command, expectedRevision: Number.MAX_SAFE_INTEGER }, { now: 10, maxLeaseMs: 9 }), { code: 'invalid_revision' });
 });
+
+test('claim authority is tied to each exact command identity and active status', () => {
+  const command = { job: 'job-a', subject: 'subject-a', worker: 'worker-a', claim: 'claim-a', epoch: 2 };
+  const authority = { ...command, active: true, leaseUntil: 20 };
+  for (const [field, different] of [['job', 'job-b'], ['subject', 'subject-b'], ['worker', 'worker-b'], ['claim', 'claim-b'], ['active', false]]) {
+    assert.throws(() => assertClaimAuthority(command, { ...authority, [field]: different }, 19),
+      { code: 'stale_authority' }, field);
+  }
+  assert.throws(() => assertClaimAuthority(command, { ...authority, leaseUntil: 20.5 }, 19), { code: 'lease_expired' });
+});
+
+test('renew accepts the exact maximum and rejects invalid duration shape or overflow', () => {
+  const snapshot = { revision: 4 };
+  const command = { expectedRevision: 4, operation: 'renew' };
+  const context = { now: 10, maxLeaseMs: 8 };
+  assert.equal(decide(snapshot, { ...command, args: { leaseMs: 8 } }, context).leaseUntil, 18);
+  for (const args of [{}, { leaseMs: 0 }, { leaseMs: 0.5 }, { leaseMs: 2, extra: true }]) {
+    assert.throws(() => decide(snapshot, { ...command, args }, context), { code: 'invalid_lease' });
+  }
+  assert.throws(() => decide(snapshot, { ...command, args: { leaseMs: 2 } },
+    { ...context, now: Number.MAX_SAFE_INTEGER - 1 }), { code: 'invalid_lease' });
+});
+
+test('canonical JSON rejects unsupported leaves while keeping the caller-specific error code', () => {
+  for (const unsupported of [undefined, new Date(0), 1n]) {
+    assert.throws(() => canonicalJson({ nested: [unsupported] }, 'bad_argument'), { code: 'bad_argument' });
+  }
+  assert.equal(canonicalJson({ nested: [null, false, 0, ''] }), '{"nested":[null,false,0,""]}');
+});

@@ -89,7 +89,7 @@ function bridgeNotRunning(error) {
   if(selected) return Object.assign(error,{message:`cannot reach the bridge: no bridge is running for DALAN_HOME=${selected} (${cause})`,fix:[`start the bridge for this home the way you set it up (${docsUrl('docs/manual-setup.md','owner-and-requester-setup')}), then run this command again`]});
   return Object.assign(error,{message:`cannot reach the bridge: DALAN_HOME is not set and no bridge is running in ${home} (${cause})`,fix:[`export DALAN_HOME=DIR for the bridge home you made, or start a trial bridge with: ${cli} try`]});
 }
-function request(route, method = 'GET', payload, headers={}, timeoutMs=0) {
+function request(route, method = 'GET', payload, headers={}, timeoutMs=30000) {
   return new Promise((resolve, reject) => {
     const bytes = payload ? JSON.stringify(payload) : '';
     const transportFailure=error=>reject(Object.assign(error.syscall==='connect'&&['ENOENT','ECONNREFUSED'].includes(error.code)?bridgeNotRunning(error):error,{kind:'transport'}));
@@ -149,7 +149,7 @@ function operator() { const file=defaultPath(home,'.config/dot-bridge/operator.k
 async function waitForAssignment(id, timeout) {
   const seconds=timeout===null?300:Number(timeout);
   if(!Number.isInteger(seconds)||seconds<1||seconds>3600) throw new Error('wait timeout must be an integer from 1 to 3600 seconds');
-  return request(`/wait?id=${encodeURIComponent(id)}&timeout=${seconds}`,'GET',null,{'x-owner-capability':receipt(id).token});
+  return request(`/wait?id=${encodeURIComponent(id)}&timeout=${seconds}`,'GET',null,{'x-owner-capability':receipt(id).token},0); // The server owns the long-poll deadline.
 }
 // Records which request owns each artifact so `artifact ART_ID` can find the owner receipt. Called by get and wait.
 function indexArtifacts(requestId,result) {

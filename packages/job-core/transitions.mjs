@@ -5,7 +5,7 @@ export function assertClaimAuthority(command, authority, now) {
   const { job, subject, worker, claim, epoch } = command;
   if (!authority || authority.job !== job || authority.subject !== subject || authority.worker !== worker ||
       authority.claim !== claim || authority.epoch !== epoch || authority.active !== true) fail('stale_authority');
-  if (!natural(authority.leaseUntil) || now >= authority.leaseUntil) fail('lease_expired');
+  if (!natural(now) || !natural(authority.leaseUntil) || now >= authority.leaseUntil) fail('lease_expired');
 }
 
 // Called only after authority and receipt replay have been checked by the caller.
@@ -14,7 +14,8 @@ export function decide(snapshot, command, context) {
   if (snapshot.revision !== expectedRevision) fail('revision_conflict');
   let leaseUntil;
   if (operation === 'renew') {
-    if (!args || Object.keys(args).some(key => key !== 'leaseMs') ||
+    if (!natural(context?.maxLeaseMs) || context.maxLeaseMs < 1 || !natural(context.now) ||
+        !args || Object.keys(args).some(key => key !== 'leaseMs') ||
         !natural(args.leaseMs) || args.leaseMs < 1 || args.leaseMs > context.maxLeaseMs) fail('invalid_lease');
     leaseUntil = context.now + args.leaseMs;
     if (!natural(leaseUntil)) fail('invalid_lease');

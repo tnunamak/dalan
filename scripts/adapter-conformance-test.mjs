@@ -14,6 +14,42 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { startAdapter } from './acp-client.mjs';
 import { NO_REPO_NOTE, UNTRACKED_NOTE, withoutNote } from '../src/acp-bridge.mjs';
+import { runInNewContext } from 'node:vm';
+
+if (process.argv.includes('--worker-break-only')) {
+  // Evaluate only the real wait loop; no ACP subprocess, socket or store is started.
+  const source=await readFile(new URL('../bin/dot-acp-agent.mjs',import.meta.url),'utf8');
+  const start=source.indexOf('\nasync function waitLoop('), end=source.indexOf('\nasync function readRowOrThrow(',start);
+  assert.ok(start>=0&&end>start);
+  async function scenario(sequence, cancelled=false) {
+    let now=0, index=0;
+    const ctl={cancelled:false,pending:{rid:'fixture'},abort:new AbortController()};
+    const seen=[];
+    const run=runInNewContext(source.slice(start,end)+'\nwaitLoop',{
+      Date:{now:()=>now}, HEARTBEAT_MS:10, OUTAGE_MS:40,
+      AbortSignal:{any:AbortSignal.any.bind(AbortSignal),timeout:()=>new AbortController().signal},
+      call:async()=>{
+        const row=sequence[index++];
+        assert.ok(row,'unexpected extra wait');
+        now=row.at;
+        if (cancelled&&index===2) {ctl.cancelled=true;ctl.abort.abort();}
+        return {status:row.status};
+      },
+      refuse:(message,details)=>Object.assign(new Error(message),details),
+      readRowOrThrow:async()=>({}), resultText:async()=>'synthetic result', trackBuild:()=>{},
+    });
+    return {completion:run({},ctl,async (channel, text)=>seen.push([channel,text])),seen};
+  }
+  const deadline=await scenario([{at:0,status:'worker_break'},{at:20,status:'worker_break'},{at:40,status:'worker_break'},{at:41,status:'finished'}]);
+  await assert.rejects(deadline.completion,{failure_type_source:'dot_acp_worker_break'});
+  assert.equal(deadline.seen.length,2);
+  const recovered=await scenario([{at:0,status:'worker_break'},{at:39,status:'finished'}]);
+  assert.equal((await recovered.completion).text,'synthetic result');
+  const aborted=await scenario([{at:0,status:'worker_break'},{at:40,status:'worker_break'}],true);
+  assert.equal((await aborted.completion).cancelled,true);
+  console.log('PASS worker-break deadline, recovery and cancellation (synthetic wait loop)');
+  process.exit(0);
+}
 
 const repo = resolve(new URL('..', import.meta.url).pathname);
 const home = await mkdtemp(join(homedir(), '.tmp', 'dalan-acp-conformance-'));

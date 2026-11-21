@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { acquireLock, LockBusyError, ownerAlive } from '../src/lock.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.homedir(), '.tmp-acpkit-'));
@@ -139,3 +139,37 @@ test('SIGKILL of the owner leaves a lock that the next acquirer takes over', asy
 });
 
 const randomToken = () => [...crypto.getRandomValues(new Uint8Array(8))].map(b => b.toString(16).padStart(2, '0')).join('');
+
+test('a live lock reports a stable busy code and owner pid', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-busy-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const lock = await acquireLock(file);
+  try {
+    await assert.rejects(acquireLock(file), error => {
+      assert.ok(error instanceof LockBusyError);
+      assert.equal(error.code, 'session_busy');
+      assert.equal(error.pid, process.pid);
+      return true;
+    });
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, lock.token);
+  } finally { lock.release(); }
+});
+
+test('a normal adapter exit releases a forgotten lock without a takeover', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-exit-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const moduleUrl = new URL('../src/lock.mjs', import.meta.url).href;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { acquireLock } from ${JSON.stringify(moduleUrl)};
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    const file = ${JSON.stringify(file)};
+    await acquireLock(file);
+    assert.ok(fs.existsSync(file));
+  `], { encoding: 'utf8', timeout: 5000 });
+  assert.ifError(child.error);
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(fs.existsSync(file), false, 'normal exit removes its own lock');
+});
