@@ -6,7 +6,7 @@ Before you begin, install [Node.js](https://nodejs.org) 24 or newer. Your agent'
 
 <a id="quickstart"></a>
 
-**Just exploring?** Run a temporary, text-only trial:
+**Just exploring?** Run a temporary trial that gives your connected worker a text-only job:
 
 ```sh
 npm install -g @tnunamak/dalan
@@ -15,7 +15,7 @@ dalan try --public
 
 Follow the terminal instructions to add the connector and approve only the matching sign-in code. Paste the supplied prompt into your agent's chat. Success is a report returned to your terminal.
 
-The trial has no repository access. Keep private code and secrets out of it. It ends after three hours at most. Its public link can change or stop without warning. For a local-only trial that opens no public route, run `dalan try --local`; to connect a worker client by hand, see [manual setup](docs/manual-setup.md#worker-setup). For a persistent connection, use the installation steps below.
+The public trial is text-only and grants no repository access. Keep private code and secrets out of it. It ends after three hours at most. Its public link can change or stop without warning. For a local-only trial that opens no public route, run `dalan try --local`. That mode may briefly grant its built-in self-check worker access to a synthetic repository created locally, not to your repositories. To connect a worker client by hand, see [manual setup](docs/manual-setup.md#worker-setup). For a persistent connection, use the installation steps below.
 
 ### Stop a trial
 
@@ -112,7 +112,7 @@ The text-only job proves pairing and reporting, not coding access. Keep using th
 
 The [manual setup guide](docs/manual-setup.md#owner-and-requester-setup) creates a separate loopback bridge in a new home; it is not an upgrade path for your persistent service. If your existing service has no workspace access, stop before submitting a repository job. Reinstalling with `--enable-workspace` is refused because the saved service configuration must match; it cannot enable workspace access in place.
 
-The first repository job below reads one file at a pinned commit. It does not edit files or run checks. The trial has no repository access.
+The first repository job below reads one file at a pinned commit. It does not edit files or run checks. The trial's synthetic repository self-check is not a grant for this job; use the persistent service and the explicit grant below.
 
 Replace `WORKER` with your worker's name (`assistant` above) and `OWNER/REPO` with the repository:
 
