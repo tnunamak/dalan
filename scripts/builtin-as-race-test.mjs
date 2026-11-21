@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { initAsFiles } from '../src/as-files.mjs';
-import { createAs } from '../src/as.mjs';
+import { createAs, REUSE_WINDOW_MS } from '../src/as.mjs';
 
 const root = fs.mkdtempSync(path.join(os.homedir(), '.tmp', 'dbrace-'));
 process.on('exit', () => { try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ } });
@@ -109,24 +109,92 @@ await check('R2', 'concurrent duplicate refresh returns one live successor', asy
   assert.deepEqual(results[0].body, results[1].body);
   assert.equal(await live(results[0].body.access_token), true);
 });
-await check('G2', 'grace is absolute and replay after expiry revokes', async () => {
+await check('G2', 'grace is absolute and replay after the reuse window revokes', async () => {
   const c = await connected('duet');
   const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
   const request = { grant_type: 'refresh_token', refresh_token: first.body.refresh_token };
   const rotated = await token(c.clientId, request); assert.equal(rotated.status, 200);
   offset = 4000; assert.equal((await token(c.clientId, request)).status, 200);
-  offset = 6000; const replay = await token(c.clientId, request); offset = 0;
+  offset = 11 * 60 * 1000; const replay = await token(c.clientId, request); offset = 0;
   assert.equal(replay.status, 400); assert.equal(replay.body.error, 'invalid_grant');
   assert.equal(await live(rotated.body.access_token), false);
 });
-await check('G3', 'ancestor reuse revokes after successor rotates', async () => {
-  const c = await connected('duet');
+const exchangeFirst = async (c) => {
   const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
-  const request = { grant_type: 'refresh_token', refresh_token: first.body.refresh_token };
-  const rotated = await token(c.clientId, request);
-  const next = await token(c.clientId, { ...request, refresh_token: rotated.body.refresh_token }); assert.equal(next.status, 200);
-  assert.equal((await token(c.clientId, request)).status, 400);
-  assert.equal(await live(next.body.access_token), false);
+  assert.equal(first.status, 200); return first.body.refresh_token;
+};
+const refresh = (c, t) => token(c.clientId, { grant_type: 'refresh_token', refresh_token: t });
+await check('G3', 'one-behind reuse inside the window returns the head; an older ancestor revokes', async () => {
+  const c = await connected('duet');
+  const t0 = await exchangeFirst(c);
+  const h1 = await refresh(c, t0), h2 = await refresh(c, h1.body.refresh_token); assert.equal(h2.status, 200);
+  offset = 60 * 1000;
+  const tolerated = await refresh(c, h1.body.refresh_token); assert.equal(tolerated.status, 200);
+  assert.equal(tolerated.body.refresh_token, h2.body.refresh_token);
+  assert.notEqual(tolerated.body.access_token, h2.body.access_token);
+  assert.equal(await live(h2.body.access_token), true); assert.equal(await live(tolerated.body.access_token), true);
+  const ancestor = await refresh(c, t0); offset = 0;
+  assert.equal(ancestor.status, 400);
+  assert.equal(await live(h2.body.access_token), false);
+});
+await check('G5', 'Muse pattern: a stale second holder gets the head, the grant stays live', async () => {
+  const c = await connected('duet');
+  const t0 = await exchangeFirst(c);
+  const h1 = await refresh(c, t0); assert.equal(h1.status, 200);              // holder X at t0
+  offset = 86 * 1000;
+  const h2 = await refresh(c, h1.body.refresh_token); assert.equal(h2.status, 200); // holder Y with X's token
+  offset = 124 * 1000;
+  const stale = await refresh(c, h1.body.refresh_token);                         // X presents the token Y consumed
+  assert.equal(stale.status, 200); assert.equal(stale.body.refresh_token, h2.body.refresh_token);
+  // The head still works and the tolerated reply did not rotate it.
+  const h3 = await refresh(c, h2.body.refresh_token); offset = 0;
+  assert.equal(h3.status, 200);
+  assert.equal(await live(h3.body.access_token), true);
+  const row = JSON.stringify(as.store.db.prepare('SELECT * FROM refresh_heads').all());
+  assert.ok(!row.includes(h2.body.refresh_token) && !row.includes(h3.body.refresh_token));
+});
+await check('G13', 'window boundary: just inside is tolerated, just outside revokes', async () => {
+  for (const [delta, expected] of [[-1000, 200], [1000, 400]]) {
+    const c = await connected('duet');
+    const h1 = await refresh(c, await exchangeFirst(c)); const h2 = await refresh(c, h1.body.refresh_token); assert.equal(h2.status, 200);
+    offset = REUSE_WINDOW_MS + delta; const stale = await refresh(c, h1.body.refresh_token); offset = 0;
+    assert.equal(stale.status, expected, `delta ${delta}`);
+    assert.equal(await live(h2.body.access_token), expected === 200);
+  }
+});
+await check('G14', 'restart inside the window still tolerates the one-behind token', async () => {
+  const c = await connected('duet');
+  const h1 = await refresh(c, await exchangeFirst(c)); const h2 = await refresh(c, h1.body.refresh_token); assert.equal(h2.status, 200);
+  as.close(); as = makeAs();
+  offset = 30 * 1000; const stale = await refresh(c, h1.body.refresh_token); offset = 0;
+  assert.equal(stale.status, 200); assert.equal(stale.body.refresh_token, h2.body.refresh_token);
+});
+await check('G15', 'a stale replay after the head rotated again is two behind and revokes', async () => {
+  const c = await connected('duet');
+  const h1 = await refresh(c, await exchangeFirst(c)); const h2 = await refresh(c, h1.body.refresh_token);
+  const h3 = await refresh(c, h2.body.refresh_token); assert.equal(h3.status, 200);
+  offset = 10 * 1000; const stale = await refresh(c, h1.body.refresh_token); offset = 0;
+  assert.equal(stale.status, 400); assert.equal(await live(h3.body.access_token), false);
+});
+await check('G16', 'a clock step backward cannot extend acceptance', async () => {
+  const c = await connected('duet');
+  offset = 60 * 1000;
+  const h1 = await refresh(c, await exchangeFirst(c)); const h2 = await refresh(c, h1.body.refresh_token); assert.equal(h2.status, 200);
+  // At offset 60 s the head is one rotation old and tolerated; with the clock stepped back it is "from the future" and refused.
+  assert.ok(as.store.reuseHead(c.approved.grant_id, h1.body.refresh_token, REUSE_WINDOW_MS));
+  offset = 0; assert.equal(as.store.reuseHead(c.approved.grant_id, h1.body.refresh_token, REUSE_WINDOW_MS), undefined);
+});
+await check('G17', 'revocation during a tolerated reuse returns and stores no live token', async () => {
+  const c = await connected('duet');
+  const h1 = await refresh(c, await exchangeFirst(c)); const h2 = await refresh(c, h1.body.refresh_token); assert.equal(h2.status, 200);
+  const original = as.provider.RefreshToken.find;
+  let calls = 0;
+  as.provider.RefreshToken.find = async function(...args) { const result = await original.apply(this, args); if (++calls === 2) as.ops.revoke({ worker: 'duet' }); return result; };
+  let stale; try { stale = await refresh(c, h1.body.refresh_token); } finally { as.provider.RefreshToken.find = original; }
+  assert.equal(calls >= 2, true);
+  assert.equal(stale.status, 400); assert.equal(stale.body.access_token, undefined);
+  assert.equal(as.store.db.prepare("SELECT count(*) AS n FROM oidc WHERE model='AccessToken' AND grant_id=?").get(c.approved.grant_id).n, 0);
+  assert.equal(as.store.connectionByGrant(c.approved.grant_id).revoked_at !== null, true);
 });
 await check('G4', 'receipt survives restart and contains no plaintext tokens', async () => {
   const c = await connected('duet');
@@ -139,7 +207,7 @@ await check('G4', 'receipt survives restart and contains no plaintext tokens', a
   as.close(); as = makeAs();
   const retry = await token(c.clientId, request); assert.equal(retry.status, 200); assert.deepEqual(retry.body, rotated.body);
 });
-await check('G5', 'failure before commit leaves original token usable', async () => {
+await check('G5b', 'failure before commit leaves original token usable', async () => {
   const c = await connected('duet');
   const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
   const request = { grant_type: 'refresh_token', refresh_token: first.body.refresh_token };
@@ -168,6 +236,8 @@ await check('G7', 'wrong client and changed parameters cannot receive a receipt'
     if (field === 'scope') changed = { ...request, scope: 'dot-bridge.read' };
     if (field === 'resource') changed = { ...request, resource: 'https://other.example/mcp' };
     const result = await token(other, changed);
+    // A narrowed scope inside the reuse window is a legitimate stale holder: it gets the head, never a wider token than it asked for.
+    if (field === 'scope') { assert.equal(result.status, 200); assert.equal(result.body.scope, 'dot-bridge.read'); continue; }
     assert.notEqual(result.status, 200, field);
     assert.notEqual(result.body.refresh_token, rotated.body.refresh_token, field);
   }
@@ -215,6 +285,15 @@ await check('G11', 'owner revocation during refresh cannot be undone by commit',
     assert.notEqual((await pending).status, 200);
     assert.notEqual(as.store.connectionByGrant(c.approved.grant_id).revoked_at, null);
   } finally { release(); as.provider.Grant.find = original; }
+});
+await check('G12', 'a refresh response without a refresh_token commits and leaves no head', async () => {
+  const c = await connected('duet');
+  const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
+  const rotated = await token(c.clientId, { grant_type: 'refresh_token', refresh_token: first.body.refresh_token }); assert.equal(rotated.status, 200);
+  const heads = () => as.store.db.prepare('SELECT count(*) AS n FROM refresh_heads WHERE grant_id=?').get(c.approved.grant_id).n;
+  assert.equal(heads(), 1);
+  as.store.commitRefresh({ reads: [], writes: [] }, c.approved.grant_id, c.clientId, 'no-rotation-token', 'params', { access_token: 'x' }, Date.now() + 5000);
+  assert.equal(heads(), 0);
 });
 await check('R3', 'adapter level: the second consume of one row throws and revokes the grant', async () => {
   const c = await connected('lark');

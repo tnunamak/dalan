@@ -16,6 +16,10 @@ import { approvalFacts, approvalRecord, describeClient } from './client-approval
 export const SCOPES = ADVERTISED_SCOPES;
 export const ACCOUNT = 'owner';
 const ACCESS_TOKEN_TTL = 3600;
+// The token rotated away one step ago, presented this soon after, is a concurrent holder of the connection, not a replay
+// (Okta rotation grace period, Auth0 rotation overlap). Measured need: stale holders arrived 38 s and 175 s late; Okta allows 0-60 s.
+// DALAN_REFRESH_REUSE_WINDOW_MS overrides it (clamped to 1 s .. 1 h) so tests can cross the window quickly.
+export const REUSE_WINDOW_MS = Math.min(3600000, Math.max(1000, Number(process.env.DALAN_REFRESH_REUSE_WINDOW_MS) || 5 * 60 * 1000));
 const OFF = Object.freeze({ enabled: false });
 const html = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 export { untrusted };
@@ -107,7 +111,8 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     scopes: [...ACCEPTED_SCOPES],
     pkce: { required: () => true }, // S256 is the only method the library supports
     ttl: { AuthorizationCode: 600, AccessToken: ACCESS_TOKEN_TTL, RefreshToken: 30 * 86400, Grant: 90 * 86400, Interaction: LIFETIMES.interaction, Session: LIFETIMES.session, IdToken: LIFETIMES.idToken, ClientCredentials: 600, DeviceCode: 600 },
-    rotateRefreshToken: true,
+    // A reuse inside the window answers with the current head and must not rotate it again.
+    rotateRefreshToken: async ctx => !ctx.dalanReuseHead,
     // A connection is the owner's approval, not a browser login: its tokens must not die with the pairing session.
     // oidc-provider's default binds them to the session unless the client asks for offline_access. Revocation stays per connection.
     expiresWithSession: async () => false,
@@ -171,7 +176,22 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
           const receipt = source.consumed && store.refreshReceipt(tokenValue);
           const retry = receipt && receipt.grant_id === source.grantId && receipt.value.clientId === clientId &&
             receipt.value.params === fingerprint && store.refreshValid(source.grantId, clientId, receipt.value.response.refresh_token);
-          if (source.consumed && !retry) return await handler(ctx);
+          if (source.consumed && !retry) {
+            // A concurrent holder of the same connection may present the one token that was rotated away moments ago. Inside the
+            // window, answer with a fresh access token and the current head, without rotating. Anything else the provider revokes.
+            const reuse = source.clientId === clientId && source.exp * 1000 > Date.now() ? store.reuseHead(source.grantId, tokenValue, REUSE_WINDOW_MS) : undefined;
+            if (reuse && store.refreshValid(source.grantId, clientId, reuse.head)) {
+              ctx.dalanReuseHead = reuse.head;
+              ctx.oidc.params.refresh_token = reuse.head;
+              // Staged like an ordinary refresh: nothing is stored or returned unless the commit-time checks still hold.
+              const staged = { reads: [], writes: [], retryToken: undefined };
+              await store.refreshExchange.run(staged, () => handler(ctx));
+              store.commitReuse(staged, source.grantId, clientId, reuse.head, REUSE_WINDOW_MS);
+              log({ kind: 'as_refresh_reuse_tolerated', age_ms: reuse.age });
+              return;
+            }
+            return await handler(ctx);
+          }
           const exchange = { reads: [], writes: [], retryToken: retry ? tokenValue : undefined };
           try { await store.refreshExchange.run(exchange, () => handler(ctx)); }
           catch (error) {

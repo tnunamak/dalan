@@ -55,6 +55,8 @@ export class AsStore {
       CREATE INDEX IF NOT EXISTS oidc_expiry ON oidc(expires_at) WHERE expires_at IS NOT NULL;
       CREATE TABLE IF NOT EXISTS refresh_receipts(
         grant_id TEXT PRIMARY KEY, token_id TEXT NOT NULL, deadline INTEGER NOT NULL, payload TEXT NOT NULL) WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS refresh_heads(
+        grant_id TEXT PRIMARY KEY, payload TEXT NOT NULL, prev_id TEXT, rotated_at INTEGER) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS static_clients(client_id TEXT PRIMARY KEY) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS connections(
         connection_id TEXT PRIMARY KEY, worker TEXT NOT NULL, grant_id TEXT NOT NULL UNIQUE, client_id TEXT NOT NULL,
@@ -71,6 +73,9 @@ export class AsStore {
     const columns = this.db.prepare('PRAGMA table_info(windows)').all().map(c => c.name);
     if (!columns.includes('registrations')) this.db.exec('ALTER TABLE windows ADD COLUMN registrations INTEGER NOT NULL DEFAULT 0');
     if (!columns.includes('generation')) this.db.exec('ALTER TABLE windows ADD COLUMN generation TEXT');
+    const headColumns = this.db.prepare('PRAGMA table_info(refresh_heads)').all().map(c => c.name);
+    if (!headColumns.includes('prev_id')) this.db.exec('ALTER TABLE refresh_heads ADD COLUMN prev_id TEXT');
+    if (!headColumns.includes('rotated_at')) this.db.exec('ALTER TABLE refresh_heads ADD COLUMN rotated_at INTEGER');
     try { this.#initializeCodec(); } catch { this.db.close(); throw new Error('as: encrypted storage could not be opened'); }
     this.onGrantRevoked = () => {};
     const self = this;
@@ -196,6 +201,34 @@ export class AsStore {
     if (!row || row.deadline <= this.now()) return undefined;
     return { ...row, value: JSON.parse(this.#open(row.payload, `refresh-receipt:${row.grant_id}`)) };
   }
+  // The grant's current head refresh token, sealed, with the id of the one token rotated away to make it. Only that token,
+  // presented within windowMs of the rotation (never before it: a clock step back is refused), is answered with the head.
+  reuseHead(grantId, tokenValue, windowMs) {
+    const row = this.db.prepare('SELECT payload,prev_id,rotated_at FROM refresh_heads WHERE grant_id=?').get(grantId);
+    if (!row || row.rotated_at === null) return undefined;
+    const age = this.now() - row.rotated_at;
+    if (age < 0 || age > windowMs || row.prev_id !== this.#id('RefreshToken', tokenValue)) return undefined;
+    return { head: this.#open(row.payload, `refresh-head:${grantId}`), age };
+  }
+  // Commit-time fence for a tolerated reuse, like commitRefresh: nothing it read may have changed, the connection must still be
+  // live, and the head must still be the one served. Only then are the staged access-token writes stored.
+  commitReuse(exchange, grantId, clientId, head, windowMs) {
+    this.tx(() => {
+      for (const [model, id, original] of exchange.reads) {
+        if (JSON.stringify(this.find(model, id)) !== original) throw new errors.InvalidGrant('refresh state changed');
+      }
+      const connection = this.connectionByGrant(grantId);
+      const grant = this.find('Grant', grantId);
+      if (!connection || connection.revoked_at !== null || connection.client_id !== clientId || !grant || grant.clientId !== clientId) throw new errors.InvalidGrant('grant inactive');
+      const row = this.db.prepare('SELECT payload,rotated_at FROM refresh_heads WHERE grant_id=?').get(grantId);
+      const age = row?.rotated_at == null ? -1 : this.now() - row.rotated_at;
+      if (!row || age < 0 || age > windowMs || this.#open(row.payload, `refresh-head:${grantId}`) !== head) throw new errors.InvalidGrant('refresh state changed');
+      for (const [op, model, id, payload, ttl] of exchange.writes) {
+        if (op !== 'upsert' || model !== 'AccessToken') throw new errors.InvalidGrant('refresh state changed');
+        this.upsert(model, id, payload, ttl);
+      }
+    });
+  }
   refreshValid(grantId, clientId, successor) {
     const connection = this.connectionByGrant(grantId);
     const grant = this.find('Grant', grantId);
@@ -226,6 +259,11 @@ export class AsStore {
       this.db.prepare('DELETE FROM refresh_receipts WHERE deadline<=? OR grant_id=?').run(this.now(), grantId);
       this.db.prepare('INSERT INTO refresh_receipts VALUES(?,?,?,?)').run(grantId, this.#id('RefreshToken', token), deadline,
         this.#seal(JSON.stringify({ clientId, params, response }), `refresh-receipt:${grantId}`));
+      // No rotated token in the response means no head to serve; a stale head must not outlive it.
+      if (typeof response?.refresh_token === 'string') {
+        this.db.prepare('INSERT INTO refresh_heads VALUES(?,?,?,?) ON CONFLICT(grant_id) DO UPDATE SET payload=excluded.payload,prev_id=excluded.prev_id,rotated_at=excluded.rotated_at')
+          .run(grantId, this.#seal(response.refresh_token, `refresh-head:${grantId}`), this.#id('RefreshToken', token), this.now());
+      } else this.db.prepare('DELETE FROM refresh_heads WHERE grant_id=?').run(grantId);
     });
   }
 
@@ -268,6 +306,7 @@ export class AsStore {
   #revokeGrantRows(grantId, reason, now = this.now()) {
     this.db.prepare('DELETE FROM oidc WHERE grant_id=?').run(grantId);
     this.db.prepare("DELETE FROM oidc WHERE model='Grant' AND id=?").run(grantId);
+    this.db.prepare('DELETE FROM refresh_heads WHERE grant_id=?').run(grantId);
     this.db.prepare('UPDATE connections SET revoked_at=?,revoked_reason=? WHERE grant_id=? AND revoked_at IS NULL').run(now, reason, grantId);
   }
   // The one revocation path: tokens, codes and the Grant record go, and the connection row is marked. Idempotent.
@@ -311,6 +350,7 @@ export class AsStore {
   purge() {
     const now = this.now();
     this.db.prepare('DELETE FROM refresh_receipts WHERE deadline<=?').run(now);
+    this.db.prepare('DELETE FROM refresh_heads WHERE grant_id NOT IN (SELECT grant_id FROM connections WHERE revoked_at IS NULL)').run();
     const expired = this.db.prepare('DELETE FROM oidc WHERE expires_at IS NOT NULL AND expires_at<=?').run(now).changes;
     // Registered clients that never got a connection are dropped after a day: anonymous registration must not grow without bound.
     const stale = this.db.prepare(`DELETE FROM oidc WHERE model='Client' AND created_at<? AND id NOT IN (SELECT client_id FROM static_clients) AND id NOT IN (SELECT client_id FROM connections)
