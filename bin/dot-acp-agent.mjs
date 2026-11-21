@@ -217,10 +217,10 @@ async function runTurn(s, ctl, text, say) {
   }
 }
 
-async function heartbeat(s, ctl, say, note = '') {
+async function heartbeat(s, ctl, say, note = '', signal = ctl.abort.signal) {
   let state = '';
   try {
-    const r = await call('/owner-states', null, { method: 'POST', payload: { items: [{ id: ctl.pending.rid, capability: tokenFor(ctl.pending.rid) }] } });
+    const r = await call('/owner-states', null, { method: 'POST', payload: { items: [{ id: ctl.pending.rid, capability: tokenFor(ctl.pending.rid) }] }, signal });
     state = r.states?.[0]?.status ?? 'unknown';
   } catch { state = 'bridge unreachable'; }
   const age = Math.round((Date.now() - ctl.pending.startedAt) / 1000);
@@ -230,25 +230,40 @@ async function heartbeat(s, ctl, say, note = '') {
 // Block until the assignment ends. Returns {text}, {blocked,text}, {cancelled} or {expired}; throws on a hard failure.
 async function waitLoop(s, ctl, say) {
   const slice = Math.max(1, Math.ceil(HEARTBEAT_MS / 1000));
-  let outageSince = null;
+  let outageSince = null, breakDeadline = null, breakSignal = null;
+  const breakExpired = () => breakDeadline !== null && (breakSignal.aborted || Date.now() >= breakDeadline);
+  const breakRefusal = () => refuse('worker usage break exceeded the turn wait limit',
+    {failure_type:'adapter_error',failure_type_source:'dot_acp_worker_break'});
   for (;;) {
     if (ctl.cancelled) return { cancelled: true };
+    if (breakExpired()) throw breakRefusal();
+    const signal = breakSignal ? AbortSignal.any([ctl.abort.signal, breakSignal]) : ctl.abort.signal;
     let r;
     try {
-      r = await call(`/wait?id=${encodeURIComponent(ctl.pending.rid)}&timeout=${slice}&peek=1`, ctl.pending.rid, { signal: ctl.abort.signal });
+      r = await call(`/wait?id=${encodeURIComponent(ctl.pending.rid)}&timeout=${slice}&peek=1`, ctl.pending.rid, { signal });
       outageSince = null;
     } catch (e) {
       if (ctl.cancelled) return { cancelled: true };
-      if (e.http_status === 409) { await sleep(1000, ctl.abort.signal); continue; } // our previous process's waiter has not detached yet
+      if (breakExpired()) throw breakRefusal();
+      if (e.http_status === 409) { await sleep(1000, signal); continue; } // our previous process's waiter has not detached yet
       if (!transient(e)) throw refuse(`worker bridge error: ${e.message}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
       outageSince ??= Date.now();
       if (Date.now() - outageSince > OUTAGE_MS) throw refuse(`worker bridge unreachable for ${Math.round(OUTAGE_MS / 60000)} min: ${e.message}`,{failure_type:'transport_error',failure_type_source:'dot_acp_transport'});
       await say('agent_thought_chunk', `bridge unreachable (${e.message}); retrying\n`);
-      await sleep(Math.min(2000, HEARTBEAT_MS), ctl.abort.signal);
+      await sleep(Math.min(2000, HEARTBEAT_MS), signal);
       continue;
     }
-    if (r.status === 'timeout') { await heartbeat(s, ctl, say); continue; }
-    if (r.status === 'worker_break') { await say('agent_thought_chunk', `worker usage break: ${r.notice ?? ''}\n`); continue; }
+    if (ctl.cancelled) return { cancelled: true };
+    if (breakExpired()) throw breakRefusal();
+    if (r.status === 'timeout') { await heartbeat(s, ctl, say, '', signal); continue; }
+    if (r.status === 'worker_break') {
+      if (breakDeadline === null) {
+        breakDeadline = Date.now() + OUTAGE_MS;
+        breakSignal = AbortSignal.timeout(Math.min(2 ** 31 - 1, Math.ceil(OUTAGE_MS)));
+      }
+      await say('agent_thought_chunk', `worker usage break: ${r.notice ?? ''}\n`);
+      continue;
+    }
     if (r.status === 'blocker' || r.status === 'question') return { blocked: true, text: `[worker ${r.status}] ${r.blocker_text ?? ''}`.trim() };
     if (r.status === 'finished') {
       const row = await readRowOrThrow(ctl.pending.rid), text = await resultText(row);
