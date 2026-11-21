@@ -38,7 +38,7 @@ class Bridge {
   constructor(name) { this.home = path.join(root, name); this.config = path.join(this.home, '.config/dot-bridge'); bridges.push(this); }
   async init() {
     this.port = await port(); this.url = `http://127.0.0.1:${this.port}`;
-    this.env = fixtureEnv(this.home, { NODE_ENV: 'test', NODE_OPTIONS: `--import=${guard}`, DOT_BRIDGE_AUTH_MODE: 'builtin', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_MIN_FREE_BYTES: '0', DOT_BRIDGE_PORT: String(this.port), DOT_BRIDGE_WORKSPACE_ROOT: path.join(this.home, 'work') });
+    this.env = fixtureEnv(this.home, { NODE_ENV: 'test', NODE_OPTIONS: `--import=${guard}`, DOT_BRIDGE_AUTH_MODE: 'builtin', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ALLOW_PRIVATE_WEBHOOKS: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_MIN_FREE_BYTES: '0', DALAN_REFRESH_REUSE_WINDOW_MS: '3000', DOT_BRIDGE_PORT: String(this.port), DOT_BRIDGE_WORKSPACE_ROOT: path.join(this.home, 'work') });
     delete this.env.DALAN_LEGACY_PROFILE; // these tests exercise the missing-profile refusal; the shared fixture env opts in
     fs.mkdirSync(this.config, { recursive: true });
     fs.writeFileSync(path.join(this.config, 'workers.json'), JSON.stringify({ workers: { dot: {workspaceAllowed:true,repos:['test/runtime']}, lark: {workspaceAllowed:true,repos:['test/runtime']}, duet: {workspaceAllowed:true,repos:['test/runtime']} } }), { mode: 0o600 });
@@ -213,8 +213,11 @@ try {
       // Same previously-valid bearer, altered audience only; never print it.
       must((await bridge.rpc(opaque, 'tools/list')).status === 401, 'wrong audience accepted by MCP');
     } finally { bridge.setAsPayload('AccessToken', selected.id, selected.context, selected.value); }
-    await delay(5100); // Cross the fixed five-second grace; retries must not extend it.
-    must((await a.refresh(A.refresh)).status === 400, 'refresh replay outside grace accepted');
+    // Inside the reuse window a stale holder gets the current head and the family stays live.
+    const stale = await a.refresh(A.refresh); must(stale.status === 200 && stale.body.refresh_token === refreshed.body.refresh_token, 'in-window replay did not return the current head');
+    must((await bridge.rpc(refreshed.body.access_token, 'tools/list')).status === 200, 'in-window replay revoked the family');
+    await delay(5100); // Cross the (test-shortened, 3 s) reuse window; retries must not extend it.
+    must((await a.refresh(A.refresh)).status === 400, 'refresh replay outside window accepted');
     must((await bridge.rpc(refreshed.body.access_token, 'tools/list')).status === 401, 'refresh replay did not revoke family');
     A = await a.connect('dot');
     must(bridge.cli(['connect', 'revoke', 'dot', '--json']).code === 0, 'revoke failed');
