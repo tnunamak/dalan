@@ -17,7 +17,8 @@ export const SCOPES = ADVERTISED_SCOPES;
 export const ACCOUNT = 'owner';
 const ACCESS_TOKEN_TTL = 3600;
 // A consumed refresh token presented this soon after rotation is a concurrent holder, not a replay (Auth0 reuse interval, Okta grace period).
-const REUSE_WINDOW_MS = 10 * 60 * 1000;
+// DALAN_REFRESH_REUSE_WINDOW_MS overrides it (clamped to 1 s .. 1 h) so tests can cross the window quickly.
+const REUSE_WINDOW_MS = Math.min(3600000, Math.max(1000, Number(process.env.DALAN_REFRESH_REUSE_WINDOW_MS) || 10 * 60 * 1000));
 const OFF = Object.freeze({ enabled: false });
 const html = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 export { untrusted };
