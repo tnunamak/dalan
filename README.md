@@ -199,7 +199,7 @@ Replace `REQUEST_ID` with a job's ID.
 | Command help | `dalan help --all` |
 | Trial options | `dalan help try` |
 | Bridge and queue state | `dalan status --json` |
-| Results needing attention | `dalan inbox --all` |
+| Job notices across all requesters on this host (last 72 hours by default) | `dalan inbox --all` |
 | A full job record | `dalan get REQUEST_ID --json` |
 | Host diagnostics | `dalan doctor --json` |
 | File locations | `dalan paths --json` |
