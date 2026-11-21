@@ -241,6 +241,14 @@ await check('G11', 'owner revocation during refresh cannot be undone by commit',
     assert.notEqual(as.store.connectionByGrant(c.approved.grant_id).revoked_at, null);
   } finally { release(); as.provider.Grant.find = original; }
 });
+await check('G12', 'a refresh response without a refresh_token commits and leaves no head', async () => {
+  const c = await connected('duet');
+  const first = await token(c.clientId, { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, code_verifier: c.flow.verifier, resource });
+  const rotated = await token(c.clientId, { grant_type: 'refresh_token', refresh_token: first.body.refresh_token }); assert.equal(rotated.status, 200);
+  assert.equal(as.store.refreshHead(c.approved.grant_id), rotated.body.refresh_token);
+  as.store.commitRefresh({ reads: [], writes: [] }, c.approved.grant_id, c.clientId, 'no-rotation-token', 'params', { access_token: 'x' }, Date.now() + 5000);
+  assert.equal(as.store.refreshHead(c.approved.grant_id), undefined);
+});
 await check('R3', 'adapter level: the second consume of one row throws and revokes the grant', async () => {
   const c = await connected('lark');
   assert.ok(as.store.find('AuthorizationCode', c.code));

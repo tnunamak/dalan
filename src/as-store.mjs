@@ -233,8 +233,11 @@ export class AsStore {
       this.db.prepare('DELETE FROM refresh_receipts WHERE deadline<=? OR grant_id=?').run(this.now(), grantId);
       this.db.prepare('INSERT INTO refresh_receipts VALUES(?,?,?,?)').run(grantId, this.#id('RefreshToken', token), deadline,
         this.#seal(JSON.stringify({ clientId, params, response }), `refresh-receipt:${grantId}`));
-      this.db.prepare('INSERT INTO refresh_heads VALUES(?,?) ON CONFLICT(grant_id) DO UPDATE SET payload=excluded.payload')
-        .run(grantId, this.#seal(response.refresh_token, `refresh-head:${grantId}`));
+      // No rotated token in the response means no head to serve; a stale head must not outlive it.
+      if (typeof response?.refresh_token === 'string') {
+        this.db.prepare('INSERT INTO refresh_heads VALUES(?,?) ON CONFLICT(grant_id) DO UPDATE SET payload=excluded.payload')
+          .run(grantId, this.#seal(response.refresh_token, `refresh-head:${grantId}`));
+      } else this.db.prepare('DELETE FROM refresh_heads WHERE grant_id=?').run(grantId);
     });
   }
 
