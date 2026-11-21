@@ -1,11 +1,24 @@
 export function canonicalValue(value, errorCode = 'invalid_json') {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (Array.isArray(value)) return value.map(item => canonicalValue(item, errorCode));
-  if (value && Object.getPrototypeOf(value) === Object.prototype) {
-    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalValue(value[key], errorCode)]));
+  const active = new WeakSet();
+  const invalid = () => Object.assign(new Error(errorCode), { code: errorCode });
+
+  function visit(item) {
+    if (item === null || typeof item === 'boolean' || typeof item === 'string') return item;
+    if (typeof item === 'number' && Number.isFinite(item)) return item;
+    const array = Array.isArray(item);
+    if (!array && (!item || Object.getPrototypeOf(item) !== Object.prototype)) throw invalid();
+    if (active.has(item)) throw invalid();
+    active.add(item);
+    try {
+      if (array) return item.map(visit);
+      return Object.fromEntries(Object.keys(item).sort().map(key => [key, visit(item[key])]));
+    } finally {
+      // Sibling branches may legitimately share the same object.
+      active.delete(item);
+    }
   }
-  throw Object.assign(new Error(errorCode), { code: errorCode });
+
+  return visit(value);
 }
 
 export const canonicalJson = (value, errorCode) => JSON.stringify(canonicalValue(value, errorCode));
