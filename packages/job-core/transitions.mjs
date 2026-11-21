@@ -5,7 +5,7 @@ export function assertClaimAuthority(command, authority, now) {
   const { job, subject, worker, claim, epoch } = command;
   if (!authority || authority.job !== job || authority.subject !== subject || authority.worker !== worker ||
       authority.claim !== claim || authority.epoch !== epoch || authority.active !== true) fail('stale_authority');
-  if (!natural(authority.leaseUntil) || now >= authority.leaseUntil) fail('lease_expired');
+  if (!natural(now) || !natural(authority.leaseUntil) || now >= authority.leaseUntil) fail('lease_expired');
 }
 
 // Called only after authority and receipt replay have been checked by the caller.
