@@ -16,7 +16,7 @@ import { parseArgs } from './live-trial/common.mjs';
 import { loadKeys, writeAtomic } from '../src/as-files.mjs';
 import { routeCustodyPath } from '../src/route-custody.mjs';
 import { writeWorkerInstructions } from '../src/worker-instructions.mjs';
-import { buildQuery, ensureDurableRoute, gozarHomeFor, isPublished, observeRetainedRoute, requireExternalRoute, resolveGozar, describeCandidate, describeDisclosure, routeFailure } from '../src/gozar-routes.mjs';
+import { buildQuery, compatibleRetainedOperationId, ensureDurableRoute, gozarHomeFor, isPublished, observeRetainedRoute, requireExternalRoute, resolveGozar, describeCandidate, describeDisclosure, routeFailure } from '../src/gozar-routes.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const SAFE_PATH = /^[A-Za-z0-9_@+=:,./-]+$/; // no space, quote, %, $ or newline: the value goes into a unit or plist as is
@@ -857,7 +857,7 @@ function readWorkerRouteReference(home, file) {
 }
 
 export function workerRouteReference(home, retained, view, custody) {
-  const operationId = retained?.operationId ?? view.operationId;
+  const operationId = compatibleRetainedOperationId(retained?.operationId, view.operationId);
   return {
     home, handle: view.handle, custody,
     ...(typeof operationId === 'string' && operationId.length ? { operationId } : {}),

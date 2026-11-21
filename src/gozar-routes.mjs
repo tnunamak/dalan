@@ -204,12 +204,22 @@ export async function waitForPublication({ gozar, home, handle, origin, signal, 
 // Only a durable host write before the dispatch fence proves the SDK was never called.
 export const routeNotDispatched = ref => ref.phase === 'prepared' && !ref.handle;
 
+export function compatibleRetainedOperationId(retained, observed) {
+  const saved = typeof retained === 'string' && retained.length ? retained : undefined;
+  const actual = typeof observed === 'string' && observed.length ? observed : undefined;
+  if (saved && actual && saved !== actual) {
+    throw new RouteError('route_conflict', 'The retained and observed Gozar operations do not match.');
+  }
+  return saved ?? actual;
+}
+
 export async function observeRetainedRoute(gozar, ref) {
   const { home, operationId, handle } = ref;
   if (handle) {
     try {
       const view = await gozar.routeStatus({ home, handle });
       if (!sameRouteHandle(view.handle, handle)) throw new RouteError('route_conflict', 'Gozar returned a different route handle.');
+      compatibleRetainedOperationId(operationId, view.operationId);
       return { state: 'recorded', view };
     } catch (error) { if (!operationId || error.code !== 'route_not_found') throw error; }
   }

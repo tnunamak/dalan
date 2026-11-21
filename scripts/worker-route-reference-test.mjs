@@ -9,7 +9,8 @@ test('worker route identity survives allocation and a matching retry view', () =
   const expected = { home, handle, custody, operationId: view.operationId };
   assert.deepEqual(workerRouteReference(home, null, view, custody), expected);
   assert.deepEqual(workerRouteReference(home, { home, handle, custody }, view, custody), expected);
-  assert.deepEqual(workerRouteReference(home, expected, { handle, operationId: 'unrelated' }, custody), expected);
+  assert.deepEqual(workerRouteReference(home, expected, view, custody), expected);
+  assert.deepEqual(workerRouteReference(home, expected, { handle }, custody), expected);
   assert.deepEqual(workerRouteReference(home, { home, handle, custody }, { handle }, custody), { home, handle, custody });
 });
 
