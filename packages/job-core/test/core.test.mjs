@@ -7,6 +7,18 @@ test('canonical JSON sorts nested keys and preserves array order', () => {
   assert.throws(() => canonicalJson({ bad: Infinity }, 'bad_value'), { code: 'bad_value' });
 });
 
+test('canonical JSON rejects an undefined array cell instead of serializing it as null', () => {
+  assert.throws(() => canonicalJson({ values: [1, undefined] }), {
+    name: 'Error', code: 'invalid_json', message: 'invalid_json',
+  });
+});
+
+test('canonical JSON rejects a Date rather than silently converting it to text', () => {
+  assert.throws(() => canonicalJson({ created: new Date(0) }, 'unsupported_value'), {
+    name: 'Error', code: 'unsupported_value', message: 'unsupported_value',
+  });
+});
+
 test('claim authority requires matching epoch and an unexpired deadline', () => {
   const command = { job: 'j', subject: 's', worker: 'w', claim: 'c', epoch: 2 };
   const authority = { ...command, active: true, leaseUntil: 10 };
