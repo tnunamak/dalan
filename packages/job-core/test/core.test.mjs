@@ -65,3 +65,20 @@ test('canonical JSON rejects unsupported leaves while keeping the caller-specifi
   }
   assert.equal(canonicalJson({ nested: [null, false, 0, ''] }), '{"nested":[null,false,0,""]}');
 });
+
+test('canonical JSON permits a shared object to appear in sibling branches', () => {
+  const shared = { z: 'last', a: 'first' };
+  assert.equal(
+    canonicalJson({ right: [shared], left: shared }),
+    '{"left":{"a":"first","z":"last"},"right":[{"a":"first","z":"last"}]}'
+  );
+});
+
+test('canonical JSON treats shared branches like independently allocated equal branches', () => {
+  const shared = { values: ['second', 'first'] };
+  assert.equal(
+    canonicalJson([shared, shared]),
+    canonicalJson([{ values: ['second', 'first'] }, { values: ['second', 'first'] }])
+  );
+  assert.deepEqual(shared, { values: ['second', 'first'] });
+});
