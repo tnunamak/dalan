@@ -173,3 +173,27 @@ test('a normal adapter exit releases a forgotten lock without a takeover', t => 
   assert.equal(child.status, 0, child.stderr);
   assert.equal(fs.existsSync(file), false, 'normal exit removes its own lock');
 });
+
+test('acquire reports a non-directory ancestor without replacing it', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-path-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const blocker = path.join(dir, 'ordinary-file');
+  const file = path.join(blocker, 'nested', 'session.lock');
+  fs.writeFileSync(blocker, 'keep this file');
+
+  await assert.rejects(acquireLock(file), { code: 'ENOTDIR' });
+  assert.deepEqual(fs.readdirSync(dir), ['ordinary-file']);
+  assert.equal(fs.readFileSync(blocker, 'utf8'), 'keep this file');
+});
+
+test('release succeeds when the temporary lock file is already absent', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-release-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const lock = await acquireLock(file);
+  assert.ok(fs.existsSync(file), 'the fixture starts with a real temporary file');
+  fs.unlinkSync(file);
+
+  assert.doesNotThrow(() => lock.release());
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
