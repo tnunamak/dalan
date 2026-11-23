@@ -25,6 +25,12 @@ test('canonical JSON rejects an undefined array cell instead of serializing it a
   });
 });
 
+test('canonical JSON rejects an undefined object member nested in an array instead of dropping it', () => {
+  assert.throws(() => canonicalJson({ rows: [{ count: 1, optional: undefined }] }), {
+    name: 'Error', code: 'invalid_json', message: 'invalid_json',
+  });
+});
+
 test('canonical JSON rejects a Date rather than silently converting it to text', () => {
   assert.throws(() => canonicalJson({ created: new Date(0) }, 'unsupported_value'), {
     name: 'Error', code: 'unsupported_value', message: 'unsupported_value',
