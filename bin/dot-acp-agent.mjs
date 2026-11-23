@@ -237,7 +237,7 @@ async function waitLoop(s, ctl, say) {
   for (;;) {
     if (ctl.cancelled) return { cancelled: true };
     if (breakExpired()) throw breakRefusal();
-    const signal = breakSignal ? AbortSignal.any([ctl.abort.signal, breakSignal]) : ctl.abort.signal;
+    let signal = breakSignal ? AbortSignal.any([ctl.abort.signal, breakSignal]) : ctl.abort.signal;
     let r;
     try {
       r = await call(`/wait?id=${encodeURIComponent(ctl.pending.rid)}&timeout=${slice}&peek=1`, ctl.pending.rid, { signal });
@@ -254,7 +254,7 @@ async function waitLoop(s, ctl, say) {
       continue;
     }
     if (ctl.cancelled) return { cancelled: true };
-    if (r.status !== 'worker_break') { breakDeadline = null; breakSignal = null; } // the break ended: a later break gets a fresh limit
+    if (r.status !== 'worker_break') { breakDeadline = null; breakSignal = null; signal = ctl.abort.signal; } // the break ended: a later break gets a fresh limit
     if (breakExpired()) throw breakRefusal();
     if (r.status === 'timeout') { await heartbeat(s, ctl, say, '', signal); continue; }
     if (r.status === 'worker_break') {

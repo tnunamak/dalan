@@ -9,18 +9,23 @@ const source = await readFile(new URL('../bin/dot-acp-agent.mjs', import.meta.ur
 const start = source.indexOf('\nasync function waitLoop('), end = source.indexOf('\nasync function readRowOrThrow(', start);
 assert.ok(start >= 0 && end > start, 'waitLoop not found');
 const keepAlive = setInterval(() => {}, 1000); // AbortSignal.timeout timers do not hold the process open
+setTimeout(() => { console.error('FAIL worker-break-wait-test exceeded 10 s (a wait was not bounded)'); process.exit(1); }, 10000).unref();
 const OUTAGE_MS = 150;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // `steps` entries: a status string, {status, after: ms to wait first}, or 'hang' (pending until its signal aborts).
-function scenario(steps) {
+function scenario(steps, heartbeatMs = 0) {
   let index = 0;
   const ctl = { cancelled: false, pending: { rid: 'fixture' }, abort: new AbortController() };
   const seen = [];
   const run = runInNewContext(source.slice(start, end) + '\nwaitLoop', {
     Date, AbortSignal, Math, encodeURIComponent, HEARTBEAT_MS: 10, OUTAGE_MS,
     sleep, transient: () => false, publishPending: () => {},
-    heartbeat: async (_s, _c, say) => say('agent_thought_chunk', 'heartbeat'),
+    heartbeat: async (_s, _c, say, _note, signal) => {
+      await sleep(heartbeatMs); // runs past the old break deadline
+      assert.equal(signal.aborted, false, 'recovery heartbeat was aborted by the expired break deadline');
+      await say('agent_thought_chunk', 'heartbeat');
+    },
     call: async (_path, _rid, { signal }) => {
       const step = steps[index++];
       assert.ok(step, 'unexpected extra wait');
@@ -52,6 +57,11 @@ function scenario(steps) {
 // 3. Break, then healthy work (timeout heartbeats) lasting beyond the original deadline, then completion: not refused.
 {
   const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, { status: 'timeout', after: 20 }, 'finished']);
+  assert.equal((await s.completion).text, 'synthetic result');
+}
+// 3b. The recovery heartbeat itself is detached from the expired break: it must outlive the old deadline.
+{
+  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS - 40 }, 'finished'], 80);
   assert.equal((await s.completion).text, 'synthetic result');
 }
 // 4. After recovery, a second break gets a fresh limit (is not refused at once by the first one's deadline).
