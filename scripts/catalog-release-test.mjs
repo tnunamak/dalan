@@ -86,10 +86,13 @@ for (const mode of ['success','delayed','timeout','not-ready','restart-fails']) 
 
 // The real probe, on both data layouts a legacy-named service can use: it must find the socket the daemon would bind.
 import net from 'node:net';
-import {bridgeSocket} from './admin-socket-probe.mjs';
+import {bridgeSocket} from './admin-socket-probe-lib.mjs';
+import {fileURLToPath} from 'node:url';
+import {cpSync} from 'node:fs';
 import {adminSocketPath} from '../src/admin-socket.mjs';
 function listen(file){return new Promise((resolve,reject)=>{const server=net.createServer();server.once('error',reject);server.listen(file,()=>resolve(server));});}
-function probe(home){return spawnSync(process.execPath,[new URL('./admin-socket-probe.mjs',import.meta.url).pathname],{env:{...process.env,HOME:home},timeout:5000}).status;}
+const probeFile=fileURLToPath(new URL('./admin-socket-probe.mjs',import.meta.url));
+function probe(home,file=probeFile,out={}){const r=spawnSync(process.execPath,[file],{env:{...process.env,HOME:home},timeout:5000,encoding:'utf8'});out.stderr=r.stderr;return r.status;}
 for (const [layout,dir] of [['legacy','dot-bridge'],['current','dalan']]) test(`admin socket probe finds a bridge on the ${layout} data layout`,async t=>{
   const home=mkdtempSync(join(tmpdir(),'probe-home-'));
   t.after(()=>rmSync(home,{recursive:true,force:true}));
@@ -102,4 +105,18 @@ for (const [layout,dir] of [['legacy','dot-bridge'],['current','dalan']]) test(`
   const server=await listen(expected);
   t.after(()=>server.close());
   assert.equal(probe(home),0,'a listener on the daemon socket is found');
+});
+
+// A checkout path with a space (and other URL-escaped characters) must still probe: a skipped probe would exit 0 and read as ready.
+test('admin socket probe runs from a checkout path with a space and reports no listener',t=>{
+  const root=mkdtempSync(join(tmpdir(),'probe spaced '));
+  t.after(()=>rmSync(root,{recursive:true,force:true}));
+  for(const dir of ['scripts','src']) mkdirSync(join(root,dir));
+  for(const file of ['scripts/admin-socket-probe.mjs','scripts/admin-socket-probe-lib.mjs','src/admin-socket.mjs','src/paths.mjs','src/env.mjs'])
+    cpSync(fileURLToPath(new URL('../'+file,import.meta.url)),join(root,file));
+  const home=mkdtempSync(join(tmpdir(),'probe-home-'));
+  t.after(()=>rmSync(home,{recursive:true,force:true}));
+  const out={};
+  assert.equal(probe(home,join(root,'scripts/admin-socket-probe.mjs'),out),1);
+  assert.equal(out.stderr,'','the probe failed to load instead of probing');
 });
