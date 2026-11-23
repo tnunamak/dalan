@@ -223,6 +223,8 @@
   "node scripts/work-order-e2e.mjs",
   "node scripts/adapter-conformance-test.mjs",
   "node scripts/worker-break-wait-test.mjs",
+  "node --test scripts/catalog-release-test.mjs",
+  "node --test scripts/dot-worker-timeout-test.mjs",
   "node scripts/queue-wait-perf-test.mjs",
   "node scripts/work-order-shape-test.mjs",
   "node scripts/admission-measure-test.mjs",
