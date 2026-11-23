@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertClaimAuthority, canonicalJson, decide } from '../index.mjs';
+import { assertClaimAuthority, canonicalJson, canonicalValue, decide } from '../index.mjs';
 
 test('canonical JSON keeps Unicode keys and values in deterministic key order', () => {
   const document = { '中': ['茶'], 'é': 'été', a: '🐟' };
@@ -137,4 +137,35 @@ test('canonical JSON does not normalize distinct Unicode strings', () => {
   const decomposed = 'e\u0301';
   assert.deepEqual(JSON.parse(canonicalJson([composed, decomposed])), [composed, decomposed]);
   assert.notEqual(canonicalJson(composed), canonicalJson(decomposed));
+});
+
+test('canonical output can be edited without changing its source document', () => {
+  const entry = Object.freeze({ label: 'source' });
+  const source = Object.freeze({ entries: Object.freeze([entry, entry]) });
+  const result = canonicalValue(source);
+
+  assert.deepEqual(result, source);
+  result.entries[0].label = 'edited';
+  result.entries.push({ label: 'added' });
+  assert.deepEqual(result.entries, [{ label: 'edited' }, { label: 'source' }, { label: 'added' }]);
+  assert.deepEqual(source.entries, [{ label: 'source' }, { label: 'source' }]);
+});
+
+test('ordinary progress needs no renewal context and leaves inputs unchanged', () => {
+  const snapshot = Object.freeze({ revision: 5, leaseUntil: 40 });
+  const command = Object.freeze({
+    expectedRevision: 5, operation: 'progress', args: Object.freeze({ note: 'fixture' }),
+  });
+  assert.deepEqual(decide(snapshot, command), {
+    events: [], effects: [{ type: 'advance_revision', expectedRevision: 5 }],
+  });
+  assert.deepEqual(snapshot, { revision: 5, leaseUntil: 40 });
+  assert.deepEqual(command.args, { note: 'fixture' });
+});
+
+test('the last incrementable revision can still produce an ordinary finish effect', () => {
+  const revision = Number.MAX_SAFE_INTEGER - 1;
+  assert.deepEqual(decide({ revision }, { expectedRevision: revision, operation: 'finish' }), {
+    events: [], effects: [{ type: 'advance_revision', expectedRevision: revision }],
+  });
 });
