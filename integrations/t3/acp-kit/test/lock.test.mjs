@@ -53,6 +53,27 @@ test('release frees the lock for the next acquirer', async () => {
   fs.rmSync(dir, { recursive: true });
 });
 
+test('an ordinary file in place of the lock parent is left untouched', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-fixture-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const obstacle = path.join(dir, 'not-a-directory');
+  fs.writeFileSync(obstacle, 'synthetic fixture');
+  await assert.rejects(acquireLock(path.join(obstacle, 's.lock')), error =>
+    error?.code === 'EEXIST' || error?.code === 'ENOTDIR');
+  assert.equal(fs.readFileSync(obstacle, 'utf8'), 'synthetic fixture');
+  assert.deepEqual(fs.readdirSync(dir), ['not-a-directory']);
+});
+
+test('releasing twice leaves the temporary lock directory empty', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-fixture-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lock = await acquireLock(path.join(dir, 's.lock'));
+  lock.release();
+  assert.deepEqual(fs.readdirSync(dir), []);
+  assert.doesNotThrow(() => lock.release());
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
 test('a dead owner is stale and is taken over', async () => {
   const dir = tmp(), file = path.join(dir, 's.lock');
   plant(file, { pid: await deadPid(), start_time: 'x' });
