@@ -68,4 +68,27 @@ for(const responseMs of [-1,NaN,Infinity]) {
   assert.equal(await second,slow);
   assert.equal(c.pending,0);
 }
+{
+  const cancelled=[];
+  const done={status:'completed'};
+  const response=checkResponse(Promise.resolve(done),{}, {
+    schedule() { return 0; },
+    cancel(id) { cancelled.push(id); },
+  });
+  assert.equal(await response,done);
+  assert.deepEqual(cancelled,[0]);
+}
+{
+  const c=clock(), running={status:'running'}, error=new Error('failed after response');
+  let fail;
+  const work=new Promise((_,reject)=>{fail=reject;});
+  const response=checkResponse(work,running,{...c,responseMs:0});
+  c.advance(0);
+  assert.equal(await response,running);
+  assert.equal(c.pending,0);
+  fail(error);
+  await assert.rejects(work,e=>e===error);
+  assert.equal(await response,running);
+  assert.equal(c.pending,0);
+}
 console.log('PASS check response virtual deadline, completion, failure and timer disposal');
