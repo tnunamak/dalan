@@ -93,6 +93,15 @@ test('renew accepts the exact maximum and rejects invalid duration shape or over
     { ...context, now: Number.MAX_SAFE_INTEGER - 1 }), { code: 'invalid_lease' });
 });
 
+test('renew accepts a deadline equal to the largest safe integer', () => {
+  const ceiling = Number.MAX_SAFE_INTEGER;
+  const command = { expectedRevision: 4, operation: 'renew', args: { leaseMs: 2 } };
+
+  assert.equal(decide({ revision: 4 }, command, {
+    now: ceiling - 2, maxLeaseMs: 2,
+  }).leaseUntil, ceiling);
+});
+
 test('canonical JSON rejects unsupported leaves while keeping the caller-specific error code', () => {
   for (const unsupported of [undefined, new Date(0), 1n]) {
     assert.throws(() => canonicalJson({ nested: [unsupported] }, 'bad_argument'), { code: 'bad_argument' });
