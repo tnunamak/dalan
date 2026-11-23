@@ -39,6 +39,22 @@ test('claim authority requires matching epoch and an unexpired deadline', () => 
   assert.throws(() => assertClaimAuthority(command, authority, 10), { code: 'lease_expired' });
 });
 
+
+test('renewal reports invalid lease when duration is missing, zero, or fractional', () => {
+  const snapshot = Object.freeze({ revision: 2 });
+  for (const args of [undefined, {}, { leaseMs: 0 }, { leaseMs: 1.5 }]) {
+    assert.throws(() => decide(snapshot, { expectedRevision: 2, operation: 'renew', args },
+      { now: 10, maxLeaseMs: 9 }), { code: 'invalid_lease' });
+  }
+  assert.deepEqual(snapshot, { revision: 2 });
+});
+
+test('a stale revision is reported before validating a renewal duration', () => {
+  const command = { expectedRevision: 1, operation: 'renew', args: { leaseMs: 0 } };
+  assert.throws(() => decide({ revision: 2 }, command, { now: 10, maxLeaseMs: 9 }),
+    { code: 'revision_conflict' });
+});
+
 test('revision and lease decisions use supplied time', () => {
   const command = { expectedRevision: 2, operation: 'renew', args: { leaseMs: 7 } };
   assert.deepEqual(decide({ revision: 2 }, command, { now: 10, maxLeaseMs: 9 }), {
