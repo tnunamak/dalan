@@ -222,6 +222,7 @@
   "node scripts/work-order-test.mjs",
   "node scripts/work-order-e2e.mjs",
   "node scripts/adapter-conformance-test.mjs",
+  "node scripts/worker-break-wait-test.mjs",
   "node scripts/queue-wait-perf-test.mjs",
   "node scripts/work-order-shape-test.mjs",
   "node scripts/admission-measure-test.mjs",

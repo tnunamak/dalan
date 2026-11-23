@@ -254,6 +254,7 @@ async function waitLoop(s, ctl, say) {
       continue;
     }
     if (ctl.cancelled) return { cancelled: true };
+    if (r.status !== 'worker_break') { breakDeadline = null; breakSignal = null; } // the break ended: a later break gets a fresh limit
     if (breakExpired()) throw breakRefusal();
     if (r.status === 'timeout') { await heartbeat(s, ctl, say, '', signal); continue; }
     if (r.status === 'worker_break') {
