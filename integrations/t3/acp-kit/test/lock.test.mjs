@@ -16,6 +16,21 @@ const deadPid = async () => {
 const plant = (file, record) => fs.writeFileSync(file, JSON.stringify({ token: 'ab'.repeat(8), host: 'x', ...record }), { mode: 0o600 });
 const run = (args) => new Promise(resolve => { const c = spawn(process.execPath, [worker, ...args], { stdio: 'inherit' }); c.once('exit', code => resolve(code)); });
 
+test('busy lock names a known synthetic owner without echoing its metadata', () => {
+  const error = new LockBusyError({ pid: 314, token: 'fixture-token', start_time: 'fixture-start' });
+  assert.equal(error.name, 'LockBusyError');
+  assert.equal(error.code, 'session_busy');
+  assert.equal(error.pid, 314);
+  assert.equal(error.message, 'this session is active in another adapter (pid 314)');
+});
+
+test('busy lock with no readable owner keeps the busy code and names no pid', () => {
+  const error = new LockBusyError(null);
+  assert.equal(error.code, 'session_busy');
+  assert.equal(error.pid, null);
+  assert.equal(error.message, 'this session is active in another adapter (pid unknown)');
+});
+
 test('acquire writes the record; release removes only our own token', async () => {
   const dir = tmp(), file = path.join(dir, 's.lock');
   const a = await acquireLock(file);
