@@ -1339,7 +1339,7 @@ const adminServer=http.createServer(async(req,res)=>{
       // Only evidence holds refill: a pause or an owner-confirmed break. throttled stays false for older readers.
       const paused=store.paused(), dotBreak=!!store.holdingBreak();
       const held=paused?'paused':dotBreak?'worker_break':null;
-      return json(res,200,{states,refill:{held,paused,worker_break:dotBreak,throttled:false}});
+      return json(res,200,{states,refill:{held,paused,worker_break:dotBreak,break_active:!!store.activeBreak(),throttled:false}});
     }
     if(url.pathname==='/tools'&&req.method==='GET') { adminOperator(req); return json(res,200,{tools:toolRegistry.list()}); }
     if(url.pathname.startsWith('/tools/')&&req.method==='POST') {

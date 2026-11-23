@@ -217,14 +217,16 @@ async function runTurn(s, ctl, text, say) {
   }
 }
 
+// Reports the job's state to the requester. Returns the bridge's owner-states reply, or null when the bridge did not answer.
 async function heartbeat(s, ctl, say, note = '', signal = ctl.abort.signal) {
-  let state = '';
+  let state = '', reply = null;
   try {
-    const r = await call('/owner-states', null, { method: 'POST', payload: { items: [{ id: ctl.pending.rid, capability: tokenFor(ctl.pending.rid) }] }, signal });
-    state = r.states?.[0]?.status ?? 'unknown';
+    reply = await call('/owner-states', null, { method: 'POST', payload: { items: [{ id: ctl.pending.rid, capability: tokenFor(ctl.pending.rid) }] }, signal });
+    state = reply.states?.[0]?.status ?? 'unknown';
   } catch { state = 'bridge unreachable'; }
   const age = Math.round((Date.now() - ctl.pending.startedAt) / 1000);
   await say('agent_thought_chunk', `worker ${state}, ${age < 120 ? `${age} s` : `${Math.round(age / 60)} min`}${note}\n`);
+  return reply;
 }
 
 // Block until the assignment ends. Returns {text}, {blocked,text}, {cancelled} or {expired}; throws on a hard failure.
@@ -254,9 +256,17 @@ async function waitLoop(s, ctl, say) {
       continue;
     }
     if (ctl.cancelled) return { cancelled: true };
-    if (r.status !== 'worker_break') { breakDeadline = null; breakSignal = null; signal = ctl.abort.signal; } // the break ended: a later break gets a fresh limit
+    // A quiet poll (status timeout) is not recovery: the bridge sends one break notice and then plain timeouts. Only the bridge's
+    // own report that no break is active ends the limit (checked before the deadline, so slow polls cannot hide a recovery).
+    if (r.status === 'timeout') {
+      const reply = await heartbeat(s, ctl, say, '', signal);
+      if (breakDeadline !== null && reply?.refill?.break_active === false) { breakDeadline = null; breakSignal = null; }
+      if (breakExpired()) throw breakRefusal();
+      continue;
+    }
+    // A terminal reply ends the wait whatever the break deadline says.
+    if (r.status !== 'worker_break') { breakDeadline = null; breakSignal = null; signal = ctl.abort.signal; }
     if (breakExpired()) throw breakRefusal();
-    if (r.status === 'timeout') { await heartbeat(s, ctl, say, '', signal); continue; }
     if (r.status === 'worker_break') {
       if (breakDeadline === null) {
         breakDeadline = Date.now() + OUTAGE_MS;

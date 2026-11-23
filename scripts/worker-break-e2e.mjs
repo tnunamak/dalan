@@ -39,12 +39,12 @@ try {
 
   // refill is held only on evidence: an inferred break (silence) holds nothing, an owner-confirmed one holds. /owner-states is what `wait --drained` reads.
   const adminPost=(route,payload)=>new Promise((resolve,reject)=>{const req=http.request({socketPath:join(root,'admin.sock'),path:route,method:'POST',headers:{'content-type':'application/json'}},res=>{let b='';res.on('data',c=>b+=c);res.on('end',()=>resolve(JSON.parse(b)));});req.on('error',reject);req.end(JSON.stringify(payload));});
-  assert.deepEqual((await adminPost('/owner-states',{items:[]})).refill,{held:null,paused:false,worker_break:false,throttled:false},'refill with no break');
+  assert.deepEqual((await adminPost('/owner-states',{items:[]})).refill,{held:null,paused:false,worker_break:false,break_active:false,throttled:false},'refill with no break');
   {
     const db=new DatabaseSync(join(root,'bridge.db'));
     db.prepare("INSERT INTO worker_breaks(since,reason,source,usage,created_at) VALUES(?,?,'inferred','{}',?)").run(new Date(Date.now()-3600000).toISOString(),'no worker tool call for 60 min',new Date().toISOString());
     status=await ok('status','--json');assert(status.worker_break.active&&status.worker_break.source==='inferred','inferred break not active: '+JSON.stringify(status.worker_break));
-    assert.deepEqual((await adminPost('/owner-states',{items:[]})).refill,{held:null,paused:false,worker_break:false,throttled:false},'an inferred break held refill');
+    assert.deepEqual((await adminPost('/owner-states',{items:[]})).refill,{held:null,paused:false,worker_break:false,break_active:true,throttled:false},'an inferred break held refill, or was not reported active');
     db.prepare('DELETE FROM worker_breaks').run();db.prepare("DELETE FROM sqlite_sequence WHERE name='worker_breaks'").run();db.close();
   }
 
@@ -58,7 +58,7 @@ try {
   status=await ok('status','--json');assert(status.worker_break.active&&status.worker_break.since===since&&status.worker_break.source==='owner');
   assert((await ok('status','--explain')).includes(` worker_break=since:${since}(owner)`),'explain lacks worker_break');
 
-  assert.deepEqual((await adminPost('/owner-states',{items:[]})).refill,{held:'worker_break',paused:false,worker_break:true,throttled:false},'an owner break did not hold refill');
+  assert.deepEqual((await adminPost('/owner-states',{items:[]})).refill,{held:'worker_break',paused:false,worker_break:true,break_active:true,throttled:false},'an owner break did not hold refill');
 
   // the worker's next tool call ends the break
   await tool('list_pending');

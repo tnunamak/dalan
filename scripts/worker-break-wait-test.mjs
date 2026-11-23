@@ -14,17 +14,18 @@ const OUTAGE_MS = 150;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // `steps` entries: a status string, {status, after: ms to wait first}, or 'hang' (pending until its signal aborts).
-function scenario(steps, heartbeatMs = 0) {
+// `breakActive` is what the bridge's owner-states reply reports in refill.break_active: true, false, or 'absent' (an older
+// bridge without the field) or null (no reply).
+function scenario(steps, breakActive = false) {
   let index = 0;
   const ctl = { cancelled: false, pending: { rid: 'fixture' }, abort: new AbortController() };
   const seen = [];
   const run = runInNewContext(source.slice(start, end) + '\nwaitLoop', {
     Date, AbortSignal, Math, encodeURIComponent, HEARTBEAT_MS: 10, OUTAGE_MS,
     sleep, transient: () => false, publishPending: () => {},
-    heartbeat: async (_s, _c, say, _note, signal) => {
-      await sleep(heartbeatMs); // runs past the old break deadline
-      assert.equal(signal.aborted, false, 'recovery heartbeat was aborted by the expired break deadline');
+    heartbeat: async (_s, _c, say) => {
       await say('agent_thought_chunk', 'heartbeat');
+      return breakActive === null ? null : { refill: breakActive === 'absent' ? {} : { break_active: breakActive } };
     },
     call: async (_path, _rid, { signal }) => {
       const step = steps[index++];
@@ -54,19 +55,29 @@ function scenario(steps, heartbeatMs = 0) {
   const s = scenario([{ status: 'worker_break', after: 0 }, { status: 'worker_break', after: OUTAGE_MS + 20 }, 'finished']);
   await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' });
 }
-// 3. Break, then healthy work (timeout heartbeats) lasting beyond the original deadline, then completion: not refused.
+// 3. Break, then the bridge reports no active break (the worker recovered) and healthy work runs past the original deadline:
+//    not refused.
 {
-  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, { status: 'timeout', after: 20 }, 'finished']);
-  assert.equal((await s.completion).text, 'synthetic result');
-}
-// 3b. The recovery heartbeat itself is detached from the expired break: it must outlive the old deadline.
-{
-  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS - 40 }, 'finished'], 80);
+  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, { status: 'timeout', after: 20 }, 'finished'], false);
   assert.equal((await s.completion).text, 'synthetic result');
 }
 // 4. After recovery, a second break gets a fresh limit (is not refused at once by the first one's deadline).
 {
-  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, 'worker_break', 'finished']);
+  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, 'worker_break', 'finished'], false);
+  assert.equal((await s.completion).text, 'synthetic result');
+}
+// 4b. A break that is still active: a single notice and then quiet polls do not cancel the limit.
+for (const [label, active] of [['still active', true], ['older bridge without the field', 'absent'], ['bridge gave no answer', null]]) {
+  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, 'finished'], active);
+  await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' }, `quiet poll ended the break limit: ${label}`);
+}
+{
+  const s = scenario(['worker_break', 'timeout', { status: 'timeout', after: OUTAGE_MS + 30 }, 'finished'], true);
+  await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' }, 'a quiet poll before the deadline ended the break limit');
+}
+// 4c. A terminal reply that arrives after the deadline still wins.
+{
+  const s = scenario(['worker_break', { status: 'finished', after: OUTAGE_MS + 30 }], true);
   assert.equal((await s.completion).text, 'synthetic result');
 }
 // 5. Cancel during a break returns cancelled.

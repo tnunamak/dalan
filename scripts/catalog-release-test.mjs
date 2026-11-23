@@ -27,6 +27,15 @@ case "$1" in
  *) exit 22;;
 esac
 `;
+// The golden test always passes; the admin-socket probe (node --input-type=module ...) is ready unless MODE says otherwise.
+const node = `#!/bin/sh
+case "$1" in scripts/catalog-golden-test.mjs) exit 0;; esac
+tree=$(cat "$FAKE_DIR/tree")
+if [ "$tree" = candidate ]; then
+  case "$MODE" in not-ready) exit 1;; esac
+fi
+exit 0
+`;
 const systemctl = `#!/bin/sh
 tree=$(cat "$FAKE_DIR/tree")
 case "$2" in
@@ -48,18 +57,18 @@ function release(t, mode) {
   const bin=join(root,'bin'),fake=join(root,'fake');
   mkdirSync(bin);mkdirSync(fake);
   copyFileSync(new URL('../bin/catalog-release.sh',import.meta.url),join(bin,'catalog-release.sh'));
-  for(const [name,body] of Object.entries({git,systemctl,node:'#!/bin/sh\\nexit 0\\n',sleep:'#!/bin/sh\\nexit 0\\n'}))
+  for(const [name,body] of Object.entries({git,systemctl,node:node,sleep:'#!/bin/sh\\nexit 0\\n'}))
     writeFileSync(join(fake,name),body.replaceAll('\\n','\n'),{mode:0o700});
   for(const [name,value] of Object.entries({branch:'previous',tree:'previous',service:'previous',checks:'0',events:'',head:'refs/heads/main'}))
     writeFileSync(join(fake,name),value+'\n');
   const result=spawnSync('bash',[join(bin,'catalog-release.sh'),'candidate-branch'],{
-    env:{PATH:fake+':/usr/bin:/bin',FAKE_DIR:fake,MODE:mode},encoding:'utf8',timeout:5000,
+    env:{PATH:fake+':/usr/bin:/bin',HOME:root,FAKE_DIR:fake,MODE:mode},encoding:'utf8',timeout:5000,
   });
   const read=name=>readFileSync(join(fake,name),'utf8').trim();
   return {result,branch:read('branch'),service:read('service'),tree:read('tree'),head:read('head'),events:read('events').split('\n')};
 }
 
-for (const mode of ['success','delayed','timeout','restart-fails']) test('catalog release '+mode,t=>{
+for (const mode of ['success','delayed','timeout','not-ready','restart-fails']) test('catalog release '+mode,t=>{
   const {result,branch,service,tree,head,events}=release(t,mode);
   assert.equal(result.error,undefined);
   const success=mode==='success'||mode==='delayed';
@@ -69,7 +78,7 @@ for (const mode of ['success','delayed','timeout','restart-fails']) test('catalo
   assert.equal(tree,branch);
   assert.equal(head,'refs/heads/main');
   const candidateProbes=events.filter(x=>x==='probe:candidate').length;
-  assert.equal(candidateProbes,{success:1,delayed:4,timeout:20,'restart-fails':0}[mode]);
+  assert.equal(candidateProbes,{success:1,delayed:4,timeout:20,'not-ready':20,'restart-fails':0}[mode]);
   assert.equal(events.includes('promote:candidate'),success);
   if(success)assert.ok(events.lastIndexOf('probe:candidate')<events.indexOf('promote:candidate'));
   else assert.ok(events.includes('restart:previous')&&events.includes('probe:previous'));

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ship a prepared catalog change. Refresh the connector and restart the worker
-# conversation only after the candidate service is active and the branch is advanced.
+# conversation only after the candidate service is active, answering on its admin socket, and the branch is advanced.
 # Usage: bin/catalog-release.sh <branch>
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -13,10 +13,22 @@ git merge-base --is-ancestor "$previous" "$candidate" || { echo "candidate is no
 
 # This targets existing legacy deployments; new installations use their generated unit name.
 unit=dot-bridge
+data_dir=${DOT_BRIDGE_DATA_DIR:-$HOME/.local/share/dot-bridge}
+# Active is not ready: the unit can be active while the bridge has not opened (or has lost) its admin socket.
+admin_socket_listening() {
+  node --input-type=module -e '
+    import net from "node:net";
+    import { adminSocketPath } from "./src/admin-socket.mjs";
+    const probe = net.connect(adminSocketPath(process.argv[1]));
+    probe.setTimeout(1000, () => process.exit(1));
+    probe.once("connect", () => process.exit(0));
+    probe.once("error", () => process.exit(1));
+  ' "$data_dir"
+}
 wait_active() {
   local attempt
   for ((attempt=1; attempt<=20; attempt++)); do
-    systemctl --user is-active --quiet "$unit" && return 0
+    systemctl --user is-active --quiet "$unit" && admin_socket_listening && return 0
     if ((attempt < 20)); then sleep 1; fi
   done
   return 1
@@ -50,7 +62,7 @@ switched=1
 node scripts/catalog-golden-test.mjs
 restart_attempted=1
 systemctl --user restart "$unit"
-wait_active || { echo "Candidate bridge did not become active before the deadline." >&2; exit 1; }
+wait_active || { echo "Candidate bridge did not become active and listening before the deadline." >&2; exit 1; }
 
 # Compare-and-swap only the local branch after readiness. The index and service
 # checkout already hold the candidate; attaching HEAD doesn't replace their files.
