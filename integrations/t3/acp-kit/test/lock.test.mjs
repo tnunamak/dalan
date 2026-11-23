@@ -71,6 +71,21 @@ test('pid reuse: a live pid with a different start_time is stale; the same start
   } finally { holder.kill(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('lock contention exposes the owning PID in a stable retry diagnostic', () => {
+  const error = new LockBusyError({pid: 2468});
+  assert.equal(error.name, 'LockBusyError');
+  assert.equal(error.code, 'session_busy');
+  assert.equal(error.pid, 2468);
+  assert.equal(error.message, 'this session is active in another adapter (pid 2468)');
+});
+
+test('lock contention without a readable owner reports busy with an unknown PID', () => {
+  const error = new LockBusyError(null);
+  assert.equal(error.code, 'session_busy');
+  assert.equal(error.pid, null);
+  assert.equal(error.message, 'this session is active in another adapter (pid unknown)');
+});
+
 test('an empty file from the old flock adapter is stale; a fresh empty file is busy', async () => {
   const dir = tmp(), file = path.join(dir, 's.lock');
   fs.writeFileSync(file, '', { mode: 0o600 });
