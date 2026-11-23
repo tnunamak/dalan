@@ -87,3 +87,17 @@ test('idle warning configuration defaults, validates, and is distinct from legac
     assert.throws(()=>loadRedeliveryLimits(file),/invalid claim_idle_warning_ms/);
   }
 });
+
+for(const [name,accepted,refused] of [['minimum',60000,59999],['maximum',604800000,null]]) {
+  test(`idle warning accepts its ${name}`,t=>{
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-idle-warning-boundary-'));
+    t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+    const file=path.join(dir,'limits.json');
+    fs.writeFileSync(file,JSON.stringify({claim_idle_warning_ms:accepted}),{mode:0o600});
+    assert.equal(loadRedeliveryLimits(file).claimIdleWarningMs,accepted);
+    if(refused!==null) {
+      fs.writeFileSync(file,JSON.stringify({claim_idle_warning_ms:refused}),{mode:0o600});
+      assert.throws(()=>loadRedeliveryLimits(file),/invalid claim_idle_warning_ms/);
+    }
+  });
+}
