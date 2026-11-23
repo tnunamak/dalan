@@ -27,9 +27,9 @@ case "$1" in
  *) exit 22;;
 esac
 `;
-// The golden test always passes; the admin-socket probe (node --input-type=module ...) is ready unless MODE says otherwise.
+// The golden test always passes; the admin-socket probe (scripts/admin-socket-probe.mjs) is ready unless MODE says otherwise.
 const node = `#!/bin/sh
-case "$1" in scripts/catalog-golden-test.mjs) exit 0;; esac
+case "$1" in scripts/catalog-golden-test.mjs) exit 0;; scripts/admin-socket-probe.mjs) ;; *) exit 24;; esac
 tree=$(cat "$FAKE_DIR/tree")
 if [ "$tree" = candidate ]; then
   case "$MODE" in not-ready) exit 1;; esac
@@ -82,4 +82,24 @@ for (const mode of ['success','delayed','timeout','not-ready','restart-fails']) 
   assert.equal(events.includes('promote:candidate'),success);
   if(success)assert.ok(events.lastIndexOf('probe:candidate')<events.indexOf('promote:candidate'));
   else assert.ok(events.includes('restart:previous')&&events.includes('probe:previous'));
+});
+
+// The real probe, on both data layouts a legacy-named service can use: it must find the socket the daemon would bind.
+import net from 'node:net';
+import {bridgeSocket} from './admin-socket-probe.mjs';
+import {adminSocketPath} from '../src/admin-socket.mjs';
+function listen(file){return new Promise((resolve,reject)=>{const server=net.createServer();server.once('error',reject);server.listen(file,()=>resolve(server));});}
+function probe(home){return spawnSync(process.execPath,[new URL('./admin-socket-probe.mjs',import.meta.url).pathname],{env:{...process.env,HOME:home},timeout:5000}).status;}
+for (const [layout,dir] of [['legacy','dot-bridge'],['current','dalan']]) test(`admin socket probe finds a bridge on the ${layout} data layout`,async t=>{
+  const home=mkdtempSync(join(tmpdir(),'probe-home-'));
+  t.after(()=>rmSync(home,{recursive:true,force:true}));
+  const data=join(home,'.local/share',dir);
+  mkdirSync(data,{recursive:true});
+  writeFileSync(join(data,'bridge.db'),'x'); // an initialized root, so the daemon's own resolution picks it
+  const expected=bridgeSocket(home);
+  assert.equal(expected,adminSocketPath(data),'the probe picked another data root');
+  assert.equal(probe(home),1,'nothing listens yet');
+  const server=await listen(expected);
+  t.after(()=>server.close());
+  assert.equal(probe(home),0,'a listener on the daemon socket is found');
 });

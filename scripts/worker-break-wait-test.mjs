@@ -16,15 +16,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // `steps` entries: a status string, {status, after: ms to wait first}, or 'hang' (pending until its signal aborts).
 // `breakActive` is what the bridge's owner-states reply reports in refill.break_active: true, false, or 'absent' (an older
 // bridge without the field) or null (no reply).
-function scenario(steps, breakActive = false) {
+function scenario(steps, breakActive = false, confirmMs = 20) {
   let index = 0;
   const ctl = { cancelled: false, pending: { rid: 'fixture' }, abort: new AbortController() };
   const seen = [];
   const run = runInNewContext(source.slice(start, end) + '\nwaitLoop', {
-    Date, AbortSignal, Math, encodeURIComponent, HEARTBEAT_MS: 10, OUTAGE_MS,
+    Date, AbortSignal, Math, encodeURIComponent, HEARTBEAT_MS: 10, OUTAGE_MS, RECOVERY_CHECK_MS: 500,
     sleep, transient: () => false, publishPending: () => {},
-    heartbeat: async (_s, _c, say) => {
+    // Signal-aware like the real one: an aborted signal means no reply. The bridge answers after confirmMs.
+    heartbeat: async (_s, _c, say, _note, signal) => {
       await say('agent_thought_chunk', 'heartbeat');
+      await sleep(confirmMs);
+      if (signal.aborted) return null;
       return breakActive === null ? null : { refill: breakActive === 'absent' ? {} : { break_active: breakActive } };
     },
     call: async (_path, _rid, { signal }) => {
@@ -46,7 +49,7 @@ function scenario(steps, breakActive = false) {
 // 1. A break that never ends is refused, even when the wait request is stalled (the real abort signal ends it).
 {
   const t = Date.now();
-  const s = scenario(['worker_break', 'hang']);
+  const s = scenario(['worker_break', 'hang'], true);
   await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' });
   assert.ok(Date.now() - t < OUTAGE_MS * 4, 'stalled wait was not bounded by the break deadline');
 }
@@ -79,6 +82,22 @@ for (const [label, active] of [['still active', true], ['older bridge without th
 {
   const s = scenario(['worker_break', { status: 'finished', after: OUTAGE_MS + 30 }], true);
   assert.equal((await s.completion).text, 'synthetic result');
+}
+// 4d. The wait is cut off at the limit, but the bridge confirms the break ended: the confirmation is not aborted by the expired
+//     break signal, and the turn goes on. If the break is still active, the turn is refused.
+{
+  const s = scenario(['worker_break', 'hang', 'finished'], false);
+  assert.equal((await s.completion).text, 'synthetic result');
+}
+{
+  const s = scenario(['worker_break', 'hang', 'finished'], true);
+  await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' });
+}
+// 4e. Cancel while that confirmation is in flight returns cancelled, not a break refusal.
+{
+  const s = scenario(['worker_break', 'hang'], true, 300);
+  setTimeout(() => { s.ctl.cancelled = true; s.ctl.abort.abort(); }, OUTAGE_MS + 60);
+  assert.equal((await s.completion).cancelled, true);
 }
 // 5. Cancel during a break returns cancelled.
 {

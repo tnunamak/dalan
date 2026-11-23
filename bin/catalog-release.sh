@@ -13,18 +13,8 @@ git merge-base --is-ancestor "$previous" "$candidate" || { echo "candidate is no
 
 # This targets existing legacy deployments; new installations use their generated unit name.
 unit=dot-bridge
-data_dir=${DOT_BRIDGE_DATA_DIR:-$HOME/.local/share/dot-bridge}
 # Active is not ready: the unit can be active while the bridge has not opened (or has lost) its admin socket.
-admin_socket_listening() {
-  node --input-type=module -e '
-    import net from "node:net";
-    import { adminSocketPath } from "./src/admin-socket.mjs";
-    const probe = net.connect(adminSocketPath(process.argv[1]));
-    probe.setTimeout(1000, () => process.exit(1));
-    probe.once("connect", () => process.exit(0));
-    probe.once("error", () => process.exit(1));
-  ' "$data_dir"
-}
+admin_socket_listening() { node scripts/admin-socket-probe.mjs; }
 wait_active() {
   local attempt
   for ((attempt=1; attempt<=20; attempt++)); do

@@ -20,6 +20,7 @@ const HEARTBEAT_MS = num('DOT_ACP_HEARTBEAT_MS', 30_000);
 const IN_FLIGHT_CAP = num('DOT_ACP_INFLIGHT_CAP', 10);
 const VALID_MS = num('DOT_ACP_VALID_MINUTES', 30) * 60_000;
 const OUTAGE_MS = num('DOT_ACP_OUTAGE_MS', 600_000);
+const RECOVERY_CHECK_MS = 5_000; // one bridge read to confirm a usage break ended
 const CANCEL_BUDGET_MS = cancelBudgetMs(process.env.DOT_ACP_CANCEL_BUDGET_MS); // T3 allows 10 s for the prompt to return after session/cancel
 // Submit does server-side work that reads never do (it reads the pinned repository to scan the scope, checks pull request
 // state and, for builds, runs the check-readiness probes), so it gets its own deadline; every other call keeps the 5 s
@@ -236,9 +237,23 @@ async function waitLoop(s, ctl, say) {
   const breakExpired = () => breakDeadline !== null && (breakSignal.aborted || Date.now() >= breakDeadline);
   const breakRefusal = () => refuse('worker usage break exceeded the turn wait limit',
     {failure_type:'adapter_error',failure_type_source:'dot_acp_worker_break'});
+  // The bridge's own report that no break is active is the only recovery evidence. The check has its own short bound, so the
+  // expired break signal cannot abort it, and it still honors the requester's cancel.
+  const breakEnded = async () => {
+    const reply = await heartbeat(s, ctl, say, '', AbortSignal.any([ctl.abort.signal, AbortSignal.timeout(RECOVERY_CHECK_MS)]));
+    return reply?.refill?.break_active === false;
+  };
+  const endBreak = () => { breakDeadline = null; breakSignal = null; };
+  // True when the limit has passed and the bridge does not say the break ended.
+  const breakOver = async () => {
+    if (!breakExpired()) return false;
+    if (ctl.cancelled || !await breakEnded()) return true;
+    endBreak();
+    return false;
+  };
   for (;;) {
     if (ctl.cancelled) return { cancelled: true };
-    if (breakExpired()) throw breakRefusal();
+    if (await breakOver()) { if (ctl.cancelled) return { cancelled: true }; throw breakRefusal(); }
     let signal = breakSignal ? AbortSignal.any([ctl.abort.signal, breakSignal]) : ctl.abort.signal;
     let r;
     try {
@@ -246,7 +261,10 @@ async function waitLoop(s, ctl, say) {
       outageSince = null;
     } catch (e) {
       if (ctl.cancelled) return { cancelled: true };
-      if (breakExpired()) throw breakRefusal();
+      if (breakExpired()) { // the wait ended at the limit: confirm before refusing, then wait again if the break is over
+        if (await breakOver()) { if (ctl.cancelled) return { cancelled: true }; throw breakRefusal(); }
+        continue;
+      }
       if (e.http_status === 409) { await sleep(1000, signal); continue; } // our previous process's waiter has not detached yet
       if (!transient(e)) throw refuse(`worker bridge error: ${e.message}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
       outageSince ??= Date.now();
@@ -256,12 +274,11 @@ async function waitLoop(s, ctl, say) {
       continue;
     }
     if (ctl.cancelled) return { cancelled: true };
-    // A quiet poll (status timeout) is not recovery: the bridge sends one break notice and then plain timeouts. Only the bridge's
-    // own report that no break is active ends the limit (checked before the deadline, so slow polls cannot hide a recovery).
+    // A quiet poll (status timeout) is not recovery: the bridge sends one break notice and then plain timeouts.
     if (r.status === 'timeout') {
-      const reply = await heartbeat(s, ctl, say, '', signal);
-      if (breakDeadline !== null && reply?.refill?.break_active === false) { breakDeadline = null; breakSignal = null; }
-      if (breakExpired()) throw breakRefusal();
+      if (breakDeadline === null) await heartbeat(s, ctl, say, '', signal);
+      else if (await breakEnded()) endBreak();
+      if (await breakOver()) { if (ctl.cancelled) return { cancelled: true }; throw breakRefusal(); }
       continue;
     }
     // A terminal reply ends the wait whatever the break deadline says.
