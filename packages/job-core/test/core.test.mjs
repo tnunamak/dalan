@@ -110,3 +110,16 @@ test('canonical JSON treats shared branches like independently allocated equal b
   );
   assert.deepEqual(shared, { values: ['second', 'first'] });
 });
+
+test('canonical JSON preserves empty containers and escaped literal text', () => {
+  const text = 'line 1\nline "2"\\';
+  assert.equal(canonicalJson({ text, object: {}, array: [] }),
+    JSON.stringify({ array: [], object: {}, text }));
+});
+
+test('canonical JSON does not normalize distinct Unicode strings', () => {
+  const composed = '\u00e9';
+  const decomposed = 'e\u0301';
+  assert.deepEqual(JSON.parse(canonicalJson([composed, decomposed])), [composed, decomposed]);
+  assert.notEqual(canonicalJson(composed), canonicalJson(decomposed));
+});
