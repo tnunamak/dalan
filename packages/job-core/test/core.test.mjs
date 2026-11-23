@@ -2,6 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { assertClaimAuthority, canonicalJson, decide } from '../index.mjs';
 
+test('canonical JSON keeps Unicode keys and values in deterministic key order', () => {
+  const document = { '中': ['茶'], 'é': 'été', a: '🐟' };
+  assert.equal(canonicalJson(document), '{"a":"🐟","é":"été","中":["茶"]}');
+});
+
+test('a non-renewal decision at revision zero contains only the advance effect', () => {
+  assert.deepEqual(decide({ revision: 0 }, { expectedRevision: 0, operation: 'record' }, {}), {
+    events: [],
+    effects: [{ type: 'advance_revision', expectedRevision: 0 }],
+  });
+});
+
 test('canonical JSON sorts nested keys and preserves array order', () => {
   assert.equal(canonicalJson({ z: [3, { b: 2, a: 1 }], a: true }), '{"a":true,"z":[3,{"a":1,"b":2}]}');
   assert.throws(() => canonicalJson({ bad: Infinity }, 'bad_value'), { code: 'bad_value' });
