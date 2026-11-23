@@ -43,4 +43,29 @@ for(const responseMs of [-1,NaN,Infinity]) {
   await assert.rejects(checkResponse(Promise.resolve(),{}, {...c,responseMs}),TypeError);
   assert.equal(c.pending,0);
 }
+{
+  const c=clock(), running={status:'running',check_run_id:'immediate'};
+  let finish;
+  const work=new Promise(resolve=>{finish=resolve;});
+  const response=checkResponse(work,running,{...c,responseMs:0});
+  assert.equal(c.pending,1);
+  c.advance(0);
+  assert.equal(await response,running);
+  finish({status:'completed'});
+  assert.deepEqual(await work,{status:'completed'},'a zero response budget does not stop the work');
+  assert.equal(c.pending,0);
+}
+{
+  const c=clock(), fast={status:'completed'}, slow={status:'running',check_run_id:'slow'};
+  let finish;
+  const first=checkResponse(new Promise(resolve=>{finish=resolve;}),{status:'running'},{...c,responseMs:10});
+  const second=checkResponse(new Promise(()=>{}),slow,{...c,responseMs:25});
+  c.advance(5);
+  finish(fast);
+  assert.equal(await first,fast);
+  assert.equal(c.pending,1,'disposing one response timer leaves the other waiter intact');
+  c.advance(20);
+  assert.equal(await second,slow);
+  assert.equal(c.pending,0);
+}
 console.log('PASS check response virtual deadline, completion, failure and timer disposal');
