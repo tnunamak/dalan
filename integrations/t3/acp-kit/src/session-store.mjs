@@ -30,7 +30,11 @@ export function writeJsonPrivate(file, value, { pretty = false } = {}) {
 // null when the file does not exist; throws state_permissions when it is not exactly 0600.
 export function readJsonPrivate(file) {
   try { assertPrivate(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
+  const text = fs.readFileSync(file, 'utf8');
+  try { return JSON.parse(text); } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw Object.assign(new Error('Saved session is unreadable; start a new session or restore the saved state.'), { code: 'invalid_session_state' });
+  }
 }
 
 export const removePrivate = file => fs.rmSync(file, { force: true });

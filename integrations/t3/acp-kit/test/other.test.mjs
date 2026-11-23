@@ -38,6 +38,18 @@ test('session store: id validation, atomic private write, refuses a file that is
   fs.rmSync(dir, { recursive: true });
 });
 
+test('session store: corrupt JSON produces a safe and actionable resume error', t => {
+  const file = '/synthetic/session-state.json';
+  t.mock.method(fs, 'statSync', () => ({ mode: 0o600 }));
+  t.mock.method(fs, 'readFileSync', () => '{synthetic private marker');
+  assert.throws(() => readJsonPrivate(file), error => {
+    assert.equal(error.code, 'invalid_session_state');
+    assert.match(error.message, /start a new session or restore the saved state/);
+    assert.doesNotMatch(error.message, /synthetic|session-state\.json/);
+    return true;
+  });
+});
+
 test('t3 envelope: unwrap, runtime block, role preamble, configurable identity prefix', () => {
   const b = text => ({ type: 'text', text });
   assert.equal(promptText([b(envelope('hi')), b(runtime)]), 'hi');
