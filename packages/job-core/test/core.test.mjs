@@ -205,6 +205,22 @@ test('canonical output can be edited without changing its source document', () =
   assert.deepEqual(source.entries, [{ label: 'source' }, { label: 'source' }]);
 });
 
+test('canonical JSON is stable after a JSON round trip', () => {
+  const source = { z: [{ b: 2, a: false }, null], a: 'fixture' };
+  const canonical = canonicalJson(source);
+
+  assert.equal(canonical, '{"a":"fixture","z":[{"a":false,"b":2},null]}');
+  assert.equal(canonicalJson(JSON.parse(canonical)), canonical);
+});
+
+test('canonical JSON preserves finite decimal and exponent values', () => {
+  const metadata = { small: 1e-7, fraction: 1.25, large: 1e21 };
+  const canonical = canonicalJson(metadata);
+
+  assert.equal(canonical, '{"fraction":1.25,"large":1e+21,"small":1e-7}');
+  assert.deepEqual(JSON.parse(canonical), metadata);
+});
+
 test('ordinary progress needs no renewal context and leaves inputs unchanged', () => {
   const snapshot = Object.freeze({ revision: 5, leaseUntil: 40 });
   const command = Object.freeze({
