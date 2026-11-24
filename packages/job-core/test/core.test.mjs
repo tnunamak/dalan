@@ -166,6 +166,21 @@ test('canonical JSON does not normalize distinct Unicode strings', () => {
   assert.notEqual(canonicalJson(composed), canonicalJson(decomposed));
 });
 
+test('canonical JSON gives numbered display rows a stable order across insertion orders', () => {
+  const first = Object.fromEntries([['10', 'ten'], ['2', 'two'], ['title', 'Rows'], ['note', 'Ready']]);
+  const second = Object.fromEntries([['note', 'Ready'], ['2', 'two'], ['title', 'Rows'], ['10', 'ten']]);
+  const expected = '{"2":"two","10":"ten","note":"Ready","title":"Rows"}';
+  assert.equal(canonicalJson(first), expected);
+  assert.equal(canonicalJson(second), expected);
+});
+
+test('canonical JSON omits non-enumerable display metadata but preserves explicit null', () => {
+  const row = { title: 'Plan', note: null };
+  Object.defineProperty(row, 'displayCache', {value: 'Ready', enumerable: false});
+  assert.equal(canonicalJson(row), '{"note":null,"title":"Plan"}');
+  assert.equal(row.displayCache, 'Ready');
+});
+
 test('canonical output can be edited without changing its source document', () => {
   const entry = Object.freeze({ label: 'source' });
   const source = Object.freeze({ entries: Object.freeze([entry, entry]) });
