@@ -42,7 +42,7 @@ export function createPhaseTrace({log,now=Date.now,max=5000}) {
       const sent=Date.parse(stamp), claimed=Date.parse(claimedAt);
       if(!Number.isFinite(sent)||iso(sent)!==stamp.replace('Z','.000Z')) return;
       const known=Number.isFinite(claimed);
-      log({kind:'claim_dispatch',request_id:requestId,claim_id:claimId,dispatched_at:stamp,
+      log({kind:'claim_dispatch',source:'worker_note',request_id:requestId,claim_id:claimId,dispatched_at:stamp,
         claimed_at:known?claimedAt:null,gap_ms:known&&claimed>=sent?gap(sent,claimed):null});
     },
     // Any worker call that names a request. The first one by the claimant after a fresh claim is the first action.

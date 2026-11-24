@@ -113,7 +113,7 @@ const { createPhaseTrace } = await import('../src/phase-trace.mjs');
   trace.progress({ ...firstProgress, requestId: 'future', note: 'dispatched_at=2026-11-24T11:00:02Z fixture' });
   trace.progress({ ...firstProgress, requestId: 'missing', claimedAt: null, note: prefix });
   const dispatch = lines.filter(l => l.kind === 'claim_dispatch');
-  assert.deepEqual(dispatch[0], { kind: 'claim_dispatch', request_id: 'dispatched', claim_id: 'fixture-claim',
+  assert.deepEqual(dispatch[0], { kind: 'claim_dispatch', source: 'worker_note', request_id: 'dispatched', claim_id: 'fixture-claim',
     dispatched_at: '2026-11-24T10:00:02Z', claimed_at: '2026-11-24T10:00:06.125Z', gap_ms: 4125 });
   assert.deepEqual(dispatch.map(l => [l.request_id, l.gap_ms]), [['dispatched', 4125], ['future', null], ['missing', null]]);
   // A failed wake logs a null answer time and is not remembered as a delivery.
@@ -153,8 +153,10 @@ try {
   assert.deepEqual(dispatch.map(l => [l.request_id, l.claim_id, l.dispatched_at]), [
     [job.request_id, job.claim_id, '2026-11-24T10:00:02Z'],
   ]);
-  const gap = Date.parse(dispatch[0].claimed_at) - Date.parse(dispatch[0].dispatched_at);
-  assert.equal(dispatch[0].gap_ms, gap >= 0 ? gap : null);
+  // The stamp is fixed in the past and the claim just happened, so the gap must be a known positive number; a missing claim time would give null here.
+  assert.ok(Number.isFinite(Date.parse(dispatch[0].claimed_at)) && Date.now() - Date.parse(dispatch[0].claimed_at) < 120000, 'claimed_at is a real recent time');
+  assert.ok(Number.isInteger(dispatch[0].gap_ms) && dispatch[0].gap_ms > 0, `gap_ms must be a positive integer, got ${dispatch[0].gap_ms}`);
+  assert.equal(dispatch[0].source, 'worker_note');
   const phase = lines.filter(l => l.kind === 'claim_phase' && l.request_id === 'req_trace_a');
   assert.equal(phase.length, 1, JSON.stringify(phase));
   assert.equal(phase[0].claim_id, job.claim_id);
