@@ -4,6 +4,7 @@ import {inspect} from 'node:util';
 import { loopbackRequestAllowed } from './loopback.mjs';
 import { normalizeRequestHost } from './gozar-routes.mjs';
 import { watchServicePublication } from './route-publication.mjs';
+import { createPhaseTrace } from './phase-trace.mjs';
 import { defaultPath,workspaceRoot,rootWarnings } from './paths.mjs';
 import { readEnv } from './env.mjs';
 import http from 'node:http';
@@ -171,6 +172,7 @@ if(t3ToolsEnabled) await loadT3Audit();
 const absentId=`req_${randomUUID()}`;
 if(store.hasAssignment(absentId)) throw new Error('absent gate id collision');
 const log = createRequestLog(path.join(stateDir, 'requests.jsonl'));
+const phaseTrace = createPhaseTrace({ log });
 logShutdownSignals(log);
 // The owner-side tool registry. It has no MCP surface here: changing it never changes tools/list.
 const t3PostHandler=createT3PostHandler({store,now:()=>store.nowMs()});
@@ -909,6 +911,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
   // Strict commands validate authority, replay and revision in their transaction.
   // The legacy implicit touch would mutate activity before a rejected CAS.
   if(!strictJob&&typeof a.request_id==='string'&&typeof a.claim_id==='string'&&store.hasAssignment(a.request_id)) store.touchClaim(a.request_id,a.claim_id,subject,worker,connectionId);
+  if(typeof a.request_id==='string') phaseTrace.action({requestId:a.request_id,tool:name,subject});
   // Workspace tools (every one, reads included) refuse any caller but the live holding connection. Native jobs skip the implicit
   // touch above, so this is their only check; legacy jobs get a second, post-await check. It runs synchronously right before
   // the tool body, after the tool's last await, so no revoke can land between the check and the write.
@@ -930,6 +933,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
       const assignments=store.listPending(worker);
       store.recordListed(assignments,free_lanes,worker);
+      phaseTrace.listed(assignments.map(x=>x.request_id));
       log({kind:'list_pending_result',subject,free_lanes,total:assignments.length,request_ids:assignments.slice(0,20).map(x=>x.request_id)});
       const guidance=workers.workers.get(worker)?.guidance==='resume'?`${listGuidance} ${resumeNudge(store.resumeIdleMs()||undefined)}`:listGuidance;
       // Say outright whether a claim would be accepted now: a worker that once saw a pause refusal must not keep listing without claiming.
@@ -965,6 +969,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       // admit the claim. External-OAuth principals pass null and are unchanged.
       const claimed=store.claim(requestId,claimant,subject,claimCapacity,preflight,worker,a.acquisition_id,a.lease_ms,ctx,principal.builtin?(principal.connection_id??''):null);
       const grant=store.db.prepare('SELECT * FROM claims WHERE request_id=?').get(requestId);
+      if(!retry) phaseTrace.claimed({requestId,worker,subject,claimId:claimed.claim_id,handoff:String(a.acquisition_id??'').startsWith(HANDOFF_ACQUISITION_PREFIX),createdAt:store.db.prepare('SELECT created_at FROM assignments WHERE request_id=?').get(requestId)?.created_at});
       const {free_lanes,queued}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
       return withAvailableChecks({...claimed,lease_expires_at:claimed.lease_expires_at??store.leaseExpiresAt(grant),queued_after_claim:queued,free_lanes,...store.nextQueued(free_lanes,requestId,worker),guidance:`${claimed.guidance} ${claimMoreGuidance}`},true,worker,subject,workspaceAllowed);
     }
@@ -1607,7 +1612,11 @@ async function drain() {
             // An earlier ACK is not a new callback and must not clear callback failures.
             if(ackLedger.has(ack)) { ackDurablyRecorded=true; state='delivered'; reason='recovered from durable webhook acceptance acknowledgment'; }
             else {
-              const response=await sendWebhook(sub.url,store.subscriptionSecret(sub),item.id,sub.id,item.body);
+              const sentAt=Date.now(),sentMono=performance.now();
+              let response;
+              try { response=await sendWebhook(sub.url,store.subscriptionSecret(sub),item.id,sub.id,item.body); }
+              catch(error) { phaseTrace.wake({item,worker:sub.worker,attemptAt:sentAt,ackMs:null,status:null,state:'failed'}); throw error; }
+              phaseTrace.wake({item,worker:sub.worker,attemptAt:sentAt,ackMs:performance.now()-sentMono,status:response.status,state:response.status>=200&&response.status<300?'delivered':'failed'});
               if(response.status>=200&&response.status<300) { positiveAckObserved=true; ackLedger.record(ack); ackDurablyRecorded=true; }
               store.eventResult(sub.id,response.status);
               state=response.status>=200&&response.status<300?'delivered':response.status===410||response.status===413?'suppressed':'failed';

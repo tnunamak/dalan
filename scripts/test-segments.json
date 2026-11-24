@@ -1,5 +1,6 @@
 [
   "node scripts/relationship-lifecycle-e2e.mjs",
+  "node scripts/phase-trace-test.mjs",
   "node scripts/relationship-routing-e2e.mjs",
   "node scripts/relationship-enrollment-test.mjs",
   "node scripts/relationship-grants-e2e.mjs",
