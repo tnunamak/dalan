@@ -454,7 +454,7 @@ function runtimeVersions() {
 }
 
 export class Workspace {
-  constructor(store,recover=true,{freeBytes,checkResponseOptions,stopReverify}={}) { this.checkResponseOptions=checkResponseOptions;this.stopReverify=stopReverify; if(freeBytes) this.freeBytes=freeBytes; this.store=store;this.activeChecks=new Set();this.checkEffects=new Map();fs.mkdirSync(worktrees,{recursive:true,mode:0o700});fs.mkdirSync(artifacts,{recursive:true,mode:0o700});fs.mkdirSync(caches,{recursive:true,mode:0o700});if(recover) this.sweepDigestScratch();if(recover) store.transaction(()=>{ for(const job of store.db.prepare("SELECT id,request_id,claim_id,check_id FROM check_jobs WHERE status='running'").all()) { store.db.prepare("UPDATE check_jobs SET status='interrupted',stop_verified=NULL,finished_at=? WHERE id=?").run(new Date().toISOString(),job.id); store.lifecycle(job.request_id,'check_failed','system',checkOutcome({...job,status:'interrupted'})[1],{claim_id:job.claim_id}); } });if(recover) this.reconcileHostStops(); }
+  constructor(store,recover=true,{freeBytes,checkResponseOptions,stopReverify}={}) { this.checkResponseOptions=checkResponseOptions;this.stopReverify=stopReverify; if(freeBytes) this.freeBytes=freeBytes; this.store=store;this.activeChecks=new Set();this.checkEffects=new Map();this.cleanupInFlight=new Set();fs.mkdirSync(worktrees,{recursive:true,mode:0o700});fs.mkdirSync(artifacts,{recursive:true,mode:0o700});fs.mkdirSync(caches,{recursive:true,mode:0o700});if(recover) this.sweepDigestScratch();if(recover) store.transaction(()=>{ for(const job of store.db.prepare("SELECT id,request_id,claim_id,check_id FROM check_jobs WHERE status='running'").all()) { store.db.prepare("UPDATE check_jobs SET status='interrupted',stop_verified=NULL,finished_at=? WHERE id=?").run(new Date().toISOString(),job.id); store.lifecycle(job.request_id,'check_failed','system',checkOutcome({...job,status:'interrupted'})[1],{claim_id:job.claim_id}); } });if(recover) this.reconcileHostStops(); }
   // Only called after expiry/revocation: the host supervisor observes loss of
   // authority and stops the whole unit. Await its receipt and discarded output.
   async quiesce(requestId) {
@@ -707,6 +707,32 @@ export class Workspace {
     if(await this.freeBytes()>=minFreeBytes()) return;
     await this.cleanupExpired();
   }
+  // One terminal row's leftovers, removed the same way for the sweep and the finish path: the dependency cache,
+  // the checkout (`git worktree remove --force` from its mirror), the ignored-written record, and the workspaces
+  // row. `cacheOnly` is the sweep's rule that a cache serves nothing once its row is terminal, even while the
+  // checkout is still retained for its owner. Returns 'cache' or 'removed' for what this call took, or null
+  // when there is nothing to do (no row, no mirror, an active check, or another caller already cleaning this
+  // request). Idempotent: a row already gone is a no-op. A failure throws and the caller logs it and leaves the
+  // row to the hourly sweep; a tampered path is an integrity error (cleanup_integrity) that aborts the sweep.
+  async removeTerminalWorkspace(requestId,{cacheOnly=false}={}) {
+    if(this.activeChecks.has(requestId)) return null;
+    if(!cacheOnly&&this.cleanupInFlight.has(requestId)) return null;
+    if(!cacheOnly) this.cleanupInFlight.add(requestId);
+    try {
+      const row=this.store.db.prepare('SELECT path FROM workspaces WHERE request_id=?').get(requestId);
+      if(!row) return null;
+      const mirror=savedWorkspaceMirror(row.path,requestId);
+      if(!mirror) return null;
+      const cache=path.join(caches,requestId);
+      if(fs.existsSync(cache)) { await removeCache(cache); if(!fs.existsSync(cache)&&cacheOnly) return 'cache'; }
+      if(cacheOnly) return null;
+      if(row.path!==path.join(worktrees,requestId)) throw Object.assign(new Error('workspace cleanup path mismatch'),{request_id:requestId,cleanup_integrity:true});
+      if(pathExistsOrThrow(row.path)) await gitAsync(['-C',mirror,'worktree','remove','--force',row.path]);
+      this.store.db.prepare('DELETE FROM workspaces WHERE request_id=?').run(requestId);
+      fs.rmSync(this.ignoredWrittenFile(requestId),{force:true});
+      return 'removed';
+    } finally { if(!cacheOnly) this.cleanupInFlight.delete(requestId); }
+  }
   async sweepExpired(log) {
     const now=new Date().toISOString(),summary={artifacts_removed:0,workspaces_removed:0,caches_removed:0,shared_caches_removed:0,mirrors_removed:0,pressure:false,errors:0},db=this.store.db;
     const failed=(entry,error)=>{summary.errors++;log({kind:'artifact_cleanup_error',...entry,reason:error.message});};
@@ -734,20 +760,18 @@ export class Workspace {
       // State can change across awaits: re-read the row and the active checks right before acting.
       const idle=()=>{const row=current.get(requestId);return row&&!this.activeChecks.has(requestId)?row:null;};
       let row=idle(); if(!row) continue;
-      let mirror=savedWorkspaceMirror(row.path,requestId);if(!mirror) continue;
       try {
         // A finished assignment cannot be claimed again; its patch and report remain in artifacts. Retaining each checkout for
-        // 14 days can consume disk. Keep it 6 h, or less once the owner fetched the result (any read, peek included) or disk is low.
+        // 14 days can consume disk. Keep it 6 h, or less once the owner fetched the result (any read, peek included) or disk is
+        // low. The finish path removes a tree at the moment its finish commits, so a row still here is one that call could not take.
         const terminalAt=terminalTime(row);
         const expired=terminalAt&&terminalAt+WORKSPACE_RETENTION_MS<=Date.now();
         // The dependency cache serves only a claimed assignment's checks. Remove it as soon as the assignment is terminal,
         // even when the checkout remains available for the owner to fetch its result.
-        const cache=path.join(caches,row.request_id);if(fs.existsSync(cache)) { await removeCache(cache);if(!fs.existsSync(cache)) summary.caches_removed++; }
+        if((await this.removeTerminalWorkspace(requestId,{cacheOnly:true}))==='cache') summary.caches_removed++;
         if(!expired&&!row.fetched_at) { if(!pressure) continue; if(!(pressure=await this.freeBytes()<minFree)) continue; if(!(row=idle())) continue; }
-        if(row.path!==path.join(worktrees,row.request_id)) throw Object.assign(new Error('workspace cleanup path mismatch'),{request_id:requestId,summary});
-        if(pathExistsOrThrow(row.path)) await gitAsync(['-C',mirror,'worktree','remove','--force',row.path]);
-        db.prepare('DELETE FROM workspaces WHERE request_id=?').run(row.request_id);fs.rmSync(this.ignoredWrittenFile(row.request_id),{force:true});summary.workspaces_removed++;
-      } catch(error) { if(error.summary) throw error;failed({request_id:requestId},error); }
+        if((await this.removeTerminalWorkspace(requestId))==='removed') summary.workspaces_removed++;
+      } catch(error) { if(error.cleanup_integrity) throw error;failed({request_id:requestId},error); }
     }
     summary.caches_removed+=await this.sweepOrphanCaches();
     if(!pressure) summary.shared_caches_removed+=await this.sweepSharedCaches(false);
