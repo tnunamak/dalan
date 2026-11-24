@@ -16,7 +16,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { loadWorkers, loadEffectiveOwnerWorkers, hasInstalledDatabase, legacyMarkerPath, seedWorkerRepos, resolveWorker, hasCapability, assertTarget, submitTarget, ensureWorkerRelationship } from './workers.mjs';
-import { Store, QUESTION_PURPOSES, nonterminalOutcome, validateProtocol, loadRedeliveryLimits, resumeNudge } from './store.mjs';
+import { Store, HANDOFF_ACQUISITION_PREFIX, HANDOFF_IDLE_LEASE_MS, QUESTION_PURPOSES, nonterminalOutcome, validateProtocol, loadRedeliveryLimits, resumeNudge } from './store.mjs';
 import {protocolArtifactChunk} from './protocol-artifact-commands.mjs';
 import { sendWebhook, validSecret } from './webhooks.mjs';
 import { checkAlerts, publishAlert, redactNote } from './alerts.mjs';
@@ -630,7 +630,9 @@ const finishNextGuidance=next=>`Claim ${next[0].request_id} yourself before you 
 // connection checks, one claim per job. The claim carries acquisition_id handoff-<finished claim_id>, so a repeated
 // finish gets the same job back, and a second finish by the same claimant name, which would otherwise count as an
 // exact retry of the first claim, is refused that job and takes the next one.
-const HANDOFF_LEASE_MS=600000,HANDOFF_POLL_MS=500,HANDOFF_MAX_ATTEMPTS=5;
+// The claim starts on a short idle lease (see HANDOFF_IDLE_LEASE_MS in store.mjs). DALAN_HANDOFF_IDLE_LEASE_MS shortens it for tests.
+const handoffIdleLeaseMs=()=>{const v=Number(readEnv('DALAN_HANDOFF_IDLE_LEASE_MS'));return Number.isInteger(v)&&v>=1000&&v<=HANDOFF_IDLE_LEASE_MS?v:HANDOFF_IDLE_LEASE_MS;};
+const HANDOFF_POLL_MS=500,HANDOFF_MAX_ATTEMPTS=5;
 const nap=(ms,signal)=>new Promise(resolve=>{
   const done=()=>{clearTimeout(timer);signal?.removeEventListener('abort',done);resolve();};
   const timer=setTimeout(done,ms);
@@ -652,7 +654,7 @@ async function runHandoff({principal,requestId,claimId,waitMs,signal}) {
     const {worker,subject}=principal;
     const held=store.db.prepare('SELECT claimant FROM claims WHERE request_id=? AND claim_id=?').get(requestId,claimId);
     if(!held) return {};
-    const acquisition_id=`handoff-${claimId}`,lease_ms=Math.min(HANDOFF_LEASE_MS,store.limits.leaseMs);
+    const acquisition_id=`${HANDOFF_ACQUISITION_PREFIX}${claimId}`,lease_ms=Math.min(handoffIdleLeaseMs(),store.limits.leaseMs);
     const claim=async next=>{
       try {
         const job=await tool('claim',{request_id:next,claimant:held.claimant,acquisition_id,lease_ms},principal,undefined,signal);
