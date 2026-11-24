@@ -82,7 +82,7 @@ try {
     const e=events.at(-1);
     assert(Date.parse(e.timestamp)===baseMs+now,'re-wake not stamped at D: '+JSON.stringify(e));
   }
-  for(const e of rewakes()) assert(e.data.request_id===A&&e.data.title===`2 assignments queued (1 free lane); claim oldest first via list_pending: queue wake ${A}`&&JSON.stringify(Object.keys(e.data))==='["request_id","title"]','re-wake payload: '+JSON.stringify(e.data));
+  for(const e of rewakes()) assert(e.data.request_id===A&&e.data.title===`2 assignments queued (1 free lane); claim oldest first via list_pending: queue wake ${A}`&&JSON.stringify(Object.keys(e.data))==='["request_id","title","request_ids","free_lanes","queued"]'&&JSON.stringify(e.data.request_ids)===JSON.stringify([A])&&e.data.free_lanes===1&&e.data.queued===2,'re-wake payload: '+JSON.stringify(e.data));
   assert(new Set(events.map(e=>e.eventId)).size===events.length,'re-wakes reused an event id');
   const gaps=events.slice(2).map((e,i)=>Date.parse(e.timestamp)-Date.parse(events[i+1].timestamp));
   assert(gaps.every(g=>g===REWAKE),'re-wake virtual cadence: '+JSON.stringify(gaps));

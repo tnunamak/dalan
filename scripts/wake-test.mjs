@@ -35,7 +35,7 @@ try {
     now+=1;assert(tick(s)===1,'no wake at queue_rewake_ms');
     const p=pending(s);
     assert(p.length===1&&p[0].request_id==='q1','not one wake naming the head: '+JSON.stringify(p));
-    assert(p[0].title==='5 assignments queued (6 free lanes); claim oldest first via list_pending: wake test q1'&&JSON.stringify(Object.keys(p[0].data))==='["request_id","title"]','wake title or payload shape: '+JSON.stringify(p[0].data));
+    assert(p[0].title==='5 assignments queued (6 free lanes); claim oldest first via list_pending: wake test q1'&&JSON.stringify(Object.keys(p[0].data))==='["request_id","title","request_ids","free_lanes","queued"]'&&JSON.stringify(p[0].data.request_ids)==='["q1","q2","q3","q4","q5"]'&&p[0].data.free_lanes===6&&p[0].data.queued===5,'wake title or payload shape: '+JSON.stringify(p[0].data));
     assert(s.db.prepare('SELECT count(*) n FROM notifications').get().n===before+1,'more than one event per tick');
     assert(tick(s)===0&&tick(s)===0,'woke while a wake was pending');
     deliverAll(s);
@@ -57,6 +57,27 @@ try {
     s.db.close();
   }
   log('one wake per tick for any queue size; none within queue_rewake_ms of a delivered or sending event, submit events included');
+  // a wake lists the IDs the worker could claim now (first free_lanes eligible, claim order), the free lanes and the eligible count
+  {
+    const s=fresh('claimable');
+    // one item: the submit wake names it and lists it alone
+    submit(s,'c1');
+    let p=pending(s);
+    assert(p.length===1&&p[0].data.request_id==='c1'&&JSON.stringify(p[0].data.request_ids)==='["c1"]'&&p[0].data.free_lanes===6&&p[0].data.queued===1,'single-item wake: '+JSON.stringify(p));
+    deliverAll(s);
+    // eight items, six lanes: the re-wake lists the first six only and says eight are queued
+    submit(s,'c2','c3','c4','c5','c6','c7','c8');deliverAll(s);
+    now+=90*SEC;assert(tick(s)===1,'no re-wake for the eight-item queue');
+    p=pending(s);
+    assert(p.length===1&&p[0].data.request_id==='c1'&&JSON.stringify(p[0].data.request_ids)==='["c1","c2","c3","c4","c5","c6"]'&&p[0].data.free_lanes===6&&p[0].data.queued===8,'eight items, six lanes: '+JSON.stringify(p[0].data));
+    deliverAll(s);
+    // a new submit while older items wait: the wake still names the head, and lists the head-first claim order
+    submit(s,'c9');
+    p=pending(s);
+    assert(p.length===1&&p[0].data.request_id==='c1'&&p[0].data.request_ids[0]==='c1'&&p[0].data.request_ids.length===6&&p[0].data.queued===9,'submit wake with older items queued: '+JSON.stringify(p[0].data));
+    s.db.close();
+  }
+  log('wake data lists the first free_lanes claimable IDs in claim order, the free lanes and the queued count');
 
   // a single item: title is the brief
   {

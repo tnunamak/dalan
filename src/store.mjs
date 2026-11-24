@@ -1650,6 +1650,9 @@ export class Store {
   }
   activeSubscriptions() { return this.db.prepare("SELECT * FROM subscriptions WHERE state='active' AND expires_at>?").all(this.stamp()).filter(sub=>this.subscriptionActive(sub)); }
   // Text of a wake that names the queue head when several items wait: the worker claims oldest first via list_pending.
+  // What a wake adds beside the head: the IDs a worker could claim now (the first free_lanes eligible items, claim order), the free lanes, and the eligible count.
+  // A worker that dispatches off the wake can claim these without a list_pending round trip. Additive: request_id and title are unchanged.
+  wakeClaimable(eligible,free) { return {request_ids:eligible.slice(0,free).map(x=>x.request_id),free_lanes:free,queued:eligible.length}; }
   queueHeadTitle(eligible,free) { return eligible.length>1?`${eligible.length} assignments queued (${free} free ${free===1?'lane':'lanes'}); claim oldest first via list_pending: ${JSON.parse(eligible[0].payload).brief}`:null; }
   // Wake for a new submission. When older items that this subscription may act on are queued, the wake names the queue head, not the
   // new item, so a worker that follows wakes does not take newer work ahead of older work. Who may claim what is unchanged.
@@ -1657,18 +1660,19 @@ export class Store {
     // Skip items list_pending marks blocked (for example waiting on a destination approval): the worker cannot claim them now.
     const blocked=this.db.prepare('SELECT 1 FROM destination_blocks WHERE request_id=?');
     const eligible=this.rewakeCandidates(sub.id).filter(x=>!blocked.get(x.request_id));
+    const free=this.subscriptionFreeLanes(sub,this.limits.laneCapacity??6), claimable=this.wakeClaimable(eligible,free);
     if(eligible.length>1&&eligible[0].request_id!==id&&eligible.some(x=>x.request_id===id))
-      return this.queueEvent(id,sub,false,this.queueHeadTitle(eligible,this.subscriptionFreeLanes(sub,this.limits.laneCapacity??6)),'submit',eligible[0].request_id);
-    return this.queueEvent(id,sub);
+      return this.queueEvent(id,sub,false,this.queueHeadTitle(eligible,free),'submit',eligible[0].request_id,claimable);
+    return this.queueEvent(id,sub,false,null,'submit',id,claimable);
   }
-  queueEvent(id, sub, force=false, title=null, wakeKind='submit', names=id) {
+  queueEvent(id, sub, force=false, title=null, wakeKind='submit', names=id, claimable=null) {
     sub=this.db.prepare('SELECT * FROM subscriptions WHERE id=?').get(sub.id);
     if(!this.subscriptionActive(sub)||!this.mayAct(sub.worker,id)) return null;
     // Only assignment wakes (submit, rewake) dedupe: an owner-note event for the item never stands in for one.
     const existing=this.db.prepare("SELECT id,state FROM notifications WHERE request_id=? AND subscription_id=? AND wake_kind IN ('submit','rewake') AND state IN ('pending','sending','failed','delivered') ORDER BY created_at DESC, rowid DESC LIMIT 1").get(id,sub.id);
     if (existing && (!force || existing.state!=='delivered')) return existing.id;
     const payload=JSON.parse(this.db.prepare('SELECT payload FROM assignments WHERE request_id=?').get(id).payload);
-    const eventId=`evt_${randomUUID()}`, body=JSON.stringify({eventId,name:'assignment.available',timestamp:this.stamp(),data:{request_id:names,title:(title??payload.brief).slice(0,160)},cursor:null});
+    const eventId=`evt_${randomUUID()}`, body=JSON.stringify({eventId,name:'assignment.available',timestamp:this.stamp(),data:{request_id:names,title:(title??payload.brief).slice(0,160),...claimable},cursor:null});
     this.db.prepare('INSERT INTO notifications(id,kind,request_id,subscription_id,body,created_at,wake_kind) VALUES(?,?,?,?,?,?,?)').run(eventId,'event',id,sub.id,body,this.stamp(),wakeKind);
     return eventId;
   }
@@ -2126,7 +2130,8 @@ export class Store {
       if(last&&rewakeMs&&now-Date.parse(last)<rewakeMs) continue;
       const eligible=this.rewakeCandidates(sub.id,limits);
       if(!eligible.length) continue;
-      this.queueEvent(eligible[0].request_id,sub,true,this.queueHeadTitle(eligible,this.subscriptionFreeLanes(sub,limits.laneCapacity??6)),'rewake');
+      const free=this.subscriptionFreeLanes(sub,limits.laneCapacity??6);
+      this.queueEvent(eligible[0].request_id,sub,true,this.queueHeadTitle(eligible,free),'rewake',eligible[0].request_id,this.wakeClaimable(eligible,free));
       announced++;
       if(brk&&sub.worker==='dot') { this.db.prepare('UPDATE worker_breaks SET last_probe_at=? WHERE id=?').run(this.stamp(),brk.id); probe=true; }
     }

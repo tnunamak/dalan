@@ -50,7 +50,7 @@ Always select the intended worker explicitly: A multi-worker profile refuses an 
 
 ## Queue wake-ups and dispatch
 
-**Wake-ups and re-announce.** A new assignment emits an availability event. While eligible work remains queued and the worker has a free lane, the bridge normally re-wakes it every 90 seconds. After an item has waited two hours, its re-wakes back off to at most once every 20 minutes. A pause, owner-confirmed break, missing subscription, full capacity or unresolved delivery can hold a wake; a new event is not proof that a worker claimed the job.
+**Wake-ups and re-announce.** A new assignment emits an availability event. Its data carries `request_id` (the queue head), `title`, `request_ids` (the eligible items the worker could claim now: the first `free_lanes`, oldest first), `free_lanes` and `queued`. While eligible work remains queued and the worker has a free lane, the bridge normally re-wakes it every 90 seconds. After an item has waited two hours, its re-wakes back off to at most once every 20 minutes. A pause, owner-confirmed break, missing subscription, full capacity or unresolved delivery can hold a wake; a new event is not proof that a worker claimed the job.
 
 If work stays queued, run `dalan status --json` and inspect its subscription, free lanes, dispatch state and unresolved deliveries. Ask the worker to inspect `list_pending` and claim only work it can start within its authority. Use [Recovery and operation](operations.md#recovery-and-operation) for delivery reconciliation and lease recovery. Scheduler settings and detailed eligibility rules are in [Lifecycle events and metrics](operations.md#lifecycle-events-and-metrics).
 
