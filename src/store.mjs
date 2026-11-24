@@ -131,8 +131,9 @@ export const pausedClaimMessage='bridge paused (temporary): new claims are refus
 const TRIAGE_PATHS_SHOWN=10,TRIAGE_KEYS=['execution_scope','repos','scope_paths','scope_paths_total','output_paths','output_paths_total','priority','review'];
 const triageFields=(payload,row)=>{
   const repos=(Array.isArray(payload.inputs)?payload.inputs:[]).filter(i=>i&&typeof i.github_repo==='string').map(i=>({github_repo:i.github_repo,...(typeof i.base_sha==='string'?{base_sha:i.base_sha}:{})}));
-  const paths=(name,list)=>Array.isArray(list)&&list.length?{[name]:list.slice(0,TRIAGE_PATHS_SHOWN),[`${name}_total`]:list.length}:{};
-  return {execution_scope:payload.execution_scope??null,...(repos.length?{repos}:{}),...paths('scope_paths',payload.scope_paths),...paths('output_paths',payload.output_paths),priority:row.priority??'normal',review:row.review===1||row.review===true};
+  // Only string paths are projected; a total above the shown list means the shown part is not the whole scope.
+  const paths=(name,list)=>{const all=Array.isArray(list)?list.filter(x=>typeof x==='string'):[];return all.length?{[name]:all.slice(0,TRIAGE_PATHS_SHOWN),[`${name}_total`]:all.length}:{};};
+  return {execution_scope:typeof payload.execution_scope==='string'?payload.execution_scope:null,...(repos.length?{repos}:{}),...paths('scope_paths',payload.scope_paths),...paths('output_paths',payload.output_paths),priority:row.priority==='background'?'background':'normal',review:row.review===1||row.review===true};
 };
 const LIST_ORDER="CASE priority WHEN 'normal' THEN 0 ELSE 1 END,skipped_at IS NOT NULL,created_at";
 // An item is marked skipped_by_worker when the worker passes it over, by either of two signals:
@@ -2440,7 +2441,7 @@ export class Store {
         return !(!approval&&!current||approval&&current?.revision===approval.revision&&current.policy.allowed);
       } catch { return true; }
     };
-    const assignments=this.db.prepare(`SELECT request_id,payload,created_at,priority,review,EXISTS(SELECT 1 FROM destination_blocks b WHERE b.request_id=assignments.request_id) blocked FROM assignments WHERE status='queued' AND ${live(this.nowMs())} ORDER BY ${LIST_ORDER}`).all().filter(a=>this.mayAct(worker,a.request_id)&&this.protocolListingLive(a.request_id)).map(a=>({...a,blocked:!!a.blocked&&blocked(a.request_id)})).sort((a,b)=>Number(a.blocked)-Number(b.blocked)).slice(0,50).map(a=>({kind:'assignment',request_id:a.request_id,title:JSON.parse(a.payload).brief.slice(0,160),created_at:a.created_at,...triageFields(JSON.parse(a.payload),a),...(a.blocked?{blocked:true}:{})}));
+    const assignments=this.db.prepare(`SELECT request_id,payload,created_at,priority,review,EXISTS(SELECT 1 FROM destination_blocks b WHERE b.request_id=assignments.request_id) blocked FROM assignments WHERE status='queued' AND ${live(this.nowMs())} ORDER BY ${LIST_ORDER}`).all().filter(a=>this.mayAct(worker,a.request_id)&&this.protocolListingLive(a.request_id)).map(a=>({...a,blocked:!!a.blocked&&blocked(a.request_id)})).sort((a,b)=>Number(a.blocked)-Number(b.blocked)).slice(0,50).map(a=>({kind:'assignment',request_id:a.request_id,title:JSON.parse(a.payload).brief.slice(0,160),created_at:a.created_at,...(a.blocked?{blocked:true}:triageFields(JSON.parse(a.payload),a))}));
     const messages=this.listMessages(worker).map(m=>({kind:'message',request_id:m.message_id,message_id:m.message_id,title:m.preview,created_at:m.created_at})).sort((a,b)=>a.created_at.localeCompare(b.created_at));
     const resumes=this.idleClaims(worker).filter(c=>this.protocolListingLive(c.request_id)).map(c=>({kind:'assignment',request_id:c.request_id,resume:true,idle_seconds:Math.floor(this.claimIdleMs(c)/1000),previous_epoch:c.epoch,
       ...(this.db.prepare('SELECT 1 FROM destination_blocks WHERE request_id=?').get(c.request_id)&&blocked(c.request_id)?{blocked:true}:{}),
