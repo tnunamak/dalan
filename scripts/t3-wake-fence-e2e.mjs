@@ -296,7 +296,7 @@ if(sub==='inspect'||sub==='read') {
   await stop();
   const raw = new DatabaseSync(dbFile);
   raw.exec('ALTER TABLE assignments DROP COLUMN parent_generation');
-  raw.exec('ALTER TABLE notifications DROP COLUMN held_kind');
+  raw.exec('DROP INDEX IF EXISTS notifications_held; ALTER TABLE notifications DROP COLUMN held_kind');
   raw.exec('PRAGMA user_version=67');
   raw.close();
   const reopened = new Store(dbFile);

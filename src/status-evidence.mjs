@@ -2,12 +2,25 @@
 const denial = /auto-?review|guardian|denied|not approved|paused out of precaution/i;
 const waiting = /auto.?stop|paused out of precaution|(?:resume|confirmation|approval).*(?:required|requested|needed)|(?:waiting|wait).*(?:guardian|confirmation|approval)/i;
 
+// progress, reports and late_evidence only ever gain rows, so each status call reads only the rows added since the last one and keeps
+// the ones that look like a denial. The first call on a store reads every row once; reading them on each call cost 100 MB per call.
+const seen = new WeakMap();
+const SOURCES = [
+  ['progress', 'SELECT request_id,id row_id,created_at at,note text FROM progress WHERE id>? ORDER BY id'],
+  ['report', 'SELECT request_id,rowid row_id,created_at at,summary text FROM reports WHERE rowid>? ORDER BY rowid'],
+  ['late_evidence', 'SELECT request_id,rowid row_id,created_at at,summary text FROM late_evidence WHERE rowid>? ORDER BY rowid'],
+];
+
 export function statusEvidence(store) {
-  const observations = [
-    ...store.db.prepare('SELECT request_id,id row_id,created_at at,note text FROM progress').all().map(row => ({ ...row, source: 'progress' })),
-    ...store.db.prepare('SELECT request_id,rowid row_id,created_at at,summary text FROM reports').all().map(row => ({ ...row, source: 'report' })),
-    ...store.db.prepare('SELECT request_id,rowid row_id,created_at at,summary text FROM late_evidence').all().map(row => ({ ...row, source: 'late_evidence' })),
-  ];
+  let state = seen.get(store);
+  if (!state) seen.set(store, state = SOURCES.map(([source, sql]) => ({ source, sql, last: 0, matches: [] })));
+  for (const part of state) {
+    for (const row of store.db.prepare(part.sql).all(part.last)) {
+      part.last = row.row_id;
+      if (denial.test(row.text)) part.matches.push({ request_id: row.request_id, row_id: row.row_id, at: row.at, source: part.source, text: row.text });
+    }
+  }
+  const observations = state.flatMap(part => part.matches);
   const summarize = predicate => {
     const matches = observations.filter(row => predicate(row.text)).sort((a, b) => b.at.localeCompare(a.at));
     return {

@@ -385,7 +385,7 @@ try {
     const kinds=s.db.prepare("SELECT kind,request_id,wake_kind FROM notifications ORDER BY rowid").all().map(r=>`${r.kind}:${r.request_id}:${r.wake_kind}`).join(',');
     assert(kinds==='event:n1:submit,event:n2:submit,event:n1:owner_note,event:null:message','wake_kind backfill: '+kinds);
     const indexes=s.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'notifications_%' ORDER BY name").all().map(r=>r.name).join(',');
-    assert(indexes==='notifications_due,notifications_request_state,notifications_wake_gate,notifications_wake_latest,notifications_wake_time','indexes: '+indexes);
+    assert(indexes==='notifications_due,notifications_due_live,notifications_held,notifications_request_state,notifications_wake_gate,notifications_wake_latest,notifications_wake_time','indexes: '+indexes);
     assert(s.claims().length===1&&s.claims()[0].claim_id===c.claim_id,'claim lost in migration 24');
     s.progress('n1',c.claim_id,'still valid','local-principal');
     s.db.close();new Store(file).db.close();
