@@ -102,6 +102,13 @@ try {
   assert(events.length===held+1,'expected exactly one wake after the lane freed');
   assert(events.at(-1).data.request_id===A&&events.at(-1).data.title===`queue wake ${A}`,'wake after finish: '+JSON.stringify(events.at(-1).data));
   log('a finished claim frees the lane and the next tick wakes for the queued item');
+  // Each wake webhook left a wake_delivery line with the receiver's answer time (the phase trace).
+  const wakeLines=(await readFile(join(home,'.local/state/dot-bridge/requests.jsonl'),'utf8')).split('\n').filter(Boolean).map(l=>JSON.parse(l)).filter(l=>l.kind==='wake_delivery');
+  for(const e of events) {
+    const line=wakeLines.find(l=>l.event_id===e.eventId);
+    assert(line&&line.http_status===204&&line.state==='delivered'&&Number.isFinite(line.ack_ms)&&line.ack_ms>=0&&Number.isFinite(line.queued_to_attempt_ms)&&line.worker,'wake_delivery line for '+e.eventId+': '+JSON.stringify(line));
+  }
+  log('every wake webhook wrote a wake_delivery line with status and answer time');
   log('queue wake e2e');
 } catch(error) {console.error(`FAIL ${error.stack||error}`);process.exitCode=1;}
 finally {side?.db.close();if(service&&service.exitCode===null){service.kill('SIGTERM');await new Promise(r=>service.once('exit',r));}if(webhook)await new Promise(r=>webhook.close(r));await rm(home,{recursive:true,force:true});}
