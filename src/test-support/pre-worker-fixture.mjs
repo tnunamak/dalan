@@ -82,6 +82,8 @@ export function preWorkerFixture(store) {
     DROP TRIGGER lifecycle_events_no_update;
     ALTER TABLE lifecycle_events DROP COLUMN worker;
     CREATE TRIGGER lifecycle_events_no_update BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT,'lifecycle events are append-only'); END;`);
+  // A historical database has none of the read indexes that Store adds at start; one of them covers target_worker.
+  db.exec('DROP INDEX IF EXISTS assignments_worker_status');
   for(const [table,cols] of Object.entries({assignments:['target_worker'],messages:['target_worker'],claims:['worker','lane_key','lane_scope','connection_id'],subscriptions:['worker','connection'],reports:['worker'],progress:['worker'],claim_denials:['worker']}))
     for(const column of cols) db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
   db.exec(`CREATE TABLE worker_calls_old (subject TEXT NOT NULL,minute INTEGER NOT NULL,tool TEXT NOT NULL,count INTEGER NOT NULL DEFAULT 0,bytes INTEGER,PRIMARY KEY(subject,minute,tool));
