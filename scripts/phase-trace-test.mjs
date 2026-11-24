@@ -104,6 +104,18 @@ const { createPhaseTrace } = await import('../src/phase-trace.mjs');
   trace.claimed({ requestId: 'n', worker: 'dot', subject: 's1', claimId: 'c7', handoff: false, createdAt: created });
   const noAck = lines.filter(l => l.kind === 'claim_phase').at(-1);
   assert.deepEqual([noAck.wake_ack_ms, noAck.wake_to_listed_ms], [null, null]);
+  const firstProgress = { requestId: 'dispatched', claimId: 'fixture-claim', claimedAt: '2026-11-24T10:00:06.125Z', first: true };
+  const prefix = 'dispatched_at=2026-11-24T10:00:02Z fixture';
+  trace.progress({ ...firstProgress, note: prefix });
+  trace.progress({ ...firstProgress, first: false, note: prefix });
+  trace.progress({ ...firstProgress, requestId: 'unprefixed', note: 'working' });
+  trace.progress({ ...firstProgress, requestId: 'bad-date', note: 'dispatched_at=2026-02-30T10:00:02Z fixture' });
+  trace.progress({ ...firstProgress, requestId: 'future', note: 'dispatched_at=2026-11-24T11:00:02Z fixture' });
+  trace.progress({ ...firstProgress, requestId: 'missing', claimedAt: null, note: prefix });
+  const dispatch = lines.filter(l => l.kind === 'claim_dispatch');
+  assert.deepEqual(dispatch[0], { kind: 'claim_dispatch', request_id: 'dispatched', claim_id: 'fixture-claim',
+    dispatched_at: '2026-11-24T10:00:02Z', claimed_at: '2026-11-24T10:00:06.125Z', gap_ms: 4125 });
+  assert.deepEqual(dispatch.map(l => [l.request_id, l.gap_ms]), [['dispatched', 4125], ['future', null], ['missing', null]]);
   // A failed wake logs a null answer time and is not remembered as a delivery.
   trace.wake({ item: item('f'), worker: 'dot', attemptAt: t, ackMs: null, status: null, state: 'failed' });
   const failed = lines.at(-1);
@@ -129,7 +141,20 @@ try {
   await b.ok('get', { request_id: 'req_trace_a' });
   // A retried claim is not a new claim.
   await b.ok('claim', { request_id: 'req_trace_a', claimant: 'fixture-worker' });
+  const prefix = 'dispatched_at=2026-11-24T10:00:02Z';
+  await b.ok('progress', { request_id: job.request_id, claim_id: job.claim_id, note: prefix + ' first' });
+  await b.ok('progress', { request_id: job.request_id, claim_id: job.claim_id, note: prefix + ' second' });
+  await b.finish(job); // the fixture bridge admits one claim at a time
+  const plain = await b.claimNew('req_trace_plain');
+  await b.ok('progress', { request_id: plain.request_id, claim_id: plain.claim_id, note: 'no timestamp' });
+  await b.ok('progress', { request_id: plain.request_id, claim_id: plain.claim_id, note: prefix + ' too late' });
   const lines = b.requestLog();
+  const dispatch = lines.filter(l => l.kind === 'claim_dispatch');
+  assert.deepEqual(dispatch.map(l => [l.request_id, l.claim_id, l.dispatched_at]), [
+    [job.request_id, job.claim_id, '2026-11-24T10:00:02Z'],
+  ]);
+  const gap = Date.parse(dispatch[0].claimed_at) - Date.parse(dispatch[0].dispatched_at);
+  assert.equal(dispatch[0].gap_ms, gap >= 0 ? gap : null);
   const phase = lines.filter(l => l.kind === 'claim_phase' && l.request_id === 'req_trace_a');
   assert.equal(phase.length, 1, JSON.stringify(phase));
   assert.equal(phase[0].claim_id, job.claim_id);

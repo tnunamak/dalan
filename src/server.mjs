@@ -991,7 +991,17 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
     case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject)),guidance:store.guidanceFor(worker)}; }
     case 'ack_message': {const message=store.ackMessage(id(a.message_id,'message_id'),worker);log({kind:'message_acknowledged',message_id:message.message_id});return {kind:'message',message};}
     case 'progress': {
-      const requestId=id(a.request_id),note=str(a.note,'note',4096),receipt=store.progress(requestId,id(a.claim_id,'claim_id'),note,subject,a.blocker===true,worker,null,commandContext('progress',{note,blocker:a.blocker===true}),connectionId);
+      const requestId=id(a.request_id),note=str(a.note,'note',4096),claimId=id(a.claim_id,'claim_id');
+      let dispatchClaim;
+      if(note.startsWith('dispatched_at=')) {
+        try { dispatchClaim=store.db.prepare('SELECT claimed_at,last_progress_at FROM claims WHERE request_id=? AND claim_id=?').get(requestId,claimId); }
+        catch { /* Telemetry never changes a tool result. */ }
+      }
+      const receipt=store.progress(requestId,claimId,note,subject,a.blocker===true,worker,null,commandContext('progress',{note,blocker:a.blocker===true}),connectionId);
+      if(dispatchClaim?.last_progress_at===null) {
+        try { phaseTrace.progress({requestId,claimId,claimedAt:dispatchClaim.claimed_at,first:true,note}); }
+        catch { /* Telemetry never changes a tool result. */ }
+      }
       notifyAttachedWaiter(requestId);
       return {...receipt,...repaired.marks};
     }

@@ -35,6 +35,16 @@ export function createPhaseTrace({log,now=Date.now,max=5000}) {
         submit_to_wake_ms:gap(created,wake?.attemptAt),wake_ack_ms:wake&&wake.ackAt!=null?Math.round(wake.ackAt-wake.attemptAt):null,
         wake_to_listed_ms:wakeToListed,listed_to_claim_ms:gap(seen,at),submit_to_claim_ms:gap(created,at)});
     },
+    // The server provides a snapshot taken before the successful progress write.
+    progress({requestId,claimId,claimedAt,first,note}) {
+      if(!first) return;
+      const stamp=/^dispatched_at=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)(?=\s|$)/.exec(note)?.[1];
+      const sent=Date.parse(stamp), claimed=Date.parse(claimedAt);
+      if(!Number.isFinite(sent)||iso(sent)!==stamp.replace('Z','.000Z')) return;
+      const known=Number.isFinite(claimed);
+      log({kind:'claim_dispatch',request_id:requestId,claim_id:claimId,dispatched_at:stamp,
+        claimed_at:known?claimedAt:null,gap_ms:known&&claimed>=sent?gap(sent,claimed):null});
+    },
     // Any worker call that names a request. The first one by the claimant after a fresh claim is the first action.
     action({requestId,tool,subject}) {
       const claim=fresh.get(requestId);
