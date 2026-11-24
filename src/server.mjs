@@ -346,7 +346,7 @@ function requireOperatorForHumanQuestion(req,requestId,questionId) {
 const event = {
   name: 'assignment.available', description: 'An assignment or lightweight message is available. Claim assignments by request_id; read messages by message_id. Use list_pending after missed events.',
   delivery: ['webhook'], inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  payloadSchema: { type: 'object', properties: { request_id: { type: 'string' }, message_id: { type: 'string' }, title: { type: 'string' } }, required: ['title'], additionalProperties: false }
+  payloadSchema: { type: 'object', properties: { request_id: { type: 'string' }, message_id: { type: 'string' }, title: { type: 'string' }, request_ids: { type: 'array', items: { type: 'string' } }, free_lanes: { type: 'integer', minimum: 0 }, queued: { type: 'integer', minimum: 0 } }, required: ['title'], additionalProperties: false }
 };
 const schema=(properties,required=[])=>({type:'object',properties,required,additionalProperties:false});
 const string={type:'string'}, integer={type:'integer'};
