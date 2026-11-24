@@ -136,7 +136,9 @@ try {
   bridges.push(b);
   await b.submit('req_trace_a');
   await b.ok('list_pending');
+  const claimWindowStart = Date.now();
   const job = await b.ok('claim', { request_id: 'req_trace_a', claimant: 'fixture-worker' });
+  const claimWindowEnd = Date.now();
   await sleep(300);
   await b.ok('get', { request_id: 'req_trace_a' });
   // A retried claim is not a new claim.
@@ -154,7 +156,8 @@ try {
     [job.request_id, job.claim_id, '2026-11-24T10:00:02Z'],
   ]);
   // The stamp is fixed in the past and the claim just happened, so the gap must be a known positive number; a missing claim time would give null here.
-  assert.ok(Number.isFinite(Date.parse(dispatch[0].claimed_at)) && Date.now() - Date.parse(dispatch[0].claimed_at) < 120000, 'claimed_at is a real recent time');
+  const claimedMs = Date.parse(dispatch[0].claimed_at);
+  assert.ok(claimedMs >= claimWindowStart - 1000 && claimedMs <= claimWindowEnd + 1000, 'claimed_at falls inside the window around the claim call (1 s clock slack)');
   assert.ok(Number.isInteger(dispatch[0].gap_ms) && dispatch[0].gap_ms > 0, `gap_ms must be a positive integer, got ${dispatch[0].gap_ms}`);
   assert.equal(dispatch[0].source, 'worker_note');
   const phase = lines.filter(l => l.kind === 'claim_phase' && l.request_id === 'req_trace_a');
