@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { prepareNodeModules, resolvePreparedNodeModules } from '../src/prepared-node-modules.mjs';
+import { npmCliPath, prepareNodeModules, resolvePreparedNodeModules } from '../src/prepared-node-modules.mjs';
 
 const root = fs.mkdtempSync(path.join(os.homedir(), 'prepared-test-'));
 const src = path.join(root, 'source'), cache = path.join(root, 'cache');
@@ -54,12 +54,41 @@ try {
   const bad = path.join(root,'bad'); fs.mkdirSync(bad); fs.writeFileSync(path.join(bad,'package.json'),JSON.stringify({name:'bad',version:'1',dependencies:{missing:'1.0.0'}})); fs.writeFileSync(path.join(bad,'package-lock.json'),JSON.stringify({name:'bad',version:'1',lockfileVersion:3,packages:{'':{name:'bad',version:'1'}}}));
   const previousOffline = process.env.npm_config_offline;
   process.env.npm_config_offline = 'true';
-  try { assert.throws(()=>prepareNodeModules(bad,options), error => error.code==='dependencies_install_failed' && error.message.includes(path.join(path.dirname(process.execPath),'npm')) && /exit status \d+/.test(error.message)); }
+  try { assert.throws(()=>prepareNodeModules(bad,options), error => error.code==='dependencies_install_failed' && error.message.includes(npmCliPath()) && /exit status \d+/.test(error.message)); }
   finally {
     if (previousOffline === undefined) delete process.env.npm_config_offline;
     else process.env.npm_config_offline = previousOffline;
   }
   assert.throws(()=>resolvePreparedNodeModules(bad,options), {code:'dependencies_unprepared'});
+  // A Node install whose `npm` beside the binary is a shell wrapper (mise) must still run npm's JavaScript entry.
+  const fakeSrc = path.join(root,'fake-src'); fs.mkdirSync(fakeSrc);
+  fs.writeFileSync(path.join(fakeSrc,'package.json'),JSON.stringify({name:'fake',version:'1.0.0'}));
+  fs.writeFileSync(path.join(fakeSrc,'package-lock.json'),JSON.stringify({name:'fake',version:'1.0.0',lockfileVersion:3,packages:{'':{name:'fake',version:'1.0.0'}}}));
+  const fakeNpmCli = `const fs=require('fs');fs.mkdirSync('node_modules');fs.writeFileSync('node_modules/ok.js','');fs.writeFileSync(process.env.FAKE_NPM_MARKER,process.argv.slice(1).join('\\n'));`;
+  const fakeNode = (name, { cli }) => {
+    const dir = path.join(root,name), bin = path.join(dir,'bin'); fs.mkdirSync(bin,{recursive:true});
+    fs.symlinkSync(process.execPath,path.join(bin,'node'));
+    fs.writeFileSync(path.join(bin,'npm'),'#!/usr/bin/env bash\nset -euo pipefail\nexec "$(dirname "${BASH_SOURCE[0]}")/../lib/node_modules/npm/bin/npm-cli.js" "$@"\n',{mode:0o755});
+    if (cli) { const cliDir = path.join(dir,cli); fs.mkdirSync(path.dirname(cliDir),{recursive:true}); fs.writeFileSync(cliDir,fakeNpmCli); }
+    return { execPath: path.join(bin,'node'), cli: cli && path.join(dir,cli) };
+  };
+  const marker2 = path.join(root,'fake-npm-marker'), env2 = { PATH: process.env.PATH, FAKE_NPM_MARKER: marker2 };
+  const layouts = [['lib layout','lib/node_modules/npm/bin/npm-cli.js'],['bin layout','bin/node_modules/npm/bin/npm-cli.js']];
+  for (const [label, cli] of layouts) {
+    const fake = fakeNode(label.replace(' ','-'),{cli}), fakeOptions = { cacheDir: path.join(root,`cache-${label.replace(' ','-')}`), execPath: fake.execPath, env: env2 };
+    assert.equal(npmCliPath({ execPath: fake.execPath, env: env2 }), fs.realpathSync(fake.cli), label);
+    const prepared = prepareNodeModules(fakeSrc, fakeOptions);
+    assert.equal(fs.existsSync(path.join(prepared.treePath,'ok.js')),true,label);
+    assert.deepEqual(fs.readFileSync(marker2,'utf8').split('\n').slice(0,2),[fs.realpathSync(fake.cli),'ci'],label); fs.rmSync(marker2);
+  }
+  const wrapperOnly = fakeNode('wrapper-only',{});
+  assert.equal(npmCliPath({ execPath: wrapperOnly.execPath, env: env2 }), path.join(path.dirname(wrapperOnly.execPath),'npm'));
+  assert.throws(()=>prepareNodeModules(fakeSrc,{ cacheDir: path.join(root,'cache-wrapper-only'), execPath: wrapperOnly.execPath, env: env2 }), error => error.code==='dependencies_install_failed');
+  // `npm_execpath` (set when a running npm started this process) wins over the install layout, but only if it is npm's own entry.
+  const running = fakeNode('running',{cli:'lib/node_modules/npm/bin/npm-cli.js'}), other = path.join(root,'other','npm-cli.js');
+  fs.mkdirSync(path.dirname(other)); fs.writeFileSync(other,fakeNpmCli);
+  assert.equal(npmCliPath({ execPath: running.execPath, env: { npm_execpath: other } }), fs.realpathSync(other));
+  assert.equal(npmCliPath({ execPath: running.execPath, env: { npm_execpath: '/usr/lib/node_modules/pnpm/bin/pnpm.cjs' } }), fs.realpathSync(running.cli));
   console.log('prepared dependencies focused tests passed (actual npm ci, no-network fixture)');
 } finally {
   // Test-owned read-only files are made removable before deleting the fixture.
