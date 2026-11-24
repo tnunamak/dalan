@@ -223,3 +223,11 @@ test('the last incrementable revision can still produce an ordinary finish effec
     events: [], effects: [{ type: 'advance_revision', expectedRevision: revision }],
   });
 });
+
+test('canonical JSON rejects a Map instead of dropping its entries', () => {
+  assert.throws(() => canonicalJson({rows: new Map([['fixture', 1]])}, 'invalid_report'), {code: 'invalid_report'});
+});
+
+test('canonical JSON rejects boxed scalars instead of coercing them', () => {
+  assert.throws(() => canonicalJson([Object(false)]), {code: 'invalid_json'});
+});
