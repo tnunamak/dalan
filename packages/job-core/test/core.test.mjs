@@ -125,6 +125,17 @@ test('canonical JSON rejects unsupported leaves while keeping the caller-specifi
   assert.equal(canonicalJson({ nested: [null, false, 0, ''] }), '{"nested":[null,false,0,""]}');
 });
 
+
+test('canonical JSON keeps the invalid-value diagnostic for a cyclic fixture', () => {
+  const rows = [];
+  rows.push(rows);
+  assert.throws(() => canonicalJson(rows), {
+    code: 'invalid_json', message: 'invalid_json',
+  });
+  assert.throws(() => canonicalJson({ rows }, 'bad_argument'), {
+    code: 'bad_argument', message: 'bad_argument',
+  });
+});
 test('canonical JSON permits a shared object to appear in sibling branches', () => {
   const shared = { z: 'last', a: 'first' };
   assert.equal(
