@@ -62,19 +62,40 @@ store.submit(body('t-many', { execution_scope: 'implementation', scope_paths: ma
   log('several repositories, a review job and a job without a repository');
 }
 {
-  // A destination-blocked row keeps its old shape (id, title, time, blocked): it is not claimable, so no scope is announced.
-  store.db.prepare('INSERT INTO destination_blocks(request_id,body) VALUES(?,?)').run('t-two', JSON.stringify({ error: 'destination_changed' }));
+  // A destination-blocked row keeps its old shape (id, title, time, blocked): it is not claimable, so no scope, output path or total is announced.
+  store.submit(body('t-blk', { execution_scope: 'implementation', scope_paths: ['src/a.mjs'], output_paths: ['src/new.mjs'] }), 't', 'e', 'owner');
+  store.db.prepare('INSERT INTO destination_blocks(request_id,body) VALUES(?,?)').run('t-blk', JSON.stringify({ error: 'destination_changed' }));
   const snap = store.destinationSnapshot.bind(store), appr = store.destinationApproval.bind(store);
   store.destinationSnapshot = () => ({ revision: 'r', policy: { allowed: false } });
   store.destinationApproval = () => null;
-  const b = item('t-two');
+  const b = item('t-blk');
+  const queuedIds = store.nextQueued(50, null, 'dot').next_queued.map(x => x.request_id);
   store.destinationSnapshot = snap; store.destinationApproval = appr;
-  assert(b && b.blocked === true && !('execution_scope' in b) && !('repos' in b), 'blocked row exposes triage fields: ' + JSON.stringify(b));
-  log('a destination-blocked row announces no triage fields');
-  store.db.prepare('DELETE FROM destination_blocks WHERE request_id=?').run('t-two');
+  assert(b && b.blocked === true, 'row did not become blocked: ' + JSON.stringify(b));
+  for (const k of ['execution_scope', 'repos', 'scope_paths', 'scope_paths_total', 'output_paths', 'output_paths_total', 'priority', 'review']) assert(!(k in b), `blocked row exposes ${k}: ` + JSON.stringify(b));
+  assert(JSON.stringify(Object.keys(b)) === '["kind","request_id","title","created_at","blocked"]', 'blocked row shape changed: ' + JSON.stringify(Object.keys(b)));
+  assert(!queuedIds.includes('t-blk'), 'blocked row offered in next_queued');
+  log('a destination-blocked row announces no triage fields and is not in next_queued');
+  store.db.prepare('DELETE FROM destination_blocks WHERE request_id=?').run('t-blk');
+}
+{
+  // Two same-pin jobs whose shown prefixes are disjoint and whose omitted tails overlap: next_queued must carry both totals, so a
+  // scheduler can see that the shown lists are not the whole scope (a total above the shown length means overlap is unknown).
+  const tail = Array.from({ length: 5 }, (_, i) => `src/tail${i}.mjs`);
+  const mk = (id, p) => store.submit(body(id, { execution_scope: 'implementation', scope_paths: [...Array.from({ length: 10 }, (_, i) => `${p}${i}.mjs`), ...tail], output_paths: [...Array.from({ length: 10 }, (_, i) => `out/${p}${i}.mjs`), ...tail, 7] }), 't', 'e', 'owner');
+  mk('t-cap1', 'src/p'); mk('t-cap2', 'src/q');
+  const n = store.nextQueued(50, null, 'dot').next_queued.filter(x => x.request_id.startsWith('t-cap'));
+  assert(n.length === 2, 'capped jobs missing from next_queued: ' + JSON.stringify(n));
+  for (const e of n) {
+    assert(e.scope_paths.length === 10 && e.scope_paths_total === 15, 'next_queued scope cap/total: ' + JSON.stringify(e));
+    assert(e.output_paths.length === 10 && e.output_paths_total === 15 && e.output_paths.every(p => typeof p === 'string'), 'next_queued output cap/total or non-string entry: ' + JSON.stringify(e));
+  }
+  assert(n[0].scope_paths.every(p => !n[1].scope_paths.includes(p)), 'fixture must have disjoint shown prefixes');
+  log('capped totals and string-only output entries survive next_queued');
 }
 {
   // Resume entries keep the next_queued shape they always had (request_id only); the projection must not add or carry keys for them.
+  // This pins today's behavior only. That a resume entry can take a slot ahead of fresh work is an older behavior and not changed here.
   const real = store.listPending.bind(store);
   store.listPending = () => [{ kind: 'assignment', request_id: 'r-resume', resume: true, idle_seconds: 130, previous_epoch: 1, note: 'resume' }, ...real('dot')];
   const next = store.nextQueued(2, null, 'dot').next_queued;
