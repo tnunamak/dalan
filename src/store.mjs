@@ -69,6 +69,10 @@ export function validateProtocol(value) {
 
 const questionError=(code,message)=>Object.assign(new Error(`${code}: ${message}`),{code});
 // A purpose other than clarification marks a question only a human may answer. SQLite cannot change a CHECK in place, so the schema 67 list below is the whole set.
+// A claim made by a finish handoff starts on a short idle lease: a job handed to a session that never touches it returns to the queue
+// after HANDOFF_IDLE_LEASE_MS. The holder's first call on it (any call, `get` included) moves it to HANDOFF_WORK_LEASE_MS, the lease
+// it ran under before the idle phase existed. The claim's acquisition_id carries the prefix, so the Store needs no extra column.
+export const HANDOFF_ACQUISITION_PREFIX='handoff-', HANDOFF_IDLE_LEASE_MS=120000, HANDOFF_WORK_LEASE_MS=600000;
 export const QUESTION_PURPOSES=['clarification','human_decision','authentication','tool_permission'];
 function validateQuestion(questionId,text) {
   if(typeof questionId!=='string'||!/^[A-Za-z0-9_.:-]{1,128}$/.test(questionId)) throw new Error('invalid question_id');
@@ -1932,12 +1936,17 @@ export class Store {
     this.refreshClaimActivity(id,claimId);
   }
   refreshClaimActivity(id,claimId) {
-    const at=this.stamp(), claim=this.db.prepare('SELECT lease_ms,worker FROM claims WHERE request_id=? AND claim_id=?').get(id,claimId);
-    const leaseMs=Math.min(claim?.lease_ms??this.limits.leaseMs,this.workerClaimLeaseCap(claim?.worker));
+    const at=this.stamp(), claim=this.db.prepare('SELECT lease_ms,worker,acquisition_id FROM claims WHERE request_id=? AND claim_id=?').get(id,claimId);
+    const leaseMs=Math.min(this.handoffWorkLeaseMs(claim)??claim?.lease_ms??this.limits.leaseMs,this.workerClaimLeaseCap(claim?.worker));
     const deadline=Date.parse(at)+leaseMs;
     if(this.isProtocolJob(id)) this.db.prepare('UPDATE claims SET last_claim_activity_at=? WHERE request_id=? AND claim_id=?').run(at,id,claimId);
     else this.db.prepare('UPDATE claims SET last_claim_activity_at=?,lease_ms=?,lease_deadline_at=?,lease_boot_id=?,lease_deadline_monotonic_ms=? WHERE request_id=? AND claim_id=?')
       .run(at,leaseMs,iso(deadline),this.leaseBootId,this.monotonicDeadlineFor(deadline),id,claimId);
+  }
+  // The working lease for a handoff claim that is still on its idle lease, else null (every other claim keeps its own lease_ms).
+  handoffWorkLeaseMs(claim) {
+    if(!claim?.acquisition_id?.startsWith(HANDOFF_ACQUISITION_PREFIX)||!(claim.lease_ms<HANDOFF_WORK_LEASE_MS)) return null;
+    return Math.min(HANDOFF_WORK_LEASE_MS,this.limits.leaseMs);
   }
   // The active, unexpired claim this worker holds under claimId, or null. A missing or expired claim is left to the caller's own error.
   liveHeldClaim(id,claimId,subject,worker) {
@@ -1960,6 +1969,8 @@ export class Store {
     try { this.assertMutationConnection(id,claim,connectionId); }
     catch(error) { if(error.destination?.error==='connection_not_live')return false; throw error; }
     this.markNotesSeen(id,subject,worker);
+    // The holder reading its handed job is the first sign of life: end the idle phase of a handoff claim. Other claims are not refreshed by a read.
+    if(this.handoffWorkLeaseMs(claim)!==null&&!this.leaseExpired(claim)) this.refreshClaimActivity(id,claim.claim_id);
     return true;
   }); }
   // Unfenced: for callers that already proved the holder inside their own claim transaction (exact retry, resume). `get` uses markNotesSeenByHolder.

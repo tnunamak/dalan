@@ -17,9 +17,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const WAIT_MS = 1500;
 const assignment = request_id => ({ schema_version: 1, request_id, brief: `Synthetic fixture ${request_id}`, inputs: [], expected_output: 'One line', execution_scope: 'read-only' });
 
-async function startBridge(label, workerExtra, limits) {
+async function startBridge(label, workerExtra, limits, extraEnv = {}) {
   const home = fs.mkdtempSync(path.join(root, `finish-handoff-${label}-`));
-  const env = fixtureEnv(home, { DOT_BRIDGE_PORT: '0', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_RESUME_IDLE_MS: '0' });
+  const env = fixtureEnv(home, { DOT_BRIDGE_PORT: '0', DOT_BRIDGE_ALLOW_INSECURE_PUBLIC: '1', DOT_BRIDGE_BIND_HOST: '127.0.0.1', DOT_BRIDGE_RESUME_IDLE_MS: '0', ...extraEnv });
   delete env.DALAN_LEGACY_PROFILE;
   if (limits) { fs.mkdirSync(path.join(home, '.config/dalan'), { recursive: true }); fs.writeFileSync(path.join(home, '.config/dalan/limits.json'), JSON.stringify(limits), { mode: 0o600 }); }
   const workersFile = path.join(home, 'workers.json');
@@ -235,6 +235,37 @@ try {
     assert.deepEqual(await off.queuedIds(), ['req_off_q1'], 'the job is still queued');
     pass('without finish_handoff the reply is the old hint and nothing is claimed');
   }
+  // 9. A handed job nobody touches goes back to the queue after a short idle lease; the first sign of life from the holder
+  // (any call on it, `get` included) moves it to the working lease, so a started job is not requeued mid-run.
+  {
+    const leaseLeft = job => Date.parse(job.lease_expires_at) - Date.now();
+    const b = await start('idle', { finish_handoff: { wait_ms: WAIT_MS } }, { max_claimed_outer_assignments: 2 });
+    const first = await b.claimNew('req_idle_first');
+    for (const id of ['req_idle_a', 'req_idle_b']) await b.submit(id);
+    const one = await b.finish(first);
+    assert.ok(leaseLeft(one.next_job) > 100000 && leaseLeft(one.next_job) <= 120500, `idle lease is about 120 s, not 600 s: ${leaseLeft(one.next_job)} ms`);
+    await b.ok('get', { request_id: 'req_idle_a' });
+    const worked = await b.ok('progress', { request_id: 'req_idle_a', claim_id: one.next_job.claim_id, note: 'started' });
+    assert.ok(worked, 'the holder can use the claim');
+    const two = await b.finish(await b.ok('claim', { request_id: 'req_idle_b', claimant: 'fixture-worker' }));
+    assert.equal(two.queue_empty, true);
+    // Short idle lease: an untouched handoff returns to the queue; a touched one stays claimed.
+    const s = await start('idle-short', { finish_handoff: { wait_ms: WAIT_MS } }, { max_claimed_outer_assignments: 3 }, { DALAN_HANDOFF_IDLE_LEASE_MS: '2000' });
+    const f = await s.claimNew('req_short_first');
+    for (const id of ['req_short_stranded', 'req_short_started']) await s.submit(id);
+    const h1 = await s.finish(f);
+    assert.equal(h1.next_job.request_id, 'req_short_stranded');
+    const f2 = await s.claimNew('req_short_second');
+    const h2 = await s.finish(f2);
+    assert.equal(h2.next_job.request_id, 'req_short_started');
+    await s.ok('get', { request_id: 'req_short_started' });
+    await sleep(4500);
+    assert.equal((await s.ok('get', { request_id: 'req_short_stranded' })).status, 'queued', 'the untouched handoff went back to the queue');
+    assert.equal((await s.ok('get', { request_id: 'req_short_started' })).status, 'claimed', 'the started handoff stays claimed');
+    await s.finish(h2.next_job);
+    pass('handoff lease: about 120 s while idle; an untouched handoff requeues; a started one keeps its claim');
+  }
+
 } finally {
   await Promise.all(bridges.map(b => b.stop()));
 }
