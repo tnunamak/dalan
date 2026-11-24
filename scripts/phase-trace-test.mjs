@@ -86,6 +86,24 @@ const { createPhaseTrace } = await import('../src/phase-trace.mjs');
   const ho = lines.filter(l => l.kind === 'claim_phase').at(-1);
   assert.deepEqual([ho.handoff, ho.submit_to_wake_ms, ho.wake_ack_ms, ho.wake_to_listed_ms, ho.listed_to_claim_ms], [true, null, null, null, null]);
   assert.ok(ho.submit_to_claim_ms > 0);
+  // A failed attempt leaves its wake and listing behind; the next claim is a finish handoff and must not log them.
+  t += 100; trace.wake({ item: item('s'), worker: 'dot', attemptAt: t, ackMs: 10, status: 204, state: 'delivered' });
+  trace.listed(['s']);
+  t += 1000; trace.claimed({ requestId: 's', worker: 'dot', subject: 's1', claimId: 'c5', handoff: true, createdAt: created });
+  const stale = lines.filter(l => l.kind === 'claim_phase').at(-1);
+  assert.deepEqual([stale.first_listed_at, stale.wake_attempt_at, stale.wake_to_listed_ms, stale.listed_to_claim_ms], [null, null, null, null], 'a handoff claim ignores timings left by an earlier attempt');
+  // Listed before the receiver's answer came back: the order of answer and listing is unknown, so the gap is null, never negative.
+  t += 100; const sendAt = t; trace.listed(['o']); t += 25; trace.wake({ item: item('o'), worker: 'dot', attemptAt: sendAt, ackMs: 60, status: 204, state: 'delivered' });
+  t += 500; trace.claimed({ requestId: 'o', worker: 'dot', subject: 's1', claimId: 'c6', handoff: false, createdAt: created });
+  const early = lines.filter(l => l.kind === 'claim_phase').at(-1);
+  assert.equal(early.wake_to_listed_ms, null, 'a listing before the answer has no known gap');
+  assert.equal(early.wake_ack_ms, 60);
+  // A delivered wake with no recorded answer time keeps the gap unknown instead of counting the answer as instant.
+  t += 100; trace.wake({ item: item('n'), worker: 'dot', attemptAt: t, ackMs: null, status: 204, state: 'delivered' });
+  t += 400; trace.listed(['n']); t += 100;
+  trace.claimed({ requestId: 'n', worker: 'dot', subject: 's1', claimId: 'c7', handoff: false, createdAt: created });
+  const noAck = lines.filter(l => l.kind === 'claim_phase').at(-1);
+  assert.deepEqual([noAck.wake_ack_ms, noAck.wake_to_listed_ms], [null, null]);
   // A failed wake logs a null answer time and is not remembered as a delivery.
   trace.wake({ item: item('f'), worker: 'dot', attemptAt: t, ackMs: null, status: null, state: 'failed' });
   const failed = lines.at(-1);

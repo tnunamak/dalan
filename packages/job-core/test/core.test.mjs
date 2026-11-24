@@ -15,7 +15,7 @@ test('a non-renewal decision at revision zero contains only the advance effect',
 });
 
 test('canonical JSON sorts nested keys and preserves array order', () => {
-  assert.equal(canonicalJson({ z: [3, { b: 2, a: 1 }], a: true }), '{"a":true,"z":[3,{"a":1,"b":2}]}');
+  assert.equal(canonicalJson({ z: [3, 1, 2, { b: 2, a: 1 }], a: true }), '{"a":true,"z":[3,1,2,{"a":1,"b":2}]}');
   assert.throws(() => canonicalJson({ bad: Infinity }, 'bad_value'), { code: 'bad_value' });
 });
 
