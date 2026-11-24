@@ -78,6 +78,20 @@ function lookup(input, base) {
     throw failure('dependencies_unprepared', `missing or invalid preparation; owner recovery: ${recovery(input.root)} --replace-invalid`);
   }
 }
+// The `npm` file beside Node is not always JavaScript: mise installs a Bash wrapper there, and
+// running that wrapper under Node fails before npm starts. Find npm's own JavaScript entry point:
+// the running npm (`npm_execpath`), then the layouts Node installers use, then the sibling file.
+export function npmCliPath({ execPath = process.execPath, env = process.env } = {}) {
+  const binDir = path.dirname(execPath);
+  const real = file => { try { return fs.realpathSync(file); } catch { return null; } };
+  const entry = file => { const resolved = real(file); return resolved && fs.statSync(resolved).isFile() ? resolved : null; };
+  const fromEnv = env.npm_execpath && path.basename(env.npm_execpath) === 'npm-cli.js' ? entry(env.npm_execpath) : null;
+  const sibling = path.join(binDir, 'npm');
+  return fromEnv
+    ?? entry(path.join(binDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'))
+    ?? entry(path.join(binDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'))
+    ?? (path.basename(real(sibling) ?? '') === 'npm-cli.js' ? real(sibling) : sibling);
+}
 export function resolvePreparedNodeModules(sourceDir, options = {}) {
   const input = inputs(sourceDir);
   return input ? lookup(input, store(options)) : null;
@@ -99,8 +113,9 @@ export function prepareNodeModules(sourceDir, options = {}) {
   try {
     fs.writeFileSync(path.join(stage, 'package.json'), input.manifest, { mode: 0o600 });
     fs.writeFileSync(path.join(stage, 'package-lock.json'), input.lock, { mode: 0o600 });
-    const npm = path.join(path.dirname(process.execPath), 'npm');
-    const run = spawnSync(process.execPath, [npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: stage, env: { ...process.env, npm_config_ignore_scripts: 'true' }, stdio: 'ignore' });
+    const env = options.env ?? process.env, execPath = options.execPath ?? process.execPath;
+    const npm = npmCliPath({ execPath, env });
+    const run = spawnSync(execPath, [npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: stage, env: { ...env, npm_config_ignore_scripts: 'true' }, stdio: 'ignore' });
     if (run.error || run.status !== 0) {
       const exit = run.error ? `error: ${run.error.message}` : run.signal ? `signal ${run.signal}` : `exit status ${run.status}`;
       throw failure('dependencies_install_failed', `npm ci failed (ran ${npm}; ${exit}); no preparation published`);
