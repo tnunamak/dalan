@@ -4,11 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { createTestingGozar, fakeRegistry } from '@tnunamak/gozar/testing';
 import { runTry } from '../src/try.mjs';
 
@@ -28,8 +29,38 @@ async function forwarder(target, observe = () => {}) {
   return { port: server.address().port, close: () => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }) };
 }
 
+async function installedPackageMetadata(specifier, packageName) {
+  let directory = dirname(fileURLToPath(import.meta.resolve(specifier)));
+  for (;;) {
+    let metadata;
+    try {
+      metadata = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    if (metadata?.name === packageName) return metadata;
+    const parent = dirname(directory);
+    assert.notEqual(parent, directory, `Could not find metadata for ${specifier}`);
+    directory = parent;
+  }
+}
+
+test('the installed Gozar version matches the Dalan manifest and lock', async () => {
+  const dependency = '@tnunamak/gozar';
+  const [manifest, lock, installed] = await Promise.all([
+    readFile(new URL('../package.json', import.meta.url), 'utf8').then(JSON.parse),
+    readFile(new URL('../package-lock.json', import.meta.url), 'utf8').then(JSON.parse),
+    installedPackageMetadata(`${dependency}/testing`, dependency),
+  ]);
+  const declared = manifest.dependencies[dependency];
+  assert.ok(declared, 'Dalan declares the Gozar dependency');
+  assert.equal(lock.packages[''].dependencies[dependency], declared, 'root lock dependency');
+  assert.equal(lock.packages[`node_modules/${dependency}`].version, declared, 'locked package version');
+  assert.equal(installed.version, declared, 'actual installed package version');
+});
+
 test('installed Gozar proves and removes an unknown route serving the real Dalan bridge', { timeout: 45000 }, async t => {
-  const root = await mkdtemp(join(homedir(), '.tmp', 'dg-'));
+  const root = await mkdtemp(join(tmpdir(), 'dg-'));
   const id = 'edge-' + randomUUID().slice(0, 8);
   const home = join(root, 'g');
   const registry = await fakeRegistry({ id, kinds: ['attached', 'session'], reach: 'internet', dir: root,
