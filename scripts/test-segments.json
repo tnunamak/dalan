@@ -160,6 +160,8 @@
   "node scripts/submission-policy-e2e.mjs",
   "node --test scripts/scanner-stderr-test.mjs",
   "node scripts/status-evidence-test.mjs",
+  "node scripts/db-read-volume-test.mjs",
+  "node scripts/loopback-probe-test.mjs",
   "node scripts/pr-preflight-test.mjs",
   "node scripts/pr-preflight-commit-test.mjs",
   "node scripts/pr-preflight-e2e.mjs",

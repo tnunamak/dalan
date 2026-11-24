@@ -42,6 +42,7 @@ import { beginMcpOutcome, recordMcpResponse, pathShape, uaToken } from './mcp-ou
 import { lifecycleMetrics, retainLifecycle, controlScopeText } from './lifecycle.mjs';
 import { normalizeMeta } from './objectives.mjs';
 import { createRequestLog } from './request-log.mjs';
+import { createLoopbackProbe } from './loopback-probe.mjs';
 import { logShutdownSignals } from './shutdown-signal.mjs';
 import { ADVERTISED_SCOPES, legacyScopeNames, wireScope } from './scopes.mjs';
 import { acquireAsOwner, loadAsConfig, loadKeys } from './as-files.mjs';
@@ -1352,7 +1353,7 @@ const adminServer=http.createServer(async(req,res)=>{
         if(action==='revoke') { toolRegistry.revoke(body.name,body.worker); return json(res,200,{name:body.name,worker:body.worker,granted:false}); }
       } catch(error) { if(error instanceof RegistryError) throw new Error(`${error.code}: ${error.message}`); throw error; }
     }
-    if(url.pathname==='/status') return json(res,200,{last_registry_change:toolRegistry.lastChange(),...store.status({limits:redeliveryLimits,capacity:claimCapacity,backgroundMaxInFlight}),max_claimed_outer_assignments:claimCapacity,worker_lane_capacity:redeliveryLimits.laneCapacity,background_max_in_flight:backgroundMaxInFlight,owner_waiter_count:waiters.size});
+    if(url.pathname==='/status') return json(res,200,{last_registry_change:toolRegistry.lastChange(),...store.status({limits:redeliveryLimits,capacity:claimCapacity,backgroundMaxInFlight}),max_claimed_outer_assignments:claimCapacity,worker_lane_capacity:redeliveryLimits.laneCapacity,background_max_in_flight:backgroundMaxInFlight,owner_waiter_count:waiters.size,loopback_probe:loopbackProbe?.snapshot()??null});
     if(url.pathname==='/metrics'&&req.method==='GET') return json(res,200,lifecycleMetrics(store,{since:url.searchParams.get('since'),laneCapacity:redeliveryLimits.laneCapacity}));
     if(['/accept','/reject'].includes(url.pathname)&&req.method==='POST') {
       const requestId=id(body.id); adminOwner(req,requestId);
@@ -1634,6 +1635,9 @@ const adminListening=new Promise(resolve=>adminServer.listen(socket,()=>{fs.chmo
 // Built-in mode sits behind a tunnel on this computer: only loopback may reach the listener.
 const bindHost=readEnv('DALAN_BIND_HOST')||(as||loopbackOnly||loopback?'127.0.0.1':'0.0.0.0');
 const publicListening=new Promise(resolve=>publicServer.listen(port,bindHost,()=>{console.log(`MCP listening on ${bindHost}:${publicServer.address().port}`);resolve();}));
+const loopbackProbeMs=Number(readEnv('DALAN_LOOPBACK_PROBE_MS')??30000);
+if(!Number.isInteger(loopbackProbeMs)||loopbackProbeMs<0||(loopbackProbeMs>0&&loopbackProbeMs<1000)) throw new Error('DALAN_LOOPBACK_PROBE_MS must be 0 or at least 1000');
+let loopbackProbe=null;
 // Every background writer starts only when no update window is open, so a candidate restarted inside the window changes no state
 // the rollback snapshot would discard. Outside a window this runs at once, in the same order as before.
 function startBackground() {
@@ -1641,6 +1645,11 @@ function startBackground() {
     home, configDir, origin: new URL(as.publicUrl).origin, secret, canWrite: () => !updateWindowOpen(),
   }));
   store.recoverSends();
+  // Off with DALAN_LOOPBACK_PROBE_MS=0. It asks the bridge's own listener a question every 30 s (default) and logs a slow or failed answer.
+  if(loopbackProbeMs>0) {
+    loopbackProbe=createLoopbackProbe({url:()=>{const {address,port}=publicServer.address();return `http://${['0.0.0.0','::'].includes(address)?'127.0.0.1':address.includes(':')?`[${address}]`:address}:${port}/`;},log,intervalMs:loopbackProbeMs});
+    void publicListening.then(()=>loopbackProbe.start());
+  }
 // Cleanup removes worktrees and dependency caches; it starts only after both servers listen, and
 // cleanupExpired is async and single-flight, so neither startup nor the hourly tick blocks requests.
 if(workspace) {

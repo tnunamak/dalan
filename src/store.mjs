@@ -344,6 +344,7 @@ export class Store {
         CREATE TABLE IF NOT EXISTS bridge_state (key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS notifications_due ON notifications(state,next_at);`);
       this.migrate();
+      this.ensureReadIndexes();
       this.pullQueue=new PullQueue(this);
       this.initializeLeaseClock();
       this.initializeSubscriptionStorage();
@@ -372,6 +373,16 @@ export class Store {
     if(typeof scope!=='string'||!scope.trim()) throw new Error('a control event needs a scope');
     if(confirmed&&denied) throw new Error('a control request cannot be both denied and confirmed');
     return this.inTransaction(()=>this.lifecycle(id,type,actor,[reason,denied].filter(Boolean).join('; ')||null,undefined,{scope:scope.trim(),outcome:confirmed?'confirmed':'unknown'}));
+  }
+  // Indexes for the queries that run on a timer or on every owner read. Without them each call scans a table whose rows carry
+  // large payloads: on the live database (428 MB) that was 2.7 GB read per minute, and under memory pressure every read is a disk read
+  // that blocks the event loop. Idempotent and outside the schema version, so older code can still open the database.
+  ensureReadIndexes() {
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS notifications_due_live ON notifications(state,next_at) WHERE kind IN ('event','t3','blocker','watch','break');
+      CREATE INDEX IF NOT EXISTS notifications_held ON notifications(state) WHERE held_kind IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS progress_request ON progress(request_id,id);
+      CREATE INDEX IF NOT EXISTS assignments_worker_status ON assignments(target_worker,status,valid_until,valid_until_source,request_id);`);
   }
   migrate() {
     this.transaction(() => {
@@ -2941,7 +2952,11 @@ export class Store {
   }
   deliveryMuted(id) { return !!this.db.prepare('SELECT 1 FROM assignment_delivery_mutes WHERE request_id=?').get(id); }
   suppressFinishedQuestions(requestId=null) {
-    this.db.prepare("UPDATE notifications SET state='suppressed',last_error='result superseded question' WHERE (kind='blocker' OR kind='wait' AND body IS NOT NULL) AND state IN ('pending','failed') AND request_id IN (SELECT request_id FROM assignments WHERE status='finished' AND (? IS NULL OR request_id=?))").run(requestId,requestId);
+    // One job, or every finished job. The two statements are not merged with `? IS NULL OR`: that form defeats the request_id index
+    // and scanned every pending row on each finish.
+    const supersede="UPDATE notifications SET state='suppressed',last_error='result superseded question' WHERE (kind='blocker' OR kind='wait' AND body IS NOT NULL) AND state IN ('pending','failed')";
+    if(requestId===null) this.db.prepare(`${supersede} AND request_id IN (SELECT request_id FROM assignments WHERE status='finished')`).run();
+    else this.db.prepare(`${supersede} AND request_id=? AND request_id IN (SELECT request_id FROM assignments WHERE status='finished' AND request_id=?)`).run(requestId,requestId);
   }
   quietDelivery(id,reason) {
     // Keep results/questions in the existing wait queue. Watches stay visible to
