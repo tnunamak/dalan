@@ -19,6 +19,22 @@ test('canonical JSON sorts nested keys and preserves array order', () => {
   assert.throws(() => canonicalJson({ bad: Infinity }, 'bad_value'), { code: 'bad_value' });
 });
 
+test('canonical JSON follows JSON index ordering for numeric-looking keys', () => {
+  const entries = [
+    ['z', 'tail'], ['10', 'ten'], ['4294967295', 'not-an-index'],
+    ['01', 'leading-zero'], ['2', 'two'], ['4294967294', 'last-index'],
+  ];
+  const expected = '{"2":"two","10":"ten","4294967294":"last-index","01":"leading-zero","4294967295":"not-an-index","z":"tail"}';
+  assert.equal(canonicalJson(Object.fromEntries(entries)), expected);
+  assert.equal(canonicalJson(Object.fromEntries([...entries].reverse())), expected);
+});
+
+test('canonical JSON writes negative zero as zero in object and array values', () => {
+  const expected = '{"array":[0,{"n":0}],"n":0}';
+  assert.equal(canonicalJson({ n: -0, array: [-0, { n: -0 }] }), expected);
+  assert.equal(canonicalJson({ n: 0, array: [0, { n: 0 }] }), expected);
+});
+
 test('canonical JSON rejects an undefined array cell instead of serializing it as null', () => {
   assert.throws(() => canonicalJson({ values: [1, undefined] }), {
     name: 'Error', code: 'invalid_json', message: 'invalid_json',
