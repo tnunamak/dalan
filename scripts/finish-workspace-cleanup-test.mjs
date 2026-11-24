@@ -221,6 +221,28 @@ try {
     await ws.sweepExpired(() => {});
     assert(!row2(checked) && !fs.existsSync(tree2(checked)), 'the sweep must remove the tree once the check ends');
 
+    // A terminal row can outlive its tree; the sidecar is still owed.
+    const treeGone = makeFinished();
+    const treeGoneSidecar = ws.ignoredWrittenFile(treeGone);
+    fs.writeFileSync(treeGoneSidecar, '{}');
+    fs.rmSync(tree2(treeGone), { recursive: true });
+    assert((await ws.removeTerminalWorkspace(treeGone)) === 'removed', 'a missing terminal tree must not strand cleanup');
+    assert(!row2(treeGone) && !fs.existsSync(treeGoneSidecar), 'missing-tree cleanup must remove the sidecar and row');
+
+    // A sidecar failure after worktree removal leaves retryable bookkeeping.
+    const sidecarFailed = makeFinished();
+    const sidecar = ws.ignoredWrittenFile(sidecarFailed);
+    fs.mkdirSync(sidecar);
+    fs.writeFileSync(path.join(sidecar, 'fixture'), 'test');
+    let sidecarError;
+    try { await ws.removeTerminalWorkspace(sidecarFailed); } catch (error) { sidecarError = error; }
+    assert(sidecarError?.path === sidecar && row2(sidecarFailed), 'the sidecar must be the failure and keep the row');
+    assert(!fs.existsSync(tree2(sidecarFailed)), 'the tree must already be gone when sidecar removal fails');
+    fs.unlinkSync(path.join(sidecar, 'fixture'));
+    fs.rmdirSync(sidecar);
+    assert((await ws.removeTerminalWorkspace(sidecarFailed)) === 'removed' && !row2(sidecarFailed), 'retry must remove the stranded row');
+    console.log('PASS a missing worktree does not strand terminal sidecar or row cleanup');
+
     // A failed removal leaves the row; once the obstacle is gone, the sweep retries and removes it.
     const failed = makeFinished();
     fs.renameSync(tree2(failed), `${tree2(failed)}-moved`);
