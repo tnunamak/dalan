@@ -248,3 +248,16 @@ test('release succeeds when the temporary lock file is already absent', async t 
   assert.doesNotThrow(() => lock.release());
   assert.deepEqual(fs.readdirSync(dir), []);
 });
+
+test('acquire creates missing fixture directories and release keeps the directories', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-nested-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const parent = path.join(dir, 'one', 'two');
+  const file = path.join(parent, 'session.lock');
+  assert.equal(fs.existsSync(parent), false);
+  const lock = await acquireLock(file);
+  try {
+    assert.deepEqual(fs.readdirSync(parent), ['session.lock']);
+  } finally { lock.release(); }
+  assert.deepEqual(fs.readdirSync(parent), []);
+});
