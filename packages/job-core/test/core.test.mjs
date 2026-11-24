@@ -29,6 +29,18 @@ test('canonical JSON follows JSON index ordering for numeric-looking keys', () =
   assert.equal(canonicalJson(Object.fromEntries([...entries].reverse())), expected);
 });
 
+test('canonical JSON ignores non-enumerable presentation data on a plain object', () => {
+  const value = { shown: 'fixture' };
+  Object.defineProperty(value, 'label', { value: 'presentation only' });
+  assert.equal(canonicalJson(value), '{"shown":"fixture"}');
+});
+
+test('canonical JSON keeps indexed array data separate from presentation properties', () => {
+  const values = [2, 1];
+  Object.assign(values, { label: 'presentation only' });
+  assert.equal(canonicalJson(values), '[2,1]');
+});
+
 test('canonical JSON writes negative zero as zero in object and array values', () => {
   const expected = '{"array":[0,{"n":0}],"n":0}';
   assert.equal(canonicalJson({ n: -0, array: [-0, { n: -0 }] }), expected);
