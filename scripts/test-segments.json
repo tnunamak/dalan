@@ -200,6 +200,7 @@
   "node scripts/revises-e2e.mjs",
   "node scripts/jsonl-test.mjs",
   "node scripts/wake-test.mjs",
+  "node scripts/list-triage-test.mjs",
   "node scripts/dispatch-gap-test.mjs",
   "node scripts/queue-wake-e2e.mjs",
   "node scripts/submission-lint-test.mjs",
