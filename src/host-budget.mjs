@@ -7,7 +7,15 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
 // The fixed production unit reserves one active envelope per Unix user.
-export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 1024 ** 3, processes: 128, disk_write_bytes: 256 * 1024 ** 2, output_bytes: 1024 ** 2 });
+// The 2 GiB memory ceiling covers the heaviest measured suite-class workload
+// on the deployment host (a 1592 MB peak in the test-sandbox run ledger,
+// 2026-11-24) with about 27% margin; one unit runs per user at a time.
+export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 2 * 1024 ** 3, processes: 128, disk_write_bytes: 256 * 1024 ** 2, output_bytes: 1024 ** 2 });
+// A reservation the kernel OOM-killed is not restarted at once: the same unit
+// fails fast with reason "oom" until this delay passes, so a caller's restart
+// loop cannot re-kill the same workload second after second.
+export const HOST_CHECK_OOM_RETRY_DELAY_MS = 60_000;
+const oomKilledReservations = new Map();
 const minima = { cpu_ms: 50, wall_ms: 100, memory_bytes: 128 * 1024 ** 2, processes: 16, disk_write_bytes: 1024 ** 2, output_bytes: 1024 };
 const service = fileURLToPath(new URL('./host-budget-service.mjs', import.meta.url));
 const stopRecorder = fileURLToPath(new URL('./host-budget-stop.mjs', import.meta.url));
@@ -35,13 +43,27 @@ const propertyArg = value => '"' + value.replaceAll('%', '%%').replaceAll('\\', 
 
 export const provesHostNotStarted = ({ spawnError, pid, stopped }) => !!(spawnError && !pid && !stopped);
 
+function markOomKilledReservation(unit, at) {
+  for (const [reservation, killedAt] of oomKilledReservations) if (at - killedAt >= HOST_CHECK_OOM_RETRY_DELAY_MS) oomKilledReservations.delete(reservation);
+  oomKilledReservations.set(unit, at);
+}
+
+// Nothing was launched: the caller marks the check failed with reason "oom"
+// instead of handing the same workload back to the kernel that just killed it.
+function deferredOomReservation({ unit, budgets, killedAt, at }) {
+  return { unit, dependencies: null, exit: { code: 125 }, budgets, usage: null, usage_complete: false, bytes: Buffer.alloc(0), phases: [],
+    error: `oom: ${unit} was kernel-killed and is not restarted at once (retry after ${Math.ceil((killedAt + HOST_CHECK_OOM_RETRY_DELAY_MS - at) / 1000)}s)`,
+    stop: { verified: false, reason: 'oom', service_result: 'oom-kill', invocation_id: null, remaining_pids: null, oom_kill: null },
+    notStarted: true, timedOut: false, cancelled: false, truncated: false, duration_ms: 0 };
+}
+
 export async function runHostBudget(options) {
   let spawned=false;
   try { return await runHostBudgetAttempt(options,()=>{spawned=true;}); }
   catch(error) { if(spawned) error.hostInvoked=true;throw error; }
 }
 
-async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sourceExemptions = [], checkRunId, receiptDir, cancelled = () => false, onStarted, onOutputStarted, enabled = readEnv('DALAN_HOST_CHECKS') === '1' }, onSpawned) {
+async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sourceExemptions = [], checkRunId, receiptDir, cancelled = () => false, onStarted, onOutputStarted, enabled = readEnv('DALAN_HOST_CHECKS') === '1', now = () => performance.now() }, onSpawned) {
   if (!enabled) throw new Error('host_execution_disabled: set DALAN_HOST_CHECKS=1 to opt in');
   if (process.platform !== 'linux') throw new Error(`host budget backend unavailable on ${process.platform}`);
   budgets = parseHostBudget(budgets);
@@ -79,6 +101,8 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const suffix = process.env.NODE_ENV === 'production' ? undefined : process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
   if (suffix && !/^[a-zA-Z0-9-]{1,80}$/.test(suffix)) throw new Error('invalid DALAN_HOST_CHECK_UNIT_SUFFIX');
   const unit = `dot-bridge-host-check${suffix ? '-' + suffix : ''}.service`;
+  const oomKilledAt = oomKilledReservations.get(unit);
+  if (oomKilledAt !== undefined && now() - oomKilledAt < HOST_CHECK_OOM_RETRY_DELAY_MS) return deferredOomReservation({ unit, budgets, killedAt: oomKilledAt, at: now() });
   const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', `--unit=${unit}`, ...properties.map(p => `--property=${p}`), '--', process.execPath, service];
   const started=performance.now();
   const child = spawn('/usr/bin/systemd-run', args, { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -138,6 +162,7 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   // application TTL can certify a still-running tree as stopped.
   const stopEvidence=resolveHostStopEvidence(receipts,stopped);
   const stop = { verified: stopEvidence?.verified === true, reason: stopEvidence?.verified ? 'systemd_control_group_stopped' : 'service_stop_not_observed', service_result: stopped?.result ?? null, invocation_id: stopEvidence?.invocationId ?? stopped?.invocation_id ?? null, remaining_pids: stopEvidence?.remaining_pids ?? stopped?.remaining_pids ?? null, oom_kill: stopped?.oom_kill ?? null };
+  if ((stopped?.oom_kill ?? 0) > 0 || stopped?.result === 'oom-kill') markOomKilledReservation(unit, now());
   let error = cpuExceeded ? 'budget exceeded: cpu' : message?.error ?? null;
   if (stopped?.oom_kill > 0 || stopped?.result === 'oom-kill') error = 'budget exceeded: memory';
   else if (stopped?.result === 'timeout') error = 'budget exceeded: wall';

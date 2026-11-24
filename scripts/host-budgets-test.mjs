@@ -95,28 +95,96 @@ test('seccomp installation failure refuses to launch', { skip: !linux && 'Linux 
 
 for (const [which, code] of Object.entries(payloads)) {
   test(`budget exceeded: ${which}; entire tree stopped and its unit inactive`, { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
-    // Import inside the test: the initial red run fails without launching any payload.
-    const { runHostBudget } = await import('../src/host-budget.mjs');
-    const result = await runHostBudget({ dir: home, budgets: { ...budgets, ...(which === 'wall' ? { wall_ms: 1000 } : {}), ...(which === 'cpu' ? { cpu_ms: 250 } : {}) }, phases: [{ name: 'check', argv: ['/runtime/node', '-e', code] }], enabled: true });
-    assert.equal(result.error, `budget exceeded: ${which}`, JSON.stringify(result));
-    assert.equal(result.stop.verified, true, JSON.stringify(result.stop));
-    assert(result.bytes.length <= budgets.output_bytes);
-    const show = spawnSync('systemctl', ['--user', 'show', result.unit, '-p', 'ActiveState', '--value'], { encoding: 'utf8' });
-    assert(!['active', 'activating', 'deactivating'].includes(show.stdout.trim()), 'this check leaves no active unit');
+    // The memory payload ends in a kernel OOM kill, and a killed reservation is
+    // not restarted at once. That scenario runs on a reservation of its own;
+    // the good run below proves the shared suite reservation still restarts.
+    const suiteSuffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+    if (which === 'memory') process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `oom-scenario-${process.pid}-${randomUUID()}`;
+    try {
+      // Import inside the test: the initial red run fails without launching any payload.
+      const { runHostBudget } = await import('../src/host-budget.mjs');
+      const result = await runHostBudget({ dir: home, budgets: { ...budgets, ...(which === 'wall' ? { wall_ms: 1000 } : {}), ...(which === 'cpu' ? { cpu_ms: 250 } : {}) }, phases: [{ name: 'check', argv: ['/runtime/node', '-e', code] }], enabled: true });
+      assert.equal(result.error, `budget exceeded: ${which}`, JSON.stringify(result));
+      assert.equal(result.stop.verified, true, JSON.stringify(result.stop));
+      assert(result.bytes.length <= budgets.output_bytes);
+      const show = spawnSync('systemctl', ['--user', 'show', result.unit, '-p', 'ActiveState', '--value'], { encoding: 'utf8' });
+      assert(!['active', 'activating', 'deactivating'].includes(show.stdout.trim()), 'this check leaves no active unit');
+    } finally {
+      if (which === 'memory') {
+        if (suiteSuffix === undefined) delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+        else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = suiteSuffix;
+      }
+    }
     const good = await runHostBudget({ dir: home, budgets, phases: [{ name: 'check', argv: ['/usr/bin/true'] }], enabled: true });
     assert.equal(good.exit.code, 0, JSON.stringify(good));
   });
 }
 
 test('kernel memory kill reports the budget and reaps the whole service', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
-  const result = await runHostBudget({ dir: home, budgets: {...budgets, memory_bytes: 128 * 1024 * 1024}, enabled: true,
-    phases: [{name: 'check', argv: ['/usr/bin/python3', '-c', 'a=bytearray(1024*1024*1024)']}] });
-  assert.equal(result.error, 'budget exceeded: memory', JSON.stringify(result));
-  assert.equal(result.exit.code, 125);
-  assert.equal(result.stop.service_result, 'signal');
-  assert(result.stop.oom_kill > 0, JSON.stringify(result.stop));
-  assert.equal(result.stop.verified, true);
-  assert.deepEqual(result.stop.remaining_pids, []);
+  // A killed reservation is not restarted at once, so this deliberate kill runs
+  // on a reservation of its own and leaves the suite reservation restartable.
+  const suiteSuffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `oom-scenario-${process.pid}-${randomUUID()}`;
+  try {
+    const result = await runHostBudget({ dir: home, budgets: {...budgets, memory_bytes: 128 * 1024 * 1024}, enabled: true,
+      phases: [{name: 'check', argv: ['/usr/bin/python3', '-c', 'a=bytearray(1024*1024*1024)']}] });
+    assert.equal(result.error, 'budget exceeded: memory', JSON.stringify(result));
+    assert.equal(result.exit.code, 125);
+    assert.equal(result.stop.service_result, 'signal');
+    assert(result.stop.oom_kill > 0, JSON.stringify(result.stop));
+    assert.equal(result.stop.verified, true);
+    assert.deepEqual(result.stop.remaining_pids, []);
+  } finally {
+    if (suiteSuffix === undefined) delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+    else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = suiteSuffix;
+  }
+});
+
+test('an oom-killed reservation is not restarted at once', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  const { runHostBudget, HOST_CHECK_OOM_RETRY_DELAY_MS } = await import('../src/host-budget.mjs');
+  const events = [
+    {event:'started',phase:'check'},
+    {event:'result',result:{error:'budget exceeded: memory',exit:{code:125},usage:{memory_bytes:1}}},
+    {event:'stopped',stop:{verified:true,remaining_pids:[],result:'oom-kill',oom_kill:1}},
+  ];
+  let clock = 1_000_000, spawns = 0;
+  const now = () => clock;
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = () => {
+    spawns++;
+    const child = new EventEmitter();
+    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    queueMicrotask(() => {
+      for (const event of events) child.stdout.write(JSON.stringify(event)+'\n');
+      child.emit('close',125,null);
+    });
+    return child;
+  };
+  syncBuiltinESMExports();
+  const suiteSuffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = `oom-defer-${process.pid}-${randomUUID()}`;
+  try {
+    const run = () => runHostBudget({dir:home,budgets,enabled:true,phases:[{name:'check',argv:['/usr/bin/true']}],now});
+    const killed = await run();
+    assert.equal(killed.error, 'budget exceeded: memory', JSON.stringify(killed));
+    assert(killed.stop.oom_kill > 0, 'the kernel kill is recorded on the reservation');
+    assert.equal(spawns, 1);
+    const blocked = await run();
+    assert.equal(spawns, 1, 'the killed reservation is not restarted at once');
+    assert.equal(blocked.notStarted, true, 'nothing was launched for the blocked run');
+    assert.deepEqual(blocked.phases, []);
+    assert.equal(blocked.stop.reason, 'oom');
+    assert.match(blocked.error, /^oom: dot-bridge-host-check-oom-defer-/, 'the suite run is marked failed with reason oom');
+    clock += HOST_CHECK_OOM_RETRY_DELAY_MS + 1;
+    const restarted = await run();
+    assert.equal(spawns, 2, 'the reservation restarts after the retry delay');
+    assert.notEqual(restarted.error, blocked.error);
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    if (suiteSuffix === undefined) delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+    else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = suiteSuffix;
+  }
 });
 
 test('supervisor killed mid-check stops detached descendants and collects its unit', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
