@@ -175,9 +175,13 @@ test('an oom-killed reservation is not restarted at once', { skip: !linux && 'Li
     assert.deepEqual(blocked.phases, []);
     assert.equal(blocked.stop.reason, 'oom');
     assert.match(blocked.error, /^oom: dot-bridge-host-check-oom-defer-/, 'the suite run is marked failed with reason oom');
+    // The unit is shared by every job of a user: a different workload on it is not deferred by the kill.
+    const other = await runHostBudget({dir:home,budgets,enabled:true,phases:[{name:'check',argv:['/usr/bin/false']}],now});
+    assert.equal(spawns, 2, 'a different workload on the same unit still starts');
+    assert.notEqual(other.notStarted, true);
     clock += HOST_CHECK_OOM_RETRY_DELAY_MS + 1;
     const restarted = await run();
-    assert.equal(spawns, 2, 'the reservation restarts after the retry delay');
+    assert.equal(spawns, 3, 'the killed workload restarts after the retry delay');
     assert.notEqual(restarted.error, blocked.error);
   } finally {
     childProcess.spawn = originalSpawn;

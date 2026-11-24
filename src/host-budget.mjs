@@ -5,15 +5,18 @@ import path from 'node:path';
 import {prepareHostReceipts,assertHostReceiptIsolation,readVerifiedHostStop} from './host-budget-receipts.mjs';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 // The fixed production unit reserves one active envelope per Unix user.
 // The 2 GiB memory ceiling covers the heaviest measured suite-class workload
 // on the deployment host (a 1592 MB peak in the test-sandbox run ledger,
 // 2026-11-24) with about 27% margin; one unit runs per user at a time.
 export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 2 * 1024 ** 3, processes: 128, disk_write_bytes: 256 * 1024 ** 2, output_bytes: 1024 ** 2 });
-// A reservation the kernel OOM-killed is not restarted at once: the same unit
-// fails fast with reason "oom" until this delay passes, so a caller's restart
-// loop cannot re-kill the same workload second after second.
+// A workload the kernel OOM-killed is not restarted at once: the same workload
+// on the same unit fails fast with reason "oom" until this delay passes, so a
+// caller's restart loop cannot re-kill it second after second. The production
+// unit is shared by every job of a Unix user, so the key includes the workload:
+// one job's memory kill must not fail another job's check.
 export const HOST_CHECK_OOM_RETRY_DELAY_MS = 60_000;
 const oomKilledReservations = new Map();
 const minima = { cpu_ms: 50, wall_ms: 100, memory_bytes: 128 * 1024 ** 2, processes: 16, disk_write_bytes: 1024 ** 2, output_bytes: 1024 };
@@ -43,9 +46,9 @@ const propertyArg = value => '"' + value.replaceAll('%', '%%').replaceAll('\\', 
 
 export const provesHostNotStarted = ({ spawnError, pid, stopped }) => !!(spawnError && !pid && !stopped);
 
-function markOomKilledReservation(unit, at) {
+function markOomKilledReservation(key, at) {
   for (const [reservation, killedAt] of oomKilledReservations) if (at - killedAt >= HOST_CHECK_OOM_RETRY_DELAY_MS) oomKilledReservations.delete(reservation);
-  oomKilledReservations.set(unit, at);
+  oomKilledReservations.set(key, at);
 }
 
 // Nothing was launched: the caller marks the check failed with reason "oom"
@@ -101,7 +104,8 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const suffix = process.env.NODE_ENV === 'production' ? undefined : process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
   if (suffix && !/^[a-zA-Z0-9-]{1,80}$/.test(suffix)) throw new Error('invalid DALAN_HOST_CHECK_UNIT_SUFFIX');
   const unit = `dot-bridge-host-check${suffix ? '-' + suffix : ''}.service`;
-  const oomKilledAt = oomKilledReservations.get(unit);
+  const oomKey = `${unit}#${createHash('sha256').update(JSON.stringify({ dir: workingDir, phases, budgets })).digest('hex')}`;
+  const oomKilledAt = oomKilledReservations.get(oomKey);
   if (oomKilledAt !== undefined && now() - oomKilledAt < HOST_CHECK_OOM_RETRY_DELAY_MS) return deferredOomReservation({ unit, budgets, killedAt: oomKilledAt, at: now() });
   const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', `--unit=${unit}`, ...properties.map(p => `--property=${p}`), '--', process.execPath, service];
   const started=performance.now();
@@ -162,7 +166,7 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   // application TTL can certify a still-running tree as stopped.
   const stopEvidence=resolveHostStopEvidence(receipts,stopped);
   const stop = { verified: stopEvidence?.verified === true, reason: stopEvidence?.verified ? 'systemd_control_group_stopped' : 'service_stop_not_observed', service_result: stopped?.result ?? null, invocation_id: stopEvidence?.invocationId ?? stopped?.invocation_id ?? null, remaining_pids: stopEvidence?.remaining_pids ?? stopped?.remaining_pids ?? null, oom_kill: stopped?.oom_kill ?? null };
-  if ((stopped?.oom_kill ?? 0) > 0 || stopped?.result === 'oom-kill') markOomKilledReservation(unit, now());
+  if ((stopped?.oom_kill ?? 0) > 0 || stopped?.result === 'oom-kill') markOomKilledReservation(oomKey, now());
   let error = cpuExceeded ? 'budget exceeded: cpu' : message?.error ?? null;
   if (stopped?.oom_kill > 0 || stopped?.result === 'oom-kill') error = 'budget exceeded: memory';
   else if (stopped?.result === 'timeout') error = 'budget exceeded: wall';
