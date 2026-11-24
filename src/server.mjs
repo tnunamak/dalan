@@ -699,6 +699,17 @@ async function finishReply(reply,{principal,requestId,claimId,signal}) {
   }
   return reply.next_queued?.length&&!store.paused()?{...reply,guidance:finishNextGuidance(reply.next_queued)}:reply;
 }
+// The finish is committed and its receipt exists: the report, patch and check evidence are already artifacts, and
+// no reader touches the tree afterwards (Workspace.result refuses a finished assignment; owner /get, /wait and
+// /artifact read the store and the artifacts). Remove the finished checkout now, as a CI runner cleans its
+// workspace at job end, instead of holding it for the 6-hour retention sweep. Not awaited: a slow or failed
+// removal cannot delay or fail the finish reply; it logs artifact_cleanup_error and leaves the row, which the
+// hourly sweep retries. A repeated finish finds no row and does nothing.
+function cleanupFinishedWorkspace(requestId) {
+  if(!workspace) return;
+  void workspace.removeTerminalWorkspace(requestId)
+    .catch(error=>log({kind:'artifact_cleanup_error',request_id:requestId,reason:error.message}));
+}
 // A loader failure carries host paths or quotes the file. Every caller of this policy gets the Store's fixed error instead.
 function repoPolicyFor(assignment) {
   try { return currentRepoPolicy(); }
@@ -1028,6 +1039,9 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
         if(crashAt('after_report_persistence',a.request_id)) process.exit(73);
         notifyAttachedWaiter(requestId);
         if(repaired.marks.summary_derived||repaired.marks.summary_truncated) log({kind:'finish_summary_repaired',request_id:requestId,...repaired.marks});
+        // The finish is committed: the tree serves nothing further, so clean it now instead of waiting for the
+        // sweep (cleanup is never awaited, and an active check or a failed removal is left to the sweep).
+        cleanupFinishedWorkspace(requestId);
         return finishReply({...receipt,...repaired.marks},{principal,requestId,claimId,signal}); }
     case 'list_files': await workspace.makeRoom(id(a.request_id));workspaceFence();return workspace.list(id(a.request_id),id(a.claim_id,'claim_id'),subject,a.path,a.limit??200,worker,a.cursor);
     case 'read_file': await workspace.makeRoom(id(a.request_id));workspaceFence();return workspace.read(id(a.request_id),id(a.claim_id,'claim_id'),subject,a.path,a.start_line??1,a.max_lines??200,worker);
