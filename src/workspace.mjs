@@ -716,6 +716,8 @@ export class Workspace {
   // row to the hourly sweep; a tampered path is an integrity error (cleanup_integrity) that aborts the sweep.
   async removeTerminalWorkspace(requestId,{cacheOnly=false}={}) {
     if(this.activeChecks.has(requestId)) return null;
+    // Only a terminal assignment loses its tree. A late or audit-only finish can be recorded while a replacement grant is live.
+    if(!this.store.db.prepare("SELECT 1 FROM assignments WHERE request_id=? AND status IN ('finished','cancelled')").get(requestId)) return null;
     if(!cacheOnly&&this.cleanupInFlight.has(requestId)) return null;
     if(!cacheOnly) this.cleanupInFlight.add(requestId);
     try {
@@ -728,8 +730,9 @@ export class Workspace {
       if(cacheOnly) return null;
       if(row.path!==path.join(worktrees,requestId)) throw Object.assign(new Error('workspace cleanup path mismatch'),{request_id:requestId,cleanup_integrity:true});
       if(pathExistsOrThrow(row.path)) await gitAsync(['-C',mirror,'worktree','remove','--force',row.path]);
-      this.store.db.prepare('DELETE FROM workspaces WHERE request_id=?').run(requestId);
+      // The sidecar goes first: if it cannot be removed, the row stays and the sweep retries both.
       fs.rmSync(this.ignoredWrittenFile(requestId),{force:true});
+      this.store.db.prepare('DELETE FROM workspaces WHERE request_id=?').run(requestId);
       return 'removed';
     } finally { if(!cacheOnly) this.cleanupInFlight.delete(requestId); }
   }

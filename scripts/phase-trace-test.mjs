@@ -86,6 +86,36 @@ const { createPhaseTrace } = await import('../src/phase-trace.mjs');
   const ho = lines.filter(l => l.kind === 'claim_phase').at(-1);
   assert.deepEqual([ho.handoff, ho.submit_to_wake_ms, ho.wake_ack_ms, ho.wake_to_listed_ms, ho.listed_to_claim_ms], [true, null, null, null, null]);
   assert.ok(ho.submit_to_claim_ms > 0);
+  // A failed attempt leaves its wake and listing behind; the next claim is a finish handoff and must not log them.
+  t += 100; trace.wake({ item: item('s'), worker: 'dot', attemptAt: t, ackMs: 10, status: 204, state: 'delivered' });
+  trace.listed(['s']);
+  t += 1000; trace.claimed({ requestId: 's', worker: 'dot', subject: 's1', claimId: 'c5', handoff: true, createdAt: created });
+  const stale = lines.filter(l => l.kind === 'claim_phase').at(-1);
+  assert.deepEqual([stale.first_listed_at, stale.wake_attempt_at, stale.wake_to_listed_ms, stale.listed_to_claim_ms], [null, null, null, null], 'a handoff claim ignores timings left by an earlier attempt');
+  // Listed before the receiver's answer came back: the order of answer and listing is unknown, so the gap is null, never negative.
+  t += 100; const sendAt = t; trace.listed(['o']); t += 25; trace.wake({ item: item('o'), worker: 'dot', attemptAt: sendAt, ackMs: 60, status: 204, state: 'delivered' });
+  t += 500; trace.claimed({ requestId: 'o', worker: 'dot', subject: 's1', claimId: 'c6', handoff: false, createdAt: created });
+  const early = lines.filter(l => l.kind === 'claim_phase').at(-1);
+  assert.equal(early.wake_to_listed_ms, null, 'a listing before the answer has no known gap');
+  assert.equal(early.wake_ack_ms, 60);
+  // A delivered wake with no recorded answer time keeps the gap unknown instead of counting the answer as instant.
+  t += 100; trace.wake({ item: item('n'), worker: 'dot', attemptAt: t, ackMs: null, status: 204, state: 'delivered' });
+  t += 400; trace.listed(['n']); t += 100;
+  trace.claimed({ requestId: 'n', worker: 'dot', subject: 's1', claimId: 'c7', handoff: false, createdAt: created });
+  const noAck = lines.filter(l => l.kind === 'claim_phase').at(-1);
+  assert.deepEqual([noAck.wake_ack_ms, noAck.wake_to_listed_ms], [null, null]);
+  const firstProgress = { requestId: 'dispatched', claimId: 'fixture-claim', claimedAt: '2026-11-24T10:00:06.125Z', first: true };
+  const prefix = 'dispatched_at=2026-11-24T10:00:02Z fixture';
+  trace.progress({ ...firstProgress, note: prefix });
+  trace.progress({ ...firstProgress, first: false, note: prefix });
+  trace.progress({ ...firstProgress, requestId: 'unprefixed', note: 'working' });
+  trace.progress({ ...firstProgress, requestId: 'bad-date', note: 'dispatched_at=2026-02-30T10:00:02Z fixture' });
+  trace.progress({ ...firstProgress, requestId: 'future', note: 'dispatched_at=2026-11-24T11:00:02Z fixture' });
+  trace.progress({ ...firstProgress, requestId: 'missing', claimedAt: null, note: prefix });
+  const dispatch = lines.filter(l => l.kind === 'claim_dispatch');
+  assert.deepEqual(dispatch[0], { kind: 'claim_dispatch', source: 'worker_note', request_id: 'dispatched', claim_id: 'fixture-claim',
+    dispatched_at: '2026-11-24T10:00:02Z', claimed_at: '2026-11-24T10:00:06.125Z', gap_ms: 4125 });
+  assert.deepEqual(dispatch.map(l => [l.request_id, l.gap_ms]), [['dispatched', 4125], ['future', null], ['missing', null]]);
   // A failed wake logs a null answer time and is not remembered as a delivery.
   trace.wake({ item: item('f'), worker: 'dot', attemptAt: t, ackMs: null, status: null, state: 'failed' });
   const failed = lines.at(-1);
@@ -106,12 +136,30 @@ try {
   bridges.push(b);
   await b.submit('req_trace_a');
   await b.ok('list_pending');
+  const claimWindowStart = Date.now();
   const job = await b.ok('claim', { request_id: 'req_trace_a', claimant: 'fixture-worker' });
+  const claimWindowEnd = Date.now();
   await sleep(300);
   await b.ok('get', { request_id: 'req_trace_a' });
   // A retried claim is not a new claim.
   await b.ok('claim', { request_id: 'req_trace_a', claimant: 'fixture-worker' });
+  const prefix = 'dispatched_at=2026-11-24T10:00:02Z';
+  await b.ok('progress', { request_id: job.request_id, claim_id: job.claim_id, note: prefix + ' first' });
+  await b.ok('progress', { request_id: job.request_id, claim_id: job.claim_id, note: prefix + ' second' });
+  await b.finish(job); // the fixture bridge admits one claim at a time
+  const plain = await b.claimNew('req_trace_plain');
+  await b.ok('progress', { request_id: plain.request_id, claim_id: plain.claim_id, note: 'no timestamp' });
+  await b.ok('progress', { request_id: plain.request_id, claim_id: plain.claim_id, note: prefix + ' too late' });
   const lines = b.requestLog();
+  const dispatch = lines.filter(l => l.kind === 'claim_dispatch');
+  assert.deepEqual(dispatch.map(l => [l.request_id, l.claim_id, l.dispatched_at]), [
+    [job.request_id, job.claim_id, '2026-11-24T10:00:02Z'],
+  ]);
+  // The stamp is fixed in the past and the claim just happened, so the gap must be a known positive number; a missing claim time would give null here.
+  const claimedMs = Date.parse(dispatch[0].claimed_at);
+  assert.ok(claimedMs >= claimWindowStart - 1000 && claimedMs <= claimWindowEnd + 1000, 'claimed_at falls inside the window around the claim call (1 s clock slack)');
+  assert.ok(Number.isInteger(dispatch[0].gap_ms) && dispatch[0].gap_ms > 0, `gap_ms must be a positive integer, got ${dispatch[0].gap_ms}`);
+  assert.equal(dispatch[0].source, 'worker_note');
   const phase = lines.filter(l => l.kind === 'claim_phase' && l.request_id === 'req_trace_a');
   assert.equal(phase.length, 1, JSON.stringify(phase));
   assert.equal(phase[0].claim_id, job.claim_id);

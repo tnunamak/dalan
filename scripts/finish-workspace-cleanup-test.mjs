@@ -202,6 +202,14 @@ try {
     const tree2 = id => path.join(root2, 'worktrees', id);
     const row2 = id => !!db2.prepare('SELECT 1 FROM workspaces WHERE request_id=?').get(id);
 
+    // A row that is not terminal keeps its tree: a finish recorded while another grant is live must not remove it.
+    const live = makeFinished();
+    db2.prepare("UPDATE assignments SET status='claimed' WHERE request_id=?").run(live);
+    assert((await ws.removeTerminalWorkspace(live)) === null && (await ws.removeTerminalWorkspace(live, { cacheOnly: true })) === null, 'a non-terminal row must not be cleaned');
+    assert(row2(live) && fs.existsSync(tree2(live)), 'a non-terminal row keeps its workspace row and tree');
+    db2.prepare("UPDATE assignments SET status='finished' WHERE request_id=?").run(live);
+    assert((await ws.removeTerminalWorkspace(live)) === 'removed' && !row2(live), 'the same row is removed once it is terminal');
+
     // An active check keeps the tree: neither the finish path nor the sweep touches it; the sweep takes it later.
     const checked = makeFinished();
     ws.activeChecks.add(checked);
