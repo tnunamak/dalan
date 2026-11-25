@@ -2,6 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { assertClaimAuthority, canonicalJson, canonicalValue, decide } from '../index.mjs';
 
+test('canonical JSON does not mutate deep-frozen request data while ordering keys', () => {
+  const row = Object.freeze({ z: 'last', a: 'first' });
+  const payload = Object.freeze({ rows: Object.freeze([row]) });
+  assert.equal(canonicalJson(payload), '{"rows":[{"a":"first","z":"last"}]}');
+  assert.deepEqual(Object.keys(row), ['z', 'a']);
+  assert.equal(payload.rows[0], row);
+});
+
+test('canonical JSON requires the caller to encode raw bytes explicitly', () => {
+  assert.throws(() => canonicalJson({ payload: new Uint8Array([65, 66]) }, 'invalid_payload'), {
+    code: 'invalid_payload', message: 'invalid_payload',
+  });
+  assert.equal(canonicalJson({ payload: [65, 66] }), '{"payload":[65,66]}');
+});
+
 test('canonical JSON keeps Unicode keys and values in deterministic key order', () => {
   const document = { '中': ['茶'], 'é': 'été', a: '🐟' };
   assert.equal(canonicalJson(document), '{"a":"🐟","é":"été","中":["茶"]}');
