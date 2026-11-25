@@ -63,12 +63,14 @@ const pass = message => console.log(`PASS ${message}`);
   const parse = finish_handoff => parseWorkers({ workers: { dot: { connections: [{ issuer: 'i', subject: 's', client_id: 'c' }], ...(finish_handoff === undefined ? {} : { finish_handoff }) } } }).workers.get('dot').finishHandoff;
   assert.equal(parse(undefined), undefined);
   assert.equal(parse(false), undefined);
-  assert.deepEqual(parse(true), { waitMs: 20000 });
-  assert.deepEqual(parse({}), { waitMs: 20000 });
-  assert.deepEqual(parse({ wait_ms: 0 }), { waitMs: 0 });
-  assert.deepEqual(parse({ wait_ms: 45000 }), { waitMs: 45000 });
-  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }])
-    assert.throws(() => parse(bad), /finish_handoff|expected object|wait_ms/, `rejects ${JSON.stringify(bad)}`);
+  assert.deepEqual(parse(true), { waitMs: 20000, maxJobs: 1 });
+  assert.deepEqual(parse({}), { waitMs: 20000, maxJobs: 1 });
+  assert.deepEqual(parse({ wait_ms: 0 }), { waitMs: 0, maxJobs: 1 });
+  assert.deepEqual(parse({ wait_ms: 45000 }), { waitMs: 45000, maxJobs: 1 });
+  assert.deepEqual(parse({ max_jobs: 1 }), { waitMs: 20000, maxJobs: 1 });
+  assert.deepEqual(parse({ wait_ms: 0, max_jobs: 8 }), { waitMs: 0, maxJobs: 8 });
+  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }, { max_jobs: 0 }, { max_jobs: 9 }, { max_jobs: 1.5 }, { max_jobs: '3' }, { max_jobs: null }])
+    assert.throws(() => parse(bad), /finish_handoff|expected object|wait_ms|max_jobs/, `rejects ${JSON.stringify(bad)}`);
   pass('finish_handoff config: off by default; true, {} and {wait_ms 0..45000} accepted; everything else refused');
 }
 
@@ -264,6 +266,53 @@ try {
     assert.equal((await s.ok('get', { request_id: 'req_short_started' })).status, 'claimed', 'the started handoff stays claimed');
     await s.finish(h2.next_job);
     pass('handoff lease: about 120 s while idle; an untouched handoff requeues; a started one keeps its claim');
+  }
+
+  // 6. max_jobs refills every lane the finish frees, not one: the reply carries up to max_jobs claimed jobs (next_job is the
+  // first, next_jobs lists all), never more than the free lanes or the queued jobs, and a repeated finish gets the same jobs.
+  {
+    const b = await start('fan', { finish_handoff: { wait_ms: WAIT_MS, max_jobs: 3 } }, { max_claimed_outer_assignments: 8 });
+    const first = await b.claimNew('req_fan_first');
+    for (let i = 1; i <= 5; i++) await b.submit(`req_fan_q${i}`);
+    const done = await b.finish(first);
+    const ids = (done.next_jobs ?? []).map(j => j.request_id);
+    assert.deepEqual(ids, ['req_fan_q1', 'req_fan_q2', 'req_fan_q3'], JSON.stringify(done));
+    assert.equal(done.next_job.request_id, 'req_fan_q1', 'next_job is the first of next_jobs');
+    assert.equal(new Set(done.next_jobs.map(j => j.claim_id)).size, 3, 'three real claims');
+    assert.deepEqual(await b.queuedIds(), ['req_fan_q4', 'req_fan_q5'], 'only three left the queue');
+    for (const id of ids) assert.equal((await b.ok('get', { request_id: id })).status, 'claimed');
+    const again = await b.finish(first);
+    assert.deepEqual((again.next_jobs ?? []).map(j => j.request_id), ids, 'a repeated finish returns the same jobs and takes no more');
+    assert.deepEqual(await b.queuedIds(), ['req_fan_q4', 'req_fan_q5']);
+    assert.match(done.guidance, /req_fan_q1/); assert.match(done.guidance, /req_fan_q3/);
+    // Fewer queued than max_jobs: hand what exists.
+    const second = await b.finish(done.next_jobs[0]);
+    assert.deepEqual(second.next_jobs.map(j => j.request_id), ['req_fan_q4', 'req_fan_q5']);
+    for (const j of [...done.next_jobs.slice(1), ...second.next_jobs]) await b.finish(j);
+    pass('max_jobs 3: one finish hands up to three claimed jobs, a repeat gets the same ones, a short queue hands fewer');
+  }
+
+  // 7. Free lanes bound the refill: with a cap of 3 claimed jobs and two still held, a finish frees one lane and gets one job.
+  {
+    const b = await start('fancap', { finish_handoff: { wait_ms: WAIT_MS, max_jobs: 8 } }, { max_claimed_outer_assignments: 3 });
+    const held = [];
+    for (let i = 0; i < 3; i++) held.push(await b.claimNew(`req_fancap_h${i}`));
+    for (let i = 0; i < 4; i++) await b.submit(`req_fancap_q${i}`);
+    const done = await b.finish(held[0]);
+    assert.deepEqual((done.next_jobs ?? []).map(j => j.request_id), ['req_fancap_q0'], JSON.stringify(done));
+    assert.equal((await b.queuedIds()).length, 3);
+    pass('the refill never exceeds the free lanes: one lane freed, one job handed');
+  }
+
+  // 8. max_jobs left at 1 keeps today's reply: next_job only, no next_jobs.
+  {
+    const b = await start('one', { finish_handoff: { wait_ms: WAIT_MS } });
+    const first = await b.claimNew('req_one_first');
+    for (const id of ['req_one_q1', 'req_one_q2']) await b.submit(id);
+    const done = await b.finish(first);
+    assert.equal(done.next_job.request_id, 'req_one_q1');
+    assert.equal(done.next_jobs, undefined, JSON.stringify(done));
+    pass('max_jobs 1 (default) keeps the single next_job reply');
   }
 
 } finally {
