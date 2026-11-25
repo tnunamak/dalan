@@ -4,6 +4,8 @@ import { redactNote } from './alerts.mjs';
 
 const responses = new WeakMap();
 
+// `worker` is the configured worker name the verified connection maps to (set after auth; null before it), so a call can be
+// attributed to dot or Muse. It is a name from the owner's workers.json, never a client-provided string.
 // The caller's class, never its text: a User-Agent can hold anything, including a credential, so only a name from this fixed
 // list is logged ("other" for the rest, null when absent). That is enough to tell an Anthropic or OpenAI caller from a generic one.
 const UA_CLASSES = [['Claude-User', /^claude-user/i], ['ClaudeBot', /^claudebot/i], ['anthropic-ai', /^anthropic-ai/i], ['ChatGPT-User', /^chatgpt-user/i], ['OAI-SearchBot', /^oai-searchbot/i],
@@ -24,7 +26,7 @@ export function beginMcpOutcome(req, res, log, toolNames, authRequired) {
   const state = {
     call_id: randomUUID(), started_at: new Date().toISOString(),
     http_method: ['POST', 'GET', 'DELETE', 'PUT', 'PATCH', 'HEAD', 'OPTIONS'].includes(req.method) ? req.method : 'other',
-    rpc_method: null, tool: null, request_id: null, phase: authRequired ? 'auth' : 'body', auth_outcome: authRequired ? 'pending' : 'disabled',
+    rpc_method: null, tool: null, request_id: null, worker: null, phase: authRequired ? 'auth' : 'body', auth_outcome: authRequired ? 'pending' : 'disabled',
     auth_reason: null, auth_duration_ms: null, jwks_outcome: 'not_attempted',
     jwks_duration_ms: null, jwks_http_status: null,
     rpc_error_code: null, tool_error: null, tool_error_message: null, response_bytes: 0,

@@ -227,7 +227,9 @@ try {
     assert.ok(lines.length >= 10, `${lines.length} signal lines`);
     assert.ok(lines.some(e => e.status === 200 && e.work === true) && lines.some(e => e.status === 200 && e.work === false));
     assert.ok(lines.some(e => e.status === 404) && lines.some(e => e.status === 429) && lines.some(e => e.status === 405));
-    for (const e of lines) assert.deepEqual(Object.keys(e).filter(k => !['at', 'kind', 'status', 'work'].includes(k)), []);
+    for (const e of lines) assert.deepEqual(Object.keys(e).filter(k => !['at', 'kind', 'status', 'work', 'worker'].includes(k)), []);
+    assert.ok(lines.filter(e => e.status === 200).every(e => typeof e.worker === 'string' && e.worker !== ''), 'an answered signal line names its worker');
+    assert.ok(lines.filter(e => e.status !== 200).every(e => !Object.hasOwn(e, 'worker')), 'a refused signal line names no worker');
     assert.ok(!text.includes(token) && !text.includes(oldToken), 'token in log');
     assert.ok(!text.includes('/signal/'), 'signal path in log');
   });

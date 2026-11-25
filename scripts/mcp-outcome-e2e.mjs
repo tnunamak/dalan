@@ -205,6 +205,11 @@ try {
   const timeline = outcomes().filter(row => row.request_id === assignment.request_id).map(row => row.tool);
   assert.deepEqual(timeline.slice(-4), ['progress', 'claim', 'get', 'get'], 'request_id lets the log rebuild a per-job timeline: ' + timeline);
   assert(outcomes().every(row => row.request_id === null || /^[-\w]{8,128}$/.test(row.request_id)));
+  // Attribution: a call that passed auth names the configured worker; one refused before auth names none.
+  const authed = outcomes().filter(row => row.rpc_method !== null && row.auth_outcome === 'success');
+  assert(authed.length > 5 && authed.every(row => row.worker === 'dot'), 'authenticated calls log their worker: ' + JSON.stringify([...new Set(authed.map(row => row.worker))]));
+  assert(outcomes().filter(row => row.http_status === 401).every(row => row.worker === null), 'a refused-auth call has worker null');
+  assert(logs().filter(row => row.kind === 'mcp_inbound' && row.rpc_method).every(row => row.worker === 'dot'), 'mcp_inbound names the worker');
   assert.equal(outcomes().find(row => row.tool === 'unknown').request_id, null, 'unknown tool logs no request_id');
 
   const count = outcomes().length;

@@ -109,7 +109,7 @@ export function createSignal({ dir, store, workerNames, publicUrl, log, now = Da
     if (wait) { log({ kind: 'signal', status: 429 }); res.writeHead(429, { 'retry-after': String(wait), 'cache-control': 'no-store' }); res.end(); return true; }
     const answer = work(worker);
     const body = JSON.stringify({ work: answer });
-    log({ kind: 'signal', status: 200, work: answer });
+    log({ kind: 'signal', status: 200, worker, work: answer });
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-length': Buffer.byteLength(body) });
     res.end(body);
     return true;
