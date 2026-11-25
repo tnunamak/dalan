@@ -21,6 +21,7 @@
   "node --test scripts/upgrade-drain-test.mjs",
   "node --test scripts/upgrade-drain-quiescent-test.mjs",
   "node scripts/quiesce-restart-test.mjs",
+  "node scripts/quiesce-drain-abort-test.mjs",
       "node scripts/quiesce-admission-test.mjs",
   "node --test scripts/upgrade-release-fixture-test.mjs",
   "node --test scripts/release-metadata-test.mjs",

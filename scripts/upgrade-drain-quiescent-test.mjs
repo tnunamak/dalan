@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {spawn,spawnSync} from 'node:child_process';
 
 // Contract: `scripts/upgrade-drain.mjs --until-quiescent` is the restart-without-drain mode. It closes the admission gate
 // (`dalan quiesce on`), waits only until no admitted RPC, delivery or unverified host check remains, and does NOT wait for live
@@ -80,7 +80,7 @@ test('until-quiescent refuses malformed counters and tells the operator how to r
     assert.notEqual(result.status,0);
     assert.match(result.stderr,/invalid in-flight counters/i);
     assert.match(result.stderr,/dalan quiesce off/);
-    assert.deepEqual(calls(root),['quiesce on','quiesce status']);
+    assert.deepEqual(calls(root),['quiesce on','quiesce status','quiesce off'],'a failed drain reopens the gate');
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
 
@@ -103,5 +103,48 @@ test('a mistyped drain option fails instead of running the default drain',()=>{
     assert.notEqual(result.status,0);
     assert.match(result.stderr,/unknown argument/);
     assert.equal(fs.existsSync(path.join(root,'calls.log')),false,'no command may run, in particular not a pause');
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
+
+// The gate must not stay closed after an aborted drain (a closed gate starves every worker with no signal), so a kill or a failure
+// during the poll reopens it. After a successful poll the gate stays closed for the restart.
+const killMidPoll=async(signal,code)=>{
+  const root=scratch();
+  try {
+    fake(root,[{...idle,admitted_in_flight:1}]);
+    const drain=spawn(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),'--until-quiescent'],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:'60000'},stdio:['ignore','pipe','pipe']});
+    let err='';drain.stderr.on('data',b=>err+=b);
+    const done=new Promise(resolve=>drain.once('exit',(c,s)=>resolve({code:c,signal:s})));
+    const limit=Date.now()+8000;
+    while(Date.now()<limit&&!(fs.existsSync(path.join(root,'calls.log'))&&calls(root).filter(c=>c==='quiesce status').length>=2))await new Promise(r=>setTimeout(r,20));
+    assert.ok(calls(root).filter(c=>c==='quiesce status').length>=2,'the drain must be polling before the kill');
+    drain.kill(signal);
+    const result=await done;
+    assert.equal(result.code,code,err);
+    assert.equal(calls(root).at(-1),'quiesce off','the last call must reopen the gate');
+    assert.match(err,/drain aborted .*gate reopened/);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+};
+test('until-quiescent reopens the gate when killed by SIGTERM mid-poll',()=>killMidPoll('SIGTERM',143));
+test('until-quiescent reopens the gate when killed by SIGINT mid-poll',()=>killMidPoll('SIGINT',130));
+
+test('until-quiescent reopens the gate when the drain times out',()=>{
+  const root=scratch();
+  try {
+    fake(root,[{...idle,admitted_in_flight:1}]);
+    const result=run(root,'1500');
+    assert.notEqual(result.status,0);
+    assert.equal(calls(root).at(-1),'quiesce off');
+    assert.match(result.stderr,/gate reopened/);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('until-quiescent leaves the gate closed after a successful poll and never reopens it',()=>{
+  const root=scratch();
+  try {
+    fake(root,[idle]);
+    const result=run(root);
+    assert.equal(result.status,0,result.stderr);
+    assert.ok(!calls(root).includes('quiesce off'),'the restart reopens the gate, not the drain');
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
