@@ -11,9 +11,15 @@ export function cliCommand(argv1, env = process.env) {
   const real = p => { try { return fs.realpathSync(p); } catch { return null; } };
   const self = real(path.resolve(argv1 ?? defaultBin));
   let firstOnPath = null;
-  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
-    if (!dir) continue;
-    firstOnPath = real(path.join(dir, 'dalan'));
+  for (const dir of env.PATH == null ? [] : env.PATH.split(path.delimiter)) {
+    const candidate = path.join(dir || '.', 'dalan');
+    try {
+      if (!fs.statSync(candidate).isFile()) continue;
+      fs.accessSync(candidate, fs.constants.X_OK);
+    } catch {
+      continue;
+    }
+    firstOnPath = real(candidate);
     if (firstOnPath !== null) break;
   }
   const onPath = self && firstOnPath === self;

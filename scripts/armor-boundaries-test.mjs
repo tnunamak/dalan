@@ -385,12 +385,30 @@ test('many redacted object keys keep their values and avoid suffix collisions',(
   const prefix='s'+'k-',count=20000;
   const input=Object.fromEntries([['[redacted secret] (2)','reserved'],...Array.from({length:count},(_,i)=>[prefix+i.toString(36).padStart(24,'A'),i])]);
   auditValue(input);
-  const started=performance.now(),output=redaction.redactOutput(input),elapsed=performance.now()-started;
-  assert(elapsed<1000,`object key redaction took ${elapsed.toFixed(1)} ms`);
+  const smallInput=Object.fromEntries(Object.entries(input).slice(0,2501));
+  const measure=sample=>{
+    const timings=[];
+    let output,best=Infinity;
+    for(let i=0;i<3;i++){
+      const started=performance.now(),candidate=redaction.redactOutput(sample),elapsed=performance.now()-started;
+      timings.push(elapsed);
+      if(elapsed<best){best=elapsed;output=candidate;}
+    }
+    return {timings,best,output};
+  };
+  const small=measure(smallInput),large=measure(input),output=large.output;
+  const formatted=timings=>timings.map(ms=>ms.toFixed(1)).join(', ');
+  const ratio=(large.best/small.best).toFixed(2);
+  const timings=`2501 keys [${formatted(small.timings)}] ms / ${count} keys [${formatted(large.timings)}] ms; best ratio ${ratio}x`;
+  // Linear code scales 8x between the samples and a quadratic one 64x, so 32x separates them with room for load. The small
+  // sample takes tens of ms here (60-240 ms measured), far above timer noise, so it needs no floor; on a runtime where it
+  // fell under about 2 ms this ratio would stop telling the two apart. The absolute ceiling is generous: loaded runs measured about 1.5 s.
+  assert(large.best<small.best*32,`object key redaction scaling: ${timings}`);
+  assert(large.best<5000,`object key redaction took too long: ${timings}`);
   assert.equal(Object.keys(output).length,count+1);
   assert.equal(output['[redacted secret] (2)'],'reserved');
   assert.equal(new Set(Object.values(output)).size,count+1);
-  console.log(`Object key collisions: ${count}, ${elapsed.toFixed(1)} ms`);
+  console.log(`Object key collisions: ${timings}`);
 });
 
 for(const [name,run] of [['ASCII','-'.repeat(5)],['en dash','–'.repeat(5)],['mixed','-–—‐‑']]) {

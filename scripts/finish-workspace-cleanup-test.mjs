@@ -243,6 +243,26 @@ try {
     assert((await ws.removeTerminalWorkspace(sidecarFailed)) === 'removed' && !row2(sidecarFailed), 'retry must remove the stranded row');
     console.log('PASS a missing worktree does not strand terminal sidecar or row cleanup');
 
+    // The periodic sweep must also retry a sidecar left behind after tree removal. The sweep only acts on a row the owner
+    // fetched (or an expired one), so mark it fetched before the first pass: that pass then really tries the removal and fails.
+    const sweepRetry = makeFinished();
+    const sweepSidecar = ws.ignoredWrittenFile(sweepRetry);
+    fs.mkdirSync(sweepSidecar);
+    fs.writeFileSync(path.join(sweepSidecar, 'fixture'), 'test');
+    db2.prepare('UPDATE workspaces SET fetched_at=? WHERE request_id=?').run(new Date().toISOString(), sweepRetry);
+    const sweepFailures = [];
+    await ws.sweepExpired(entry => sweepFailures.push(entry));
+    assert(row2(sweepRetry) && !fs.existsSync(tree2(sweepRetry)), 'the first sweep keeps the row when sidecar cleanup fails');
+    assert(fs.existsSync(sweepSidecar), 'the first sweep must leave the blocked sidecar');
+    assert(sweepFailures.some(entry => JSON.stringify(entry).includes(sweepRetry)), `the first sweep must report the failed removal: ${JSON.stringify(sweepFailures)}`);
+    fs.unlinkSync(path.join(sweepSidecar, 'fixture'));
+    fs.rmdirSync(sweepSidecar);
+    fs.writeFileSync(sweepSidecar, '{}');
+    const retryFailures = [];
+    await ws.sweepExpired(entry => retryFailures.push(entry));
+    assert(!row2(sweepRetry) && !fs.existsSync(sweepSidecar), `the retry sweep must clear the row and sidecar: ${JSON.stringify(retryFailures)}`);
+    console.log('PASS periodic sweep retries terminal cleanup after a sidecar failure');
+
     // A failed removal leaves the row; once the obstacle is gone, the sweep retries and removes it.
     const failed = makeFinished();
     fs.renameSync(tree2(failed), `${tree2(failed)}-moved`);
