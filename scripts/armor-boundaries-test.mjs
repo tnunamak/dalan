@@ -399,8 +399,11 @@ test('many redacted object keys keep their values and avoid suffix collisions',(
   const small=measure(smallInput),large=measure(input),output=large.output;
   const formatted=timings=>timings.map(ms=>ms.toFixed(1)).join(', ');
   const ratio=(large.best/small.best).toFixed(2);
-  const timings=`2500 keys [${formatted(small.timings)}] ms / ${count} keys [${formatted(large.timings)}] ms; best ratio ${ratio}x`;
-  assert(large.best<small.best*8*4+250,`object key redaction scaling: ${timings}`);
+  const timings=`2501 keys [${formatted(small.timings)}] ms / ${count} keys [${formatted(large.timings)}] ms; best ratio ${ratio}x`;
+  // Linear code scales 8x between the samples and a quadratic one 64x, so 32x separates them with room for load. The small
+  // best is floored at 2 ms so timer noise cannot fail it. The absolute ceiling is generous: loaded runs measured about 1.5 s.
+  assert(large.best<Math.max(small.best,2)*32,`object key redaction scaling: ${timings}`);
+  assert(large.best<5000,`object key redaction took too long: ${timings}`);
   assert.equal(Object.keys(output).length,count+1);
   assert.equal(output['[redacted secret] (2)'],'reserved');
   assert.equal(new Set(Object.values(output)).size,count+1);
