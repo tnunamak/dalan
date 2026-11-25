@@ -132,6 +132,28 @@ test('lock contention without a readable owner reports busy with an unknown PID'
   assert.equal(error.message, 'this session is active in another adapter (pid unknown)');
 });
 
+test('a fresh partial record reports busy and preserves the incomplete bytes', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-partial-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const partial = '{"pid":';
+  fs.writeFileSync(file, partial);
+  await assert.rejects(acquireLock(file), { name: 'LockBusyError', code: 'session_busy', pid: null });
+  assert.equal(fs.readFileSync(file, 'utf8'), partial);
+  assert.deepEqual(fs.readdirSync(dir), ['session.lock']);
+});
+
+test('a lock target that is a fresh directory reports busy without touching it', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-directory-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  fs.mkdirSync(file);
+  fs.writeFileSync(path.join(file, 'keep.txt'), 'owned test fixture');
+  await assert.rejects(acquireLock(file), { name: 'LockBusyError', code: 'session_busy', pid: null });
+  assert.deepEqual(fs.readdirSync(file), ['keep.txt']);
+  assert.equal(fs.readFileSync(path.join(file, 'keep.txt'), 'utf8'), 'owned test fixture');
+});
+
 test('an empty file from the old flock adapter is stale; a fresh empty file is busy', async () => {
   const dir = tmp(), file = path.join(dir, 's.lock');
   fs.writeFileSync(file, '', { mode: 0o600 });
