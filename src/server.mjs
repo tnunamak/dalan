@@ -654,6 +654,7 @@ async function handOffNextJob(args) {
 // A finish hands over up to maxJobs claimed jobs, never more than the free lanes: the first claim is keyed handoff-<claim_id>,
 // the others handoff-<claim_id>-n<n>, so a repeated finish gets the same jobs back and takes no more.
 async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal}) {
+  const jobs=[]; // claimed so far: an error after a claim must still report it, or the job idles until its lease ends
   try {
     const {worker,subject}=principal;
     const held=store.db.prepare('SELECT claimant FROM claims WHERE request_id=? AND claim_id=?').get(requestId,claimId);
@@ -671,11 +672,10 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal})
     const ids=Array.from({length:maxJobs},(_,n)=>acquisitionFor(n));
     const priors=store.db.prepare(`SELECT c.request_id,c.state,c.acquisition_id,a.status FROM claims c JOIN assignments a USING(request_id) WHERE c.worker=? AND c.subject=? AND c.acquisition_id IN (${ids.map(()=>'?').join(',')}) ORDER BY c.claimed_at,c.rowid`).all(worker,subject,...ids);
     if(priors.length) {
-      const jobs=[];
       for(const prior of priors) { const job=prior.state==='active'&&prior.status==='claimed'?await claim(prior.request_id,prior.acquisition_id):null; if(job) jobs.push(job); }
       return jobs.length?{jobs}:{};
     }
-    const started=Date.now(),tried=new Set(),jobs=[];
+    const started=Date.now(),tried=new Set();
     let sawQueued=false;
     const pick=free=>(store.nextQueued(free+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id));
     for(;;) {
@@ -700,7 +700,7 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal})
       if(left<=0) return sawQueued?{}:{empty:true,waited_ms:Date.now()-started};
       await nap(Math.min(HANDOFF_POLL_MS,left),signal);
     }
-  } catch(error) { log({kind:'finish_handoff_error',request_id:requestId,reason:redactNote(String(error?.message??error))}); return {}; }
+  } catch(error) { log({kind:'finish_handoff_error',request_id:requestId,reason:redactNote(String(error?.message??error))}); return jobs.length?{jobs}:{}; }
 }
 async function finishReply(reply,{principal,requestId,claimId,signal}) {
   const setting=workers.workers.get(principal.worker)?.finishHandoff;
