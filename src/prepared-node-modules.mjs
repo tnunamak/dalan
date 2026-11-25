@@ -24,6 +24,19 @@ function readRegular(file, optional = false) {
     throw failure('dependencies_invalid', 'cannot read regular manifest or lock');
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
+// Why the host cannot prepare this manifest and lock (null when it can, or when there is nothing to prepare).
+function unsupportedReason(pkg, data) {
+  if (pkg.workspaces || ![2, 3].includes(data.lockfileVersion) || !data.packages || typeof data.packages !== 'object') return 'only root npm lockfiles without workspaces are supported';
+  for (const [name, entry] of Object.entries(data.packages)) {
+    if (entry?.link || (name && !name.startsWith('node_modules/')) || /^(file:|link:|workspace:)/i.test(entry?.resolved ?? '')) return 'local or workspace dependencies are unsupported';
+    for (const group of ['dependencies','devDependencies','optionalDependencies']) for (const value of Object.values(entry?.[group] ?? {})) if (typeof value === 'string' && /^(file:|link:|workspace:)/i.test(value)) return 'local or workspace dependencies are unsupported';
+  }
+  return null;
+}
+export function unsupportedDependencies(manifest, lock) {
+  if (!lock) return null;
+  try { return unsupportedReason(JSON.parse(manifest), JSON.parse(lock)); } catch { return null; }
+}
 function inputs(source) {
   const root = path.resolve(source);
   if (fs.realpathSync(root) !== root || !fs.lstatSync(root).isDirectory()) throw failure('dependencies_invalid', 'source directory must be canonical');
@@ -32,11 +45,8 @@ function inputs(source) {
   const manifest = readRegular(path.join(root, 'package.json'));
   let pkg, data;
   try { pkg = JSON.parse(manifest); data = JSON.parse(lock); } catch { throw failure('dependencies_invalid', 'invalid manifest or lock JSON'); }
-  if (pkg.workspaces || ![2, 3].includes(data.lockfileVersion) || !data.packages || typeof data.packages !== 'object') throw failure('dependencies_unsupported', 'only root npm lockfiles without workspaces are supported');
-  for (const [name, entry] of Object.entries(data.packages)) {
-    if (entry?.link || (name && !name.startsWith('node_modules/')) || /^(file:|link:|workspace:)/i.test(entry?.resolved ?? '')) throw failure('dependencies_unsupported', 'local or workspace dependencies are unsupported');
-    for (const group of ['dependencies','devDependencies','optionalDependencies']) for (const value of Object.values(entry?.[group] ?? {})) if (typeof value === 'string' && /^(file:|link:|workspace:)/i.test(value)) throw failure('dependencies_unsupported', 'local or workspace dependencies are unsupported');
-  }
+  const unsupported = unsupportedReason(pkg, data);
+  if (unsupported) throw failure('dependencies_unsupported', unsupported);
   const identity = { lock_sha256: hash(lock), manifest_sha256: hash(manifest), runtime: runtime() };
   return { root, lock, manifest, identity, key: hash(JSON.stringify(identity.runtime)) };
 }

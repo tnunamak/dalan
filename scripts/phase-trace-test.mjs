@@ -61,6 +61,38 @@ async function startBridge(label, workerExtra, limits, extraEnv = {}) {
 const pass = message => console.log(`PASS ${message}`);
 const { createPhaseTrace } = await import('../src/phase-trace.mjs');
 
+// 0. Claim silence: log-only, with a fake clock.
+{
+  const { SILENCE_MS } = await import('../src/phase-trace.mjs');
+  assert.equal(SILENCE_MS, 120000);
+  let t = Date.parse('2026-11-24T10:00:00.000Z');
+  const lines = [];
+  const trace = createPhaseTrace({ log: l => lines.push(l), now: () => t, max: 2 });
+  const created = '2026-11-24T10:00:00.000Z', silent = () => lines.filter(l => l.kind === 'claim_silence');
+  trace.claimed({ requestId: 'q', worker: 'muse', subject: 's1', claimId: 'cq', handoff: false, createdAt: created });
+  t += 1500; trace.action({ requestId: 'q', tool: 'get', subject: 's1' });
+  assert.equal(silent().length, 0, 'a short gap logs nothing');
+  t += 119999; trace.action({ requestId: 'q', tool: 'progress', subject: 's1' });
+  assert.equal(silent().length, 0, 'just under the threshold logs nothing');
+  t += 5000; trace.action({ requestId: 'q', tool: 'get', subject: 's2' });
+  assert.equal(silent().length, 0, 'another subject is not the holder and does not reset the clock');
+  t += 120000; trace.action({ requestId: 'q', tool: 'progress', subject: 's1' });
+  assert.deepEqual(silent().map(l => [l.tool, l.silence_ms, l.since, l.final, l.calls_before, l.claim_id]), [['progress', 125000, 'previous_call', false, 2, 'cq']]);
+  t += 7000; trace.action({ requestId: 'q', tool: 'finish', subject: 's1' });
+  assert.deepEqual(silent().slice(1).map(l => [l.tool, l.silence_ms, l.final, l.calls_before]), [['finish', 7000, true, 3]], 'finish always logs its silence');
+  assert.equal(silent()[1].claim_age_ms, 1500 + 119999 + 5000 + 120000 + 7000);
+  t += 500000; trace.action({ requestId: 'q', tool: 'get', subject: 's1' });
+  assert.equal(silent().length, 2, 'nothing is logged for a finished claim');
+  // A claim that is never worked: the first call after 3 minutes is silence measured from the claim.
+  trace.claimed({ requestId: 'w', worker: 'muse', subject: 's1', claimId: 'cw', handoff: false, createdAt: created });
+  t += 180000; trace.action({ requestId: 'w', tool: 'get', subject: 's1' });
+  assert.deepEqual(silent().slice(2).map(l => [l.silence_ms, l.since, l.calls_before]), [[180000, 'claim', 0]]);
+  // Bounded memory: with max 2, the oldest claim is forgotten and then logs nothing, never a wrong number.
+  for (const id of ['x1', 'x2']) trace.claimed({ requestId: id, worker: 'muse', subject: 's1', claimId: `c${id}`, handoff: false, createdAt: created });
+  t += 400000; trace.action({ requestId: 'w', tool: 'get', subject: 's1' });
+  assert.equal(silent().length, 3, 'a forgotten claim logs nothing');
+}
+
 // 1. The trace itself, with a fake clock and log.
 {
   let t = Date.parse('2026-11-24T10:00:00.000Z');
@@ -173,5 +205,23 @@ try {
   pass('server: list_pending, claim and the first call after it write claim_phase and claim_first_action once; a claim retry writes none');
 } finally {
   await Promise.all(bridges.map(b => b.stop()));
+}
+// 9. A failing log write is contained: no throw from any trace call, and the state still advances.
+{
+  const { createPhaseTrace: make, SILENCE_MS: quiet } = await import('../src/phase-trace.mjs');
+  let t = 1000, fail = true;
+  const lines = [];
+  const trace = make({ log: l => { if (fail) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); lines.push(l); }, now: () => t });
+  const item = { id: 'e1', request_id: 'rq', created_at: '2026-11-24T10:00:00.000Z' };
+  trace.wake({ item, worker: 'w', attemptAt: t, ackMs: 5, status: 200, state: 'delivered' });
+  trace.claimed({ requestId: 'rq', worker: 'w', subject: 's', claimId: 'c', handoff: false, createdAt: item.created_at });
+  t += quiet + 1;
+  trace.action({ requestId: 'rq', tool: 'get', subject: 's' });
+  t += 10;
+  trace.action({ requestId: 'rq', tool: 'finish', subject: 's' });
+  fail = false;
+  trace.claimed({ requestId: 'rq2', worker: 'w', subject: 's', claimId: 'c2', handoff: false, createdAt: item.created_at });
+  assert.deepEqual(lines.map(l => l.kind), ['claim_phase'], 'logging resumes after the failure and the finished claim is gone');
+  console.log('PASS phase-trace log failure contained');
 }
 console.log('PASS phase-trace');
