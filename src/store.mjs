@@ -115,7 +115,7 @@ const storedMeta=(meta,legacy)=>({...meta,objective_key:storedObjectiveKey(meta.
 function submitIntentDigest(identity,delivery,environmentId,review,priority,meta,targetWorker,execution,requiredCapabilities,destinationRevision=null,legacyFixNames=true) {
   return hash(JSON.stringify(canonical({payload:identity,delivery,environmentId:environmentId??'',review:!!review,priority,meta:storedMeta(normalizeMeta(meta),legacyFixNames),targetWorker,execution,requiredCapabilities,...(destinationRevision===null?{}:{destination_revision:destinationRevision})})));
 }
-const defaultRedeliveryLimits={intervalMs:600000,maxCount:3,silenceMs:1200000,claimIdleWarningMs:900000,leaseMs:3600000,workerClaimLeaseMs:{},laneCapacity:6,rewakeMs:90000,rewakeWindowMs:7200000,rewakeStaleMs:1200000,breakSilenceMs:1200000,breakProbeMs:1800000,maxClaimsPerHour:90,maxToolCallsPerHour:1000,maxToolCallsPer24h:10000,maxResponseBytesPerHour:8000000,maxResponseBytesPer24h:100000000};
+const defaultRedeliveryLimits={intervalMs:600000,maxCount:3,silenceMs:1200000,claimIdleWarningMs:900000,leaseMs:3600000,workerClaimLeaseMs:{},workerClaimMinGapMs:{},laneCapacity:6,rewakeMs:90000,rewakeWindowMs:7200000,rewakeStaleMs:1200000,breakSilenceMs:1200000,breakProbeMs:1800000,maxClaimsPerHour:90,maxToolCallsPerHour:1000,maxToolCallsPer24h:10000,maxResponseBytesPerHour:8000000,maxResponseBytesPer24h:100000000};
 const HOUR=3600000, iso=ms=>new Date(ms).toISOString();
 export const QUEUE_WINDOW=Object.freeze({minSamples:5,factor:3,minMs:15*60000,maxMs:12*HOUR});
 const queueKindSql=canonicalKindSql("COALESCE(a.task_kind,json_extract(a.payload,'$.task_kind'),CASE WHEN a.review=1 THEN 'review' ELSE json_extract(a.payload,'$.execution_scope') END,'unknown')");
@@ -183,6 +183,10 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(value.worker_claim_lease_ms===null||typeof workerClaimLeaseMs!=='object'||Array.isArray(workerClaimLeaseMs)||
     Object.entries(workerClaimLeaseMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<60000||ms>604800000))
     throw new Error('invalid worker_claim_lease_ms');
+  const workerClaimMinGapMs=value.worker_claim_min_gap_ms??{};
+  if(value.worker_claim_min_gap_ms===null||typeof workerClaimMinGapMs!=='object'||Array.isArray(workerClaimMinGapMs)||
+    Object.entries(workerClaimMinGapMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<1000||ms>600000))
+    throw new Error('invalid worker_claim_min_gap_ms');
   // Denominator of utilization metrics: how many lanes the worker can work in parallel. Independent of the claim cap (max_claimed_outer_assignments).
   // worker_* limits keys are the current names; the dot_* names are read as aliases so existing files keep working.
   const laneCapacity=value.worker_lane_capacity??value.dot_lane_capacity??defaultRedeliveryLimits.laneCapacity;
@@ -214,7 +218,7 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(!Number.isInteger(maxResponseBytesPerHour)||maxResponseBytesPerHour<100000||maxResponseBytesPerHour>1000000000) throw new Error('invalid max_response_bytes_per_hour');
   const maxResponseBytesPer24h=value.max_response_bytes_per_24h??defaultRedeliveryLimits.maxResponseBytesPer24h;
   if(!Number.isInteger(maxResponseBytesPer24h)||maxResponseBytesPer24h<1000000||maxResponseBytesPer24h>10000000000) throw new Error('invalid max_response_bytes_per_24h');
-  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
+  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
 }
 
 // Gates that cap one rolling hour. They hold background work before agent-requested work (see rollingUsage).
@@ -2409,7 +2413,25 @@ export class Store {
     if(this.resumeIdleMs()<=0) return [];
     return this.db.prepare("SELECT c.* FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND a.cancelled_at IS NULL AND c.state='active' AND c.worker=? ORDER BY c.last_claim_activity_at").all(worker).filter(c=>this.isIdleClaim(c));
   }
-  guidanceFor(worker) { return this.workers.workers.get(worker)?.guidance==='resume'?`${workerGuidance} ${resumeNudge(this.resumeIdleMs()||defaultResumeIdleMs)}`:workerGuidance; }
+  workerClaimGapMs(worker) {
+    const gaps=this.limits.workerClaimMinGapMs??{};
+    return Object.hasOwn(gaps,worker)?gaps[worker]:0;
+  }
+  guidanceFor(worker) {
+    const base=this.workers.workers.get(worker)?.guidance==='resume'?`${workerGuidance} ${resumeNudge(this.resumeIdleMs()||defaultResumeIdleMs)}`:workerGuidance;
+    return this.workerClaimGapMs(worker)?`${base} Work this claim and report it before you claim another.`:base;
+  }
+  assertClaimGap(id,subject,worker,active) {
+    const gap=this.workerClaimGapMs(worker);
+    if(!gap)return;
+    const now=this.nowMs();
+    const remaining=(active??this.activeClaims(subject,worker,id)).reduce((max,claim)=>{
+      if(claim.subject!==subject||this.leaseExpired(claim))return max;
+      const age=now-Date.parse(claim.claimed_at);
+      return Number.isFinite(age)?Math.max(max,gap-Math.max(0,age)):max;
+    },0);
+    if(remaining>0)throw new Error(`claim_throttled: Work this claim and report it before you claim another. Retry after ${Math.ceil(remaining/1000)} seconds.`);
+  }
   // Owner messages first (oldest first), then assignments in LIST_ORDER: normal before background, items the worker skipped last.
   // One bit for the public wake signal: a queued, live, uncancelled assignment targets one of these workers.
   hasQueuedFor(workerNames) {
@@ -2564,7 +2586,10 @@ export class Store {
       return {request_id:id,claim_id:old.claim_id,epoch:old.epoch,assignment:JSON.parse(a.payload),owner_notes:this.ownerNotes(id),duplicate:true,guidance:this.guidanceFor(worker),...this.destinationClaimFields(id)};
     }
     if(old && (old.state!=='active' || this.leaseExpired(old))) this.assertRegrantReady(old);
-    if(takeover&&old.subject===subject&&this.isIdleClaim(old)) return this.rotateIdleClaim(old,a,claimant,subject,worker,acquisitionId,leaseMs,connectionId);
+    if(takeover&&old.subject===subject&&this.isIdleClaim(old)) {
+      this.assertClaimGap(id,subject,worker);
+      return this.rotateIdleClaim(old,a,claimant,subject,worker,acquisitionId,leaseMs,connectionId);
+    }
     if(takeover) {
       if(!this.leaseExpired(old)&&old.subject===subject&&this.resumeIdleMs()>0) throw new Error(JSON.stringify({error:'claim_busy',message:`Request ${id}: another run of this worker holds it and is active; pick other work or retry after its lease expires. This affects only ${id}.`,request_id:id}));
       if(!this.leaseExpired(old)) throw new Error('already claimed by another claimant');
@@ -2573,7 +2598,9 @@ export class Store {
     if(destinationRefusal)return destinationRefusal;
     // Every new epoch of an existing claim (takeover, claim after abandon) waits for reconcile.
     if(old) this.assertNoUncertainDelivery(id);
-    if(this.activeClaims(subject,worker,id).length>=capacity) throw new Error('capacity_full');
+    const active=this.activeClaims(subject,worker,id);
+    if(active.length>=capacity) throw new Error('capacity_full');
+    this.assertClaimGap(id,subject,worker,active);
     this.recordPrPreflight(id,'claim',JSON.parse(a.payload),preflight,!!old);
     if(takeover) { const why=Store.expirySummary(old); this.db.prepare("UPDATE claims SET state='abandoned',abandoned_at=?,abandon_reason=? WHERE request_id=?").run(this.stamp(),why,id); this.lifecycle(id,'abandoned','system',why,old); this.laneFreed(); }
     const claimId=`claim_${randomUUID()}`;
