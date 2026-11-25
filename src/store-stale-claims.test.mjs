@@ -16,6 +16,28 @@ test('CLI guidance uses the stable command for the executable on PATH, but npx i
   assert.equal(cliCommand(bin, { PATH: dir, npm_command: 'exec' }), 'npx @tnunamak/dalan');
 });
 
+test('suite self-test accepts a Node executable path containing spaces and an apostrophe', { skip: process.platform === 'win32' }, async t => {
+  const { spawnSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-segments-node-path-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const scripts = path.join(dir, 'scripts');
+  const fakeNode = path.join(dir, "operator's node");
+  fs.mkdirSync(scripts);
+  fs.symlinkSync(process.execPath, fakeNode);
+  const runner = path.join(scripts, 'test-segments.mjs');
+  const preload = path.join(dir, 'path-fixture.mjs');
+  fs.copyFileSync(new URL('../scripts/test-segments.mjs', import.meta.url), runner);
+  fs.writeFileSync(path.join(scripts, 'test-segments-test.mjs'), '');
+  fs.writeFileSync(preload, 'Object.defineProperty(process, "execPath", { value: process.env.FIXTURE_NODE_PATH });');
+  const result = spawnSync(process.execPath, ['--import', preload, runner, '--self-test'], {
+    env: { HOME: dir, TMPDIR: dir, PATH: process.env.PATH, FIXTURE_NODE_PATH: fakeNode },
+    encoding: 'utf8', timeout: 10000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /PASS segment runner continues after failures/);
+});
+
 test('CLI guidance falls back to the checkout when a different dalan is first on PATH', async t => {
   const { cliCommand } = await import('./cli-name.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-cli-fallback-'));

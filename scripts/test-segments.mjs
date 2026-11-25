@@ -230,10 +230,11 @@ async function runSegment(command) {
 }
 
 async function verifyFailureDoesNotShortCircuit() {
+  const node = "'" + process.execPath.replaceAll("'", "'\"'\"'") + "'";
   const fixture = [
-    `${process.execPath} -e 'process.exit(7)'`,
-    `${process.execPath} -e 'process.stdout.write("later segment ran")'`,
-    `${process.execPath} -e 'process.exit(9)'`
+    `${node} -e 'process.exit(7)'`,
+    `${node} -e 'process.stdout.write("later segment ran")'`,
+    `${node} -e 'process.exit(9)'`
   ];
   const results = [];
   for (const [index, command] of fixture.entries()) {
