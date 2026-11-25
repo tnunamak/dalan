@@ -155,3 +155,27 @@ for(const [name,accepted,refused] of [['minimum',60000,59999],['maximum',6048000
     }
   });
 }
+
+test('lineBuffer assembles split CRLF lines and flushes an unterminated final line once', async () => {
+  const { lineBuffer } = await import('./try-exposure.mjs');
+  const lines = [];
+  const push = lineBuffer(line => lines.push(line));
+  push('one\r');
+  assert.deepEqual(lines, []);
+  push('\ntwo\nlast');
+  assert.deepEqual(lines, ['one', 'two']);
+  push.end();
+  push.end();
+  assert.deepEqual(lines, ['one', 'two', 'last']);
+});
+
+test('lineBuffer retains the configured tail while waiting for a final newline', async () => {
+  const { lineBuffer } = await import('./try-exposure.mjs');
+  const lines = [];
+  const push = lineBuffer(line => lines.push(line), 4);
+  push('discard-kept');
+  assert.deepEqual(lines, []);
+  push('\n');
+  push.end();
+  assert.deepEqual(lines, ['kept']);
+});
