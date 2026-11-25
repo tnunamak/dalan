@@ -29,6 +29,18 @@ test('canonical JSON follows JSON index ordering for numeric-looking keys', () =
   assert.equal(canonicalJson(Object.fromEntries([...entries].reverse())), expected);
 });
 
+test('canonical JSON ignores non-enumerable presentation data on a plain object', () => {
+  const value = { shown: 'fixture' };
+  Object.defineProperty(value, 'label', { value: 'presentation only' });
+  assert.equal(canonicalJson(value), '{"shown":"fixture"}');
+});
+
+test('canonical JSON keeps indexed array data separate from presentation properties', () => {
+  const values = [2, 1];
+  Object.assign(values, { label: 'presentation only' });
+  assert.equal(canonicalJson(values), '[2,1]');
+});
+
 test('canonical JSON writes negative zero as zero in object and array values', () => {
   const expected = '{"array":[0,{"n":0}],"n":0}';
   assert.equal(canonicalJson({ n: -0, array: [-0, { n: -0 }] }), expected);
@@ -125,6 +137,17 @@ test('canonical JSON rejects unsupported leaves while keeping the caller-specifi
   assert.equal(canonicalJson({ nested: [null, false, 0, ''] }), '{"nested":[null,false,0,""]}');
 });
 
+
+test('canonical JSON keeps the invalid-value diagnostic for a cyclic fixture', () => {
+  const rows = [];
+  rows.push(rows);
+  assert.throws(() => canonicalJson(rows), {
+    code: 'invalid_json', message: 'invalid_json',
+  });
+  assert.throws(() => canonicalJson({ rows }, 'bad_argument'), {
+    code: 'bad_argument', message: 'bad_argument',
+  });
+});
 test('canonical JSON permits a shared object to appear in sibling branches', () => {
   const shared = { z: 'last', a: 'first' };
   assert.equal(
@@ -155,6 +178,21 @@ test('canonical JSON does not normalize distinct Unicode strings', () => {
   assert.notEqual(canonicalJson(composed), canonicalJson(decomposed));
 });
 
+test('canonical JSON gives numbered display rows a stable order across insertion orders', () => {
+  const first = Object.fromEntries([['10', 'ten'], ['2', 'two'], ['title', 'Rows'], ['note', 'Ready']]);
+  const second = Object.fromEntries([['note', 'Ready'], ['2', 'two'], ['title', 'Rows'], ['10', 'ten']]);
+  const expected = '{"2":"two","10":"ten","note":"Ready","title":"Rows"}';
+  assert.equal(canonicalJson(first), expected);
+  assert.equal(canonicalJson(second), expected);
+});
+
+test('canonical JSON omits non-enumerable display metadata but preserves explicit null', () => {
+  const row = { title: 'Plan', note: null };
+  Object.defineProperty(row, 'displayCache', {value: 'Ready', enumerable: false});
+  assert.equal(canonicalJson(row), '{"note":null,"title":"Plan"}');
+  assert.equal(row.displayCache, 'Ready');
+});
+
 test('canonical output can be edited without changing its source document', () => {
   const entry = Object.freeze({ label: 'source' });
   const source = Object.freeze({ entries: Object.freeze([entry, entry]) });
@@ -165,6 +203,22 @@ test('canonical output can be edited without changing its source document', () =
   result.entries.push({ label: 'added' });
   assert.deepEqual(result.entries, [{ label: 'edited' }, { label: 'source' }, { label: 'added' }]);
   assert.deepEqual(source.entries, [{ label: 'source' }, { label: 'source' }]);
+});
+
+test('canonical JSON is stable after a JSON round trip', () => {
+  const source = { z: [{ b: 2, a: false }, null], a: 'fixture' };
+  const canonical = canonicalJson(source);
+
+  assert.equal(canonical, '{"a":"fixture","z":[{"a":false,"b":2},null]}');
+  assert.equal(canonicalJson(JSON.parse(canonical)), canonical);
+});
+
+test('canonical JSON preserves finite decimal and exponent values', () => {
+  const metadata = { small: 1e-7, fraction: 1.25, large: 1e21 };
+  const canonical = canonicalJson(metadata);
+
+  assert.equal(canonical, '{"fraction":1.25,"large":1e+21,"small":1e-7}');
+  assert.deepEqual(JSON.parse(canonical), metadata);
 });
 
 test('ordinary progress needs no renewal context and leaves inputs unchanged', () => {
@@ -184,4 +238,12 @@ test('the last incrementable revision can still produce an ordinary finish effec
   assert.deepEqual(decide({ revision }, { expectedRevision: revision, operation: 'finish' }), {
     events: [], effects: [{ type: 'advance_revision', expectedRevision: revision }],
   });
+});
+
+test('canonical JSON rejects a Map instead of dropping its entries', () => {
+  assert.throws(() => canonicalJson({rows: new Map([['fixture', 1]])}, 'invalid_report'), {code: 'invalid_report'});
+});
+
+test('canonical JSON rejects boxed scalars instead of coercing them', () => {
+  assert.throws(() => canonicalJson([Object(false)]), {code: 'invalid_json'});
 });

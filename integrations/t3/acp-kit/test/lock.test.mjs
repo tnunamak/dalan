@@ -82,6 +82,16 @@ test('a dead owner is stale and is taken over', async () => {
   lock.release(); fs.rmSync(dir, { recursive: true });
 });
 
+test('owner probes ignore absent or noninteger process references', () => {
+  for (const record of [null, {}, {pid:'42'}, {pid:1.5}, {pid:NaN}]) {
+    assert.equal(ownerAlive(record), false);
+  }
+});
+
+test('the current process is live for an older record without a start time', () => {
+  assert.equal(ownerAlive({pid:process.pid}), true);
+});
+
 test('pid reuse: a live pid with a different start_time is stale; the same start_time is busy', async () => {
   if (!['linux', 'darwin'].includes(process.platform)) return;
   const dir = tmp(), file = path.join(dir, 's.lock');
@@ -237,6 +247,36 @@ test('acquire reports a non-directory ancestor without replacing it', async t =>
   assert.equal(fs.readFileSync(blocker, 'utf8'), 'keep this file');
 });
 
+test('new lock directories and files are private on POSIX', {skip: process.platform === 'win32'}, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-mode-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const parent = path.join(dir, 'nested');
+  const file = path.join(parent, 'session.lock');
+  const lock = await acquireLock(file);
+  try {
+    assert.equal(fs.statSync(parent).mode & 0o077, 0);
+    assert.equal(fs.statSync(file).mode & 0o077, 0);
+  } finally { lock.release(); }
+});
+
+test('two session lock paths can be acquired independently by one process', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-paths-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const first = path.join(dir, 'first.lock');
+  const second = path.join(dir, 'second.lock');
+  const one = await acquireLock(first);
+  try {
+    const two = await acquireLock(second);
+    try {
+      assert.ok(fs.existsSync(first));
+      assert.ok(fs.existsSync(second));
+      one.release();
+      assert.equal(fs.existsSync(first), false);
+      assert.ok(fs.existsSync(second));
+    } finally { two.release(); }
+  } finally { one.release(); }
+});
+
 test('release succeeds when the temporary lock file is already absent', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-release-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -247,4 +287,17 @@ test('release succeeds when the temporary lock file is already absent', async t 
 
   assert.doesNotThrow(() => lock.release());
   assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test('acquire creates missing fixture directories and release keeps the directories', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-nested-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const parent = path.join(dir, 'one', 'two');
+  const file = path.join(parent, 'session.lock');
+  assert.equal(fs.existsSync(parent), false);
+  const lock = await acquireLock(file);
+  try {
+    assert.deepEqual(fs.readdirSync(parent), ['session.lock']);
+  } finally { lock.release(); }
+  assert.deepEqual(fs.readdirSync(parent), []);
 });
