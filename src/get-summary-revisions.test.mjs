@@ -70,6 +70,46 @@ for (const [status, next, note] of [
     assert.doesNotMatch(summary, /Correction:/);
   });
 }
+async function successfulAlertCli(t, title, message) {
+  const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'dalan-alert-success-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'bin'));
+  await mkdir(join(root, 'src'));
+  const cli = join(root, 'bin', 'dot-alert.mjs');
+  await copyFile(new URL('../bin/dot-alert.mjs', import.meta.url), cli);
+  await writeFile(join(root, 'src', 'alerts.mjs'), `
+    export async function publishAlert(title, message, log, options) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      log('fixture diagnostic');
+      console.log(JSON.stringify({ title, message, options }));
+    }
+  `);
+  const result = spawnSync(process.execPath, [cli, title, message], {
+    env: { HOME: root, USERPROFILE: root }, encoding: 'utf8', timeout: 5000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, '');
+  const [delivery, ...rest] = result.stdout.trimEnd().split('\n');
+  return { delivery: JSON.parse(delivery), rest };
+}
+
+test('alert CLI sends one intact title and body to the required publisher', async t => {
+  const title = 'Fixture subject: two words';
+  const message = 'first line\nsecond line with "quotes"';
+  const { delivery } = await successfulAlertCli(t, title, message);
+  assert.deepEqual(delivery, { title, message, options: { requirePublisher: true } });
+});
+
+test('alert CLI only acknowledges after asynchronous publication completes', async t => {
+  const { rest } = await successfulAlertCli(t, 'fixture subject', 'fixture body');
+  assert.deepEqual(rest, ['sent']);
+});
+
 test('running questions and original full-record access remain available after revision', () => {
   const summary = formatGetSummary({ status: 'running', revised_by: { request_id: 'job-correction' },
     progress: [{ note: 'QUESTION: Which fixture?' }] }, options);
