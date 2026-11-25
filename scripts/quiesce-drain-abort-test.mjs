@@ -61,7 +61,7 @@ const parse=r=>{assert.equal(r.isError,false,JSON.stringify(r));return JSON.pars
 const ids=['req_abort_1','req_abort_2'];
 const assignment=request_id=>({schema_version:1,request_id,brief:'Synthetic fixture',inputs:[],expected_output:'One line',execution_scope:'read-only'});
 // Contract: if `upgrade-drain.mjs --until-quiescent` is killed (SIGTERM or SIGINT) while it polls, it reopens the gate before it exits,
-// so the dot and Muse workers are not starved by a gate nobody will reopen. Here an admitted call is held at a barrier so the drain
+// so the remote workers are not starved by a gate nobody will reopen. Here an admitted call is held at a barrier so the drain
 // stays in its poll loop, the drain is killed, and a claim then succeeds on the real server.
 async function abortWith(signal,code,reqId,otherId,note) {
   const claim=parse(await rpc('claim',{request_id:reqId,claimant:'fixture-worker'}));
