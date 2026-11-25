@@ -156,6 +156,15 @@ for(const [name,accepted,refused] of [['minimum',60000,59999],['maximum',6048000
   });
 }
 
+test('try refuses conflicting local and public modes in either order', async () => {
+  const { parseTryArgs } = await import('./try.mjs');
+  for (const argv of [['--local', '--public'], ['--public', '--local']]) {
+    assert.throws(() => parseTryArgs(argv), /--local cannot be combined with --public/);
+  }
+  assert.equal(parseTryArgs(['--local', '--local']).mode, 'local');
+  assert.equal(parseTryArgs(['--public', '--public']).mode, 'public');
+});
+
 test('lineBuffer assembles split CRLF lines and flushes an unterminated final line once', async () => {
   const { lineBuffer } = await import('./try-exposure.mjs');
   const lines = [];
