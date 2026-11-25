@@ -1174,6 +1174,7 @@ const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)
       log({kind:'connection_denied',reason:error.code??'unknown_connection',client_id:principal.client_id??null});
       res.writeHead(403,{'content-type':'application/json'});res.end(JSON.stringify({error:error.code??'unknown_connection'}));return;
     }
+    outcome.state.worker=principal.worker;
     outcome.state.phase='body';
     const body=await readBody(req,outcome.state);
     if(req.method!=='POST') { res.writeHead(405,{allow:'POST'}); res.end(); return; }
@@ -1182,7 +1183,7 @@ const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)
     if(!rpc||typeof rpc!=='object'||Array.isArray(rpc)||rpc.jsonrpc!=='2.0'||typeof rpc.method!=='string') return json(res,400,rpcError(rpc?.id??null,-32600,'Invalid Request'));
     outcome.identify(rpc);
     // Metadata only: bodies can carry webhook secrets and worker results.
-    log({kind:'mcp_inbound',call_id:outcome.state.call_id,rpc_method:outcome.state.rpc_method,tool:outcome.state.tool,ua:uaToken(req)});
+    log({kind:'mcp_inbound',call_id:outcome.state.call_id,rpc_method:outcome.state.rpc_method,tool:outcome.state.tool,worker:principal.worker,ua:uaToken(req)});
     if(!Object.hasOwn(rpc,'id')) { res.writeHead(202); res.end(); return; }
     outcome.state.phase='dispatch';
     const eventStream=readEnv('DALAN_TRIAL_SSE')==='1'&&req.method==='POST'&&acceptsMcpEventStream(req.headers.accept)?beginMcpEventStream(res):null;
