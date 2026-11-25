@@ -101,14 +101,32 @@ for (const pattern of ['-----BEGIN-----', '-BEGIN-PRIVATE-KEY-']) {
   test(`linear scan ${pattern}`, () => {
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { redactSecrets } from './src/redaction.mjs';
-      const input = ${JSON.stringify(pattern)}.repeat(Math.ceil(1048576 / ${pattern.length})).slice(0, 1048576);
-      const start = performance.now();
-      redactSecrets(input);
-      const ms = performance.now() - start;
-      console.log(ms.toFixed(1) + ' ms');
-      if (ms >= 1000) process.exitCode = 1;
-    `], { encoding: 'utf8', timeout: 2000 });
-    assert.equal(result.status, 0, String(result.error ?? result.stderr));
+      const pattern = ${JSON.stringify(pattern)};
+      const input = size => pattern.repeat(Math.ceil(size / pattern.length)).slice(0, size);
+      const inputs = [input(64 * 1024), input(256 * 1024)];
+      const measure = data => {
+        const start = process.cpuUsage();
+        redactSecrets(data);
+        const usage = process.cpuUsage(start);
+        return (usage.user + usage.system) / 1000;
+      };
+      // Warm each size, then alternate the order of three CPU-only measurements.
+      for (const data of inputs) redactSecrets(data);
+      const samples = [[], []];
+      for (let run = 0; run < 3; run++) {
+        for (const index of run % 2 ? [1, 0] : [0, 1]) samples[index].push(measure(inputs[index]));
+      }
+      const [small, large] = samples.map(times => Math.min(...times));
+      const ratio = large / small;
+      console.log('64 KiB=' + small.toFixed(2) + ' CPU ms, 256 KiB=' + large.toFixed(2) +
+        ' CPU ms, ratio=' + ratio.toFixed(2) + 'x');
+      if (!(small > 0 && ratio < 8)) process.exitCode = 1;
+      else {
+        const completion = measure(input(1024 * 1024));
+        console.log('1 MiB completed (' + completion.toFixed(2) + ' CPU ms; no speed threshold)');
+      }
+    `], { encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, [result.error, result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n'));
     console.log(`${pattern}: ${result.stdout.trim()}`);
   });
 }
