@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store, loadRedeliveryLimits } from './store.mjs';
+import { HOST_BUDGET_CEILINGS, parseHostBudget } from './host-budget.mjs';
 
 const minute=60000;
 function fixture(t) {
@@ -91,6 +92,19 @@ test('terminal claims are not counted',t=>{
   const f=fixture(t);f.advance(20*minute);
   f.store.db.prepare("UPDATE assignments SET status='finished' WHERE request_id=?").run('idle-test');
   assert.equal(f.store.status().stale_claims.count,0);
+});
+
+test('host budget refuses a missing required limit', () => {
+  const budget = {...HOST_BUDGET_CEILINGS};
+  delete budget.output_bytes;
+  assert.throws(() => parseHostBudget(budget), /host_budget requires.*output_bytes/);
+});
+
+test('host budget names the misaligned memory or disk limit', () => {
+  for (const limit of ['memory_bytes', 'disk_write_bytes']) {
+    const budget = {...HOST_BUDGET_CEILINGS, [limit]: HOST_BUDGET_CEILINGS[limit] - 1};
+    assert.throws(() => parseHostBudget(budget), new RegExp('invalid host_budget\\.' + limit + ': expected a multiple of 4096'));
+  }
 });
 
 test('idle warning configuration defaults, validates, and is distinct from legacy lease setting',t=>{

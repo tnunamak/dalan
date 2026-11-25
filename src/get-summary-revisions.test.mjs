@@ -42,3 +42,46 @@ test('running questions and original full-record access remain available after r
   assert.ok(summary.includes('Full record: dalan get job-original --json'));
   assert.ok(summary.includes('Next: dalan get job-correction'));
 });
+
+async function heartbeatFailureFixture(t, healthFailure) {
+  const { readFile, writeFile, mkdir, mkdtemp, rm } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'dalan-heartbeat-failure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'bin'));
+  await mkdir(join(root, 'src'));
+  const original = await readFile(new URL('../bin/dot-heartbeat.mjs', import.meta.url));
+  await writeFile(join(root, 'bin/dot-heartbeat.mjs'), original);
+  await writeFile(join(root, 'src/paths.mjs'), "export const defaultPath = (...parts) => parts.join('/');");
+  await writeFile(join(root, 'src/env.mjs'), 'export const readEnv = name => process.env[name];');
+  await writeFile(join(root, 'src/admin-socket.mjs'), 'export const adminSocketPath = () => "fixture";');
+  await writeFile(join(root, 'src/host-health.mjs'), healthFailure
+    ? 'export async function bridgeHealth() { throw new Error("fixture probe failed"); }'
+    : 'export async function bridgeHealth() { return { healthy: true }; }');
+  await writeFile(join(root, 'bin/dot-deadman.mjs'),
+    'import { writeFileSync } from "node:fs"; writeFileSync(process.env.FIXTURE_SENTINEL, "entered"); process.exitCode = 7;');
+  const health = join(root, 'health.json');
+  const sentinel = join(root, 'child-entered');
+  await writeFile(health, '{"healthy":true}');
+  const result = spawnSync(process.execPath, [join(root, 'bin/dot-heartbeat.mjs')], {
+    encoding: 'utf8',
+    env: { DALAN_HEALTH_FILE: health, FIXTURE_SENTINEL: sentinel },
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /health check or external heartbeat failed/);
+  assert.equal(result.stdout, '');
+  await assert.rejects(readFile(health), { code: 'ENOENT' });
+  return { readFile, sentinel };
+}
+
+test('heartbeat probe failure removes stale health without launching the alert helper', async t => {
+  const { readFile, sentinel } = await heartbeatFailureFixture(t, true);
+  await assert.rejects(readFile(sentinel), { code: 'ENOENT' });
+});
+
+test('heartbeat helper failure retracts the positive health file and exits nonzero', async t => {
+  const { readFile, sentinel } = await heartbeatFailureFixture(t, false);
+  assert.equal(await readFile(sentinel, 'utf8'), 'entered');
+});
