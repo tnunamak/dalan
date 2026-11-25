@@ -1998,6 +1998,9 @@ export class Store {
     const a=Store.toolActivity(c), t=x=>x.slice(11,19)+'Z';
     return `lease_expired: ${a.tool_calls} call${a.tool_calls===1?'':'s'}${a.last_tool?`, last ${a.last_tool} at ${t(a.last_tool_at)}`:''}${a.first_workspace_tool_at?`, first workspace tool at ${t(a.first_workspace_tool_at)}`:', no workspace tool'}${a.last_tool_error?`, last error: ${a.last_tool_error.slice(0,80)}`:''}`;
   }
+  // A handed claim that lapsed with no call on it but the claim itself (reason "lease_expired: 1 call, last claim at ..."): the
+  // worker did not take the job when it was pushed to it. A finish does not push that row again; the worker claims it from its own list.
+  handoffLapsed(id,worker) { return !!this.db.prepare("SELECT 1 FROM lifecycle_events WHERE request_id=? AND worker=? AND type='abandoned' AND actor='system' AND reason LIKE 'lease_expired: 1 call, last claim at %' LIMIT 1").get(id,worker); }
   failureFields(id) {
     const a=this.db.prepare('SELECT status,cancelled_reason FROM assignments WHERE request_id=?').get(id);
     if(!a) {const policy=this.pullQueue.inbox(id);return policy?{failure_type:policy.failure_type,failure_type_source:policy.failure_type_source}:{failure_type:'unknown',failure_type_source:'unknown'};}
