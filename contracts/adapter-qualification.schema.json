@@ -30,7 +30,8 @@
     },
     "observed_on": {
       "type": "string",
-      "format": "date"
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
     },
     "pins": {
       "type": "object",
@@ -42,11 +43,36 @@
         "sdk",
         "catalog_fingerprint"
       ],
-      "additionalProperties": {
-        "type": [
-          "string",
-          "null"
-        ]
+      "additionalProperties": false,
+      "properties": {
+        "dalan_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requester_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker_host_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sdk": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "catalog_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "roles": {
@@ -166,5 +192,66 @@
         "type": "string"
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "qualification": {
+            "properties": {
+              "state": {
+                "const": "passed_for_declared_scope"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          }
+        },
+        "required": [
+          "qualification"
+        ]
+      },
+      "then": {
+        "properties": {
+          "pins": {
+            "properties": {
+              "catalog_fingerprint": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "capabilities": {
+            "items": {
+              "if": {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "required"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "observed": {
+                    "const": "passed"
+                  }
+                }
+              }
+            }
+          },
+          "qualification": {
+            "properties": {
+              "run_refs": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

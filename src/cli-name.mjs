@@ -10,7 +10,13 @@ const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 export function cliCommand(argv1, env = process.env) {
   const real = p => { try { return fs.realpathSync(p); } catch { return null; } };
   const self = real(path.resolve(argv1 ?? defaultBin));
-  const onPath = self && (env.PATH ?? '').split(path.delimiter).some(dir => dir && real(path.join(dir, 'dalan')) === self);
+  let firstOnPath = null;
+  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    firstOnPath = real(path.join(dir, 'dalan'));
+    if (firstOnPath !== null) break;
+  }
+  const onPath = self && firstOnPath === self;
   if (onPath) return env.npm_command === 'exec' ? 'npx @tnunamak/dalan' : 'dalan';
   return `node ${shellQuote(self ?? path.resolve(argv1 ?? defaultBin))}`;
 }

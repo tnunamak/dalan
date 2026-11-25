@@ -60,14 +60,39 @@ test('the installed Gozar version matches the Dalan manifest and lock', async ()
 });
 
 test('installed Gozar proves and removes an unknown route serving the real Dalan bridge', { timeout: 45000 }, async t => {
+  // Everything acquired is registered in `cleanups` the moment it exists and released last-in first-out by t.after, which runs
+  // even when setup throws. Every step runs even if another rejects. A failure anywhere in the journey, setup included, is the
+  // primary failure: cleanup failures are then diagnostics only, and they fail the test only when the journey itself passed.
+  const cleanups = [];
+  let journeyFailed = false;
+  t.after(async () => {
+    const failures = [];
+    for (const step of cleanups.reverse()) {
+      try { await step(); } catch (error) { failures.push(error); }
+    }
+    for (const error of failures) t.diagnostic(`cleanup failed: ${error?.stack ?? error}`);
+    if (failures.length && !journeyFailed) throw new AggregateError(failures, 'fixture cleanup failed');
+  });
+  try {
+    await installedJourney(t, cleanups);
+  } catch (error) {
+    journeyFailed = true;
+    throw error;
+  }
+});
+
+async function installedJourney(t, cleanups) {
   const root = await mkdtemp(join(tmpdir(), 'dg-'));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
   const id = 'edge-' + randomUUID().slice(0, 8);
   const home = join(root, 'g');
   const registry = await fakeRegistry({ id, kinds: ['attached', 'session'], reach: 'internet', dir: root,
     protocols: ['sse', 'streamable-http', 'oauth-dcr'] });
+  cleanups.push(() => registry.cleanup());
   const trial = join(root, 'd');
   const probe = net.createServer();
-  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
+  cleanups.push(() => probe.listening ? new Promise(resolve => probe.close(resolve)) : undefined);
   const appPort = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   const preparedId = process.env.DALAN_TEST_PREPARED_ROUTE === '1' ? randomUUID() : null;
@@ -78,8 +103,16 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
   }
   const stop = new AbortController();
   const input = new PassThrough();
+  const resources = new Map();
+  cleanups.push(async () => {
+    const failures = [];
+    for (const resource of resources.values()) {
+      try { await resource.close(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, 'resource close failed');
+  });
   const foreign = await forwarder('127.0.0.1:1');
-  const resources = new Map([['foreign', foreign]]);
+  resources.set('foreign', foreign);
   let requestedTarget, publicOrigin, nonceReads = 0, removed = [];
   const browserReceipt = process.env.DALAN_TEST_BROWSER_RECEIPT;
   const testReproof = process.env.DALAN_TEST_REPROOF_ROUTE === '1';
@@ -137,6 +170,7 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
       return { status: response.status, headers: Object.fromEntries(response.headers), chunks };
     } },
   ] });
+  cleanups.push(() => harness.close());
   let proof;
   const watchRoutes = harness.gozar.watchRoutes;
   harness.gozar.watchRoutes = async function* (request) {
@@ -156,6 +190,15 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
       if (text.includes('Waiting for sign-in.')) signalHandoff();
     } }, input, signal: stop.signal, errorContext: {},
     hosted: { interactive: true, gozar: harness.gozar, fetchImpl: publicFetch, readyMs: browserReceipt ? 18000 : 3000 },
+  });
+  cleanups.push(async () => {
+    stop.abort();
+    input.end();
+    // Bounded: a run that never settles after abort must not stop the harness, forwarders, registry and root from closing.
+    const timer = new AbortController();
+    const settled = await Promise.race([run.then(() => true, () => true), sleep(5000, false, { signal: timer.signal })]);
+    timer.abort();
+    if (!settled) throw new Error('the code under test did not stop within 5 s of abort');
   });
   let handedOff = false;
   try {
@@ -202,26 +245,22 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
     }
   } catch (error) {
     if (proof && !handedOff) {
-      assert.equal(proof.published, publicOrigin);
-      assert.ok(proof.verification.checks.includes('nonce'));
-      assert.notEqual(requestedTarget, proof.verification.subject.target);
-      assert.deepEqual(removed, ['owned'], 'failed app readiness still closes the exact connector');
-      assert.deepEqual([...resources.keys()], ['foreign']);
-      assert.doesNotMatch(output, /Waiting for sign-in|Paste this URL/);
-      await assert.rejects(readFile(join(trial, 'resource-url')), { code: 'ENOENT' });
-      t.diagnostic('SDK nonce proof reached the gate, Dalan refused the host, and cleanup preserved the foreign sentinel without handoff.');
+      try {
+        assert.equal(proof.published, publicOrigin);
+        assert.ok(proof.verification.checks.includes('nonce'));
+        assert.notEqual(requestedTarget, proof.verification.subject.target);
+        assert.deepEqual(removed, ['owned'], 'failed app readiness still closes the exact connector');
+        assert.deepEqual([...resources.keys()], ['foreign']);
+        assert.doesNotMatch(output, /Waiting for sign-in|Paste this URL/);
+        await assert.rejects(readFile(join(trial, 'resource-url')), { code: 'ENOENT' });
+        t.diagnostic('SDK nonce proof reached the gate, Dalan refused the host, and cleanup preserved the foreign sentinel without handoff.');
+      } catch (secondary) {
+        t.diagnostic(`failure-path assertions also failed: ${secondary?.message ?? secondary}`);
+      }
     }
     throw error;
-  } finally {
-    stop.abort();
-    input.end();
-    await run.catch(() => {});
-    await harness.close().catch(() => {});
-    await Promise.all([...resources.values()].map(resource => resource.close()));
-    await registry.cleanup();
-    await rm(root, { recursive: true, force: true });
   }
-});
+}
 
 async function waitForResource(file, expected) {
   const until = Date.now() + 12000;

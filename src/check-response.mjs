@@ -5,8 +5,11 @@ export async function checkResponse(work, running, {
   schedule = setTimeout,
   cancel = clearTimeout,
 } = {}) {
-  if (!Number.isFinite(responseMs) || responseMs < 0)
+  if (!Number.isFinite(responseMs) || responseMs < 0) {
+    // Observe rejected work even when the response budget is invalid.
+    Promise.resolve(work).catch(() => {});
     throw new TypeError('responseMs must be a non-negative finite number');
+  }
   let timer;
   try {
     return await Promise.race([

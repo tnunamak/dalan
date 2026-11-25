@@ -5,6 +5,66 @@ import path from 'node:path';
 import {sign} from 'node:crypto';
 import {DotBridgeAdapter} from './conformance/adapter-dot-bridge.mjs';
 import {parseWorkers} from '../src/workers.mjs';
+import Ajv2020 from 'ajv/dist/2020.js';
+import addFormats from 'ajv-formats';
+
+// Validate the actual shipped schema, not a parallel hand-written predicate.
+function testQualificationSchema() {
+  const readJSON = relative => JSON.parse(fs.readFileSync(new URL(relative, import.meta.url), 'utf8'));
+  const ajv = new Ajv2020({allErrors:true});
+  addFormats(ajv);
+  const validate = ajv.compile(readJSON('../contracts/adapter-qualification.schema.json'));
+  for (const name of ['protocol-v0', 'mcp']) {
+    assert.equal(validate(readJSON('../qualification/' + name + '.json')), true,
+      name + ': ' + JSON.stringify(validate.errors));
+  }
+  const fixture = {
+    schema_version:1,
+    record_kind:'draft_internal_qualification_record_not_wire_protocol',
+    adapter_id:'synthetic',
+    observed_on:'2026-11-15',
+    pins:{dalan_commit:'fixture-commit', requester_ref:'fixture-requester',
+      worker_host_ref:'fixture-worker', protocol:'fixture-protocol',
+      sdk:null, catalog_fingerprint:'fixture-catalog'},
+    roles:['worker'], continuity:'unknown', activation:'unknown',
+    capabilities:[{name:'synthetic-capability', declared:'yes', observed:'passed', required:true}],
+    qualification:{state:'passed_for_declared_scope', evidence_level:'deterministic_component', run_refs:['fixture-run']},
+    limits:['Synthetic schema fixture only; not qualification evidence.'],
+  };
+  const check = (label, mutate, expected) => {
+    const record = structuredClone(fixture);
+    mutate(record);
+    assert.equal(validate(record), expected, label + ': ' + JSON.stringify(validate.errors));
+  };
+  check('valid synthetic passed record', () => {}, true);
+  for (const pin of ['dalan_commit', 'requester_ref', 'worker_host_ref', 'protocol']) {
+    for (const value of [null, '']) {
+      check(pin + ' rejects ' + JSON.stringify(value), r => { r.pins[pin] = value; }, false);
+    }
+    check(pin + ' must be present', r => { delete r.pins[pin]; }, false);
+  }
+  check('unknown pin rejected', r => { r.pins.extra = 'fixture'; }, false);
+  for (const value of [null, '']) {
+    check('passed requires catalog fingerprint', r => { r.pins.catalog_fingerprint = value; }, false);
+  }
+  check('sdk string accepted', r => { r.pins.sdk = 'fixture-sdk'; }, true);
+  check('sdk number rejected', r => { r.pins.sdk = 1; }, false);
+  for (const observed of ['failed', 'not_tested', 'blocked', 'inconclusive']) {
+    check('required capability must pass: ' + observed, r => { r.capabilities[0].observed = observed; }, false);
+    check('optional capability need not pass: ' + observed, r => {
+      r.capabilities[0].required = false; r.capabilities[0].observed = observed;
+    }, true);
+  }
+  check('passed requires at least one run reference', r => { r.qualification.run_refs = []; }, false);
+  check('not-run may lack evidence', r => {
+    r.qualification.state = 'not_run'; r.qualification.run_refs = [];
+    r.pins.catalog_fingerprint = null; r.capabilities[0].observed = 'not_tested';
+  }, true);
+  for (const date of ['2026-1-15', '2026-11-5', '2026/11/15', '2026-02-30']) {
+    check('invalid observed_on: ' + date, r => { r.observed_on = date; }, false);
+  }
+}
+testQualificationSchema();
 
 const adapter=new DotBridgeAdapter();
 // Profile connections pin a client as well as a subject; sign the fixture tokens with that same client.

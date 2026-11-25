@@ -723,14 +723,21 @@ export class Workspace {
     try {
       const row=this.store.db.prepare('SELECT path FROM workspaces WHERE request_id=?').get(requestId);
       if(!row) return null;
-      const mirror=savedWorkspaceMirror(row.path,requestId);
-      if(!mirror) return null;
+      const expectedPath=path.join(worktrees,requestId);
+      let treeAbsent=false;
+      if(!cacheOnly&&row.path===expectedPath&&path.dirname(expectedPath)===worktrees&&path.basename(expectedPath)===requestId) {
+        try { fs.lstatSync(expectedPath); }
+        catch(error) { treeAbsent=error.code==='ENOENT'&&fs.lstatSync(worktrees,{throwIfNoEntry:false})?.isDirectory()===true; }
+      }
+      const mirror=treeAbsent?null:savedWorkspaceMirror(row.path,requestId);
+      if(!treeAbsent&&!mirror) return null;
       const cache=path.join(caches,requestId);
       if(fs.existsSync(cache)) { await removeCache(cache); if(!fs.existsSync(cache)&&cacheOnly) return 'cache'; }
       if(cacheOnly) return null;
-      if(row.path!==path.join(worktrees,requestId)) throw Object.assign(new Error('workspace cleanup path mismatch'),{request_id:requestId,cleanup_integrity:true});
-      if(pathExistsOrThrow(row.path)) await gitAsync(['-C',mirror,'worktree','remove','--force',row.path]);
-      // The sidecar goes first: if it cannot be removed, the row stays and the sweep retries both.
+      if(row.path!==expectedPath) throw Object.assign(new Error('workspace cleanup path mismatch'),{request_id:requestId,cleanup_integrity:true});
+      if(treeAbsent&&(pathExistsOrThrow(row.path)||fs.lstatSync(worktrees,{throwIfNoEntry:false})?.isDirectory()!==true)) return null;
+      if(!treeAbsent&&pathExistsOrThrow(row.path)) await gitAsync(['-C',mirror,'worktree','remove','--force',row.path]);
+      // Keep the row until the sidecar is gone, so the sweep can retry after the tree is removed.
       fs.rmSync(this.ignoredWrittenFile(requestId),{force:true});
       this.store.db.prepare('DELETE FROM workspaces WHERE request_id=?').run(requestId);
       return 'removed';
