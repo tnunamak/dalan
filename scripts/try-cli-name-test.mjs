@@ -38,3 +38,21 @@ test('under npx the CLI is named npx @tnunamak/dalan, because npx puts its tempo
     assert.equal(cliCommand(path.join(dir, 'dalan'), { PATH: dir, npm_command: 'run-script' }), 'dalan');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+for (const executable of [true, false]) {
+  test(`an earlier ${executable ? 'executable' : 'non-executable'} dalan ${executable ? 'shadows' : 'does not shadow'} this CLI`, () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'try-cli-'));
+    try {
+      const earlier = path.join(root, 'earlier');
+      const later = path.join(root, 'later');
+      fs.mkdirSync(earlier);
+      fs.mkdirSync(later);
+      const other = path.join(earlier, 'dalan');
+      fs.writeFileSync(other, '#!/bin/sh\n');
+      fs.chmodSync(other, executable ? 0o755 : 0o644);
+      fs.symlinkSync(bin, path.join(later, 'dalan'));
+      assert.equal(cliCommand(bin, { PATH: [earlier, later].join(path.delimiter) }),
+        executable ? `node '${fs.realpathSync(bin)}'` : 'dalan');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+}
