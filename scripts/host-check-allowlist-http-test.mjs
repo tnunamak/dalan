@@ -106,6 +106,25 @@ try {
     assert.equal(good.evidence.host_budget.dependencies.lock_sha256,prepared.lock_sha256);
     assert.equal(good.evidence.host_budget.stop.verified,true);assert.deepEqual(good.evidence.host_budget.stop.remaining_pids,[]);
     assert.equal(fs.existsSync(path.join(repo,'node_modules')),false,'owner preparation must not install in the checkout');
+    // A lockfile the host cannot prepare fails every host check, so the claim offers none and says why.
+    await call('finish',{request_id:freshId,claim_id:freshClaim.claim_id,outcome:'completed',summary:'Prepared check ran',result:'The prepared check completed.'});
+    const workspaceManifest={...manifest,workspaces:['packages/*']};
+    fs.writeFileSync(path.join(repo,'package.json'),JSON.stringify(workspaceManifest));
+    git('add','.');git('commit','-qm','workspaces');
+    // The bridge's mirror was cloned at the first claim: bring the new commit into it, as the real admission fetch does.
+    const mirrors=[];const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory()){if(entry.name==='fixture.git')mirrors.push(full);else if(entry.name!=='node_modules'&&entry.name!=='.git')walk(full);}}};walk(home);
+    assert.equal(mirrors.length,1,`one mirror, saw ${mirrors}`);
+    assert.equal(spawnSync('git',['-C',mirrors[0],'fetch','-q',repo,'+refs/heads/*:refs/heads/*'],{encoding:'utf8'}).status,0,'mirror fetch');
+    const wsId=`req_${randomUUID()}`;
+    const wsAssignment={...assignment,request_id:wsId,inputs:[{github_repo:'example-owner/fixture',base_sha:git('rev-parse','HEAD')}]};
+    const wsStore=new Store(dbPath);
+    try{wsStore.submit(wsAssignment,'thread','environment','unsupported-http-owner',false,null,'normal',null,wsAssignment,null,null,'host');}finally{wsStore.db.close();}
+    const wsClaim=await call('claim',{request_id:wsId,claimant:'dot'});
+    assert(wsClaim.claim_id,JSON.stringify(wsClaim));
+    assert.deepEqual(wsClaim.available_checks,[],'a workspace lockfile offers no runnable check');
+    assert.equal(wsClaim.host_execution_available,false);
+    assert.match(wsClaim.host_execution_unavailable_reason,/dependencies_unsupported: only root npm lockfiles without workspaces/);
+    assert.equal(Object.hasOwn(wsClaim,'available_check_details'),false);
     console.log('PASS authenticated HTTP prepared run_check: on-demand preparation of the pinned lockfile, read-only real backend and persisted identity');
   }
 } finally {

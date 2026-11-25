@@ -13,7 +13,7 @@ import { argvTestFiles, assignmentInput, prepareGithubRepo, detectCheck, detectC
 import { hostBackend, hostReadiness, capabilityNotAvailable, TRUST, withEvidence } from './execution.mjs';
 import { redactSecrets, redactOutput, privateKeyHeader } from './redaction.mjs';
 import { hostCheckRefusal, hostCheckAuthorization } from './host-execution-policy.mjs';
-import { resolvePreparedNodeModules, prepareNodeModulesInChild } from './prepared-node-modules.mjs';
+import { resolvePreparedNodeModules, prepareNodeModulesInChild, unsupportedDependencies } from './prepared-node-modules.mjs';
 import { ownerReportArtifactBytes } from './owner-report-artifact.mjs';
 import { withCheckCoverage } from './check-coverage.mjs';
 import { runHostBudget, parseHostBudget } from './host-budget.mjs';
@@ -831,8 +831,11 @@ export class Workspace {
       const absent=dir?excludedPathsAbsent(dir,assignment):excludedPathsAccountedAtBase(this.mirrorFor(assignmentInput(assignment),worker),assignment);
       const baseRefusal=hostCheckRefusal(assignment,null,null,null,absent);
       const readiness=hostReadiness();
-      const candidates=baseRefusal||!readiness.ready?[]:declared.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
-      const reason=baseRefusal||(!readiness.ready?readiness.reason:null)||(!candidates.length?'host_check_not_allowlisted: no permitted owner-configured check is runnable':null);
+      // Every host check looks up prepared dependencies for the whole checkout, so a lockfile the host cannot prepare
+      // (workspaces, local dependencies) fails them all: say so here instead of offering checks that cannot run.
+      const unsupported=baseRefusal||!readiness.ready?null:this.dependenciesUnsupported(assignment,dir,worker);
+      const candidates=baseRefusal||!readiness.ready||unsupported?[]:declared.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
+      const reason=baseRefusal||(!readiness.ready?readiness.reason:null)||(unsupported?`dependencies_unsupported: ${unsupported}; run_check cannot run in this repository`:null)||(!candidates.length?'host_check_not_allowlisted: no permitted owner-configured check is runnable':null);
       const details=candidates.length?this.checkDetails(assignment,repo,candidates,dir,worker):null;
       return {available_checks:candidates,...(details?{available_check_details:details,check_guidance:CHECK_GUIDANCE}:{}),host_execution_available:candidates.length>0,host_execution_unavailable_reason:reason};
     } catch(error) {
@@ -840,6 +843,18 @@ export class Workspace {
       if(execution==='host'&&assignment.execution_scope!=='implementation') throw error;
       return {available_checks:[],available_checks_error:'invalid check metadata',...(execution==='host'?{host_execution_available:false,host_execution_unavailable_reason:'invalid check metadata'}:{})};
     }
+  }
+  // The reason this checkout's manifest and lockfile cannot be prepared on the host, or null. Best effort: unreadable input is not a reason.
+  dependenciesUnsupported(assignment,dir,worker='dot') {
+    try {
+      if(dir) {
+        const read=file=>{try{return fs.readFileSync(path.join(dir,file));}catch{return null;}};
+        return unsupportedDependencies(read('package.json'),read('package-lock.json'));
+      }
+      const input=assignmentInput(assignment),mirror=this.mirrorFor(input,worker);
+      const show=file=>{try{return git(['-C',mirror,'show',`${input.base_sha}:${file}`],{encoding:'buffer'});}catch{return null;}};
+      return unsupportedDependencies(show('package.json'),show('package-lock.json'));
+    } catch { return null; }
   }
   // id -> what run_check runs. Best effort: a check whose definition cannot be read is listed without a summary, never withheld.
   checkDetails(assignment,repo,ids,dir,worker) {
