@@ -61,12 +61,23 @@ test('the installed Gozar version matches the Dalan manifest and lock', async ()
 
 test('installed Gozar proves and removes an unknown route serving the real Dalan bridge', { timeout: 45000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'dg-'));
-  // The root is owned from the moment it exists: t.after runs after the body and its own cleanup, even when setup fails.
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Everything acquired is registered here at once and released last-in first-out by t.after, which runs even when setup
+  // throws. Every step runs even if another rejects; a cleanup failure never replaces the failure that ended the body.
+  const cleanups = [() => rm(root, { recursive: true, force: true })];
+  let bodyFailed = false;
+  t.after(async () => {
+    const failures = [];
+    for (const step of cleanups.reverse()) {
+      try { await step(); } catch (error) { failures.push(error); }
+    }
+    for (const error of failures) t.diagnostic(`cleanup failed: ${error?.stack ?? error}`);
+    if (failures.length && !bodyFailed) throw new AggregateError(failures, 'fixture cleanup failed');
+  });
   const id = 'edge-' + randomUUID().slice(0, 8);
   const home = join(root, 'g');
   const registry = await fakeRegistry({ id, kinds: ['attached', 'session'], reach: 'internet', dir: root,
     protocols: ['sse', 'streamable-http', 'oauth-dcr'] });
+  cleanups.push(() => registry.cleanup());
   const trial = join(root, 'd');
   const probe = net.createServer();
   await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
@@ -80,8 +91,16 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
   }
   const stop = new AbortController();
   const input = new PassThrough();
+  const resources = new Map();
+  cleanups.push(async () => {
+    const failures = [];
+    for (const resource of resources.values()) {
+      try { await resource.close(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, 'resource close failed');
+  });
   const foreign = await forwarder('127.0.0.1:1');
-  const resources = new Map([['foreign', foreign]]);
+  resources.set('foreign', foreign);
   let requestedTarget, publicOrigin, nonceReads = 0, removed = [];
   const browserReceipt = process.env.DALAN_TEST_BROWSER_RECEIPT;
   const testReproof = process.env.DALAN_TEST_REPROOF_ROUTE === '1';
@@ -139,6 +158,7 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
       return { status: response.status, headers: Object.fromEntries(response.headers), chunks };
     } },
   ] });
+  cleanups.push(() => harness.close());
   let proof;
   const watchRoutes = harness.gozar.watchRoutes;
   harness.gozar.watchRoutes = async function* (request) {
@@ -159,8 +179,12 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
     } }, input, signal: stop.signal, errorContext: {},
     hosted: { interactive: true, gozar: harness.gozar, fetchImpl: publicFetch, readyMs: browserReceipt ? 18000 : 3000 },
   });
+  cleanups.push(async () => {
+    stop.abort();
+    input.end();
+    await run.catch(() => {});
+  });
   let handedOff = false;
-  let bodyFailed = false;
   try {
     await Promise.race([handoff, run.then(() => assert.fail('trial stopped before handoff'))]);
     handedOff = true;
@@ -206,28 +230,20 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
   } catch (error) {
     bodyFailed = true;
     if (proof && !handedOff) {
-      assert.equal(proof.published, publicOrigin);
-      assert.ok(proof.verification.checks.includes('nonce'));
-      assert.notEqual(requestedTarget, proof.verification.subject.target);
-      assert.deepEqual(removed, ['owned'], 'failed app readiness still closes the exact connector');
-      assert.deepEqual([...resources.keys()], ['foreign']);
-      assert.doesNotMatch(output, /Waiting for sign-in|Paste this URL/);
-      await assert.rejects(readFile(join(trial, 'resource-url')), { code: 'ENOENT' });
-      t.diagnostic('SDK nonce proof reached the gate, Dalan refused the host, and cleanup preserved the foreign sentinel without handoff.');
+      try {
+        assert.equal(proof.published, publicOrigin);
+        assert.ok(proof.verification.checks.includes('nonce'));
+        assert.notEqual(requestedTarget, proof.verification.subject.target);
+        assert.deepEqual(removed, ['owned'], 'failed app readiness still closes the exact connector');
+        assert.deepEqual([...resources.keys()], ['foreign']);
+        assert.doesNotMatch(output, /Waiting for sign-in|Paste this URL/);
+        await assert.rejects(readFile(join(trial, 'resource-url')), { code: 'ENOENT' });
+        t.diagnostic('SDK nonce proof reached the gate, Dalan refused the host, and cleanup preserved the foreign sentinel without handoff.');
+      } catch (secondary) {
+        t.diagnostic(`failure-path assertions also failed: ${secondary?.message ?? secondary}`);
+      }
     }
     throw error;
-  } finally {
-    // Every child stops even if another one fails to. A cleanup failure never replaces the failure that ended the body.
-    const cleanupFailures = [];
-    const settle = async step => { try { await step(); } catch (error) { cleanupFailures.push(error); } };
-    stop.abort();
-    input.end();
-    await settle(() => run.catch(() => {}));
-    await settle(() => harness.close().catch(() => {}));
-    for (const resource of resources.values()) await settle(() => resource.close());
-    await settle(() => registry.cleanup());
-    for (const error of cleanupFailures) t.diagnostic(`cleanup failed: ${error?.stack ?? error}`);
-    if (cleanupFailures.length && !bodyFailed) throw new AggregateError(cleanupFailures, 'fixture cleanup failed');
   }
 });
 
