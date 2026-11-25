@@ -70,9 +70,9 @@ export function validateProtocol(value) {
 const questionError=(code,message)=>Object.assign(new Error(`${code}: ${message}`),{code});
 // A purpose other than clarification marks a question only a human may answer. SQLite cannot change a CHECK in place, so the schema 67 list below is the whole set.
 // A claim made by a finish handoff starts on a short idle lease: a job handed to a session that never touches it returns to the queue
-// after HANDOFF_IDLE_LEASE_MS. The holder's first call on it (any call, `get` included) moves it to HANDOFF_WORK_LEASE_MS, the lease
+// after the worker's finish_handoff.idle_lease_ms (default 2 minutes). The holder's first call on it (any call, `get` included) moves it to HANDOFF_WORK_LEASE_MS, the lease
 // it ran under before the idle phase existed. The claim's acquisition_id carries the prefix, so the Store needs no extra column.
-export const HANDOFF_ACQUISITION_PREFIX='handoff-', HANDOFF_IDLE_LEASE_MS=120000, HANDOFF_WORK_LEASE_MS=600000;
+export const HANDOFF_ACQUISITION_PREFIX='handoff-', HANDOFF_WORK_LEASE_MS=600000;
 export const QUESTION_PURPOSES=['clarification','human_decision','authentication','tool_permission'];
 function validateQuestion(questionId,text) {
   if(typeof questionId!=='string'||!/^[A-Za-z0-9_.:-]{1,128}$/.test(questionId)) throw new Error('invalid question_id');
