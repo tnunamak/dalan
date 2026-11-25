@@ -71,7 +71,7 @@ const pass = message => console.log(`PASS ${message}`);
   assert.deepEqual(parse({ wait_ms: 0, max_jobs: 8 }), { waitMs: 0, maxJobs: 8, idleLeaseMs: 120000 });
   assert.deepEqual(parse({ idle_lease_ms: 60000 }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 60000 });
   assert.deepEqual(parse({ idle_lease_ms: 1000 }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 1000 });
-  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }, { max_jobs: 0 }, { max_jobs: 9 }, { max_jobs: 1.5 }, { max_jobs: '3' }, { max_jobs: null }, { idle_lease_ms: 999 }, { idle_lease_ms: 120001 }, { idle_lease_ms: 1.5 }, { idle_lease_ms: '60000' }, { idle_lease_ms: null }])
+  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }, { max_jobs: 0 }, { max_jobs: 9 }, { max_jobs: 1.5 }, { max_jobs: '3' }, { max_jobs: null }, { idle_lease_ms: -1 }, { idle_lease_ms: 999 }, { idle_lease_ms: 120001 }, { idle_lease_ms: 1.5 }, { idle_lease_ms: '60000' }, { idle_lease_ms: null }])
     assert.throws(() => parse(bad), /finish_handoff|expected object|wait_ms|max_jobs|idle_lease_ms/, `rejects ${JSON.stringify(bad)}`);
   pass('finish_handoff config: off by default; true, {} and {wait_ms 0..45000} accepted; everything else refused');
 }
