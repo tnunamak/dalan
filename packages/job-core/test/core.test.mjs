@@ -89,6 +89,30 @@ test('a stale revision is reported before validating a renewal duration', () => 
     { code: 'revision_conflict' });
 });
 
+test('a matching but unrepresentable finish revision produces no decision', () => {
+  for (const revision of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const snapshot = Object.freeze({ revision });
+    const command = Object.freeze({ expectedRevision: revision, operation: 'finish' });
+    assert.throws(() => decide(snapshot, command), { code: 'invalid_revision', message: 'invalid_revision' });
+    assert.deepEqual(snapshot, { revision });
+  }
+});
+
+test('renewal refuses missing or invalid server clock context before emitting an effect', () => {
+  const snapshot = Object.freeze({ revision: 4 });
+  const command = Object.freeze({
+    expectedRevision: 4, operation: 'renew', args: Object.freeze({ leaseMs: 2 }),
+  });
+  for (const context of [undefined, { now: -1, maxLeaseMs: 8 },
+    { now: 10.5, maxLeaseMs: 8 }, { now: 10, maxLeaseMs: 0 }]) {
+    assert.throws(() => decide(snapshot, command, context), {
+      code: 'invalid_lease', message: 'invalid_lease',
+    });
+    assert.deepEqual(snapshot, { revision: 4 });
+  }
+  assert.equal(decide(snapshot, command, { now: 10, maxLeaseMs: 8 }).leaseUntil, 12);
+});
+
 test('revision and lease decisions use supplied time', () => {
   const command = { expectedRevision: 2, operation: 'renew', args: { leaseMs: 7 } };
   assert.deepEqual(decide({ revision: 2 }, command, { now: 10, maxLeaseMs: 9 }), {
