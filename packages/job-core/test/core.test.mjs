@@ -47,6 +47,13 @@ test('canonical JSON writes negative zero as zero in object and array values', (
   assert.equal(canonicalJson({ n: 0, array: [0, { n: 0 }] }), expected);
 });
 
+test('canonical JSON rejects a missing array cell rather than inventing an explicit null', () => {
+  const incomplete = ['first', 'second'];
+  delete incomplete[1];
+  assert.throws(() => canonicalJson(incomplete, 'invalid_fixture'), { code: 'invalid_fixture' });
+  assert.equal(canonicalJson(['first', null]), '["first",null]');
+});
+
 test('canonical JSON rejects an undefined array cell instead of serializing it as null', () => {
   assert.throws(() => canonicalJson({ values: [1, undefined] }), {
     name: 'Error', code: 'invalid_json', message: 'invalid_json',
