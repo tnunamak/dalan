@@ -268,6 +268,30 @@ try {
     pass('handoff lease: about 120 s while idle; an untouched handoff requeues; a started one keeps its claim');
   }
 
+  // 10. A row whose handoff lapsed untouched is not pushed again. In production the same rows were handed ten times and
+  // never started (62 of 117 handed claims were repeats). The worker still claims such a row from its own list.
+  {
+    const b = await start('lapsed', { finish_handoff: { wait_ms: WAIT_MS } }, { max_claimed_outer_assignments: 4 }, { DALAN_HANDOFF_IDLE_LEASE_MS: '2000' });
+    const f1 = await b.claimNew('req_lapse_first');
+    await b.submit('req_lapse_a');
+    assert.equal((await b.finish(f1)).next_job.request_id, 'req_lapse_a');
+    await sleep(4500);
+    assert.equal((await b.ok('get', { request_id: 'req_lapse_a' })).status, 'queued', 'the untouched handoff lapsed');
+    // Only the lapsed row is queued: nothing is handed, the finish does not wait, and the old hint lists the row.
+    const f2 = await b.claimNew('req_lapse_second');
+    const started = Date.now();
+    const bare = await b.finish(f2);
+    assert.ok(Date.now() - started < 1000, 'no wait when only a lapsed row is queued');
+    assert.equal(bare.next_job, undefined, JSON.stringify(bare));
+    assert.equal(bare.next_queued?.[0]?.request_id, 'req_lapse_a', JSON.stringify(bare));
+    // A fresh row behind it is handed; the lapsed one is skipped.
+    await b.submit('req_lapse_fresh');
+    const f3 = await b.claimNew('req_lapse_third');
+    assert.equal((await b.finish(f3)).next_job?.request_id, 'req_lapse_fresh');
+    assert.ok((await b.ok('claim', { request_id: 'req_lapse_a', claimant: 'fixture-worker' })).claim_id, 'the worker claims the lapsed row itself');
+    pass('a handoff that lapsed untouched is not pushed again; a fresh row is handed instead; the worker can still claim it');
+  }
+
   // 6. max_jobs refills every lane the finish frees, not one: the reply carries up to max_jobs claimed jobs (next_job is the
   // first, next_jobs lists all), never more than the free lanes or the queued jobs, and a repeated finish gets the same jobs.
   {

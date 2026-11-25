@@ -634,7 +634,7 @@ const finishNextGuidance=next=>`Claim ${next[0].request_id} yourself before you 
 // exact retry of the first claim, is refused that job and takes the next one.
 // The claim starts on a short idle lease (see HANDOFF_IDLE_LEASE_MS in store.mjs). DALAN_HANDOFF_IDLE_LEASE_MS shortens it for tests.
 const handoffIdleLeaseMs=()=>{const v=Number(readEnv('DALAN_HANDOFF_IDLE_LEASE_MS'));return Number.isInteger(v)&&v>=1000&&v<=HANDOFF_IDLE_LEASE_MS?v:HANDOFF_IDLE_LEASE_MS;};
-const HANDOFF_POLL_MS=500,HANDOFF_MAX_ATTEMPTS=5;
+const HANDOFF_POLL_MS=500,HANDOFF_MAX_ATTEMPTS=5,HANDOFF_PICK_WINDOW=64;
 const nap=(ms,signal)=>new Promise(resolve=>{
   const done=()=>{clearTimeout(timer);signal?.removeEventListener('abort',done);resolve();};
   const timer=setTimeout(done,ms);
@@ -677,7 +677,8 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal})
     }
     const started=Date.now(),tried=new Set();
     let sawQueued=false;
-    const pick=free=>(store.nextQueued(free+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id));
+    // Rows whose last handoff lapsed untouched are left for the worker's own list_pending: the same rows were handed ten times and never started.
+    const pick=free=>(store.nextQueued(HANDOFF_PICK_WINDOW+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id)&&!store.handoffLapsed(x.request_id,worker)).slice(0,free);
     for(;;) {
       if(signal?.aborted||store.paused()) return jobs.length?{jobs}:{};
       const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
@@ -705,7 +706,8 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal})
           if(left<=0) return jobs.length?{jobs}:{};
           fresh=pick(left);
         }
-        if(jobs.length||tried.size) return jobs.length?{jobs}:{};
+        // Only rows that lapsed untouched are queued: hand nothing and do not hold the finish; the old hint lists them.
+        if(jobs.length||tried.size||!pick(free_lanes).length) return jobs.length?{jobs}:{};
       }
       const left=started+waitMs-Date.now();
       if(left<=0) return sawQueued?{}:{empty:true,waited_ms:Date.now()-started};
