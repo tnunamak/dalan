@@ -18,19 +18,22 @@ export function ensureWorkerRelationship(db,worker,pattern='outbound_only') {
     SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM relationships WHERE counterpart_ref=?)`)
     .run(`rel_${randomUUID()}`,JSON.stringify(['requester']),worker,pattern,'unknown','none',new Date().toISOString(),worker);
 }
-// finish_handoff: true | {wait_ms, max_jobs}. A finishing worker is handed its next job in the reply, or waits up to wait_ms for one.
+// finish_handoff: true | {wait_ms, max_jobs, idle_lease_ms}. A finishing worker is handed its next job in the reply, or waits up to wait_ms for one.
+// idle_lease_ms (1000..120000, default 120000) is how long a handed job may stay untouched before it returns to the queue.
 // max_jobs (1..8, default 1) is how many jobs one finish may hand over: it refills every lane the finish frees, up to the free lanes.
 // ChatGPT documents no tool-call timeout and users report about 60 s, so the wait stays well below that.
-export const FINISH_HANDOFF_WAIT_MS=20000, FINISH_HANDOFF_MAX_WAIT_MS=45000, FINISH_HANDOFF_MAX_JOBS=8;
+export const FINISH_HANDOFF_WAIT_MS=20000, FINISH_HANDOFF_MAX_WAIT_MS=45000, FINISH_HANDOFF_MAX_JOBS=8, FINISH_HANDOFF_MIN_IDLE_LEASE_MS=1000, FINISH_HANDOFF_MAX_IDLE_LEASE_MS=120000;
 function parseFinishHandoff(value,name) {
   if(value===undefined||value===false) return null;
-  if(value===true) return {waitMs:FINISH_HANDOFF_WAIT_MS,maxJobs:1};
-  object(value,['wait_ms','max_jobs']);
+  if(value===true) return {waitMs:FINISH_HANDOFF_WAIT_MS,maxJobs:1,idleLeaseMs:FINISH_HANDOFF_MAX_IDLE_LEASE_MS};
+  object(value,['wait_ms','max_jobs','idle_lease_ms']);
   const waitMs=value.wait_ms===undefined?FINISH_HANDOFF_WAIT_MS:value.wait_ms;
   if(!Number.isInteger(waitMs)||waitMs<0||waitMs>FINISH_HANDOFF_MAX_WAIT_MS) fail(`${name}.finish_handoff.wait_ms must be an integer from 0 to ${FINISH_HANDOFF_MAX_WAIT_MS}`);
   const maxJobs=value.max_jobs===undefined?1:value.max_jobs;
   if(!Number.isInteger(maxJobs)||maxJobs<1||maxJobs>FINISH_HANDOFF_MAX_JOBS) fail(`${name}.finish_handoff.max_jobs must be an integer from 1 to ${FINISH_HANDOFF_MAX_JOBS}`);
-  return {waitMs,maxJobs};
+  const idleLeaseMs=value.idle_lease_ms===undefined?FINISH_HANDOFF_MAX_IDLE_LEASE_MS:value.idle_lease_ms;
+  if(!Number.isInteger(idleLeaseMs)||idleLeaseMs<FINISH_HANDOFF_MIN_IDLE_LEASE_MS||idleLeaseMs>FINISH_HANDOFF_MAX_IDLE_LEASE_MS) fail(`${name}.finish_handoff.idle_lease_ms must be an integer from ${FINISH_HANDOFF_MIN_IDLE_LEASE_MS} to ${FINISH_HANDOFF_MAX_IDLE_LEASE_MS}`);
+  return {waitMs,maxJobs,idleLeaseMs};
 }
 const repoPart=/^[A-Za-z0-9_.-]+$/;
 function validRepoName(repo) {

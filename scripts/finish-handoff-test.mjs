@@ -63,14 +63,16 @@ const pass = message => console.log(`PASS ${message}`);
   const parse = finish_handoff => parseWorkers({ workers: { dot: { connections: [{ issuer: 'i', subject: 's', client_id: 'c' }], ...(finish_handoff === undefined ? {} : { finish_handoff }) } } }).workers.get('dot').finishHandoff;
   assert.equal(parse(undefined), undefined);
   assert.equal(parse(false), undefined);
-  assert.deepEqual(parse(true), { waitMs: 20000, maxJobs: 1 });
-  assert.deepEqual(parse({}), { waitMs: 20000, maxJobs: 1 });
-  assert.deepEqual(parse({ wait_ms: 0 }), { waitMs: 0, maxJobs: 1 });
-  assert.deepEqual(parse({ wait_ms: 45000 }), { waitMs: 45000, maxJobs: 1 });
-  assert.deepEqual(parse({ max_jobs: 1 }), { waitMs: 20000, maxJobs: 1 });
-  assert.deepEqual(parse({ wait_ms: 0, max_jobs: 8 }), { waitMs: 0, maxJobs: 8 });
-  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }, { max_jobs: 0 }, { max_jobs: 9 }, { max_jobs: 1.5 }, { max_jobs: '3' }, { max_jobs: null }])
-    assert.throws(() => parse(bad), /finish_handoff|expected object|wait_ms|max_jobs/, `rejects ${JSON.stringify(bad)}`);
+  assert.deepEqual(parse(true), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 120000 });
+  assert.deepEqual(parse({}), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 120000 });
+  assert.deepEqual(parse({ wait_ms: 0 }), { waitMs: 0, maxJobs: 1, idleLeaseMs: 120000 });
+  assert.deepEqual(parse({ wait_ms: 45000 }), { waitMs: 45000, maxJobs: 1, idleLeaseMs: 120000 });
+  assert.deepEqual(parse({ max_jobs: 1 }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 120000 });
+  assert.deepEqual(parse({ wait_ms: 0, max_jobs: 8 }), { waitMs: 0, maxJobs: 8, idleLeaseMs: 120000 });
+  assert.deepEqual(parse({ idle_lease_ms: 60000 }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 60000 });
+  assert.deepEqual(parse({ idle_lease_ms: 1000 }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 1000 });
+  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }, { max_jobs: 0 }, { max_jobs: 9 }, { max_jobs: 1.5 }, { max_jobs: '3' }, { max_jobs: null }, { idle_lease_ms: -1 }, { idle_lease_ms: 999 }, { idle_lease_ms: 120001 }, { idle_lease_ms: 1.5 }, { idle_lease_ms: '60000' }, { idle_lease_ms: null }])
+    assert.throws(() => parse(bad), /finish_handoff|expected object|wait_ms|max_jobs|idle_lease_ms/, `rejects ${JSON.stringify(bad)}`);
   pass('finish_handoff config: off by default; true, {} and {wait_ms 0..45000} accepted; everything else refused');
 }
 
@@ -252,7 +254,7 @@ try {
     const two = await b.finish(await b.ok('claim', { request_id: 'req_idle_b', claimant: 'fixture-worker' }));
     assert.equal(two.queue_empty, true);
     // Short idle lease: an untouched handoff returns to the queue; a touched one stays claimed.
-    const s = await start('idle-short', { finish_handoff: { wait_ms: WAIT_MS } }, { max_claimed_outer_assignments: 3 }, { DALAN_HANDOFF_IDLE_LEASE_MS: '2000' });
+    const s = await start('idle-short', { finish_handoff: { wait_ms: WAIT_MS, idle_lease_ms: 2000 } }, { max_claimed_outer_assignments: 3 });
     const f = await s.claimNew('req_short_first');
     for (const id of ['req_short_stranded', 'req_short_started']) await s.submit(id);
     const h1 = await s.finish(f);
@@ -271,7 +273,7 @@ try {
   // 10. A row whose handoff lapsed untouched is not pushed again. In production the same rows were handed ten times and
   // never started (62 of 117 handed claims were repeats). The worker still claims such a row from its own list.
   {
-    const b = await start('lapsed', { finish_handoff: { wait_ms: WAIT_MS } }, { max_claimed_outer_assignments: 4 }, { DALAN_HANDOFF_IDLE_LEASE_MS: '2000' });
+    const b = await start('lapsed', { finish_handoff: { wait_ms: WAIT_MS, idle_lease_ms: 2000 } }, { max_claimed_outer_assignments: 4 });
     const f1 = await b.claimNew('req_lapse_first');
     await b.submit('req_lapse_a');
     assert.equal((await b.finish(f1)).next_job.request_id, 'req_lapse_a');
@@ -288,8 +290,16 @@ try {
     await b.submit('req_lapse_fresh');
     const f3 = await b.claimNew('req_lapse_third');
     assert.equal((await b.finish(f3)).next_job?.request_id, 'req_lapse_fresh');
-    assert.ok((await b.ok('claim', { request_id: 'req_lapse_a', claimant: 'fixture-worker' })).claim_id, 'the worker claims the lapsed row itself');
-    pass('a handoff that lapsed untouched is not pushed again; a fresh row is handed instead; the worker can still claim it');
+    // The worker claims the lapsed row itself, works on it, and its short lease runs out: that abandon says it was worked, so a finish may hand it again.
+    const own = await b.ok('claim', { request_id: 'req_lapse_a', claimant: 'fixture-worker', lease_ms: 2000 });
+    assert.ok(own.claim_id, 'the worker claims the lapsed row itself');
+    await b.ok('progress', { request_id: 'req_lapse_a', claim_id: own.claim_id, note: 'started' });
+    await sleep(4500);
+    assert.equal((await b.ok('get', { request_id: 'req_lapse_a' })).status, 'queued', 'the worked claim lapsed too');
+    const f4 = await b.claimNew('req_lapse_fourth');
+    const r4 = await b.finish(f4);
+    assert.equal(r4.next_job?.request_id, 'req_lapse_a', `only the latest abandon counts: ${JSON.stringify(r4).slice(0, 300)}`);
+    pass('a handoff that lapsed untouched is not pushed again; a fresh row is handed instead; the worker can still claim it; a later abandon of a worked claim clears it');
   }
 
   // 6. max_jobs refills every lane the finish frees, not one: the reply carries up to max_jobs claimed jobs (next_job is the
