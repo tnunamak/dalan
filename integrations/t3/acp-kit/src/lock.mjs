@@ -138,8 +138,13 @@ export async function acquireLock(file, { attempts = 8, guardWaitMs = 2000 } = {
     if (createExclusive(file, record)) {
       const release = () => {
         held.delete(release);
-        const now = inspect(file);
-        if (now?.record?.token === token) fs.rmSync(file, { force: true });
+        try {
+          const now = inspect(file);
+          if (now?.record?.token === token) fs.rmSync(file, { force: true });
+        } catch (error) {
+          // A replaced parent means the old lock is no longer at this path.
+          if (error.code !== 'ENOTDIR') throw error;
+        }
       };
       held.add(release);
       return { token, release };

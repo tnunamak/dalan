@@ -337,6 +337,21 @@ test('release succeeds when the temporary lock file is already absent', async t 
   assert.deepEqual(fs.readdirSync(dir), []);
 });
 
+test('release leaves a replacement of the original fixture directory alone', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-moved-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const parent = path.join(dir, 'session');
+  const moved = path.join(dir, 'moved');
+  const file = path.join(parent, 'session.lock');
+  const lock = await acquireLock(file);
+  fs.renameSync(parent, moved);
+  fs.writeFileSync(parent, 'ordinary replacement file');
+
+  assert.doesNotThrow(() => lock.release());
+  assert.equal(fs.readFileSync(parent, 'utf8'), 'ordinary replacement file');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(moved, 'session.lock'), 'utf8')).token, lock.token);
+});
+
 test('acquire creates missing fixture directories and release keeps the directories', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-nested-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
