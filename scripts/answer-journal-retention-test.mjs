@@ -124,8 +124,9 @@ http.request=(options,callback)=>{
   assert.equal(JSON.parse(liveCommand.stdout).answered,true);
   assert.deepEqual(liveCommand.calls.map(call=>call.method),['GET','POST']); // revision read, then the send; the question is read back only to settle a failed send
   assert.equal(JSON.parse(fs.readFileSync(journalPath(cliReceipts,cliLive,'Q'),'utf8')).state,'committed');
-  // Not pinned here: a saved journal entry for a job that has since expired. On this trunk the CLI resumes that send without
-  // reading the job first (the original branch expected a TOMBSTONE exit with one GET). Pin it when the CLI gains that gate.
+  // Resuming a saved answer for an expired job is deliberately not gated in the CLI: the server refuses the send itself
+  // (protocol-owner-command.mjs:18 calls assertProtocolAvailable, which throws TOMBSTONE) and answer-journal.mjs:42,113 reads that
+  // reply as lost state. The original branch pinned a CLI-side GET with no POST; the fake bridge here cannot show the server refusal.
 
   console.log('PASS real Store retention fence, live preservation, expired pruning, encoded names, symlink and unexpected-entry refusal');
 } finally {
