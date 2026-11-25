@@ -2,13 +2,26 @@
 //   wake_delivery      each wake webhook: queued-to-attempt time and how long the receiver took to answer
 //   claim_phase        each new claim: the timestamps and gaps from submit to wake, wake to first listing, listing to claim
 //   claim_first_action the holder's first call on a fresh claim after the claim itself
+//   claim_silence      the holder's next call after at least SILENCE_MS without one, and (final:true) its finish, whatever the gap
 // Fresh claims and finish handoffs are told apart by `handoff`: a handoff claim has no wake and no listing of its own.
 // Remembered state is in memory and bounded; a restart forgets it, and the lines then carry nulls, never wrong numbers.
+export const SILENCE_MS=120000;
 const iso=ms=>new Date(ms).toISOString();
 const gap=(from,to)=>from==null||to==null?null:Math.round(to-from);
 export function createPhaseTrace({log,now=Date.now,max=5000}) {
-  const listed=new Map(),woke=new Map(),fresh=new Map();
+  const listed=new Map(),woke=new Map(),fresh=new Map(),active=new Map();
   const remember=(map,key,value)=>{map.set(key,value);while(map.size>max)map.delete(map.keys().next().value);};
+  // Measurement only: how long a claim goes quiet between the holder's calls. A claim that ends by cancel or lease expiry
+  // makes no call, so its last silence is read offline from the last mcp_outcome line against claim_phase.
+  const silence=({requestId,tool,subject})=>{
+    const claim=active.get(requestId);
+    if(!claim||claim.subject!==subject) return;
+    const at=now(),silent=at-claim.last,final=tool==='finish';
+    if(silent>=SILENCE_MS||final) log({kind:'claim_silence',request_id:requestId,claim_id:claim.claimId,tool,silence_ms:Math.round(silent),
+      since:claim.calls?'previous_call':'claim',final,calls_before:claim.calls,claim_age_ms:Math.round(at-claim.claimedAt)});
+    if(final) active.delete(requestId);
+    else { claim.last=at;claim.calls++; }
+  };
   return {
     // A list_pending call showed these rows: keep the first time each one was seen.
     listed(requestIds) {
@@ -30,6 +43,7 @@ export function createPhaseTrace({log,now=Date.now,max=5000}) {
       // Send, answer and listing are separate stamps. A row listed before the answer came back (or before the send) has no known order: null, never a negative gap.
       const wakeToListed=wake&&wake.ackAt!=null&&seen!=null&&seen>=wake.ackAt?gap(wake.ackAt,seen):null;
       remember(fresh,requestId,{claimId,subject,at,handoff});
+      remember(active,requestId,{claimId,subject,claimedAt:at,last:at,calls:0});
       log({kind:'claim_phase',request_id:requestId,worker,claim_id:claimId,handoff,created_at:createdAt,
         wake_attempt_at:wake?iso(wake.attemptAt):null,first_listed_at:seen==null?null:iso(seen),claimed_at:iso(at),
         submit_to_wake_ms:gap(created,wake?.attemptAt),wake_ack_ms:wake&&wake.ackAt!=null?Math.round(wake.ackAt-wake.attemptAt):null,
@@ -47,6 +61,7 @@ export function createPhaseTrace({log,now=Date.now,max=5000}) {
     },
     // Any worker call that names a request. The first one by the claimant after a fresh claim is the first action.
     action({requestId,tool,subject}) {
+      silence({requestId,tool,subject});
       const claim=fresh.get(requestId);
       if(!claim||claim.subject!==subject) return;
       fresh.delete(requestId);
