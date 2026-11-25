@@ -18,16 +18,19 @@ export function ensureWorkerRelationship(db,worker,pattern='outbound_only') {
     SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM relationships WHERE counterpart_ref=?)`)
     .run(`rel_${randomUUID()}`,JSON.stringify(['requester']),worker,pattern,'unknown','none',new Date().toISOString(),worker);
 }
-// finish_handoff: true | {wait_ms}. A finishing worker is handed its next job in the reply, or waits up to wait_ms for one.
+// finish_handoff: true | {wait_ms, max_jobs}. A finishing worker is handed its next job in the reply, or waits up to wait_ms for one.
+// max_jobs (1..8, default 1) is how many jobs one finish may hand over: it refills every lane the finish frees, up to the free lanes.
 // ChatGPT documents no tool-call timeout and users report about 60 s, so the wait stays well below that.
-export const FINISH_HANDOFF_WAIT_MS=20000, FINISH_HANDOFF_MAX_WAIT_MS=45000;
+export const FINISH_HANDOFF_WAIT_MS=20000, FINISH_HANDOFF_MAX_WAIT_MS=45000, FINISH_HANDOFF_MAX_JOBS=8;
 function parseFinishHandoff(value,name) {
   if(value===undefined||value===false) return null;
-  if(value===true) return {waitMs:FINISH_HANDOFF_WAIT_MS};
-  object(value,['wait_ms']);
+  if(value===true) return {waitMs:FINISH_HANDOFF_WAIT_MS,maxJobs:1};
+  object(value,['wait_ms','max_jobs']);
   const waitMs=value.wait_ms===undefined?FINISH_HANDOFF_WAIT_MS:value.wait_ms;
   if(!Number.isInteger(waitMs)||waitMs<0||waitMs>FINISH_HANDOFF_MAX_WAIT_MS) fail(`${name}.finish_handoff.wait_ms must be an integer from 0 to ${FINISH_HANDOFF_MAX_WAIT_MS}`);
-  return {waitMs};
+  const maxJobs=value.max_jobs===undefined?1:value.max_jobs;
+  if(!Number.isInteger(maxJobs)||maxJobs<1||maxJobs>FINISH_HANDOFF_MAX_JOBS) fail(`${name}.finish_handoff.max_jobs must be an integer from 1 to ${FINISH_HANDOFF_MAX_JOBS}`);
+  return {waitMs,maxJobs};
 }
 const repoPart=/^[A-Za-z0-9_.-]+$/;
 function validRepoName(repo) {

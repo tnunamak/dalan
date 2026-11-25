@@ -650,39 +650,51 @@ async function handOffNextJob(args) {
   handoffsInFlight.set(key,run);
   return run;
 }
-// Returns {job}, {empty,waited_ms} or {} (no handoff: the caller keeps the old hint). Never throws: the finish is stored.
-async function runHandoff({principal,requestId,claimId,waitMs,signal}) {
+// Returns {jobs}, {empty,waited_ms} or {} (no handoff: the caller keeps the old hint). Never throws: the finish is stored.
+// A finish hands over up to maxJobs claimed jobs, never more than the free lanes: the first claim is keyed handoff-<claim_id>,
+// the others handoff-<claim_id>-n<n>, so a repeated finish gets the same jobs back and takes no more.
+async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal}) {
   try {
     const {worker,subject}=principal;
     const held=store.db.prepare('SELECT claimant FROM claims WHERE request_id=? AND claim_id=?').get(requestId,claimId);
     if(!held) return {};
-    const acquisition_id=`${HANDOFF_ACQUISITION_PREFIX}${claimId}`,lease_ms=Math.min(handoffIdleLeaseMs(),store.limits.leaseMs);
-    const claim=async next=>{
+    const base=`${HANDOFF_ACQUISITION_PREFIX}${claimId}`,lease_ms=Math.min(handoffIdleLeaseMs(),store.limits.leaseMs);
+    const acquisitionFor=n=>n===0?base:`${base}-n${n}`;
+    const claim=async(next,acquisition_id)=>{
       try {
         const job=await tool('claim',{request_id:next,claimant:held.claimant,acquisition_id,lease_ms},principal,undefined,signal);
         return job&&typeof job.error!=='string'&&job.claim_id?job:null;
       } catch { return null; }
     };
-    // A repeated finish gets back the job its first reply carried. If that job is gone (finished, expired), this finish
-    // already had its handoff: it takes no second job.
-    const prior=store.db.prepare("SELECT c.request_id,c.state,a.status FROM claims c JOIN assignments a USING(request_id) WHERE c.worker=? AND c.subject=? AND c.acquisition_id=?").get(worker,subject,acquisition_id);
-    if(prior) { const job=prior.state==='active'&&prior.status==='claimed'?await claim(prior.request_id):null; return job?{job}:{}; }
-    const started=Date.now(),tried=new Set();
+    // A repeated finish gets back the jobs its first reply carried. A job that is gone (finished, expired) is not replaced:
+    // this finish already had its handoff.
+    const ids=Array.from({length:maxJobs},(_,n)=>acquisitionFor(n));
+    const priors=store.db.prepare(`SELECT c.request_id,c.state,c.acquisition_id,a.status FROM claims c JOIN assignments a USING(request_id) WHERE c.worker=? AND c.subject=? AND c.acquisition_id IN (${ids.map(()=>'?').join(',')}) ORDER BY c.claimed_at,c.rowid`).all(worker,subject,...ids);
+    if(priors.length) {
+      const jobs=[];
+      for(const prior of priors) { const job=prior.state==='active'&&prior.status==='claimed'?await claim(prior.request_id,prior.acquisition_id):null; if(job) jobs.push(job); }
+      return jobs.length?{jobs}:{};
+    }
+    const started=Date.now(),tried=new Set(),jobs=[];
     let sawQueued=false;
+    const pick=free=>(store.nextQueued(free+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id));
     for(;;) {
-      if(signal?.aborted||store.paused()) return {};
+      if(signal?.aborted||store.paused()) return jobs.length?{jobs}:{};
       const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
-      if(free_lanes<=0) return {};
+      if(free_lanes<=0) return jobs.length?{jobs}:{};
       if(store.hasQueuedFor([worker])) {
         sawQueued=true;
-        const pick=()=>(store.nextQueued(free_lanes+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id));
         // A lost race or an unclaimable head moves on to the next job; an unclaimable queue ends in the old hint.
-        for(let fresh=pick();fresh.length&&tried.size<HANDOFF_MAX_ATTEMPTS;fresh=pick()) {
+        // After the first job the same loop refills the other freed lanes, up to maxJobs and the free lanes.
+        for(let fresh=pick(free_lanes);fresh.length&&tried.size<HANDOFF_MAX_ATTEMPTS+maxJobs;) {
           tried.add(fresh[0].request_id);
-          const job=await claim(fresh[0].request_id);
-          if(job) return {job};
+          const job=await claim(fresh[0].request_id,acquisitionFor(jobs.length));
+          if(job) { jobs.push(job); if(jobs.length>=maxJobs) return {jobs}; }
+          const left=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity).free_lanes;
+          if(left<=0) return jobs.length?{jobs}:{};
+          fresh=pick(left);
         }
-        if(tried.size) return {};
+        if(jobs.length||tried.size) return jobs.length?{jobs}:{};
       }
       const left=started+waitMs-Date.now();
       if(left<=0) return sawQueued?{}:{empty:true,waited_ms:Date.now()-started};
@@ -693,9 +705,10 @@ async function runHandoff({principal,requestId,claimId,waitMs,signal}) {
 async function finishReply(reply,{principal,requestId,claimId,signal}) {
   const setting=workers.workers.get(principal.worker)?.finishHandoff;
   if(setting&&reply.receipt_id&&!store.isProtocolJob(requestId)) {
-    const {job,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,signal});
-    log({kind:'finish_handoff',request_id:requestId,next_request_id:job?.request_id??null,result:job?'claimed':empty?'empty':'none',waited_ms:waited_ms??0});
+    const {jobs,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,maxJobs:setting.maxJobs,signal}),job=jobs?.[0];
+    log({kind:'finish_handoff',request_id:requestId,next_request_id:job?.request_id??null,jobs:jobs?.length??0,result:job?'claimed':empty?'empty':'none',waited_ms:waited_ms??0});
     const {next_queued,next_action,...rest}=reply;
+    if(job&&setting.maxJobs>1) return {...rest,next_job:job,next_jobs:jobs,guidance:`Your next ${jobs.length===1?'job':'jobs'} ${jobs.map(j=>j.request_id).join(', ')} ${jobs.length===1?'is':'are'} already claimed for you; the claim results are in next_jobs. Start all of them now, in parallel, in this turn, and call finish for each as soon as it is done. ${job.lease_expires_at?`The first lease ends at ${job.lease_expires_at}`:'The leases are short'}; every tool call on a job renews its lease.`};
     if(job) return {...rest,next_job:job,guidance:`Your next job ${job.request_id} is already claimed for you; its claim result is in next_job. Work on it now, in this turn, and call finish for it. ${job.lease_expires_at?`Its lease ends at ${job.lease_expires_at}`:'Its lease is short'}; every tool call on it renews the lease.`};
     if(empty) return {...rest,queue_empty:true,waited_ms,guidance:waited_ms>=1000?`No job was queued for ${Math.round(waited_ms/1000)} seconds. Nothing is claimed for you. End this run; a new assignment wakes you.`:'No job is queued. Nothing is claimed for you. End this run; a new assignment wakes you.'};
   }
