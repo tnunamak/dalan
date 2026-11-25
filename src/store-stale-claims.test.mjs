@@ -46,6 +46,26 @@ test('an assignment tool call two minutes ago keeps a 20-minute-old claim fresh'
   assert.equal(f.store.status().stale_claims.max_idle_ms,null);
 });
 
+test('idle observation changes at the boundary without changing assignment state',t=>{
+  const f=fixture(t);
+  f.advance(15*minute-1);
+  assert.equal(f.store.status().stale_claims.count,0);
+  f.advance(1);
+  assert.equal(f.store.status().stale_claims.count,1);
+  assert.equal(f.row().state,'active');
+});
+
+test('repeated status reads report the same idle observation at a frozen clock',t=>{
+  const f=fixture(t);
+  f.advance(23*minute);
+  const before=f.row();
+  const first=f.store.status().stale_claims;
+  const second=f.store.status().stale_claims;
+  assert.equal(first.count,1);
+  assert.deepEqual(second,first);
+  assert.deepEqual(f.row(),before);
+});
+
 test('recent progress independently keeps a claim fresh',t=>{
   const f=fixture(t);f.advance(18*minute);
   f.store.db.prepare('UPDATE claims SET last_progress_at=? WHERE request_id=?').run(f.stamp(),'idle-test');
