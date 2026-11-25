@@ -411,5 +411,8 @@
   "node scripts/pull-queue-destination-test.mjs",
   "node scripts/pull-catalog-hash-test.mjs",
   "node --test src/store-stale-claims.test.mjs",
-  "node --test scripts/service-launchd-test.mjs"
+  "node --test scripts/service-launchd-test.mjs",
+  "node --test scripts/ack-ledger-concurrent-test.mjs",
+  "node scripts/design-docs-test.mjs",
+  "node --test src/get-summary-revisions.test.mjs"
 ]
