@@ -210,6 +210,8 @@ try {
   assert(authed.length > 5 && authed.every(row => row.worker === 'dot'), 'authenticated calls log their worker: ' + JSON.stringify([...new Set(authed.map(row => row.worker))]));
   assert(outcomes().filter(row => row.http_status === 401).every(row => row.worker === null), 'a refused-auth call has worker null');
   assert(logs().filter(row => row.kind === 'mcp_inbound' && row.rpc_method).every(row => row.worker === 'dot'), 'mcp_inbound names the worker');
+  assert(logs().filter(row => row.kind === 'mcp_received').every(row => !Object.hasOwn(row, 'worker')), 'mcp_received is written before auth and names no worker');
+  assert(logs().filter(row => row.kind === 'mcp_inbound' && !row.rpc_method).every(row => !Object.hasOwn(row, 'worker')), 'an inbound refusal before auth names no worker');
   assert.equal(outcomes().find(row => row.tool === 'unknown').request_id, null, 'unknown tool logs no request_id');
 
   const count = outcomes().length;

@@ -260,6 +260,13 @@ try {
     const res = await valid(aUrl);
     assert.equal(await res.text(), '{"work":false}');
   });
+  await check('the signal log names the worker whose token answered: alpha false, beta true', async () => {
+    await valid(aUrl); await valid(bUrl);
+    const answered = pair.logLines().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.kind === 'signal' && e.status === 200);
+    assert.ok(answered.some(e => e.worker === 'alpha' && e.work === false), 'alpha line');
+    assert.ok(answered.some(e => e.worker === 'beta' && e.work === true), 'beta line');
+    assert.ok(answered.every(e => ['alpha', 'beta'].includes(e.worker)), 'only configured workers');
+  });
   await check("rotating alpha's token leaves beta's URL and file untouched", async () => {
     const before = fs.readFileSync(tokenFile(pair, 'beta'), 'utf8');
     pair.cli(['connect', 'signal-token', '--worker', 'alpha', '--rotate']);
