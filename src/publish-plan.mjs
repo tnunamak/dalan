@@ -123,7 +123,7 @@ function setOfIds(value, label) {
 
 function text(value, label, maximum, multiline) {
   if (typeof value !== 'string' || value.length > maximum || (!multiline && !value.trim())) fail(`${label}: invalid text`);
-  const controls = multiline ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/ : /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+  const controls = multiline ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/ : /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
   if (controls.test(value) || !value.isWellFormed()) fail(`${label}: unsafe text controls`);
   return value;
 }
@@ -141,7 +141,7 @@ function frozen(value) {
 
 // Human-readable literal text, deliberately not Markdown, HTML or shell quoting.
 function literal(value) {
-  return JSON.stringify(value).replace(/[<>&`$\[\]()*_#!|~@]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  return JSON.stringify(value).replace(/[<>&`$\[\]()*_#!|~@\u2028\u2029]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 function evidence(candidate, selection, bound) {

@@ -12,7 +12,13 @@ export class AckLedger {
     fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});
     const existed=fs.existsSync(file);
     if(existed&&(fs.statSync(file).mode&0o777)!==0o600) throw new Error('acknowledgment ledger must be mode 0600');
-    if(!existed) { const fd=fs.openSync(file,'wx',0o600); fs.closeSync(fd); }
+    if(!existed) {
+      let fd;
+      try { fd=fs.openSync(file,'wx',0o600); }
+      catch(error) { if(error?.code!=='EEXIST') throw error; }
+      if(fd!==undefined) fs.closeSync(fd);
+    }
+    if((fs.statSync(file).mode&0o777)!==0o600) throw new Error('acknowledgment ledger must be mode 0600');
     this.db=new DatabaseSync(file);
     try {
       if((fs.statSync(file).mode&0o777)!==0o600) throw new Error('acknowledgment ledger must be mode 0600');

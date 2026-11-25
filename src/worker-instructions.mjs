@@ -17,10 +17,29 @@ You work for a Dalan bridge. Its tools are MCP tools such as \`list_pending\`, \
 export const WORKER_INSTRUCTIONS_FILE = 'worker-instructions.md';
 
 // Writes the guidance into a bridge home (mode 0600), replacing an older copy.
-export function writeWorkerInstructions(home) {
+export function writeWorkerInstructions(home, { fs: io = fs } = {}) {
   const file = path.join(home, WORKER_INSTRUCTIONS_FILE);
-  fs.rmSync(file, { force: true });
-  fs.writeFileSync(file, WORKER_INSTRUCTIONS, { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  const temp = path.join(home, `.${WORKER_INSTRUCTIONS_FILE}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`);
+  let fd;
+  let created = false;
+  try {
+    // Exclusivity refuses a pre-existing name (including a symlink). All writes
+    // and mode changes use this descriptor, never the published target path.
+    fd = io.openSync(temp, 'wx', 0o600);
+    created = true;
+    io.writeFileSync(fd, WORKER_INSTRUCTIONS);
+    io.fchmodSync(fd, 0o600);
+    io.fsyncSync(fd);
+    io.closeSync(fd);
+    fd = undefined;
+    // A sibling rename replaces the target name, including a symlink itself.
+    io.renameSync(temp, file);
+    created = false;
+  } catch (error) {
+    if (fd !== undefined) { try { io.closeSync(fd); } catch {} }
+    // Do not remove a name we failed to create exclusively.
+    if (created) { try { io.rmSync(temp, { force: true }); } catch {} }
+    throw error;
+  }
   return file;
 }

@@ -5,6 +5,7 @@ export function formatGetSummary(job, { id, cli }) {
   const state = job.status ?? 'unknown';
   const report = job.report ?? null;
   const lines = [`Job ${id}: ${state}`];
+  if (job.revised_by?.request_id) lines.push(`Correction: ${job.revised_by.request_id}`);
   if (job.target_worker) lines.push(`Worker: ${job.target_worker}`);
   if (report?.outcome && report.outcome !== 'done') lines.push(`Outcome: ${report.outcome}`);
   if (report?.summary) lines.push(`Summary: ${report.summary}`);
@@ -15,12 +16,20 @@ export function formatGetSummary(job, { id, cli }) {
   const count = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const artifacts = (job.artifacts?.length ?? 0) || (job.artifact_ids?.length ?? 0), checks = job.checks?.length ?? 0;
   if (artifacts || checks) lines.push('', `Evidence: ${[artifacts && count(artifacts, 'artifact'), checks && count(checks, 'check')].filter(Boolean).join(', ')}`);
-  const next = state === 'finished' ? `${cli} decide ${id} accepted`
+  const next = correctionAction(job, cli) ?? (state === 'finished' ? `${cli} decide ${id} accepted`
     : state === 'cancelled' ? null
-    : `${cli} wait ${id} --timeout 3600, then ${cli} get ${id}`;
+    : `${cli} wait ${id} --timeout 3600, then ${cli} get ${id}`);
   if (next) lines.push('', `Next: ${next}`);
   lines.push(`Full record: ${cli} get ${id} --json`);
   return lines.join('\n');
+}
+
+const correctionAction = (job, cli) => job?.revised_by?.request_id ? `${cli} get ${job.revised_by.request_id}` : null;
+
+// Piped human output retains the full JSON record and adds only this stderr guidance.
+export function formatGetEndNote(job, { id, cli, decideWords }) {
+  const correction = correctionAction(job, cli);
+  return correction ? `Next: ${correction}` : job?.status === 'finished' ? `decide: ${cli} decide ${id} ${decideWords}` : null;
 }
 
 // `dalan wait` on a terminal: one line, in place of the JSON status document.
