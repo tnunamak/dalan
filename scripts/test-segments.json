@@ -74,6 +74,7 @@
   "node --test scripts/package-contents-test.mjs",
   "timeout --kill-after=5s 150s nice -n 10 node --test scripts/host-budgets-test.mjs",
   "node scripts/prepared-node-modules-test.mjs",
+  "node scripts/check-adoption-test.mjs",
   "node --test scripts/setup-start-wait-test.mjs",
   "timeout --kill-after=5s 90s nice -n 10 node --test scripts/prepared-dependencies-host-test.mjs",
   "node scripts/host-check-allowlist-test.mjs && node scripts/host-check-allowlist-http-test.mjs && node scripts/host-check-withheld-claim-test.mjs",

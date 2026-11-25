@@ -103,7 +103,12 @@ try {
   assert(claim.claim_id, JSON.stringify(claim));
   assert.deepEqual(claim.available_checks, ['default'], `claim must advertise the check: ${claim.host_execution_unavailable_reason}`);
   assert.equal(claim.host_execution_available, true);
+  // The worker is told what the id runs and where, not just the id.
+  assert.deepEqual(claim.available_check_details, { default: 'node test/probe.js (limit 30 s)' });
+  assert.match(claim.check_guidance, /bridge sandbox/);
+  assert.match(claim.check_guidance, /check_id \(not check or name\)/);
   const got = await call('get', { request_id: one.id });
+  assert.deepEqual(got.available_check_details, claim.available_check_details, 'get describes the same checks as claim');
   assert.deepEqual(got.available_checks, ['default'], `get must advertise the check: ${got.host_execution_unavailable_reason}`);
   assert.equal(got.host_execution_available, true);
   // The advertised check really runs, and the sensitive file is absent from what it sees.

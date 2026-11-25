@@ -465,7 +465,8 @@ const argumentFixes={
     artifact_ids:'artifact_ids must be at most 8 strings; call finish again with fewer ids',
     summary:'summary must be text; call finish again with a string or leave summary out'
   },
-  progress:{note:'send note as 1 to 4096 bytes of text; call progress again with a shorter note'}
+  progress:{note:'send note as 1 to 4096 bytes of text; call progress again with a shorter note'},
+  run_check:{check_id:'send check_id, one id from available_check_details or available_checks (the argument is named check_id, not check or name); call run_check again'}
 };
 const SUMMARY_MAX=4096,NOTE_MAX=4096;
 const clipWithMarker=(text,max,marker)=>`${Store.clipBytes(text,max-Buffer.byteLength(marker))}${marker}`;
@@ -501,7 +502,7 @@ function validate(name,args) {
   };
   if(!args||typeof args!=='object'||Array.isArray(args)) throw new Error('invalid arguments');
   const s=definition.inputSchema;
-  for(const field of Object.keys(args)) if(!Object.hasOwn(s.properties,field)) throw new Error(`unknown field ${field}`);
+  for(const field of Object.keys(args)) if(!Object.hasOwn(s.properties,field)) throw new Error(name==='run_check'?`unknown field ${field}: ${argumentFixes.run_check.check_id}`:`unknown field ${field}`);
   for(const field of s.required) if(!Object.hasOwn(args,field)) throw refuse('missing',field);
   // The schema no longer requires summary, but one must exist by now: repairArguments could not derive it when the result is blank.
   if(name==='finish'&&(args.summary===undefined||typeof args.summary==='string'&&!args.summary.trim())) throw refuse('missing','summary');

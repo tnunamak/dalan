@@ -469,6 +469,13 @@ export function withCheckMetadata(mirror, sha, fn) {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
+// One line saying what run_check will execute for a check, so a worker can judge it before calling.
+export function checkSummary(spec) {
+  const text = argv => argv.map(a => a === '/runtime/node' ? 'node' : a).join(' ');
+  const command = `${spec.install_argv ? `${text(spec.install_argv)} && ` : ''}${text(spec.argv)}`;
+  return `${command.length > 200 ? `${command.slice(0, 197)}...` : command} (limit ${Math.round(spec.timeout_ms / 1000)} s)`;
+}
+
 // Every check spec (id -> normalized spec) at a pinned commit.
 export function checkSpecsAt(repo, mirror, sha) {
   return withCheckMetadata(mirror, sha, dir => Object.fromEntries(availableChecks(repo, dir).map(id => [id, detectCheck(repo, dir, id)])));

@@ -9,10 +9,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { checkOutcome } from './lifecycle.mjs';
 import { checkResponse } from './check-response.mjs';
 import { secretContent, isSensitiveRepoPath, isSourceExemptionPath, sensitivePolicyPaths } from './submission-policy.mjs';
-import { argvTestFiles, assignmentInput, prepareGithubRepo, detectCheck, detectCheckWithOrigin, availableChecks, workspaceCheck, mirrorPath, withCheckMetadata, checkSpecsAt } from './projects.mjs';
+import { argvTestFiles, assignmentInput, prepareGithubRepo, detectCheck, detectCheckWithOrigin, availableChecks, workspaceCheck, mirrorPath, withCheckMetadata, checkSpecsAt, checkSummary } from './projects.mjs';
 import { hostBackend, hostReadiness, capabilityNotAvailable, TRUST, withEvidence } from './execution.mjs';
 import { redactSecrets, redactOutput, privateKeyHeader } from './redaction.mjs';
 import { hostCheckRefusal, hostCheckAuthorization } from './host-execution-policy.mjs';
+import { resolvePreparedNodeModules, prepareNodeModulesInChild } from './prepared-node-modules.mjs';
 import { ownerReportArtifactBytes } from './owner-report-artifact.mjs';
 import { withCheckCoverage } from './check-coverage.mjs';
 import { runHostBudget, parseHostBudget } from './host-budget.mjs';
@@ -86,6 +87,7 @@ function closedWorkspace(a,requestId,claimId,claimEpoch,currentEpoch) {
   if(a.status==='claimed'&&claimEpoch!==undefined&&currentEpoch!==undefined&&claimEpoch!==currentEpoch) return coded('claim_superseded',`claim ${claimId} for ${requestId} was superseded by epoch ${currentEpoch}; stop using this claim. This affects only ${requestId}.`);
   return coded('assignment_not_claimed',`assignment ${requestId} is not claimed (status ${a.status}); its workspace is not open. This affects only ${requestId}.`);
 }
+const CHECK_GUIDANCE='run_check runs a listed check in the bridge sandbox on this claim\'s workspace, with your applied patches. It does not run on your machine. Call run_check with check_id (not check or name) after apply_patch and before finish. Its receipt is bridge-verified evidence; a test you ran yourself is not. available_check_details says what each id runs.';
 function git(args,opts={}) { const r=spawnSync('git',args,{encoding:'utf8',timeout:10000,maxBuffer:12*1024*1024,...opts,env:gitEnv(opts.env)}); if(r.error||r.status!==0) throw new Error(`git failed: ${(r.stderr||r.error?.message||'').slice(0,300)}`); return r.stdout; }
 function relative(p,allowDot=false) { if (allowDot && (p===undefined||p==='')) return ''; if(typeof p!=='string'||!p||Buffer.byteLength(p)>1024||p.includes('\0')||path.isAbsolute(p)||p.split('/').some(x=>!x||x==='.'||x==='..'||x==='.git'||x.includes('\\'))) throw new Error('invalid project-relative path'); return p; }
 function safePath(dir,p,existing=false) { p=relative(p); let cursor=dir; for(const part of p.split('/')) { cursor=path.join(cursor,part); try { if(fs.lstatSync(cursor).isSymbolicLink()) throw new Error('symlink traversal denied'); } catch(e) { if(e.code!=='ENOENT') throw e; if(existing) throw new Error('file not found'); } } return cursor; }
@@ -831,12 +833,22 @@ export class Workspace {
       const readiness=hostReadiness();
       const candidates=baseRefusal||!readiness.ready?[]:declared.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
       const reason=baseRefusal||(!readiness.ready?readiness.reason:null)||(!candidates.length?'host_check_not_allowlisted: no permitted owner-configured check is runnable':null);
-      return {available_checks:candidates,host_execution_available:candidates.length>0,host_execution_unavailable_reason:reason};
+      const details=candidates.length?this.checkDetails(assignment,repo,candidates,dir,worker):null;
+      return {available_checks:candidates,...(details?{available_check_details:details,check_guidance:CHECK_GUIDANCE}:{}),host_execution_available:candidates.length>0,host_execution_unavailable_reason:reason};
     } catch(error) {
       if(!String(error?.message??'').includes('check metadata')) throw error;
       if(execution==='host'&&assignment.execution_scope!=='implementation') throw error;
       return {available_checks:[],available_checks_error:'invalid check metadata',...(execution==='host'?{host_execution_available:false,host_execution_unavailable_reason:'invalid check metadata'}:{})};
     }
+  }
+  // id -> what run_check runs. Best effort: a check whose definition cannot be read is listed without a summary, never withheld.
+  checkDetails(assignment,repo,ids,dir,worker) {
+    let specs=null;
+    try { specs=dir?null:this.checkMetadataFor(assignment,worker); } catch {}
+    return Object.fromEntries(ids.map(id=>{
+      let spec=null;try { spec=dir?detectCheck(repo,dir,id):specs?.[id]; } catch {}
+      return [id,spec?checkSummary(spec):'no summary available'];
+    }));
   }
   checkMetadataFor(assignment,worker='dot') {
     const input=assignmentInput(assignment),mirror=this.mirrorFor(input,worker);
@@ -967,6 +979,7 @@ export class Workspace {
       assertCurrentAuthority();
       const launchRefusal=hostCheckRefusal(this.store.get(requestId).assignment,input.github_repo,checkId,spec,excludedPathsAbsent(dir,this.store.get(requestId).assignment));
       if(launchRefusal) throw new Error(launchRefusal);
+      await this.prepareDependencies(dir,input.base_sha);assertCurrentAuthority();
       const hosted=await this.runConfined(requestId,dir,spec.argv,{...spec,host_budget:jobBudget,maskPaths:masked.paths,sourceExemptions:masked.sourceExemptions},{checkRunId,repo:input.github_repo,checkId,expectedSpec:spec,cancelled:()=>{
         try { assertCurrentAuthority(); return false; } catch { return true; }
       }});
@@ -1048,6 +1061,19 @@ export class Workspace {
       this.store.lifecycle(saved.request_id,type,'system',reason,{claim_id:saved.claim_id});
     });
     return saved;
+  }
+  // A check looks dependencies up in the owner's prepared store by lockfile hash. When this workspace still carries the
+  // pinned base commit's package.json and lockfile (the owner's trust decision: the repository and check are allowlisted),
+  // an absent entry is built once here instead of failing every check with an owner-only recovery command. A changed
+  // manifest or lock is the worker's own input, so it is never installed here: the check fails as before.
+  async prepareDependencies(dir,baseSha) {
+    try { resolvePreparedNodeModules(dir);return; }
+    catch(error) { if(error.code!=='dependencies_unprepared') return; }
+    for(const file of ['package.json','package-lock.json']) {
+      let pinned;try{pinned=git(['-C',dir,'show',`${baseSha}:${file}`]);}catch{return;}
+      if(fs.readFileSync(path.join(dir,file),'utf8')!==pinned) return;
+    }
+    await prepareNodeModulesInChild(dir);
   }
   async runConfined(requestId,dir,command,spec,{cancelled,checkRunId,repo=null,checkId=null,expectedSpec=null}={}) {
     // Policy is rechecked at the only launch boundary; repository metadata

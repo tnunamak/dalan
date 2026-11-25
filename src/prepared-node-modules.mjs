@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const runtime = () => ({ node: process.version, abi: process.versions.modules, platform: process.platform, arch: process.arch });
@@ -141,4 +142,27 @@ export function prepareNodeModules(sourceDir, options = {}) {
     const thaw = dir => { const st=fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) return; fs.chmodSync(dir, 0o700); for (const name of fs.readdirSync(dir)) thaw(path.join(dir,name)); };
     thaw(stage); fs.rmSync(stage, { recursive: true, force: true });
   } }
+}
+
+// Prepare in a child process so a minutes-long `npm ci` does not stop the bridge's event loop. The child is the same
+// `dalan prepare-deps` the owner runs by hand, so it publishes to the same private store and under the same checks.
+// Callers must only pass a source whose manifest and lock the owner already trusts (a pinned base commit).
+const inFlight = new Map();
+export function prepareNodeModulesInChild(sourceDir, { timeoutMs = 600000, env = process.env } = {}) {
+  const root = fs.realpathSync(sourceDir);
+  const input = inputs(root);
+  if (!input) return Promise.resolve(null);
+  const key = `${input.identity.lock_sha256}:${input.key}`;
+  const running = inFlight.get(key);
+  if (running) return running;
+  const cli = fileURLToPath(new URL('../bin/dot-worker.mjs', import.meta.url));
+  const childEnv = Object.fromEntries(Object.entries(env).filter(([name]) => /^(PATH|HOME|LANG|TMPDIR|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|npm_config_.*|(https?|no)_proxy)$/i.test(name)));
+  const done = new Promise((resolve, reject) => {
+    execFile(process.execPath, [cli, 'prepare-deps', root, '--json'], { env: childEnv, timeout: timeoutMs, maxBuffer: 1 << 20, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+      if (error) return reject(failure('dependencies_install_failed', `automatic preparation failed (${error.killed ? 'timed out' : `exit ${error.code}`}): ${String(stderr || error.message).trim().split('\n').slice(-3).join(' ').slice(0, 300)}`));
+      try { resolve(JSON.parse(stdout)); } catch { reject(failure('dependencies_install_failed', 'automatic preparation printed no result')); }
+    });
+  }).finally(() => inFlight.delete(key));
+  inFlight.set(key, done);
+  return done;
 }
