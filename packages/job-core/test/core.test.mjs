@@ -278,3 +278,20 @@ test('canonical JSON rejects a Map instead of dropping its entries', () => {
 test('canonical JSON rejects boxed scalars instead of coercing them', () => {
   assert.throws(() => canonicalJson([Object(false)]), {code: 'invalid_json'});
 });
+
+test('canonical JSON keeps punctuation in object field names without turning it into structure', () => {
+  const value = { 'two words': true, 'quoted"field': 'fixture', 'line\nbreak': 1 };
+  const encoded = canonicalJson(value);
+  assert.equal(encoded, '{"line\\nbreak":1,"quoted\\"field":"fixture","two words":true}');
+  assert.deepEqual(JSON.parse(encoded), value);
+});
+
+test('renewal at the initial supplied clock advances a frozen revision without altering it', () => {
+  const snapshot = Object.freeze({ revision: 0, leaseUntil: 50 });
+  const command = Object.freeze({ expectedRevision: 0, operation: 'renew', args: Object.freeze({ leaseMs: 10 }) });
+  const context = Object.freeze({ now: 0, maxLeaseMs: 10 });
+  assert.deepEqual(decide(snapshot, command, context), {
+    events: [], effects: [{ type: 'advance_revision', expectedRevision: 0 }], leaseUntil: 10,
+  });
+  assert.equal(snapshot.leaseUntil, 50);
+});
