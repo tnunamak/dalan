@@ -2671,6 +2671,11 @@ export class Store {
     return {next_queued:next,next_action:`${all.length} queued and ${free} ${free===1?'lane':'lanes'} free: claim ${next.map(x=>x.request_id).join(', ')} now (oldest first)`};
   }
   freeLanes(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity) { return Math.max(0,Math.min(laneCapacity,claimCapacity)-this.activeClaims(subject,worker).length); }
+  quiesceCounts() {
+    const live=this.db.prepare("SELECT c.* FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND c.state='active'").all();
+    const hostChecks=this.db.prepare("SELECT count(*) AS n FROM check_jobs WHERE status='running' OR stop_verified IS NOT 1").get().n;
+    return {host_checks_unverified:hostChecks,live_leases:live.filter(claim=>!this.leaseExpired(claim)).length};
+  }
   // Active claims for the operator, with the lease state that decides whether another claimant may take one over.
   claims() {
     return this.db.prepare("SELECT c.*,a.priority FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND c.state='active' ORDER BY c.claimed_at").all().map(c=>({
