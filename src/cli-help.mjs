@@ -88,6 +88,8 @@ export const COMMANDS = [
   { name: 'pause', group: 'operator', summary: 'Stop handing out new jobs', usage: 'dalan pause --reason TEXT' },
   { name: 'resume', group: 'operator', summary: 'Resume handing out jobs', usage: 'dalan resume' },
   // Reachable, but not on the first screen.
+  { name: 'quiesce', summary: 'Hold new effectful calls for a restart', usage: 'dalan quiesce on|off|status [--json]',
+    detail: ['Closes (on) or reopens (off) the admission gate so the service can restart without waiting for worker leases. While on, every call that changes state is refused with a retryable message; reads still answer and no lease changes.', '', 'status prints on, admitted_in_flight, delivery_in_flight, host_checks_unverified and live_leases. The mode is in memory only: a restart reopens the gate.'] },
   { name: 'artifact', summary: 'Download a job artifact', usage: 'dalan artifact ID --output PATH' },
   { name: 'cancel', summary: 'Cancel a job', usage: 'dalan cancel ID [--reason TEXT]',
     detail: ['Withdraws a job.', '', 'Scope controlled: the job. Its authority is withdrawn, so a result sent after this is kept as audit evidence and is not accepted.', 'Not controlled: worker compute. A worker that already holds the job may still run and report late. Nothing here proves it stopped (compute_stopped stays false until a stop is verified).', '',

@@ -2,6 +2,10 @@
 import {spawnSync} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
 
+const extraArgs=process.argv.slice(2).filter(arg=>arg!=='--until-quiescent');
+if(extraArgs.length){console.error(`upgrade-drain: unknown argument ${JSON.stringify(extraArgs[0])}. The only option is --until-quiescent.`);process.exit(2);}
+const untilQuiescent=process.argv.slice(2).includes('--until-quiescent');
+const quiesceRecovery='If the old service is quiesced, keep it running and run `dalan quiesce off` under the old HOME before retrying.';
 const recovery='If the old service is paused, keep it running. Let workers finish or wait for their leases to expire, run `dalan resume` under the old HOME, then retry this drain.';
 async function main() {
   const timeoutMs=Number(process.env.DALAN_UPGRADE_DRAIN_TIMEOUT_MS??300000);
@@ -16,6 +20,21 @@ async function main() {
     if(result.status!==0)fail(`dalan ${args[0]} failed: ${(result.stderr||result.stdout||`exit ${result.status}`).trim()}.`);
     try { return JSON.parse(result.stdout); } catch { fail(`dalan ${args[0]} printed no JSON.`); }
   };
+  if(untilQuiescent) {
+    cli('quiesce','on');
+    console.log('Admission is quiesced. Live leases survive a restart using the same database and are not waited on.');
+    const names=['admitted_in_flight','delivery_in_flight','host_checks_unverified'];
+    for(;;) {
+      const status=cli('quiesce','status');
+      if(!status||typeof status!=='object'||names.some(name=>!Number.isSafeInteger(status[name])||status[name]<0))
+        fail('dalan quiesce status returned invalid in-flight counters.');
+      if(names.every(name=>status[name]===0))break;
+      if(Date.now()>=deadline)fail('Upgrade drain timed out while work was still in flight.');
+      await delay(Math.min(1000,Math.max(0,deadline-Date.now())));
+    }
+    console.log('No admitted calls, deliveries or unverified host checks remain. Restart with the same HOME and database; the new process starts with admission open. If you do not restart, run `dalan quiesce off` to reopen it.');
+    return;
+  }
   cli('pause','--reason','upgrade drain');
   console.log('Claims paused. New submissions are still accepted while the drain waits.');
   while(true) {
@@ -34,6 +53,6 @@ async function main() {
 }
 
 main().catch(error=>{
-  console.error(`${error?.message??String(error)}\n${recovery}`);
+  console.error(`${error?.message??String(error)}\n${untilQuiescent?quiesceRecovery:recovery}`);
   process.exitCode=1;
 });

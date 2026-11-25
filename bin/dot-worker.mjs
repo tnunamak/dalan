@@ -628,6 +628,7 @@ async function main() {
       break;
     }
     case 'resume': result=await request('/resume','POST',{}, {'x-operator-key':operator()}); break;
+    case 'quiesce': { const modes=args.filter(x=>x!=='--json'&&!x.startsWith('-')),mode=modes[0]; if(modes.length!==1||!['on','off','status'].includes(mode)||args.some(x=>x.startsWith('-')&&x!=='--json')) throw new Error('quiesce takes on, off or status (optional --json)'); result=mode==='status'?await request('/quiesce','GET',null,{'x-operator-key':operator()}):await request('/quiesce','POST',{on:mode==='on'},{'x-operator-key':operator()}); break; }
     case 'claims': { if(args.some(a=>a!=='--json')) throw new Error('claims accepts only --json'); result=await request('/claims','GET',null,{'x-operator-key':operator()}); break; }
     case 'abandon': { const id=args[0]; if(!id||id.startsWith('-')) throw new Error('abandon requires request id'); if(args.includes('--reason')&&!option('--reason')) throw new Error('--reason requires text'); result=await request('/abandon','POST',{id,...(args.includes('--reason')?{reason:option('--reason')}:{})},{'x-operator-key':operator()}); break; }
     case 'accept': case 'reject': { const id=args[0]; if(!id||id.startsWith('-')) throw new Error(`${command} requires request id`); if(args.includes('--note')&&!option('--note')) throw new Error('--note requires text'); result=await request(`/${command}`,'POST',{id,...(args.includes('--note')?{note:option('--note')}:{})},{'x-owner-capability':receipt(id).token}); break; }
