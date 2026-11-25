@@ -98,10 +98,13 @@ try {
   // a new claim is refused too
   const refusedClaim=await rpc('claim',{request_id:ids[1],claimant:'fixture-worker'});
   assert.equal(refusedClaim.isError,true);
+  assert.match(refusedClaim.content[0].text,/paused for a restart/,'a new claim must be refused by quiesce, not by lane capacity');
   // off: the same progress call now goes through, and a claim works
   assert.equal((await admin('/quiesce',{on:false},op)).status,200);
   parse(await rpc('progress',{request_id:ids[0],claim_id:claim.claim_id,note:'resumed'}));
-  assert.ok(parse(await rpc('claim',{request_id:ids[1],claimant:'fixture-worker'})).claim_id);
+  // the fixture worker's one lane is still held by ids[0], so a claim now fails on capacity: proof the quiesce gate is off
+  const afterOff=await rpc('claim',{request_id:ids[1],claimant:'fixture-worker'});
+  assert.equal(afterOff.isError,true);assert.doesNotMatch(afterOff.content[0].text,/paused for a restart/);
   const held=rpc('progress',{request_id:ids[0],claim_id:claim.claim_id,note:'owned barrier'});
   void held.catch(()=>{});
   await until(()=>fs.existsSync(entered),'call did not reach admitted barrier');
