@@ -6,6 +6,26 @@ import path from 'node:path';
 import { Store, loadRedeliveryLimits } from './store.mjs';
 import { HOST_BUDGET_CEILINGS, parseHostBudget } from './host-budget.mjs';
 
+test('CLI guidance uses the stable command for the executable on PATH, but npx in npm exec', async t => {
+  const { cliCommand } = await import('./cli-name.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-cli-name-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'dalan');
+  fs.writeFileSync(bin, '', { mode: 0o700 });
+  assert.equal(cliCommand(bin, { PATH: dir }), 'dalan');
+  assert.equal(cliCommand(bin, { PATH: dir, npm_command: 'exec' }), 'npx @tnunamak/dalan');
+});
+
+test('CLI guidance falls back to the checkout when a different dalan is first on PATH', async t => {
+  const { cliCommand } = await import('./cli-name.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-cli-fallback-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const checkout = path.join(dir, 'checkout with spaces.mjs');
+  fs.writeFileSync(checkout, '', { mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'dalan'), '', { mode: 0o700 });
+  assert.equal(cliCommand(checkout, { PATH: dir }), "node '" + fs.realpathSync(checkout) + "'");
+});
+
 const minute=60000;
 function fixture(t) {
   let now=Date.parse('2026-11-13T12:00:00Z');
@@ -135,3 +155,27 @@ for(const [name,accepted,refused] of [['minimum',60000,59999],['maximum',6048000
     }
   });
 }
+
+test('lineBuffer assembles split CRLF lines and flushes an unterminated final line once', async () => {
+  const { lineBuffer } = await import('./try-exposure.mjs');
+  const lines = [];
+  const push = lineBuffer(line => lines.push(line));
+  push('one\r');
+  assert.deepEqual(lines, []);
+  push('\ntwo\nlast');
+  assert.deepEqual(lines, ['one', 'two']);
+  push.end();
+  push.end();
+  assert.deepEqual(lines, ['one', 'two', 'last']);
+});
+
+test('lineBuffer retains the configured tail while waiting for a final newline', async () => {
+  const { lineBuffer } = await import('./try-exposure.mjs');
+  const lines = [];
+  const push = lineBuffer(line => lines.push(line), 4);
+  push('discard-kept');
+  assert.deepEqual(lines, []);
+  push('\n');
+  push.end();
+  assert.deepEqual(lines, ['kept']);
+});
