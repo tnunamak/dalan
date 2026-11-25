@@ -262,3 +262,38 @@ test('lineBuffer retains the configured tail while waiting for a final newline',
   push.end();
   assert.deepEqual(lines, ['kept']);
 });
+
+async function runUpgradeDrainFixture(t, args, extraEnv = {}) {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const cli = fileURLToPath(new URL('../scripts/upgrade-drain.mjs', import.meta.url));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-drain-args-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  // A regression must never reach a real bin/dot-worker.mjs or use the host HOME.
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd,
+    env: { HOME: cwd, USERPROFILE: cwd, SYSTEMROOT: process.env.SYSTEMROOT, ...extraEnv },
+    encoding: 'utf8',
+    timeout: 2000,
+  });
+}
+
+test('upgrade-drain refuses unknown flags before operating on the service', async t => {
+  const result = await runUpgradeDrainFixture(t, ['--unknown-option']);
+  assert.ifError(result.error);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /unknown argument "--unknown-option"/);
+  assert.match(result.stderr, /only option is --until-quiescent/);
+  assert.equal(result.stdout, '');
+});
+
+test('upgrade-drain rejects a subminimum timeout before pausing or quiescing', async t => {
+  for (const args of [[], ['--until-quiescent']]) {
+    const result = await runUpgradeDrainFixture(t, args, { DALAN_UPGRADE_DRAIN_TIMEOUT_MS: '999' });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /DALAN_UPGRADE_DRAIN_TIMEOUT_MS must be an integer of at least 1000/);
+    assert.match(result.stderr, args.length ? /quiesce off/ : /dalan resume/);
+    assert.equal(result.stdout, '');
+  }
+});
