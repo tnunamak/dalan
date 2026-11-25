@@ -95,18 +95,18 @@ try {
     try{freshStore.submit(freshAssignment,'thread','environment','prepared-http-owner',false,null,'normal',null,freshAssignment,null,null,'host');}finally{freshStore.db.close();}
     const freshClaim=await call('claim',{request_id:freshId,claimant:'dot'});
     assert(freshClaim.claim_id,JSON.stringify(freshClaim));
-    const missing=await call('run_check',{request_id:freshId,claim_id:freshClaim.claim_id,check_id:'default'});
-    assert.equal(missing.status,'failed',JSON.stringify(missing));assert.match(missing.error,/dependencies_unprepared/);
+    // The lockfile is the pinned base's and nothing is prepared yet: the bridge prepares it on demand instead of failing
+    // with an owner-only recovery command. (A worker-changed lockfile stays unprepared: scripts/check-adoption-test.mjs.)
+    const good=await call('run_check',{request_id:freshId,claim_id:freshClaim.claim_id,check_id:'default'});
+    assert.equal(good.status,'completed',JSON.stringify(good));assert.equal(good.exit_code,0,JSON.stringify(good));
     const preparation=spawnSync(process.execPath,['bin/dot-worker.mjs','prepare-deps',repo,'--json'],{cwd:path.resolve(new URL('..',import.meta.url).pathname),env,encoding:'utf8',timeout:30000});
     assert.equal(preparation.status,0,preparation.stderr);
     const prepared=JSON.parse(preparation.stdout);
-    const good=await call('run_check',{request_id:freshId,claim_id:freshClaim.claim_id,check_id:'default'});
-    assert.equal(good.status,'completed',JSON.stringify(good));assert.equal(good.exit_code,0,JSON.stringify(good));
     assert.match(good.output_preview,/HTTP_PREPARED_VERIFIED/);
     assert.equal(good.evidence.host_budget.dependencies.lock_sha256,prepared.lock_sha256);
     assert.equal(good.evidence.host_budget.stop.verified,true);assert.deepEqual(good.evidence.host_budget.stop.remaining_pids,[]);
     assert.equal(fs.existsSync(path.join(repo,'node_modules')),false,'owner preparation must not install in the checkout');
-    console.log('PASS authenticated HTTP prepared run_check: named missing-input refusal, owner-only preparation, read-only real backend and persisted identity');
+    console.log('PASS authenticated HTTP prepared run_check: on-demand preparation of the pinned lockfile, read-only real backend and persisted identity');
   }
 } finally {
   await stopChild(service);
