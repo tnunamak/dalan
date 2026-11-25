@@ -288,8 +288,16 @@ try {
     await b.submit('req_lapse_fresh');
     const f3 = await b.claimNew('req_lapse_third');
     assert.equal((await b.finish(f3)).next_job?.request_id, 'req_lapse_fresh');
-    assert.ok((await b.ok('claim', { request_id: 'req_lapse_a', claimant: 'fixture-worker' })).claim_id, 'the worker claims the lapsed row itself');
-    pass('a handoff that lapsed untouched is not pushed again; a fresh row is handed instead; the worker can still claim it');
+    // The worker claims the lapsed row itself, works on it, and its short lease runs out: that abandon says it was worked, so a finish may hand it again.
+    const own = await b.ok('claim', { request_id: 'req_lapse_a', claimant: 'fixture-worker', lease_ms: 2000 });
+    assert.ok(own.claim_id, 'the worker claims the lapsed row itself');
+    await b.ok('progress', { request_id: 'req_lapse_a', claim_id: own.claim_id, note: 'started' });
+    await sleep(4500);
+    assert.equal((await b.ok('get', { request_id: 'req_lapse_a' })).status, 'queued', 'the worked claim lapsed too');
+    const f4 = await b.claimNew('req_lapse_fourth');
+    const r4 = await b.finish(f4);
+    assert.equal(r4.next_job?.request_id, 'req_lapse_a', `only the latest abandon counts: ${JSON.stringify(r4).slice(0, 300)}`);
+    pass('a handoff that lapsed untouched is not pushed again; a fresh row is handed instead; the worker can still claim it; a later abandon of a worked claim clears it');
   }
 
   // 6. max_jobs refills every lane the finish frees, not one: the reply carries up to max_jobs claimed jobs (next_job is the
