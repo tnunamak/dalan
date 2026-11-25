@@ -12,8 +12,8 @@ import { parseWorkers } from '../src/workers.mjs';
 const MIN=60000, GAP=20000, CAP=8, dir=mkdtempSync(join(tmpdir(),'dalan-claim-throttle-'));
 let now=Date.parse('2026-11-25T00:00:00.000Z');
 const base={intervalMs:10*MIN,maxCount:3,silenceMs:20*MIN,leaseMs:60*MIN};
-const open=(name,limits)=>{
-  const s=new Store(join(dir,`${name}.db`),{now:()=>now,random:()=>0.5,capacity:CAP,limits:{...base,...limits}});
+const open=(name,limits,options={})=>{
+  const s=new Store(join(dir,`${name}.db`),{now:()=>now,random:()=>0.5,capacity:CAP,limits:{...base,...limits},...options});
   const connections=subject=>[{issuer:'issuer',subject,client_id:'client'}];
   s.workers=parseWorkers({workers:{dot:{connections:connections('subject_d')},muse:{connections:[...connections('subject_m'),...connections('subject_n')]}}});
   return s;
@@ -61,6 +61,20 @@ try {
     assert.doesNotMatch(s.claim('x1','muse-run','subject_m',CAP,null,'muse').guidance,/report it before/i,'no throttle, no extra guidance');
     s.db.close();
     pass('without the limits field nothing changes');
+  }
+  {
+    // The idle-takeover path (a claim whose worker went quiet is taken over by a new run) must obey the gap too.
+    const s=open('idle',{workerClaimMinGapMs:{muse:GAP},leaseMs:60000},{resumeIdleMs:2*MIN});
+    submit(s,'m1','m2');
+    s.claim('m1','muse-run','subject_m',CAP,null,'muse');
+    now+=3*MIN;
+    s.claim('m2','muse-run','subject_m',CAP,null,'muse');
+    assert.throws(()=>s.claim('m1','muse-run-2','subject_m',CAP,null,'muse'),/claim_throttled/,'an idle takeover inside the gap is refused');
+    assert.equal(s.db.prepare("SELECT epoch FROM claims WHERE request_id='m1'").get().epoch,1,'the refused takeover leaves the old claim as it was');
+    now+=GAP;
+    assert.ok(s.claim('m1','muse-run-2','subject_m',CAP,null,'muse').resumed,'the takeover goes through once the gap has passed');
+    s.db.close();
+    pass('an idle takeover obeys the claim gap');
   }
   {
     const file=join(dir,'limits.json');
