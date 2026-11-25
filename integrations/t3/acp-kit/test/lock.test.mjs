@@ -364,3 +364,30 @@ test('acquire creates missing fixture directories and release keeps the director
   } finally { lock.release(); }
   assert.deepEqual(fs.readdirSync(parent), []);
 });
+
+test('a released handle cannot remove a newly acquired lock at the same path', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-reacquire-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const old = await acquireLock(file);
+  old.release();
+
+  const current = await acquireLock(file);
+  try {
+    old.release();
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, current.token);
+  } finally { current.release(); }
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test('reusing an existing fixture directory preserves its POSIX mode', { skip: process.platform === 'win32' }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-mode-existing-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const parent = path.join(dir, 'existing');
+  fs.mkdirSync(parent);
+  fs.chmodSync(parent, 0o750);
+  const lock = await acquireLock(path.join(parent, 'session.lock'));
+  try { assert.equal(fs.statSync(parent).mode & 0o777, 0o750); }
+  finally { lock.release(); }
+  assert.equal(fs.statSync(parent).mode & 0o777, 0o750);
+});
