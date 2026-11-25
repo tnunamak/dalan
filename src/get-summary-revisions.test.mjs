@@ -85,3 +85,41 @@ test('heartbeat helper failure retracts the positive health file and exits nonze
   const { readFile, sentinel } = await heartbeatFailureFixture(t, false);
   assert.equal(await readFile(sentinel, 'utf8'), 'entered');
 });
+
+async function deadmanHeartbeatRefusal(t, health) {
+  const { readFile, writeFile, mkdir, mkdtemp, rm } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'dalan-deadman-refusal-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'bin'));
+  await mkdir(join(root, 'src'));
+  await writeFile(join(root, 'bin/dot-deadman.mjs'),
+    await readFile(new URL('../bin/dot-deadman.mjs', import.meta.url)));
+  await writeFile(join(root, 'src/env.mjs'), 'export const readEnv = name => process.env[name];');
+  await writeFile(join(root, 'src/deadman.mjs'),
+    'export const createDeadmanFromEnv = () => { throw Error("unexpected monitor start"); }; export const readDeadmanStatus = () => { throw Error("unexpected DB access"); };');
+  const preload = join(root, 'fixture-clock.mjs');
+  await writeFile(preload, 'Date.now = () => Date.parse("2026-01-01T00:00:00Z"); globalThis.fetch = () => { throw Error("unexpected heartbeat publication"); };');
+  const file = join(root, 'health.json');
+  await writeFile(file, JSON.stringify(health));
+  const result = spawnSync(process.execPath, ['--import', preload, join(root, 'bin/dot-deadman.mjs'), 'heartbeat'], {
+    encoding: 'utf8', timeout: 5000,
+    env: { HOME: root, DALAN_HEALTH_FILE: file, DOT_DEADMAN_ENV: join(root, 'missing-env'),
+      DOT_DEADMAN_URL: 'https://fixture.example.test', DOT_DEADMAN_TOKEN: 'x'.repeat(32) },
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr.trim(), 'dalan-deadman: bridge health evidence is absent, unhealthy, or stale');
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), health);
+}
+
+test('dead-man heartbeat refuses old positive health evidence without publishing', async t => {
+  await deadmanHeartbeatRefusal(t, { healthy: true, observed_at: '2025-12-31T23:58:29Z' });
+});
+
+test('dead-man heartbeat refuses health evidence beyond the future-skew allowance', async t => {
+  await deadmanHeartbeatRefusal(t, { healthy: true, observed_at: '2026-01-01T00:00:31Z' });
+});
