@@ -2,6 +2,9 @@
 // Source bindings: adapter-dot-bridge.mjs:91-128,146-166,180-204;
 // question-lifecycle-http-e2e.mjs:18-34; server.mjs:1058 (owner token);
 // store.mjs:2145-2160 (consumption); destinations/index.mjs:22-28 (lazy T3).
+// Budget note: src/tool-registry.mjs counts 21 t3 tokens and is byte-identical to the version the stale baseline (4)
+// was taken from; the baseline simply predates it. It is a budget exception, not a T3-free file. The import and
+// no-T3-execution controls and the per-file ceiling still apply to it, so any new reference fails the gate.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
