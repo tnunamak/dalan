@@ -844,7 +844,9 @@ export class Workspace {
       return {available_checks:[],available_checks_error:'invalid check metadata',...(execution==='host'?{host_execution_available:false,host_execution_unavailable_reason:'invalid check metadata'}:{})};
     }
   }
-  // The reason this checkout's manifest and lockfile cannot be prepared on the host, or null. Best effort: unreadable input is not a reason.
+  // The reason this repository's manifest and lockfile cannot be prepared on the host, or null. Best effort: unreadable input is not a reason.
+  // claim and get pass no checkout, so this reads the pinned base: a worker's later edit of the lockfile is not seen here, and run_check
+  // (which prepares only a lockfile identical to the base) still refuses it with its own error.
   dependenciesUnsupported(assignment,dir,worker='dot') {
     try {
       if(dir) {
