@@ -26,6 +26,47 @@ test('CLI guidance falls back to the checkout when a different dalan is first on
   assert.equal(cliCommand(checkout, { PATH: dir }), "node '" + fs.realpathSync(checkout) + "'");
 });
 
+async function selfCheckFailureFixture(t) {
+  const { spawnSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-selfcheck-failure-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'scripts'));
+  fs.mkdirSync(path.join(dir, 'src'));
+  const cli = path.join(dir, 'scripts', 'dalan-try-selfcheck.mjs');
+  fs.copyFileSync(new URL('../scripts/dalan-try-selfcheck.mjs', import.meta.url), cli);
+  fs.writeFileSync(path.join(dir, 'src', 'redirect-policy.mjs'), 'export const validateRedirectUri = () => ({ ok: true });');
+  fs.writeFileSync(path.join(dir, 'src', 'try-selfcheck.mjs'), `
+    export const SELFCHECK_REDIRECT = 'https://example.invalid/callback';
+    export async function runSelfCheck({ url }) {
+      throw new Error('fixture connection failed at ' + url);
+    }
+  `);
+  return (vars = {}) => {
+    const result = spawnSync(process.execPath, [cli, '--home', dir], {
+      env: { HOME: dir, USERPROFILE: dir, ...vars }, encoding: 'utf8', timeout: 5000,
+    });
+    assert.ifError(result.error);
+    return result;
+  };
+}
+
+test('trial self-check reports usage when the supplied home lacks a resource-url file', async t => {
+  const invoke = await selfCheckFailureFixture(t);
+  const result = invoke();
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /^usage:/);
+  assert.equal(result.stdout, '');
+});
+
+test('trial self-check reports the failed result without echoing the attempted URL', async t => {
+  const invoke = await selfCheckFailureFixture(t);
+  const url = 'https://example.invalid/fixture-marker';
+  const result = invoke({ DALAN_TRY_URL: url });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /RESULT FAIL/);
+  assert.doesNotMatch(result.stdout + result.stderr, /fixture-marker|fixture connection failed/);
+});
+
 const minute=60000;
 function fixture(t) {
   let now=Date.parse('2026-11-13T12:00:00Z');
