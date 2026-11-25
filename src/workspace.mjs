@@ -1070,8 +1070,8 @@ export class Workspace {
     try { resolvePreparedNodeModules(dir);return; }
     catch(error) { if(error.code!=='dependencies_unprepared') return; }
     for(const file of ['package.json','package-lock.json']) {
-      let pinned;try{pinned=git(['-C',dir,'show',`${baseSha}:${file}`]);}catch{return;}
-      if(fs.readFileSync(path.join(dir,file),'utf8')!==pinned) return;
+      let pinned;try{pinned=git(['-C',dir,'show',`${baseSha}:${file}`],{encoding:'buffer'});}catch{return;}
+      if(!fs.readFileSync(path.join(dir,file)).equals(pinned)) return;
     }
     await prepareNodeModulesInChild(dir);
   }
