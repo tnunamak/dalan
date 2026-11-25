@@ -17,7 +17,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { loadWorkers, loadEffectiveOwnerWorkers, hasInstalledDatabase, legacyMarkerPath, seedWorkerRepos, resolveWorker, hasCapability, assertTarget, submitTarget, ensureWorkerRelationship } from './workers.mjs';
-import { Store, HANDOFF_ACQUISITION_PREFIX, HANDOFF_IDLE_LEASE_MS, QUESTION_PURPOSES, nonterminalOutcome, validateProtocol, loadRedeliveryLimits, resumeNudge } from './store.mjs';
+import { Store, HANDOFF_ACQUISITION_PREFIX, QUESTION_PURPOSES, nonterminalOutcome, validateProtocol, loadRedeliveryLimits, resumeNudge } from './store.mjs';
 import {protocolArtifactChunk} from './protocol-artifact-commands.mjs';
 import { sendWebhook, validSecret } from './webhooks.mjs';
 import { checkAlerts, publishAlert, redactNote } from './alerts.mjs';
@@ -632,8 +632,7 @@ const finishNextGuidance=next=>`Claim ${next[0].request_id} yourself before you 
 // connection checks, one claim per job. The claim carries acquisition_id handoff-<finished claim_id>, so a repeated
 // finish gets the same job back, and a second finish by the same claimant name, which would otherwise count as an
 // exact retry of the first claim, is refused that job and takes the next one.
-// The claim starts on a short idle lease (see HANDOFF_IDLE_LEASE_MS in store.mjs). DALAN_HANDOFF_IDLE_LEASE_MS shortens it for tests.
-const handoffIdleLeaseMs=()=>{const v=Number(readEnv('DALAN_HANDOFF_IDLE_LEASE_MS'));return Number.isInteger(v)&&v>=1000&&v<=HANDOFF_IDLE_LEASE_MS?v:HANDOFF_IDLE_LEASE_MS;};
+// The claim starts on a short idle lease: the worker's finish_handoff.idle_lease_ms (workers.mjs, at most 2 minutes).
 const HANDOFF_POLL_MS=500,HANDOFF_MAX_ATTEMPTS=5,HANDOFF_PICK_WINDOW=64;
 const nap=(ms,signal)=>new Promise(resolve=>{
   const done=()=>{clearTimeout(timer);signal?.removeEventListener('abort',done);resolve();};
@@ -653,13 +652,13 @@ async function handOffNextJob(args) {
 // Returns {jobs}, {empty,waited_ms} or {} (no handoff: the caller keeps the old hint). Never throws: the finish is stored.
 // A finish hands over up to maxJobs claimed jobs, never more than the free lanes: the first claim is keyed handoff-<claim_id>,
 // the others handoff-<claim_id>-n<n>, so a repeated finish gets the same jobs back and takes no more.
-async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal}) {
+async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,idleLeaseMs,signal}) {
   const jobs=[]; // claimed so far: an error after a claim must still report it, or the job idles until its lease ends
   try {
     const {worker,subject}=principal;
     const held=store.db.prepare('SELECT claimant FROM claims WHERE request_id=? AND claim_id=?').get(requestId,claimId);
     if(!held) return {};
-    const base=`${HANDOFF_ACQUISITION_PREFIX}${claimId}`,lease_ms=Math.min(handoffIdleLeaseMs(),store.limits.leaseMs);
+    const base=`${HANDOFF_ACQUISITION_PREFIX}${claimId}`,lease_ms=Math.min(idleLeaseMs,store.limits.leaseMs);
     const acquisitionFor=n=>n===0?base:`${base}-n${n}`;
     const claim=async(next,acquisition_id)=>{
       try {
@@ -718,7 +717,7 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal})
 async function finishReply(reply,{principal,requestId,claimId,signal}) {
   const setting=workers.workers.get(principal.worker)?.finishHandoff;
   if(setting&&reply.receipt_id&&!store.isProtocolJob(requestId)) {
-    const {jobs,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,maxJobs:setting.maxJobs,signal}),job=jobs?.[0];
+    const {jobs,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,maxJobs:setting.maxJobs,idleLeaseMs:setting.idleLeaseMs,signal}),job=jobs?.[0];
     log({kind:'finish_handoff',request_id:requestId,next_request_id:job?.request_id??null,jobs:jobs?.length??0,result:job?'claimed':empty?'empty':'none',waited_ms:waited_ms??0});
     const {next_queued,next_action,...rest}=reply;
     if(job&&setting.maxJobs>1) return {...rest,next_job:job,next_jobs:jobs,guidance:`Your next ${jobs.length===1?'job':'jobs'} ${jobs.map(j=>j.request_id).join(', ')} ${jobs.length===1?'is':'are'} already claimed for you; the claim results are in next_jobs. Start all of them now, in parallel, in this turn, and call finish for each as soon as it is done. ${job.lease_expires_at?`The first lease ends at ${job.lease_expires_at}`:'The leases are short'}; every tool call on a job renews its lease.`};
