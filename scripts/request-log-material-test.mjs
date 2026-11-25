@@ -146,9 +146,11 @@ test('colliding keys scale', t => {
     Array.from({ length }, (_, i) => [`token=ABCDEF123456${i}`, i]),
   ));
   const measure = value => {
-    const start = performance.now();
+    // CPU time (user plus system), not wall time: a loaded host stretches wall time but not the work done.
+    const start = process.cpuUsage();
     const result = JSON.parse(logged({ value })).value;
-    return { ms: performance.now() - start, result };
+    const usage = process.cpuUsage(start);
+    return { ms: (usage.user + usage.system) / 1000, result };
   };
   // Warm both sizes before measuring, then interleave them to reduce JIT and
   // host-load bias. Best of three avoids treating one scheduling pause as work.
@@ -165,7 +167,7 @@ test('colliding keys scale', t => {
   assert.equal(Object.keys(result).length, 20000);
   const [small, large] = times.map(samples => Math.min(...samples));
   const ratio = large / small;
-  t.diagnostic(`colliding keys: 2,000=${small.toFixed(1)} ms, 20,000=${large.toFixed(1)} ms, ratio=${ratio.toFixed(1)}x`);
+  t.diagnostic(`colliding keys: 2,000=${small.toFixed(1)} CPU ms, 20,000=${large.toFixed(1)} CPU ms, ratio=${ratio.toFixed(1)}x`);
   // Ten times as many colliding keys is about 10x work for suffix tracking,
   // but about 100x if every collision scans suffixes from the beginning.
   // 30x leaves a 3x margin over linear growth without a host-speed deadline.
