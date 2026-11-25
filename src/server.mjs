@@ -842,25 +842,34 @@ async function submitPolicy(body,req,dryRun) {
   return {...result,execution,excluded_workers:excludedWorkers};
 }
 
+let quiescing=false,admittedInFlight=0;
+const restartQuiesceText='bridge_quiescing: bridge paused for a restart; retry after it reopens.';
+function quiesceStatus() {
+  return {on:quiescing,admitted_in_flight:admittedInFlight,delivery_in_flight:delivering?1:0,...store.quiesceCounts()};
+}
+
 // Record the call on the claim it names (one UPDATE); a thrown error or a structured {error} result is kept as the last tool error.
 async function tool(name,a,principal,notifyMeta,signal) {
   if(!toolNames.has(name)) throw new Error('unknown tool');
-  // Refuse hidden names before audits, lease touches, sweeps or repository preparation.
-  if(name==='claim'&&typeof a?.request_id==='string'&&store.hasAssignment(a.request_id)&&store.mayAct(principal.worker,a.request_id)&&
-    !holdsLiveGrant(principal.worker,a.request_id,a.claimant,principal.subject,a.acquisition_id)) {
-    assertRepoAllowed(principal.worker,store.get(a.request_id).assignment);
-  }
+  if(quiescing&&toolAnnotations[name]?.readOnlyHint!==true) throw new Error(restartQuiesceText);
+  admittedInFlight++;
   let error=null;
   try {
+    if(name==='claim'&&typeof a?.request_id==='string'&&store.hasAssignment(a.request_id)&&store.mayAct(principal.worker,a.request_id)&&
+      !holdsLiveGrant(principal.worker,a.request_id,a.claimant,principal.subject,a.acquisition_id)) {
+      assertRepoAllowed(principal.worker,store.get(a.request_id).assignment);
+    }
     const result=await dispatchTool(name,a,principal,notifyMeta,signal);
     if(typeof result?.error==='string') error=redactNote(result.error);
     return result;
   } catch(e) { error=redactNote(String(e?.message??e)); if(e.destination&&typeof a?.request_id==='string')notifyAttachedWaiter(a.request_id); throw e; }
   finally {
-    const rid=a?.request_id;
-    if(typeof rid==='string'&&rid!==absentId&&toolNames.has(name)&&!t3Tools.has(name)&&!notifyTools.has(name)) {
-      try { store.recordToolActivity(rid,principal.subject,principal.worker,name,{workspace:disabled.has(name),error,connectionId:principal.builtin?(principal.connection_id??''):null}); } catch { /* activity is diagnostic; never fail the call */ }
-    }
+    try {
+      const rid=a?.request_id;
+      if(typeof rid==='string'&&rid!==absentId&&toolNames.has(name)&&!t3Tools.has(name)&&!notifyTools.has(name)) {
+        try { store.recordToolActivity(rid,principal.subject,principal.worker,name,{workspace:disabled.has(name),error,connectionId:principal.builtin?(principal.connection_id??''):null}); } catch { /* activity is diagnostic; never fail the call */ }
+      }
+    } finally { admittedInFlight--; }
   }
 }
 async function dispatchTool(name,a,principal,notifyMeta,signal) {
@@ -985,9 +994,9 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       log({kind:'list_pending_result',subject,free_lanes,total:assignments.length,request_ids:assignments.slice(0,20).map(x=>x.request_id)});
       const guidance=workers.workers.get(worker)?.guidance==='resume'?`${listGuidance} ${resumeNudge(store.resumeIdleMs()||undefined)}`:listGuidance;
       // Say outright whether a claim would be accepted now: a worker that once saw a pause refusal must not keep listing without claiming.
-      const claims_accepted=!store.paused();
+      const claims_accepted=!quiescing&&!store.paused();
       const next=claims_accepted?store.nextQueued(free_lanes,null,worker):{};
-      const claimsNote=claims_accepted?'':'Claims are paused (temporary): do not claim now; call list_pending again later and claim once claims_accepted is true.';
+      const claimsNote=claims_accepted?'':quiescing?restartQuiesceText:'Claims are paused (temporary): do not claim now; call list_pending again later and claim once claims_accepted is true.';
       return {assignments,policy_work:policyPage(worker),attention:store.attention(subject,worker),free_lanes,claims_accepted,...(claims_accepted?next:{next_action:claimsNote}),guidance};
     }
     case 'claim': {
@@ -1516,6 +1525,14 @@ const adminServer=http.createServer(async(req,res)=>{
       if(body.dry_run!==undefined&&typeof body.dry_run!=='boolean') throw new Error('invalid dry_run');
       return json(res,200,store.backfillObjectives(body.tuples,{dryRun:body.dry_run===true}));
     }
+    if(url.pathname==='/quiesce'&&(req.method==='GET'||req.method==='POST')) {
+      adminOperator(req);
+      if(req.method==='POST') {
+        if(typeof body.on!=='boolean')return json(res,400,{error:'on must be a boolean'});
+        quiescing=body.on;
+      }
+      return json(res,200,quiesceStatus());
+    }
     if(url.pathname==='/claims'&&req.method==='GET') { adminOperator(req); return json(res,200,{lease_ms:store.limits.leaseMs,claims:store.claims()}); }
     if(url.pathname==='/abandon'&&req.method==='POST') {
       adminOperator(req);
@@ -1631,11 +1648,11 @@ async function reconcileTick() {
 }
 let delivering=false;
 async function drain() {
-  if(delivering||store.paused()) return; delivering=true;
+  if(delivering||quiescing||store.paused()) return; delivering=true;
   try {
     store.reannounceQueued(redeliveryLimits);
     for(const item of store.due()) {
-      if(store.paused()) break;
+      if(quiescing||store.paused()) break;
       const row=item.kind==='event'?null:store.get(item.request_id);
       let destination=null;
       if(row) {
@@ -1653,6 +1670,8 @@ async function drain() {
         if(reason) { store.quietDelivery(item.id,reason); notifyAttachedWaiter(item.request_id); continue; }
       }
       const argv=row?destination.argv(item,row):null;
+      // Destination selection can await across the admin toggle.
+      if(quiescing||store.paused()) break;
       const started=store.startAttempt(item.id,argv); if(!started) continue;
       if(crashAt('after_attempt_commit',item.request_id)) process.exit(71);
       let state='failed',reason='';
