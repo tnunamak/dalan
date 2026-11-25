@@ -114,6 +114,48 @@ test('terminal claims are not counted',t=>{
   assert.equal(f.store.status().stale_claims.count,0);
 });
 
+async function runDrainErrorFixture(t, args, responder) {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-drain-errors-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(cwd, 'bin'));
+  fs.writeFileSync(path.join(cwd, 'bin', 'dot-worker.mjs'), responder);
+  const cli = fileURLToPath(new URL('../scripts/upgrade-drain.mjs', import.meta.url));
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd,
+    env: { HOME: cwd, USERPROFILE: cwd, SYSTEMROOT: process.env.SYSTEMROOT },
+    encoding: 'utf8', timeout: 3000,
+  });
+}
+
+test('upgrade-drain reports a failed pause without claiming the queue is safe', async t => {
+  const result = await runDrainErrorFixture(t, [], [
+    'if (process.argv[2] !== "pause") process.exit(9);',
+    'console.error("synthetic pause refusal");',
+    'process.exitCode = 42;',
+  ].join('\n'));
+  assert.ifError(result.error);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /dalan pause failed: synthetic pause refusal/);
+  assert.match(result.stderr, /dalan resume/);
+});
+
+test('upgrade-drain refuses an invalid quiesce snapshot without telling the operator to restart', async t => {
+  const result = await runDrainErrorFixture(t, ['--until-quiescent'], [
+    'if (process.argv[2] !== "quiesce") process.exit(9);',
+    'if (process.argv[3] === "on") console.log("{}");',
+    'else if (process.argv[3] === "status") console.log(JSON.stringify({admitted_in_flight:0,delivery_in_flight:0}));',
+    'else process.exitCode = 9;',
+  ].join('\n'));
+  assert.ifError(result.error);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /invalid in-flight counters/);
+  assert.match(result.stderr, /dalan quiesce off/);
+  assert.doesNotMatch(result.stdout, /No admitted calls/);
+});
+
 test('host budget refuses a missing required limit', () => {
   const budget = {...HOST_BUDGET_CEILINGS};
   delete budget.output_bytes;
