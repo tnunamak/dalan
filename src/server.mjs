@@ -687,8 +687,19 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,signal})
         // A lost race or an unclaimable head moves on to the next job; an unclaimable queue ends in the old hint.
         // After the first job the same loop refills the other freed lanes, up to maxJobs and the free lanes.
         for(let fresh=pick(free_lanes);fresh.length&&tried.size<HANDOFF_MAX_ATTEMPTS+maxJobs;) {
+          // A claim that errored after it committed leaves a grant under this slot's key. Settle that grant first: take it
+          // (an exact retry returns it) or stop. Never claim a different job against an unsettled slot.
+          const slot=acquisitionFor(jobs.length),stuck=store.db.prepare('SELECT request_id,state FROM claims WHERE worker=? AND subject=? AND acquisition_id=?').get(worker,subject,slot);
+          if(stuck) {
+            const job=stuck.state==='active'?await claim(stuck.request_id,slot):null;
+            if(!job) return jobs.length?{jobs}:{};
+            jobs.push(job); tried.add(stuck.request_id);
+            if(jobs.length>=maxJobs) return {jobs};
+            fresh=pick(store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity).free_lanes);
+            continue;
+          }
           tried.add(fresh[0].request_id);
-          const job=await claim(fresh[0].request_id,acquisitionFor(jobs.length));
+          const job=await claim(fresh[0].request_id,slot);
           if(job) { jobs.push(job); if(jobs.length>=maxJobs) return {jobs}; }
           const left=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity).free_lanes;
           if(left<=0) return jobs.length?{jobs}:{};
