@@ -11,6 +11,7 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {Store} from '../src/store.mjs';
 import {PullQueue} from '../src/pull-queue.mjs';
+import {LEGACY_PROFILE} from '../src/workers.mjs';
 
 const payload = request_id => ({schema_version:1,request_id,brief:'authority fixture',
   inputs:[],expected_output:'characterization',execution_scope:'read-only'});
@@ -74,7 +75,7 @@ if(process.argv[2]==='--stale-holder') {
     // assertLiveConnection 2320-2347; assertMutationConnection 2529-2540;
     // progress transaction 2581-2597 and finishOnce 2658-2661.
     let live=true;
-    s.destinationProfile=()=>({legacy:true});
+    s.destinationProfile=()=>LEGACY_PROFILE;
     s.connectionIsLive=id=>live&&['connection-a','connection-b'].includes(id);
     // src/store.mjs#assertLiveConnection: admission itself must refuse, not only later mutations.
     submit('admission-dead');live=false;
@@ -86,7 +87,7 @@ if(process.argv[2]==='--stale-holder') {
     assert.throws(()=>claim('admission-no-profile','W1','connection-a'),/connection_not_live/);
     assert.deepEqual(query(s,"SELECT * FROM claims WHERE request_id='admission-no-profile'"),[]);
     assert.deepEqual(query(s,"SELECT status FROM assignments WHERE request_id='admission-no-profile'"),[{status:'queued'}]);
-    s.destinationProfile=()=>({legacy:true});
+    s.destinationProfile=()=>LEGACY_PROFILE;
     // control: the same live connection with a profile is admitted.
     submit('connection');const connected=claim('connection','W1','connection-a');
     assert.deepEqual(query(s,"SELECT connection_id FROM claims WHERE request_id='connection'"),
