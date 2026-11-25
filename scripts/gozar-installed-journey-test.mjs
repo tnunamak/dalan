@@ -60,19 +60,30 @@ test('the installed Gozar version matches the Dalan manifest and lock', async ()
 });
 
 test('installed Gozar proves and removes an unknown route serving the real Dalan bridge', { timeout: 45000 }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dg-'));
-  // Everything acquired is registered here at once and released last-in first-out by t.after, which runs even when setup
-  // throws. Every step runs even if another rejects; a cleanup failure never replaces the failure that ended the body.
-  const cleanups = [() => rm(root, { recursive: true, force: true })];
-  let bodyFailed = false;
+  // Everything acquired is registered in `cleanups` the moment it exists and released last-in first-out by t.after, which runs
+  // even when setup throws. Every step runs even if another rejects. A failure anywhere in the journey, setup included, is the
+  // primary failure: cleanup failures are then diagnostics only, and they fail the test only when the journey itself passed.
+  const cleanups = [];
+  let journeyFailed = false;
   t.after(async () => {
     const failures = [];
     for (const step of cleanups.reverse()) {
       try { await step(); } catch (error) { failures.push(error); }
     }
     for (const error of failures) t.diagnostic(`cleanup failed: ${error?.stack ?? error}`);
-    if (failures.length && !bodyFailed) throw new AggregateError(failures, 'fixture cleanup failed');
+    if (failures.length && !journeyFailed) throw new AggregateError(failures, 'fixture cleanup failed');
   });
+  try {
+    await installedJourney(t, cleanups);
+  } catch (error) {
+    journeyFailed = true;
+    throw error;
+  }
+});
+
+async function installedJourney(t, cleanups) {
+  const root = await mkdtemp(join(tmpdir(), 'dg-'));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
   const id = 'edge-' + randomUUID().slice(0, 8);
   const home = join(root, 'g');
   const registry = await fakeRegistry({ id, kinds: ['attached', 'session'], reach: 'internet', dir: root,
@@ -80,7 +91,8 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
   cleanups.push(() => registry.cleanup());
   const trial = join(root, 'd');
   const probe = net.createServer();
-  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
+  cleanups.push(() => probe.listening ? new Promise(resolve => probe.close(resolve)) : undefined);
   const appPort = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   const preparedId = process.env.DALAN_TEST_PREPARED_ROUTE === '1' ? randomUUID() : null;
@@ -182,7 +194,11 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
   cleanups.push(async () => {
     stop.abort();
     input.end();
-    await run.catch(() => {});
+    // Bounded: a run that never settles after abort must not stop the harness, forwarders, registry and root from closing.
+    const timer = new AbortController();
+    const settled = await Promise.race([run.then(() => true, () => true), sleep(5000, false, { signal: timer.signal })]);
+    timer.abort();
+    if (!settled) throw new Error('the code under test did not stop within 5 s of abort');
   });
   let handedOff = false;
   try {
@@ -228,7 +244,6 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
       t.diagnostic('The prepared operation kept its ID through approval, route proof, bridge traffic and cleanup.');
     }
   } catch (error) {
-    bodyFailed = true;
     if (proof && !handedOff) {
       try {
         assert.equal(proof.published, publicOrigin);
@@ -245,7 +260,7 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
     }
     throw error;
   }
-});
+}
 
 async function waitForResource(file, expected) {
   const until = Date.now() + 12000;
