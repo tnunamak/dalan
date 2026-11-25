@@ -8,7 +8,9 @@
 export const SILENCE_MS=120000;
 const iso=ms=>new Date(ms).toISOString();
 const gap=(from,to)=>from==null||to==null?null:Math.round(to-from);
-export function createPhaseTrace({log,now=Date.now,max=5000}) {
+export function createPhaseTrace({log:write,now=Date.now,max=5000}) {
+  // Telemetry only: a failing log write (full disk, missing directory) must never change a tool result or a wake delivery.
+  const log=entry=>{try{write(entry);}catch{}};
   const listed=new Map(),woke=new Map(),fresh=new Map(),active=new Map();
   const remember=(map,key,value)=>{map.set(key,value);while(map.size>max)map.delete(map.keys().next().value);};
   // Measurement only: how long a claim goes quiet between the holder's calls. A claim that ends by cancel or lease expiry

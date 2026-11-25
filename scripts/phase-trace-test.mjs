@@ -206,4 +206,22 @@ try {
 } finally {
   await Promise.all(bridges.map(b => b.stop()));
 }
+// 9. A failing log write is contained: no throw from any trace call, and the state still advances.
+{
+  const { createPhaseTrace: make, SILENCE_MS: quiet } = await import('../src/phase-trace.mjs');
+  let t = 1000, fail = true;
+  const lines = [];
+  const trace = make({ log: l => { if (fail) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); lines.push(l); }, now: () => t });
+  const item = { id: 'e1', request_id: 'rq', created_at: '2026-11-24T10:00:00.000Z' };
+  trace.wake({ item, worker: 'w', attemptAt: t, ackMs: 5, status: 200, state: 'delivered' });
+  trace.claimed({ requestId: 'rq', worker: 'w', subject: 's', claimId: 'c', handoff: false, createdAt: item.created_at });
+  t += quiet + 1;
+  trace.action({ requestId: 'rq', tool: 'get', subject: 's' });
+  t += 10;
+  trace.action({ requestId: 'rq', tool: 'finish', subject: 's' });
+  fail = false;
+  trace.claimed({ requestId: 'rq2', worker: 'w', subject: 's', claimId: 'c2', handoff: false, createdAt: item.created_at });
+  assert.deepEqual(lines.map(l => l.kind), ['claim_phase'], 'logging resumes after the failure and the finished claim is gone');
+  console.log('PASS phase-trace log failure contained');
+}
 console.log('PASS phase-trace');
