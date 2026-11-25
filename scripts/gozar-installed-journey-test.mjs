@@ -61,6 +61,8 @@ test('the installed Gozar version matches the Dalan manifest and lock', async ()
 
 test('installed Gozar proves and removes an unknown route serving the real Dalan bridge', { timeout: 45000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'dg-'));
+  // The root is owned from the moment it exists: t.after runs after the body and its own cleanup, even when setup fails.
+  t.after(() => rm(root, { recursive: true, force: true }));
   const id = 'edge-' + randomUUID().slice(0, 8);
   const home = join(root, 'g');
   const registry = await fakeRegistry({ id, kinds: ['attached', 'session'], reach: 'internet', dir: root,
@@ -158,6 +160,7 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
     hosted: { interactive: true, gozar: harness.gozar, fetchImpl: publicFetch, readyMs: browserReceipt ? 18000 : 3000 },
   });
   let handedOff = false;
+  let bodyFailed = false;
   try {
     await Promise.race([handoff, run.then(() => assert.fail('trial stopped before handoff'))]);
     handedOff = true;
@@ -201,6 +204,7 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
       t.diagnostic('The prepared operation kept its ID through approval, route proof, bridge traffic and cleanup.');
     }
   } catch (error) {
+    bodyFailed = true;
     if (proof && !handedOff) {
       assert.equal(proof.published, publicOrigin);
       assert.ok(proof.verification.checks.includes('nonce'));
@@ -213,13 +217,17 @@ test('installed Gozar proves and removes an unknown route serving the real Dalan
     }
     throw error;
   } finally {
+    // Every child stops even if another one fails to. A cleanup failure never replaces the failure that ended the body.
+    const cleanupFailures = [];
+    const settle = async step => { try { await step(); } catch (error) { cleanupFailures.push(error); } };
     stop.abort();
     input.end();
-    await run.catch(() => {});
-    await harness.close().catch(() => {});
-    await Promise.all([...resources.values()].map(resource => resource.close()));
-    await registry.cleanup();
-    await rm(root, { recursive: true, force: true });
+    await settle(() => run.catch(() => {}));
+    await settle(() => harness.close().catch(() => {}));
+    for (const resource of resources.values()) await settle(() => resource.close());
+    await settle(() => registry.cleanup());
+    for (const error of cleanupFailures) t.diagnostic(`cleanup failed: ${error?.stack ?? error}`);
+    if (cleanupFailures.length && !bodyFailed) throw new AggregateError(cleanupFailures, 'fixture cleanup failed');
   }
 });
 
