@@ -83,3 +83,25 @@ test('until-quiescent refuses malformed counters and tells the operator how to r
     assert.deepEqual(calls(root),['quiesce on','quiesce status']);
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
+
+for(const [label,counters] of [['negative',{admitted_in_flight:-1}],['fractional',{admitted_in_flight:0.5}],['missing',{host_checks_unverified:undefined}]]) test(`until-quiescent refuses a ${label} counter`,()=>{
+  const root=scratch();
+  try {
+    fake(root,[{...idle,...counters}]);
+    const result=run(root);
+    assert.notEqual(result.status,0);
+    assert.match(result.stderr,/invalid in-flight counters/i);
+    assert.match(result.stderr,/dalan quiesce off/);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('a mistyped drain option fails instead of running the default drain',()=>{
+  const root=scratch(),bin=path.join(root,'bin');fs.mkdirSync(bin,{recursive:true});
+  try {
+    fs.writeFileSync(path.join(bin,'dot-worker.mjs'),`require('node:fs').appendFileSync(${JSON.stringify(path.join(root,'calls.log'))},'called\\n');\n`);
+    const result=spawnSync(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),'--until-quiesent'],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:'3000'},encoding:'utf8',timeout:8000});
+    assert.notEqual(result.status,0);
+    assert.match(result.stderr,/unknown argument/);
+    assert.equal(fs.existsSync(path.join(root,'calls.log')),false,'no command may run, in particular not a pause');
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
