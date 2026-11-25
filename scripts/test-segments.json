@@ -19,6 +19,7 @@
   "node --test scripts/dalan-storage-root-test.mjs",
   "node --test scripts/dalan-upgrade-repos-test.mjs",
   "node --test scripts/upgrade-drain-test.mjs",
+  "node --test scripts/upgrade-drain-quiescent-test.mjs",
       "node scripts/quiesce-admission-test.mjs",
   "node --test scripts/upgrade-release-fixture-test.mjs",
   "node --test scripts/release-metadata-test.mjs",
