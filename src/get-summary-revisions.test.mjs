@@ -3,6 +3,42 @@ import assert from 'node:assert/strict';
 import { formatGetSummary, formatGetEndNote } from './get-summary.mjs';
 
 const options = { id: 'job-original', cli: 'dalan', decideWords: 'accepted|rejected|applied' };
+async function reviewArgumentFailure(t, args) {
+  const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'dalan-review-args-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'bin'));
+  await mkdir(join(root, 'src'));
+  const cli = join(root, 'bin', 'dot-pr-reviewer.mjs');
+  await copyFile(new URL('../bin/dot-pr-reviewer.mjs', import.meta.url), cli);
+  await writeFile(join(root, 'src', 'pr-head-reviewer.mjs'), `
+    const unexpected = () => { throw new Error('entered reviewer dependency'); };
+    export const paths = {};
+    export const loadConfig = unexpected, acquireLock = unexpected, parseOnly = unexpected,
+      realDeps = unexpected, run = unexpected;
+  `);
+  const result = spawnSync(process.execPath, [cli, ...args], {
+    env: { HOME: root, USERPROFILE: root }, encoding: 'utf8', timeout: 5000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  return result.stderr.trim();
+}
+
+test('reviewer refuses an invalid --max before loading configuration', async t => {
+  for (const args of [['--max'], ['--max', '-1'], ['--max', '1.5']]) {
+    assert.equal(await reviewArgumentFailure(t, args), 'dalan-pr-reviewer: --max expects a non-negative integer');
+  }
+});
+
+test('reviewer refuses the capacity override outside dry-run before loading configuration', async t => {
+  assert.equal(await reviewArgumentFailure(t, ['--ignore-capacity']), 'dalan-pr-reviewer: --ignore-capacity requires --dry-run');
+});
+
 for (const status of ['finished', 'running']) {
   test(`revised ${status} job points to correction without hiding original evidence`, () => {
     const job = { status, target_worker: 'dot', revised_by: { request_id: 'job-correction' },
