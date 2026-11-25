@@ -8,7 +8,7 @@
       "../integrations/t3/acp-kit/src/capability.mjs",
       "../integrations/t3/acp-kit/src/t3-envelope.mjs"
     ],
-    "tokens": null
+    "tokens": 0
   },
   "src/acp-context.mjs": {
     "imports": [],
@@ -20,7 +20,11 @@
   },
   "src/alerts.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
+  },
+  "src/answer-journal-retention.mjs": {
+    "imports": [],
+    "tokens": 0
   },
   "src/answer-journal.mjs": {
     "imports": [],
@@ -32,15 +36,15 @@
   },
   "src/as-files.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/as-store.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/as.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/auth-check.mjs": {
     "imports": [],
@@ -48,11 +52,15 @@
   },
   "src/auth.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/builtin-http.mjs": {
     "imports": [],
     "tokens": 0
+  },
+  "src/catalog-switch-inventory.mjs": {
+    "imports": [],
+    "tokens": 1
   },
   "src/check-coverage.mjs": {
     "imports": [],
@@ -60,7 +68,7 @@
   },
   "src/check-lint.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/check-readiness.mjs": {
     "imports": [],
@@ -108,7 +116,7 @@
   },
   "src/deadman.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/default-home.mjs": {
     "imports": [],
@@ -120,7 +128,7 @@
   },
   "src/demo-worker.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/destinations/index.mjs": {
     "imports": [],
@@ -132,7 +140,7 @@
   },
   "src/diagnostic.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/docs-url.mjs": {
     "imports": [],
@@ -174,6 +182,10 @@
     "imports": [],
     "tokens": 0
   },
+  "src/get-summary-revisions.test.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
   "src/get-summary.mjs": {
     "imports": [],
     "tokens": 0
@@ -184,7 +196,7 @@
   },
   "src/gozar-routes.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/host-budget-receipts.mjs": {
     "imports": [],
@@ -246,13 +258,17 @@
     "imports": [],
     "tokens": 2
   },
+  "src/loopback-probe.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
   "src/loopback.mjs": {
     "imports": [],
     "tokens": 0
   },
   "src/mcp-outcome.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/mcp-sse.mjs": {
     "imports": [],
@@ -288,7 +304,11 @@
   },
   "src/paths.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
+  },
+  "src/phase-trace.mjs": {
+    "imports": [],
+    "tokens": 0
   },
   "src/pr-head-reviewer.mjs": {
     "imports": [],
@@ -356,7 +376,7 @@
   },
   "src/redaction.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/redirect-policy.mjs": {
     "imports": [],
@@ -372,13 +392,25 @@
   },
   "src/restore-check.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/result-binding.mjs": {
     "imports": [],
     "tokens": 0
   },
+  "src/route-custody.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/route-publication.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
   "src/route-setting.mjs": {
+    "imports": [],
+    "tokens": 0
+  },
+  "src/route-setup.mjs": {
     "imports": [],
     "tokens": 0
   },
@@ -400,7 +432,7 @@
   },
   "src/server.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 44
   },
   "src/service-auto-update.mjs": {
     "imports": [],
@@ -424,7 +456,7 @@
   },
   "src/service-update-runtime.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/service-update.mjs": {
     "imports": [],
@@ -432,7 +464,7 @@
   },
   "src/service.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/setup.mjs": {
     "imports": [],
@@ -444,7 +476,7 @@
   },
   "src/signal.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/status-evidence.mjs": {
     "imports": [],
@@ -460,15 +492,15 @@
   },
   "src/store.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 36
   },
   "src/submission-policy.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/subscription-storage.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/terminal-safe.mjs": {
     "imports": [],
@@ -476,7 +508,7 @@
   },
   "src/tool-registry.mjs": {
     "imports": [],
-    "tokens": 4
+    "tokens": 21
   },
   "src/try-command.mjs": {
     "imports": [],
@@ -488,15 +520,15 @@
   },
   "src/try-hosted.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/try-selfcheck.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/try.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   },
   "src/webhooks.mjs": {
     "imports": [],
@@ -520,6 +552,6 @@
   },
   "src/workspace.mjs": {
     "imports": [],
-    "tokens": null
+    "tokens": 0
   }
 }

@@ -414,5 +414,11 @@
   "node --test scripts/service-launchd-test.mjs",
   "node --test scripts/ack-ledger-concurrent-test.mjs",
   "node scripts/design-docs-test.mjs",
-  "node --test src/get-summary-revisions.test.mjs"
+  "node --test src/get-summary-revisions.test.mjs",
+  "node scripts/host-neutrality-test.mjs",
+  "node scripts/catalog-switch-inventory-test.mjs",
+  "node scripts/answer-journal-retention-test.mjs",
+  "node scripts/characterize-native-questions-e2e.mjs",
+  "node scripts/characterize-native-submit-e2e.mjs",
+  "node scripts/characterize-native-authority-e2e.mjs"
 ]

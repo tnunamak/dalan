@@ -1,4 +1,4 @@
-// Host-neutrality gate, baseline cb6b119196f025ac8cbbf93f0ee8bd0a30221654.
+// Host-neutrality gate. Baseline regenerated with --print on 2026-11-25 (was cb6b119196f025ac8cbbf93f0ee8bd0a30221654).
 // Source bindings: adapter-dot-bridge.mjs:91-128,146-166,180-204;
 // question-lifecycle-http-e2e.mjs:18-34; server.mjs:1058 (owner token);
 // store.mjs:2145-2160 (consumption); destinations/index.mjs:22-28 (lazy T3).
