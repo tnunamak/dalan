@@ -455,6 +455,7 @@ function runtimeVersions() {
   return runtimeCache={node:process.version,bwrap:fs.existsSync('/usr/bin/bwrap')?first('/usr/bin/bwrap',['--version']):null,pasta:pasta?{path:pasta,version:first(pasta,['--version'])}:null};
 }
 
+const UNSUPPORTED_MEMO_MAX=256;
 export class Workspace {
   constructor(store,recover=true,{freeBytes,checkResponseOptions,stopReverify}={}) { this.checkResponseOptions=checkResponseOptions;this.stopReverify=stopReverify; if(freeBytes) this.freeBytes=freeBytes; this.store=store;this.activeChecks=new Set();this.checkEffects=new Map();this.cleanupInFlight=new Set();fs.mkdirSync(worktrees,{recursive:true,mode:0o700});fs.mkdirSync(artifacts,{recursive:true,mode:0o700});fs.mkdirSync(caches,{recursive:true,mode:0o700});if(recover) this.sweepDigestScratch();if(recover) store.transaction(()=>{ for(const job of store.db.prepare("SELECT id,request_id,claim_id,check_id FROM check_jobs WHERE status='running'").all()) { store.db.prepare("UPDATE check_jobs SET status='interrupted',stop_verified=NULL,finished_at=? WHERE id=?").run(new Date().toISOString(),job.id); store.lifecycle(job.request_id,'check_failed','system',checkOutcome({...job,status:'interrupted'})[1],{claim_id:job.claim_id}); } });if(recover) this.reconcileHostStops(); }
   // Only called after expiry/revocation: the host supervisor observes loss of
@@ -853,9 +854,17 @@ export class Workspace {
         const read=file=>{try{return fs.readFileSync(path.join(dir,file));}catch{return null;}};
         return unsupportedDependencies(read('package.json'),read('package-lock.json'));
       }
-      const input=assignmentInput(assignment),mirror=this.mirrorFor(input,worker);
+      // The pinned base commit never changes, so its verdict is memoised (most recently used 256 kept): claim and get poll often,
+      // and reading and parsing a multi-megabyte lockfile each time blocks the bridge's event loop.
+      const input=assignmentInput(assignment),key=`${input.github_repo}@${input.base_sha}`,memo=this.unsupportedMemo??=new Map();
+      if(memo.has(key)) { const hit=memo.get(key);memo.delete(key);memo.set(key,hit);return hit; }
+      const mirror=this.mirrorFor(input,worker);
+      git(['-C',mirror,'cat-file','-e',`${input.base_sha}^{commit}`]); // no commit yet: throw, so a missing mirror is never memoised as "supported"
       const show=file=>{try{return git(['-C',mirror,'show',`${input.base_sha}:${file}`],{encoding:'buffer'});}catch{return null;}};
-      return unsupportedDependencies(show('package.json'),show('package-lock.json'));
+      const verdict=unsupportedDependencies(show('package.json'),show('package-lock.json'));
+      memo.set(key,verdict);
+      while(memo.size>UNSUPPORTED_MEMO_MAX) memo.delete(memo.keys().next().value);
+      return verdict;
     } catch { return null; }
   }
   // id -> what run_check runs. Best effort: a check whose definition cannot be read is listed without a summary, never withheld.
