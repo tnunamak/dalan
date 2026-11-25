@@ -82,6 +82,16 @@ test('a dead owner is stale and is taken over', async () => {
   lock.release(); fs.rmSync(dir, { recursive: true });
 });
 
+test('owner probes ignore absent or noninteger process references', () => {
+  for (const record of [null, {}, {pid:'42'}, {pid:1.5}, {pid:NaN}]) {
+    assert.equal(ownerAlive(record), false);
+  }
+});
+
+test('the current process is live for an older record without a start time', () => {
+  assert.equal(ownerAlive({pid:process.pid}), true);
+});
+
 test('pid reuse: a live pid with a different start_time is stale; the same start_time is busy', async () => {
   if (!['linux', 'darwin'].includes(process.platform)) return;
   const dir = tmp(), file = path.join(dir, 's.lock');
