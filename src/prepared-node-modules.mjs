@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const runtime = () => ({ node: process.version, abi: process.versions.modules, platform: process.platform, arch: process.arch });
@@ -141,4 +142,43 @@ export function prepareNodeModules(sourceDir, options = {}) {
     const thaw = dir => { const st=fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) return; fs.chmodSync(dir, 0o700); for (const name of fs.readdirSync(dir)) thaw(path.join(dir,name)); };
     thaw(stage); fs.rmSync(stage, { recursive: true, force: true });
   } }
+}
+
+// Prepare in a child process so a minutes-long `npm ci` does not stop the bridge's event loop. The child is the same
+// `dalan prepare-deps` the owner runs by hand, so it publishes to the same private store and under the same checks.
+// Callers must only pass a source whose manifest and lock the owner already trusts (a pinned base commit).
+const inFlight = new Map();
+const listStages = base => { try { return fs.readdirSync(base).filter(name => name.startsWith('.stage-')); } catch { return []; } };
+export function prepareNodeModulesInChild(sourceDir, { timeoutMs = 600000, env = process.env } = {}) {
+  const root = fs.realpathSync(sourceDir);
+  const input = inputs(root);
+  if (!input) return Promise.resolve(null);
+  const key = `${input.identity.lock_sha256}:${input.key}`;
+  const running = inFlight.get(key);
+  if (running) return running;
+  const cli = fileURLToPath(new URL('../bin/dot-worker.mjs', import.meta.url));
+  const childEnv = Object.fromEntries(Object.entries(env).filter(([name]) => /^(PATH|HOME|LANG|TMPDIR|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|npm_config_.*|(https?|no)_proxy)$/i.test(name)));
+  const base = store({});
+  const stagesBefore = new Set(listStages(base));
+  const done = new Promise((resolve, reject) => {
+    // Own process group: npm runs under the CLI's synchronous spawn, so killing the CLI alone would leave npm installing.
+    const child = spawn(process.execPath, [cli, 'prepare-deps', root, '--json'], { env: childEnv, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '', timedOut = false;
+    child.stdout.on('data', chunk => { if (out.length < 1 << 20) out += chunk; });
+    child.stderr.on('data', chunk => { if (err.length < 1 << 16) err += chunk; });
+    const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, timeoutMs);
+    child.on('error', error => { clearTimeout(timer); reject(failure('dependencies_install_failed', `automatic preparation could not start: ${error.message}`)); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (timedOut) {
+        // The killed CLI cannot clean up after itself: remove the staging directories it left, never ones that existed before.
+        for (const name of listStages(base)) if (!stagesBefore.has(name)) fs.rmSync(path.join(base, name), { recursive: true, force: true });
+        return reject(failure('dependencies_install_failed', `automatic preparation failed (timed out after ${Math.round(timeoutMs / 1000)} s)`));
+      }
+      if (code !== 0) return reject(failure('dependencies_install_failed', `automatic preparation failed (exit ${code}): ${err.trim().split('\n').slice(-3).join(' ').slice(0, 300)}`));
+      try { resolve(JSON.parse(out)); } catch { reject(failure('dependencies_install_failed', 'automatic preparation printed no result')); }
+    });
+  }).finally(() => inFlight.delete(key));
+  inFlight.set(key, done);
+  return done;
 }
