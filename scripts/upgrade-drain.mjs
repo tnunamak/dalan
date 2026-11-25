@@ -50,7 +50,9 @@ async function main() {
   cli('pause','--reason','upgrade drain');
   console.log('Claims paused. New submissions are still accepted while the drain waits.');
   while(true) {
-    const {claims=[]}=cli('claims');
+    const status=cli('claims');
+    if(!Array.isArray(status?.claims))fail('dalan claims returned no claims array.');
+    const {claims}=status;
     const open=claims.filter(claim=>{
       const expiry=Date.parse(claim.lease_expires_at);
       return !Number.isFinite(expiry)||expiry>Date.now();

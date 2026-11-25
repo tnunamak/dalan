@@ -198,6 +198,38 @@ for(const [name,accepted,refused] of [['minimum',60000,59999],['maximum',6048000
   });
 }
 
+test('upgrade-drain will not report an empty queue without a claims array', async t => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-drain-report-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(cwd, 'bin'));
+  fs.writeFileSync(path.join(cwd, 'bin', 'dot-worker.mjs'), [
+    'const operation = process.argv[2];',
+    'if (operation === "pause") console.log("{}");',
+    'else if (operation === "claims") console.log(process.env.OWNED_CLAIMS_REPORT);',
+    'else process.exitCode = 2;',
+  ].join('\n'));
+  const cli = fileURLToPath(new URL('../scripts/upgrade-drain.mjs', import.meta.url));
+  const run = payload => spawnSync(process.execPath, [cli], {
+    cwd,
+    env: { HOME: cwd, USERPROFILE: cwd, SYSTEMROOT: process.env.SYSTEMROOT, OWNED_CLAIMS_REPORT: payload },
+    encoding: 'utf8',
+    timeout: 3000,
+  });
+  for (const report of ['{}', '{"claims":null}']) {
+    const refused = run(report);
+    assert.ifError(refused.error);
+    assert.equal(refused.status, 1, 'an unmeasured queue must not authorize restart');
+    assert.match(refused.stderr, /dalan claims returned no claims array/);
+    assert.doesNotMatch(refused.stdout, /No unexpired claims remain/);
+  }
+  const empty = run('{"claims":[]}');
+  assert.ifError(empty.error);
+  assert.equal(empty.status, 0);
+  assert.match(empty.stdout, /No unexpired claims remain/);
+});
+
 test('try refuses conflicting local and public modes in either order', async () => {
   const { parseTryArgs } = await import('./try.mjs');
   for (const argv of [['--local', '--public'], ['--public', '--local']]) {
