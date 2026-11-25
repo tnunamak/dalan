@@ -15,7 +15,7 @@ function reopenGate(why) {
   if(result.status===0){gateClosed=false;console.error(`drain aborted (${why}); gate reopened`);}
   else console.error(`drain aborted (${why}); the gate could NOT be reopened: ${(result.stderr||result.stdout||`exit ${result.status}`).trim()}`);
 }
-if(untilQuiescent)for(const [name,code] of [['SIGINT',130],['SIGTERM',143]])process.on(name,()=>{reopenGate(name);process.exit(code);});
+if(untilQuiescent)for(const [name,code] of [['SIGINT',130],['SIGTERM',143],['SIGHUP',129]])process.on(name,()=>{reopenGate(name);process.exit(code);});
 const recovery='If the old service is paused, keep it running. Let workers finish or wait for their leases to expire, run `dalan resume` under the old HOME, then retry this drain.';
 async function main() {
   const timeoutMs=Number(process.env.DALAN_UPGRADE_DRAIN_TIMEOUT_MS??300000);

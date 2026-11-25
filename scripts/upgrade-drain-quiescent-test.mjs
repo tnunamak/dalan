@@ -128,6 +128,8 @@ const killMidPoll=async(signal,code)=>{
 test('until-quiescent reopens the gate when killed by SIGTERM mid-poll',()=>killMidPoll('SIGTERM',143));
 test('until-quiescent reopens the gate when killed by SIGINT mid-poll',()=>killMidPoll('SIGINT',130));
 
+test('until-quiescent reopens the gate when the terminal hangs up (SIGHUP)',()=>killMidPoll('SIGHUP',129));
+
 test('until-quiescent reopens the gate when the drain times out',()=>{
   const root=scratch();
   try {
