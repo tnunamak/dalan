@@ -11,7 +11,7 @@ export function cliCommand(argv1, env = process.env) {
   const real = p => { try { return fs.realpathSync(p); } catch { return null; } };
   const self = real(path.resolve(argv1 ?? defaultBin));
   let firstOnPath = null;
-  for (const dir of env.PATH === undefined ? [] : env.PATH.split(path.delimiter)) {
+  for (const dir of env.PATH == null ? [] : env.PATH.split(path.delimiter)) {
     const candidate = path.join(dir || '.', 'dalan');
     try {
       if (!fs.statSync(candidate).isFile()) continue;
@@ -20,7 +20,7 @@ export function cliCommand(argv1, env = process.env) {
       continue;
     }
     firstOnPath = real(candidate);
-    break;
+    if (firstOnPath !== null) break;
   }
   const onPath = self && firstOnPath === self;
   if (onPath) return env.npm_command === 'exec' ? 'npx @tnunamak/dalan' : 'dalan';
