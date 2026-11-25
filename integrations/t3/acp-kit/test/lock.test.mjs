@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { acquireLock, LockBusyError, ownerAlive } from '../src/lock.mjs';
+import { readJsonPrivate, writeJsonPrivate } from '../src/session-store.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.homedir(), '.tmp-acpkit-'));
 const worker = path.join(import.meta.dirname, 'lock-worker.mjs');
@@ -72,6 +73,37 @@ test('releasing twice leaves the temporary lock directory empty', async t => {
   assert.deepEqual(fs.readdirSync(dir), []);
   assert.doesNotThrow(() => lock.release());
   assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test('a serialization error leaves the committed session readable and untouched', {skip: process.platform === 'win32'}, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-session-serialize-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.json');
+  const old = {step: 'saved'};
+  writeJsonPrivate(file, old);
+  const bytes = fs.readFileSync(file);
+  const circular = {};
+  circular.self = circular;
+  assert.throws(() => writeJsonPrivate(file, circular), TypeError);
+  assert.deepEqual(readJsonPrivate(file), old);
+  assert.deepEqual(fs.readFileSync(file), bytes);
+  assert.deepEqual(fs.readdirSync(dir), ['session.json']);
+});
+
+test('a leftover partial temp file does not change the committed session', {skip: process.platform === 'win32'}, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-session-staged-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.json');
+  const partial = `${file}.${process.pid}.tmp`;
+  const committed = {step: 'confirmed'};
+  writeJsonPrivate(file, committed);
+  fs.writeFileSync(partial, '{"step":', {mode: 0o600});
+  assert.deepEqual(readJsonPrivate(file), committed);
+  assert.equal(fs.readFileSync(partial, 'utf8'), '{"step":');
+  const next = {step: 'continued'};
+  writeJsonPrivate(file, next);
+  assert.deepEqual(readJsonPrivate(file), next);
+  assert.deepEqual(fs.readdirSync(dir), ['session.json']);
 });
 
 test('a dead owner is stale and is taken over', async () => {
