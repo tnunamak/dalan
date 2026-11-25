@@ -239,6 +239,42 @@ test('a live lock reports a stable busy code and owner pid', async t => {
   } finally { lock.release(); }
 });
 
+test('a fresh truncated lock is protected, then recoverable after the grace window', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-truncated-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const partial = '{"pid":';
+  fs.writeFileSync(file, partial, { mode: 0o600 });
+  await assert.rejects(acquireLock(file), { code: 'session_busy', pid: null });
+  assert.equal(fs.readFileSync(file, 'utf8'), partial);
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(file, old, old);
+  const acquired = await acquireLock(file);
+  try {
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, acquired.token);
+    assert.deepEqual(fs.readdirSync(dir), ['session.lock']);
+  } finally { acquired.release(); }
+});
+
+test('a waiting acquirer gets the lock after the live takeover guard releases', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-guard-release-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const stale = await deadPid();
+  plant(file, { pid: stale });
+  const guard = `${file}.takeover.${'ab'.repeat(8)}.0`;
+  plant(guard, { pid: process.pid });
+  const pending = acquireLock(file, { guardWaitMs: 1000 });
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).pid, stale);
+  assert.ok(fs.existsSync(guard));
+  fs.unlinkSync(guard);
+  const acquired = await pending;
+  try {
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, acquired.token);
+    assert.deepEqual(fs.readdirSync(dir), ['session.lock']);
+  } finally { acquired.release(); }
+});
+
 test('a normal adapter exit releases a forgotten lock without a takeover', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-exit-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
