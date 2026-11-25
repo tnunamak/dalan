@@ -102,7 +102,12 @@ export function parseTryArgs(argv) {
   const out = { home: null, port: null, callbacks: [] };
   for (let i = 0; i < argv.length; i++) {
     const [flag, value] = [argv[i], argv[i + 1]];
-    if (flag === '--local' || flag === '--public') { out.mode = flag.slice(2); continue; }
+    if (flag === '--local' || flag === '--public') {
+      const mode = flag.slice(2);
+      if (out.mode && out.mode !== mode) throw new Error('--local cannot be combined with --public');
+      out.mode = mode;
+      continue;
+    }
     if (!['--home', '--port', '--callback', '--route'].includes(flag)) throw new Error(`unknown option ${JSON.stringify(flag)}\n${USAGE}`);
     if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value\n${USAGE}`);
     i++;

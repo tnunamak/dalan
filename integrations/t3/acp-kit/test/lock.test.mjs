@@ -277,6 +277,32 @@ test('two session lock paths can be acquired independently by one process', asyn
   } finally { one.release(); }
 });
 
+test('acquire and release preserve a session path containing spaces and Unicode', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-name-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'résumé α.lock');
+  const lock = await acquireLock(file, {attempts: 1});
+  try {
+    assert.deepEqual(fs.readdirSync(dir), ['résumé α.lock']);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, lock.token);
+  } finally { lock.release(); }
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test('zero installation attempts leave an existing lock owner unchanged', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-budget-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.lock');
+  const lock = await acquireLock(file);
+  try {
+    const before = fs.readFileSync(file);
+    await assert.rejects(acquireLock(file, {attempts: 0}),
+      {name: 'LockBusyError', code: 'session_busy'});
+    assert.deepEqual(fs.readFileSync(file), before);
+    assert.deepEqual(fs.readdirSync(dir), ['session.lock']);
+  } finally { lock.release(); }
+});
+
 test('release succeeds when the temporary lock file is already absent', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-release-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
