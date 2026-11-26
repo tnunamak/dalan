@@ -26,8 +26,6 @@ test('refusal preserves explicit diagnostic data without inventing data for an o
   assert.deepEqual(refuse('fixture rejected', false).args, [REFUSE_CODE, 'fixture rejected', false]);
 });
 
-import { writeJsonPrivate } from '../src/session-store.mjs';
-
 test('a failed session promotion removes its temporary file and preserves the destination', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-session-rename-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
