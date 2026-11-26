@@ -13,7 +13,7 @@ import { argvTestFiles, assignmentInput, prepareGithubRepo, detectCheck, detectC
 import { hostBackend, hostReadiness, capabilityNotAvailable, TRUST, withEvidence } from './execution.mjs';
 import { redactSecrets, redactOutput, privateKeyHeader } from './redaction.mjs';
 import { hostCheckRefusal, hostCheckAuthorization } from './host-execution-policy.mjs';
-import { resolvePreparedNodeModules, prepareNodeModulesInChild, unsupportedDependencies } from './prepared-node-modules.mjs';
+import { resolvePreparedNodeModules, prepareNodeModulesInChild, unsupportedDependencies, localInputFiles } from './prepared-node-modules.mjs';
 import { resolvePreparedGoModules, prepareGoModulesInChild, goModulesUnsupported } from './prepared-go-modules.mjs';
 import { ownerReportArtifactBytes } from './owner-report-artifact.mjs';
 import { withCheckCoverage } from './check-coverage.mjs';
@@ -1099,7 +1099,9 @@ export class Workspace {
       try{return fs.readFileSync(path.join(dir,file)).equals(pinned);}catch{return false;}
     });
     const unprepared=resolve=>{try{resolve(dir);return false;}catch(error){return error.code==='dependencies_unprepared';}};
-    if(unprepared(resolvePreparedNodeModules)&&unchangedFromBase(['package.json','package-lock.json'])) await prepareNodeModulesInChild(dir);
+    // Workspace manifests and local tarballs are inputs of the prepared tree too: each must equal the pinned base.
+    const localFiles=()=>{try{return localInputFiles(fs.readFileSync(path.join(dir,'package-lock.json')));}catch{return [];}};
+    if(unprepared(resolvePreparedNodeModules)&&unchangedFromBase(['package.json','package-lock.json'])&&unchangedFromBase(localFiles())) await prepareNodeModulesInChild(dir);
     // A Go repository: the module cache and toolchain come from go.mod and go.sum alone, under the same pinned-base rule. go.sum may be absent from the base, and then must be absent here.
     const sumInBase=(()=>{try{git(['-C',dir,'cat-file','-e',`${baseSha}:go.sum`]);return true;}catch{return false;}})();
     if(unprepared(resolvePreparedGoModules)&&unchangedFromBase(sumInBase?['go.mod','go.sum']:['go.mod'])&&(sumInBase||!fs.existsSync(path.join(dir,'go.sum')))) await prepareGoModulesInChild(dir);

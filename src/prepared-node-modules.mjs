@@ -24,14 +24,38 @@ export function readRegular(file, optional = false) {
     throw failure('dependencies_invalid', 'cannot read regular manifest or lock');
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
-// Why the host cannot prepare this manifest and lock (null when it can, or when there is nothing to prepare).
+// Workspaces and local tarballs are the only local inputs the host can prepare: every one is a file the owner pins by hash.
+// A workspace is a lock key outside node_modules (npm's own `ci` checks that the lock matches the manifests); a local tarball is a
+// `file:` dependency on a .tgz. Directory links, `link:` and `workspace:` specs stay unsupported.
+const SAFE_SEGMENT = /^[A-Za-z0-9_@.+-]+$/;
+const safeRelative = value => typeof value === 'string' && value.split('/').every(part => SAFE_SEGMENT.test(part) && part !== '.' && part !== '..' && part !== 'node_modules' && part !== '.git');
+const LOCAL_TARBALL = /^file:(?:\.\/)?(.+\.(?:tgz|tar\.gz))$/i;
+const tarballPath = spec => { const match = LOCAL_TARBALL.exec(String(spec)); return match && safeRelative(match[1]) ? match[1] : null; };
+// A dependency spec names its tarball relative to the package that declares it (`file:../../vendor/x.tgz`); only the lock's `resolved` path, relative to the root, decides which file is read.
+const tarballSpec = spec => LOCAL_TARBALL.test(String(spec)) && !String(spec).slice(5).startsWith('/') && !/(^|\/)node_modules(\/|$)/.test(String(spec));
+const workspaceKeys = data => Object.keys(data.packages).filter(name => name && !name.startsWith('node_modules/') && !name.includes('/node_modules/'));
 function unsupportedReason(pkg, data) {
-  if (pkg.workspaces || ![2, 3].includes(data.lockfileVersion) || !data.packages || typeof data.packages !== 'object') return 'only root npm lockfiles without workspaces are supported';
+  if (![2, 3].includes(data.lockfileVersion) || !data.packages || typeof data.packages !== 'object') return 'only npm lockfiles of version 2 or 3 are supported';
+  const workspaces = new Set(workspaceKeys(data));
+  if (workspaces.size && !pkg.workspaces) return 'the lock lists workspaces the manifest does not declare';
+  if (pkg.workspaces && !workspaces.size) return 'only root npm lockfiles with their workspaces are supported';
+  for (const name of workspaces) if (!safeRelative(name)) return 'a workspace path is unsupported';
+  const local = 'local or link dependencies are unsupported';
   for (const [name, entry] of Object.entries(data.packages)) {
-    if (entry?.link || (name && !name.startsWith('node_modules/')) || /^(file:|link:|workspace:)/i.test(entry?.resolved ?? '')) return 'local or workspace dependencies are unsupported';
-    for (const group of ['dependencies','devDependencies','optionalDependencies']) for (const value of Object.values(entry?.[group] ?? {})) if (typeof value === 'string' && /^(file:|link:|workspace:)/i.test(value)) return 'local or workspace dependencies are unsupported';
+    if (name) {
+      if (name.includes('/node_modules/') && !name.startsWith('node_modules/') && !workspaces.has(name.split('/node_modules/')[0])) return local;
+      if (entry?.link) { if (!name.startsWith('node_modules/') || !workspaces.has(entry.resolved)) return local; continue; }
+      if (/^(file:|link:|workspace:)/i.test(entry?.resolved ?? '') && !tarballPath(entry.resolved)) return local;
+    }
+    for (const group of ['dependencies','devDependencies','optionalDependencies']) for (const value of Object.values(entry?.[group] ?? {})) if (typeof value === 'string' && /^(file:|link:|workspace:)/i.test(value) && !tarballSpec(value)) return local;
   }
   return null;
+}
+// The repository-relative files that must match the owner's pinned base for a lock to be prepared from it: each workspace's package.json and each local tarball.
+export function localInputFiles(lock) {
+  const data = JSON.parse(lock);
+  const tarballs = Object.values(data.packages ?? {}).map(entry => tarballPath(entry?.resolved)).filter(Boolean);
+  return [...new Set([...workspaceKeys(data).map(name => `${name}/package.json`), ...tarballs])].sort();
 }
 export function unsupportedDependencies(manifest, lock) {
   if (!lock) return null;
@@ -48,7 +72,18 @@ function inputs(source) {
   const unsupported = unsupportedReason(pkg, data);
   if (unsupported) throw failure('dependencies_unsupported', unsupported);
   const identity = { lock_sha256: hash(lock), manifest_sha256: hash(manifest), runtime: runtime() };
-  return { root, lock, manifest, identity, key: hash(JSON.stringify(identity.runtime)) };
+  // Workspace manifests and local tarballs are read without following symlinks, and their hashes join the identity.
+  const files = new Map(), workspaces = workspaceKeys(data).sort();
+  for (const name of localInputFiles(lock)) {
+    const dir = path.dirname(path.join(root, name));
+    if (fs.realpathSync(dir) !== dir) throw failure('dependencies_invalid', 'workspace or tarball path must not contain links');
+    files.set(name, readRegular(path.join(root, name)));
+  }
+  if (workspaces.length) identity.workspaces = Object.fromEntries(workspaces.map(name => [name, hash(files.get(`${name}/package.json`))]));
+  const manifests = new Set(workspaces.map(name => `${name}/package.json`));
+  const tarballs = [...files.keys()].filter(name => !manifests.has(name));
+  if (tarballs.length) identity.local_files = Object.fromEntries(tarballs.map(name => [name, hash(files.get(name))]));
+  return { root, lock, manifest, files, workspaces, identity, key: hash(JSON.stringify(identity.runtime)) };
 }
 // Remove every write bit under a prepared tree so the sandbox's read-only mount and the owner agree on what the bytes are.
 export function freezeTree(dir) { const s = fs.lstatSync(dir); if (s.isSymbolicLink()) return; if (s.isDirectory()) for (const name of fs.readdirSync(dir)) freezeTree(path.join(dir, name)); else if (!s.isFile()) throw failure('dependencies_invalid', 'special file in dependency tree'); fs.chmodSync(dir, s.mode & 0o555); }
@@ -65,11 +100,18 @@ export function checkParents(dir) {
     if (p === '/') break;
   }
 }
-export function validateTree(root) {
+// `place` says where this tree sits in the repository layout (dir: its node_modules' parent, relative to the repository root) and which
+// workspace paths a link may point at: npm links each workspace into node_modules, and that target is the source checkout, not this tree.
+export function validateTree(root, place = null) {
   const walk = dir => {
     const st = fs.lstatSync(dir);
     if (st.uid !== process.getuid() || (!st.isSymbolicLink() && (st.mode & 0o222))) throw failure('dependencies_invalid', 'dependency tree ownership or mode invalid');
     if (st.isSymbolicLink()) {
+      if (place) {
+        const inRepo = path.posix.join(place.dir, 'node_modules', path.relative(root, path.dirname(dir)).split(path.sep).join('/'));
+        const target = path.posix.normalize(path.posix.join(inRepo, fs.readlinkSync(dir)));
+        if (!path.isAbsolute(fs.readlinkSync(dir)) && place.workspaces.includes(target)) return;
+      }
       const target = fs.realpathSync(dir);
       if (!target.startsWith(root + path.sep)) throw failure('dependencies_invalid', 'dependency link escapes tree');
     } else if (st.isDirectory()) for (const name of fs.readdirSync(dir)) walk(path.join(dir, name));
@@ -87,8 +129,12 @@ function lookup(input, base) {
     if (!st.isFile() || st.uid !== process.getuid() || (st.mode & 0o222)) throw new Error('bad metadata');
     const metadata = JSON.parse(readRegular(metaPath));
     if (JSON.stringify(metadata.identity) !== JSON.stringify(input.identity)) throw new Error('identity mismatch');
-    const treePath = path.join(entry, 'node_modules'); validateTree(treePath);
-    return { treePath, ...input.identity };
+    const places = [{ dir: '', treePath: path.join(entry, 'node_modules') }, ...(metadata.trees ?? []).map(name => ({ dir: name, treePath: path.join(entry, 'workspaces', name, 'node_modules') }))];
+    // Only workspaces the identity names may have a tree; a recorded tree for any other path is refused.
+    if (places.slice(1).some(place => !input.workspaces.includes(place.dir))) throw new Error('unexpected workspace tree');
+    const workspaces = input.workspaces.map(name => path.posix.normalize(name));
+    for (const place of places) validateTree(place.treePath, { dir: place.dir, workspaces });
+    return { treePath: places[0].treePath, workspaceTrees: places.slice(1).map(({ dir, treePath }) => ({ path: dir, treePath })), ...input.identity };
   } catch (e) {
     throw failure('dependencies_unprepared', `missing or invalid preparation; owner recovery: ${recovery(input.root)} --replace-invalid`);
   }
@@ -126,20 +172,32 @@ export function prepareNodeModules(sourceDir, options = {}) {
   }
   const stage = fs.mkdtempSync(path.join(base, `.stage-${process.pid}-`));
   try {
-    fs.writeFileSync(path.join(stage, 'package.json'), input.manifest, { mode: 0o600 });
-    fs.writeFileSync(path.join(stage, 'package-lock.json'), input.lock, { mode: 0o600 });
+    // npm runs in work/ with the lock, the root manifest, every workspace manifest and every local tarball; only the node_modules trees are published.
+    const work = path.join(stage, 'work');
+    fs.mkdirSync(work, { mode: 0o700 });
+    fs.writeFileSync(path.join(work, 'package.json'), input.manifest, { mode: 0o600 });
+    fs.writeFileSync(path.join(work, 'package-lock.json'), input.lock, { mode: 0o600 });
+    for (const [name, bytes] of input.files) { fs.mkdirSync(path.dirname(path.join(work, name)), { recursive: true, mode: 0o700 }); fs.writeFileSync(path.join(work, name), bytes, { mode: 0o600 }); }
     const env = options.env ?? process.env, execPath = options.execPath ?? process.execPath;
     const npm = npmCliPath({ execPath, env });
-    const run = spawnSync(execPath, [npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: stage, env: { ...env, npm_config_ignore_scripts: 'true' }, stdio: 'ignore' });
+    const run = spawnSync(execPath, [npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: work, env: { ...env, npm_config_ignore_scripts: 'true' }, stdio: 'ignore' });
     if (run.error || run.status !== 0) {
       const exit = run.error ? `error: ${run.error.message}` : run.signal ? `signal ${run.signal}` : `exit status ${run.status}`;
       throw failure('dependencies_install_failed', `npm ci failed (ran ${npm}; ${exit}); no preparation published`);
     }
-    const tree = path.join(stage, 'node_modules');
-    if (!fs.existsSync(tree)) fs.mkdirSync(tree, { mode: 0o700 });
-    freezeTree(tree); validateTree(tree);
-    fs.rmSync(path.join(stage, 'package.json')); fs.rmSync(path.join(stage, 'package-lock.json'));
-    fs.writeFileSync(path.join(stage, 'metadata.json'), JSON.stringify({ identity: input.identity }) + '\n', { mode: 0o400 });
+    const workspaces = input.workspaces.map(name => path.posix.normalize(name));
+    const trees = [];
+    fs.mkdirSync(path.join(work, 'node_modules'), { recursive: true, mode: 0o700 });
+    fs.renameSync(path.join(work, 'node_modules'), path.join(stage, 'node_modules'));
+    for (const name of input.workspaces) {
+      const tree = path.join(work, name, 'node_modules');
+      if (!fs.existsSync(tree)) continue;
+      fs.mkdirSync(path.join(stage, 'workspaces', name), { recursive: true, mode: 0o700 });
+      fs.renameSync(tree, path.join(stage, 'workspaces', name, 'node_modules')); trees.push(name);
+    }
+    fs.rmSync(work, { recursive: true, force: true });
+    for (const [dir, tree] of [['', path.join(stage, 'node_modules')], ...trees.map(name => [name, path.join(stage, 'workspaces', name, 'node_modules')])]) { freezeTree(tree); validateTree(tree, { dir, workspaces }); }
+    fs.writeFileSync(path.join(stage, 'metadata.json'), JSON.stringify({ identity: input.identity, trees }) + '\n', { mode: 0o400 });
     if(fs.existsSync(destination)) {
       // Recheck after npm: a concurrent owner preparation may have finished.
       try { return lookup(input,base); }

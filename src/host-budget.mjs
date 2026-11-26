@@ -78,21 +78,24 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const workingDir=fs.realpathSync(dir);
   const dependencies=resolvePreparedNodeModules(workingDir);
   const goModules=resolvePreparedGoModules(workingDir);
-  const protectedPaths=['node_modules','package.json','package-lock.json','go.mod','go.sum'];
+  const protectedPaths=['node_modules','package.json','package-lock.json','go.mod','go.sum',...Object.keys(dependencies?.workspaces??{}).flatMap(name=>[`${name}/node_modules`,`${name}/package.json`]),...Object.keys(dependencies?.local_files??{})];
   const overlaps=(a,b)=>a===b||a.startsWith(b+'/')||b.startsWith(a+'/');
   for(const name of [...maskPaths,...sourceExemptions.map(entry=>entry.path)]) {
     if(typeof name!=='string'||!name||path.posix.normalize(name)!==name||name.startsWith('/')||name==='..'||name.startsWith('../')||protectedPaths.some(p=>overlaps(name,p))) throw new Error('dependencies_invalid: overlay overlaps dependency inputs');
   }
   if(dependencies) for(const entry of sourceExemptions) {
-    const host=fs.realpathSync(entry.hostPath), tree=fs.realpathSync(dependencies.treePath);
-    if(host===tree||host.startsWith(tree+path.sep)||tree.startsWith(host+path.sep)) throw new Error('dependencies_invalid: overlay exposes dependency tree');
+    const host=fs.realpathSync(entry.hostPath);
+    for(const treePath of [dependencies.treePath,...dependencies.workspaceTrees.map(tree=>tree.treePath)]) {
+      const tree=fs.realpathSync(treePath);
+      if(host===tree||host.startsWith(tree+path.sep)||tree.startsWith(host+path.sep)) throw new Error('dependencies_invalid: overlay exposes dependency tree');
+    }
   }
   if(receipts) {
     assertHostReceiptIsolation(receipts.receiptDir,[workingDir,'/usr','/lib','/lib64','/etc/alternatives',process.execPath,
       path.resolve(path.dirname(process.execPath),'../lib/node_modules/npm'),service,stopRecorder,
       cgroupReader,processSignaler,
       fileURLToPath(new URL('./host-budget-storage.py',import.meta.url)),fileURLToPath(new URL('./host-budget-seccomp.py',import.meta.url)),
-      ...sourceExemptions.map(entry=>entry.hostPath),...(dependencies?[dependencies.treePath]:[]),...(goModules?[goModules.treePath]:[])]);
+      ...sourceExemptions.map(entry=>entry.hostPath),...(dependencies?[dependencies.treePath,...dependencies.workspaceTrees.map(tree=>tree.treePath)]:[]),...(goModules?[goModules.treePath]:[])]);
   }
   const config = { dir: workingDir, budgets, phases, maskPaths, sourceExemptions, dependencies, goModules, node: process.execPath, ...(receipts?{receipts}:{}) };
   const serialized = JSON.stringify(config);
@@ -184,5 +187,5 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const bytes = Buffer.concat(phaseResults.map(p => p.bytes)).subarray(0, budgets.output_bytes);
   const notStarted=provesHostNotStarted({spawnError:exit.error,pid,stopped}); // stderr is not trusted for this decision.
   const usage = message?.usage ? { ...partialUsage, ...message.usage } : partialUsage;
-  return { unit, dependencies: dependencies ? {lock_sha256:dependencies.lock_sha256,manifest_sha256:dependencies.manifest_sha256,runtime:dependencies.runtime} : null, go_modules: goModules ? {go_mod_sha256:goModules.go_mod_sha256,go_sum_sha256:goModules.go_sum_sha256,runtime:goModules.runtime} : null, exit: error ? { code: 125 } : message?.exit ?? { code: 125 }, error, budgets, usage, usage_complete: !!message?.usage && !!message?.phases?.length && stopped?.result !== 'timeout' && !stopped?.oom_kill, bytes, phases: phaseResults, stop, notStarted, timedOut: error === 'budget exceeded: wall', cancelled: !!message?.cancelled, truncated: error === 'budget exceeded: output', duration_ms: Math.round(performance.now()-started) };
+  return { unit, dependencies: dependencies ? {lock_sha256:dependencies.lock_sha256,manifest_sha256:dependencies.manifest_sha256,runtime:dependencies.runtime,...(dependencies.workspaces?{workspaces:dependencies.workspaces}:{})} : null, go_modules: goModules ? {go_mod_sha256:goModules.go_mod_sha256,go_sum_sha256:goModules.go_sum_sha256,runtime:goModules.runtime} : null, exit: error ? { code: 125 } : message?.exit ?? { code: 125 }, error, budgets, usage, usage_complete: !!message?.usage && !!message?.phases?.length && stopped?.result !== 'timeout' && !stopped?.oom_kill, bytes, phases: phaseResults, stop, notStarted, timedOut: error === 'budget exceeded: wall', cancelled: !!message?.cancelled, truncated: error === 'budget exceeded: output', duration_ms: Math.round(performance.now()-started) };
 }
