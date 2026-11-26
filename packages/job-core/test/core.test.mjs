@@ -96,6 +96,27 @@ test('claim authority requires matching epoch and an unexpired deadline', () => 
 });
 
 
+test('claim authority requires explicit boolean activation, not truthiness', () => {
+  const command = Object.freeze({ job: 'j', subject: 's', worker: 'w', claim: 'c', epoch: 2 });
+  const lease = Object.freeze({ ...command, leaseUntil: 1 });
+  for (const active of [1, 'true', null]) {
+    const authority = Object.freeze({ ...lease, active });
+    assert.throws(() => assertClaimAuthority(command, authority, 0), { code: 'stale_authority' });
+  }
+  assert.doesNotThrow(() => assertClaimAuthority(command, { ...lease, active: true }, 0));
+});
+
+test('renewal requires an explicit, positive integral caller ceiling', () => {
+  const snapshot = Object.freeze({ revision: 7 });
+  const command = Object.freeze({ expectedRevision: 7, operation: 'renew', args: Object.freeze({ leaseMs: 1 }) });
+  for (const context of [undefined, { now: 3 }, { now: 3, maxLeaseMs: 0 }, { now: 3, maxLeaseMs: 1.5 }]) {
+    assert.throws(() => decide(snapshot, command, context), { code: 'invalid_lease' });
+  }
+  assert.deepEqual(decide(snapshot, command, { now: 3, maxLeaseMs: 1 }), {
+    events: [], effects: [{ type: 'advance_revision', expectedRevision: 7 }], leaseUntil: 4,
+  });
+});
+
 test('renewal reports invalid lease when duration is missing, zero, or fractional', () => {
   const snapshot = Object.freeze({ revision: 2 });
   for (const args of [undefined, {}, { leaseMs: 0 }, { leaseMs: 1.5 }]) {
