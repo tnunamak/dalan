@@ -12,7 +12,7 @@ const { Workspace } = await import('../src/workspace.mjs');
 // Which manifests and locks the host can never prepare, so run_check is not offered for them.
 const pkg = extra => JSON.stringify({ name: 'f', version: '1.0.0', ...extra });
 const lock = (packages = {}, extra = {}) => JSON.stringify({ name: 'f', version: '1.0.0', lockfileVersion: 3, packages: { '': { name: 'f', version: '1.0.0' }, ...packages }, ...extra });
-const reason = /without workspaces|local or workspace/;
+const reason = /workspaces|local or link|lockfiles of version/;
 
 assert.equal(unsupportedDependencies(pkg(), lock({ 'node_modules/a': { version: '1.0.0', resolved: 'https://registry.npmjs.org/a/-/a-1.0.0.tgz' } })), null, 'a plain registry lockfile is supported');
 assert.equal(unsupportedDependencies(pkg(), null), null, 'no lockfile: nothing to prepare, not unsupported');

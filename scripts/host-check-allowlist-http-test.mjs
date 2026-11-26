@@ -123,7 +123,7 @@ try {
     assert(wsClaim.claim_id,JSON.stringify(wsClaim));
     assert.deepEqual(wsClaim.available_checks,[],'a workspace lockfile offers no runnable check');
     assert.equal(wsClaim.host_execution_available,false);
-    assert.match(wsClaim.host_execution_unavailable_reason,/dependencies_unsupported: only root npm lockfiles without workspaces/);
+    assert.match(wsClaim.host_execution_unavailable_reason,/dependencies_unsupported: only root npm lockfiles with their workspaces/);
     assert.equal(Object.hasOwn(wsClaim,'available_check_details'),false);
     console.log('PASS authenticated HTTP prepared run_check: on-demand preparation of the pinned lockfile, read-only real backend and persisted identity');
   }

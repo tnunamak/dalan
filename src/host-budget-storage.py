@@ -28,7 +28,7 @@ if sys.argv[1] != '--inside':
     config_fd=os.memfd_create('dot-host-config')
     guest_config = dict(config)
     if config['dependencies']:
-        guest_config['dependencies'] = {key: value for key, value in config['dependencies'].items() if key != 'treePath'}
+        guest_config['dependencies'] = {key: value for key, value in config['dependencies'].items() if key not in ('treePath', 'workspaceTrees')}
     if config.get('goModules'):
         guest_config['goModules'] = {key: value for key, value in config['goModules'].items() if key != 'treePath'}
     os.write(config_fd,json.dumps(guest_config).encode())
@@ -50,6 +50,9 @@ if sys.argv[1] != '--inside':
         command += ['--ro-bind', npm, '/runtime/npm']
     if config['dependencies']:
         command += ['--ro-bind', config['dependencies']['treePath'], '/budget/workspace/node_modules']
+        # A workspace's own node_modules (versions that conflict with the root's) sits beside its source, read-only like the root tree.
+        for tree in config['dependencies'].get('workspaceTrees', []):
+            command += ['--ro-bind', tree['treePath'], '/budget/workspace/' + tree['path'] + '/node_modules']
     # The prepared Go module cache (modules plus the toolchain go.mod asks for) is the sandbox's GOMODCACHE, read-only.
     if config.get('goModules'):
         command += ['--ro-bind', config['goModules']['treePath'], '/budget/cache/go/pkg/mod']
@@ -170,9 +173,12 @@ try:
             archive.extractall('/workspace', filter='data')
     dependencies = config['dependencies']
     if dependencies:
-        for name, key in [('package-lock.json', 'lock_sha256'), ('package.json', 'manifest_sha256')]:
+        checks = [('package-lock.json', dependencies['lock_sha256']), ('package.json', dependencies['manifest_sha256'])]
+        checks += [(name + '/package.json', digest) for name, digest in dependencies.get('workspaces', {}).items()]
+        checks += list(dependencies.get('local_files', {}).items())
+        for name, digest in checks:
             with open('/workspace/' + name, 'rb') as stream:
-                if hashlib.sha256(stream.read()).hexdigest() != dependencies[key]:
+                if hashlib.sha256(stream.read()).hexdigest() != digest:
                     raise ValueError('dependencies_invalid: copied dependency inputs changed')
     elif os.path.lexists('/workspace/package-lock.json'):
         raise ValueError('dependencies_invalid: copied lock appeared after admission')
