@@ -683,7 +683,7 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,idleLeas
     // only_when_empty: work queued at the finish is the worker's to claim; no handoff, and the finish is not held.
     if(onlyWhenEmpty&&store.hasQueuedFor([worker])) return {};
     // Rows whose last handoff lapsed untouched are left for the worker's own list_pending: the same rows were handed ten times and never started.
-    const pick=free=>(store.nextQueued(HANDOFF_PICK_WINDOW+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id)&&!store.handoffLapsed(x.request_id,worker)).slice(0,free);
+    const pick=free=>(store.nextQueued(HANDOFF_PICK_WINDOW+tried.size,null,worker,{applyHint:false}).next_queued??[]).filter(x=>!tried.has(x.request_id)&&!store.handoffLapsed(x.request_id,worker)).slice(0,free);
     for(;;) {
       if(signal?.aborted||store.paused()) return jobs.length?{jobs}:{};
       const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);

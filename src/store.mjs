@@ -2711,14 +2711,16 @@ export class Store {
     return this.db.prepare("SELECT c.* FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND c.state='active' AND c.worker=?").all(worker)
       .filter(c=>Date.parse(c.last_claim_activity_at??c.claimed_at)>=since).length;
   }
-  nextQueued(free,exceptId=null,worker='dot') {
-    const hint=this.claimHint(worker);
+  // `applyHint:false` is for the bridge's own picks (a finish handoff), which must see every eligible row: the hint only shapes what a worker is told.
+  nextQueued(free,exceptId=null,worker='dot',{applyHint=true}={}) {
+    const hint=applyHint?this.claimHint(worker):null,lanesFree=free;
     if(hint!==null) free=Math.min(free,Math.max(0,hint-this.recentClaimCount(worker)));
     if(free<=0) return {};
     const all=this.listPending(worker).filter(x=>x.kind==='assignment'&&!x.blocked&&x.request_id!==exceptId);
     if(!all.length) return {};
     const next=all.slice(0,free).map(x=>Object.fromEntries(['request_id','title',...TRIAGE_KEYS].filter(k=>x[k]!==undefined).map(k=>[k,x[k]])));
-    return {next_queued:next,next_action:`${all.length} queued and ${free} ${free===1?'lane':'lanes'} free: claim ${next.map(x=>x.request_id).join(', ')} now (oldest first)`};
+    const lanes=free<lanesFree?`${lanesFree} ${lanesFree===1?'lane':'lanes'} free, ${free} suggested`:`${free} ${free===1?'lane':'lanes'} free`;
+    return {next_queued:next,next_action:`${all.length} queued and ${lanes}: claim ${next.map(x=>x.request_id).join(', ')} now (oldest first)`};
   }
   freeLanes(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity) { return Math.max(0,Math.min(laneCapacity,claimCapacity)-this.activeClaims(subject,worker).length); }
   quiesceCounts() {
