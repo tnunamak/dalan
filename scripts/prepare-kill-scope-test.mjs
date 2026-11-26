@@ -31,7 +31,7 @@ try {
   fs.writeFileSync(path.join(slow, 'package-lock.json'), JSON.stringify({ name: 'slow-fixture', version: '1.0.0', lockfileVersion: 3,
     packages: { '': manifest, 'node_modules/stalled': { version: '1.0.0', resolved: `http://127.0.0.1:${stalled.address().port}/stalled.tgz`, integrity: 'sha512-AAAA' } } }));
 
-  const result = prepareNodeModulesInChild(slow, { timeoutMs: 4000 }).then(() => 'resolved', error => error);
+  const result = prepareNodeModulesInChild(slow, { timeoutMs: 4000, env: { ...process.env, npm_config_registry: `http://127.0.0.1:${stalled.address().port}/` } }).then(() => 'resolved', error => error);
   // While it stalls: every process the preparation started is in one group, and that group is not ours.
   let running = [];
   for (let i = 0; i < 60 && !running.length; i++) { await sleep(100); running = inStore(); }

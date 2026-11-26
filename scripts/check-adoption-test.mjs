@@ -86,6 +86,9 @@ try {
   // A stalled install is killed with its whole process tree and leaves no staging directory; a retry works.
   const stalled = http.createServer(() => {});
   await new Promise(resolve => stalled.listen(0, '127.0.0.1', resolve));
+  // The stalled server is the registry host. npm 12 refuses a tarball URL on any other host (allow-remote defaults to none), which would fail at
+  // once instead of stalling; a tarball on the registry's own host is installed the same way by npm 11 and 12.
+  const stalledRegistry = { ...process.env, npm_config_registry: `http://127.0.0.1:${stalled.address().port}/` };
   const slow = fs.realpathSync(fs.mkdtempSync(path.join(home, 'slow-')));
   const slowManifest = { name: 'slow-fixture', version: '1.0.0', dependencies: { stalled: '1.0.0' } };
   fs.writeFileSync(path.join(slow, 'package.json'), JSON.stringify(slowManifest));
@@ -94,7 +97,7 @@ try {
   const survivors = () => fs.readdirSync('/proc').filter(pid => /^\d+$/.test(pid)).filter(pid => { try { return fs.readlinkSync(`/proc/${pid}/cwd`).startsWith(home); } catch { return false; } });
   const stages = () => fs.readdirSync(store).filter(name => name.startsWith('.stage-'));
   for (const attempt of [1, 2]) {
-    await assert.rejects(prepareNodeModulesInChild(slow, { timeoutMs: 2500 }), { code: 'dependencies_install_failed', message: /timed out/ }, `attempt ${attempt} times out`);
+    await assert.rejects(prepareNodeModulesInChild(slow, { timeoutMs: 2500, env: stalledRegistry }), { code: 'dependencies_install_failed', message: /timed out/ }, `attempt ${attempt} times out`);
     assert.deepEqual(stages(), [], `attempt ${attempt} leaves no staging directory`);
     assert.deepEqual(survivors(), [], `attempt ${attempt} leaves no process running in the store`);
   }
