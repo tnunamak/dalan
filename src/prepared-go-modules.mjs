@@ -75,7 +75,7 @@ export function prepareGoModules(sourceDir, options = {}) {
     try { return lookup(input, base); }
     catch (error) { if (!options.replaceInvalid) throw error; }
   }
-  const stage = fs.mkdtempSync(path.join(base, '.stage-'));
+  const stage = fs.mkdtempSync(path.join(base, `.stage-${process.pid}-`));
   try {
     const work = path.join(stage, 'work'), cache = path.join(stage, 'modcache');
     for (const dir of [work, cache, path.join(stage, 'home'), path.join(stage, 'gopath')]) fs.mkdirSync(dir, { mode: 0o700 });
@@ -104,7 +104,10 @@ export function prepareGoModules(sourceDir, options = {}) {
       // Keep the old inodes for any running read-only mount; the new bytes go to a new path.
       fs.renameSync(destination, path.join(base, '.replaced-' + randomUUID()));
     }
-    fs.renameSync(stage, destination);
+    try { fs.renameSync(stage, destination); }
+    catch (error) { // another publisher won the race: reuse its entry when it is valid, otherwise report the original failure
+      try { return lookup(input, base); } catch { throw error; }
+    }
     return lookup(input, base);
   } finally {
     if (fs.existsSync(stage)) { thawTree(stage); fs.rmSync(stage, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }

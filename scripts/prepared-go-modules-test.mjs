@@ -15,9 +15,10 @@ process.on('exit', () => { try { for (const dir of fs.readdirSync(root)) thaw(pa
 const thaw = dir => { try { const st = fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) return; fs.chmodSync(dir, 0o700); for (const name of fs.readdirSync(dir)) thaw(path.join(dir, name)); } catch {} };
 const { prepareGoModules, resolvePreparedGoModules, unsupportedGoModules, goModulesUnsupported } = await import('../src/prepared-go-modules.mjs');
 const { runHostBudget } = await import('../src/host-budget.mjs');
-const linux = process.platform === 'linux' && fs.existsSync('/usr/bin/go');
+const hasGo = fs.existsSync('/usr/bin/go');
+const linux = process.platform === 'linux' && hasGo;
 
-const goVersion = spawnSync('/usr/bin/go', ['env', 'GOVERSION'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', GOTOOLCHAIN: 'local' } }).stdout.trim();
+const goVersion = !hasGo ? 'go1.21' : spawnSync('/usr/bin/go', ['env', 'GOVERSION'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', GOTOOLCHAIN: 'local' } }).stdout.trim();
 const goLine = goVersion.replace(/^go(\d+\.\d+).*/, '$1'); // the host's own version: the toolchain never needs to switch here
 const run = (cmd, args, cwd, env = {}) => { const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: root, GOCACHE: path.join(root, 'gocache'), GOMODCACHE: path.join(root, 'gomod'), GOFLAGS: '-modcacherw', ...env } }); if (r.status !== 0) throw new Error(r.stderr || r.stdout); return r.stdout; };
 
@@ -41,7 +42,7 @@ const app = repo('app', withDep, {
   'app_test.go': 'package app\n\nimport (\n\t"testing"\n\n\t"example.org/dep"\n)\n\nfunc TestAnswer(t *testing.T) {\n\tif dep.Answer() != 42 {\n\t\tt.Fatal("wrong")\n\t}\n}\n',
   'app.go': 'package app\n',
 });
-run('/usr/bin/go', ['mod', 'tidy'], app, { ...offlineEnv, GOTOOLCHAIN: 'local' }); // writes go.sum from the proxy
+if (hasGo) run('/usr/bin/go', ['mod', 'tidy'], app, { ...offlineEnv, GOTOOLCHAIN: 'local' }); // writes go.sum from the proxy
 
 test('unsupported go.mod shapes are named, and a plain one is not', () => {
   assert.equal(unsupportedGoModules(withDep), null);

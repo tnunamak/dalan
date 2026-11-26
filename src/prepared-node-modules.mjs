@@ -124,7 +124,7 @@ export function prepareNodeModules(sourceDir, options = {}) {
     try { return lookup(input, base); }
     catch(error) { if(!options.replaceInvalid)throw error; }
   }
-  const stage = fs.mkdtempSync(path.join(base, '.stage-'));
+  const stage = fs.mkdtempSync(path.join(base, `.stage-${process.pid}-`));
   try {
     fs.writeFileSync(path.join(stage, 'package.json'), input.manifest, { mode: 0o600 });
     fs.writeFileSync(path.join(stage, 'package-lock.json'), input.lock, { mode: 0o600 });
@@ -160,7 +160,8 @@ export function prepareNodeModules(sourceDir, options = {}) {
 // `dalan prepare-deps` the owner runs by hand, so it publishes to the same private store and under the same checks.
 // Callers must only pass a source whose manifest and lock the owner already trusts (a pinned base commit).
 const inFlight = new Map();
-const listStages = base => { try { return fs.readdirSync(base).filter(name => name.startsWith('.stage-')); } catch { return []; } };
+// A stage directory names the process that owns it, so a killed child's parent removes exactly that child's stages.
+const listStages = (base, pid) => { try { return fs.readdirSync(base).filter(name => name.startsWith(`.stage-${pid}-`)); } catch { return []; } };
 export function prepareNodeModulesInChild(sourceDir, { timeoutMs = 600000, env = process.env } = {}) {
   const root = fs.realpathSync(sourceDir);
   const input = inputs(root);
@@ -173,7 +174,6 @@ export function prepareInChild({ root, key, base, flags, timeoutMs = 600000, env
   if (running) return running;
   const cli = fileURLToPath(new URL('../bin/dot-worker.mjs', import.meta.url));
   const childEnv = Object.fromEntries(Object.entries(env).filter(([name]) => /^(PATH|HOME|LANG|TMPDIR|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|npm_config_.*|GOPROXY|GOSUMDB|(https?|no)_proxy)$/i.test(name)));
-  const stagesBefore = new Set(listStages(base));
   const done = new Promise((resolve, reject) => {
     // Own process group: npm runs under the CLI's synchronous spawn, so killing the CLI alone would leave npm installing.
     const child = spawn(process.execPath, [cli, 'prepare-deps', root, '--json', ...flags], { env: childEnv, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -185,8 +185,8 @@ export function prepareInChild({ root, key, base, flags, timeoutMs = 600000, env
     child.on('close', code => {
       clearTimeout(timer);
       if (timedOut) {
-        // The killed CLI cannot clean up after itself: remove the staging directories it left, never ones that existed before.
-        for (const name of listStages(base)) if (!stagesBefore.has(name)) fs.rmSync(path.join(base, name), { recursive: true, force: true });
+        // The killed CLI cannot clean up after itself: remove the staging directories it left (named by its pid), never another preparation's.
+        for (const name of listStages(base, child.pid)) { try { thawTree(path.join(base, name)); fs.rmSync(path.join(base, name), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch {} }
         return reject(failure('dependencies_install_failed', `automatic preparation failed (timed out after ${Math.round(timeoutMs / 1000)} s)`));
       }
       if (code !== 0) return reject(failure('dependencies_install_failed', `automatic preparation failed (exit ${code}): ${err.trim().split('\n').slice(-3).join(' ').slice(0, 300)}`));
