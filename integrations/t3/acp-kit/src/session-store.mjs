@@ -24,7 +24,13 @@ export function writeJsonPrivate(file, value, { pretty = false } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  try {
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    // The destination is unchanged; do not strand this attempt's temp file.
+    try { fs.rmSync(tmp, { force: true }); } catch { /* preserve the original failure */ }
+    throw error;
+  }
 }
 
 // null when the file does not exist; throws state_permissions when it is not exactly 0600.
