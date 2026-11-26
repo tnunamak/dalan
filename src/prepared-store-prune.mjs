@@ -3,7 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { failure, checkParents, checkDirectory, thawTree, preparedNodeStore } from './prepared-node-modules.mjs';
 
-// Keep-newest-N pruning for the prepared node_modules store (npm and pnpm entries share it). A running check bind-mounts an entry
+// Keep-newest-N pruning for the prepared node_modules store (npm and pnpm entries share it) and, with `base`, the Go module store (same
+// <lock>/<key>/metadata.json layout). A running check bind-mounts an entry
 // read-only, so an entry is never deleted in place: it is renamed to `.pruned-<uuid>` (open files and mounts keep their inodes), and only a
 // later pass, at least an hour after, deletes it. Entries younger than a day are never touched, which also spares an entry a check
 // resolved moments ago. Entries rank by last use (markUsed touches metadata.json when a check resolves one), not publication time, so a
@@ -15,7 +16,7 @@ const remove = target => { try { thawTree(target); fs.rmSync(target, { recursive
 export function pruneNodeStore(options = {}) {
   const keep = options.keep ?? 4, now = options.now ?? Date.now();
   if (!Number.isInteger(keep) || keep < 1) throw failure('dependencies_invalid', 'keep must be a positive integer');
-  const base = preparedNodeStore(options);
+  const base = options.base ?? preparedNodeStore(options);
   const result = { kept: [], renamed: [], deleted: [], skipped_young: [] };
   if (!fs.existsSync(base)) return result;
   checkParents(base); checkDirectory(base, true);

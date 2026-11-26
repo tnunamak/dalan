@@ -13,7 +13,7 @@ process.env.HOME = path.join(root, 'home'); // the default prepared store lives 
 fs.mkdirSync(process.env.HOME, { recursive: true, mode: 0o700 });
 process.on('exit', () => { try { for (const dir of fs.readdirSync(root)) thaw(path.join(root, dir)); } catch {} fs.rmSync(root, { recursive: true, force: true }); });
 const thaw = dir => { try { const st = fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) return; fs.chmodSync(dir, 0o700); for (const name of fs.readdirSync(dir)) thaw(path.join(dir, name)); } catch {} };
-const { prepareGoModules, resolvePreparedGoModules, unsupportedGoModules, goModulesUnsupported } = await import('../src/prepared-go-modules.mjs');
+const { prepareGoModules, resolvePreparedGoModules, pruneGoStore, unsupportedGoModules, goModulesUnsupported } = await import('../src/prepared-go-modules.mjs');
 const { runHostBudget } = await import('../src/host-budget.mjs');
 const hasGo = fs.existsSync('/usr/bin/go');
 const linux = process.platform === 'linux' && hasGo;
@@ -85,6 +85,47 @@ test('prepare publishes a frozen cache keyed by go.mod and go.sum, and any chang
   fs.chmodSync(path.join(path.dirname(prepared.treePath), 'metadata.json'), 0o600);
   fs.writeFileSync(path.join(path.dirname(prepared.treePath), 'metadata.json'), '{"identity":{}}\n');
   assert.throws(() => resolvePreparedGoModules(app, { cacheDir }), { code: 'dependencies_unprepared' }, 'tampered metadata is refused');
+});
+
+test('a check that resolves an entry marks it used', { skip: !linux }, () => {
+  const cacheDir = path.join(root, 'store-use');
+  const prepared = prepareGoModules(app, { cacheDir, env: offlineEnv });
+  const meta = path.join(path.dirname(prepared.treePath), 'metadata.json'), old = new Date(Date.now() - 5 * 3600e3);
+  fs.utimesSync(meta, old, old);
+  resolvePreparedGoModules(app, { cacheDir });
+  assert(Date.now() - fs.statSync(meta).mtimeMs < 60e3, 'last use moved to now');
+});
+
+// The go store is capped like the node_modules store: the newest N entries by last use stay, an entry under a day old is never touched,
+// an older one is renamed and only a later pass, an hour on, deletes it.
+test('the Go module store keeps the newest entries by last use and deletes the rest in two passes', async () => {
+  const base = path.join(root, 'store-prune'), now = Date.now(), H = 3600e3, D = 24 * H;
+  const make = (lock, usedAgo) => {
+    const entry = path.join(base, lock, 'k'); fs.mkdirSync(path.join(entry, 'modcache', 'pkg@v1'), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(entry, 'modcache', 'pkg@v1', 'a.go'), 'package a\n'); fs.writeFileSync(path.join(entry, 'metadata.json'), '{}\n', { mode: 0o400 });
+    fs.chmodSync(path.join(entry, 'modcache', 'pkg@v1'), 0o555); fs.chmodSync(path.join(entry, 'modcache'), 0o555);
+    const when = new Date(now - usedAgo); fs.utimesSync(path.join(entry, 'metadata.json'), when, when);
+    return entry;
+  };
+  const busy = make('aa', 10 * D), recent = make('bb', 2 * H), mid = make('cc', 3 * D), stale = make('dd', 5 * D), young = make('ee', 3 * H);
+  const first = pruneGoStore({ cacheDir: base, keep: 2, now });
+  assert.deepEqual(first.kept.sort(), [recent, young].sort(), 'newest two by last use stay, however old their lock dir is');
+  assert.deepEqual(first.renamed.sort(), [busy, mid, stale].sort(), 'older entries are renamed, not deleted');
+  assert.equal(first.deleted.length, 0);
+  assert(!fs.existsSync(busy) && fs.readdirSync(base).filter(n => n.startsWith('.pruned-')).length === 3);
+  assert.equal(pruneGoStore({ cacheDir: base, keep: 2, now: now + 30 * 60e3 }).deleted.length, 0, 'not yet an hour on');
+  const later = pruneGoStore({ cacheDir: base, keep: 2, now: now + 2 * H });
+  assert.equal(later.deleted.length, 3);
+  assert.deepEqual(fs.readdirSync(base).filter(n => n.startsWith('.pruned-')), [], 'the frozen trees were thawed and removed');
+  assert(fs.existsSync(recent) && fs.existsSync(young));
+  // With no cacheDir it prunes the Go store under HOME, not the node_modules store.
+  const { defaultPath } = await import('../src/paths.mjs');
+  const homeStore = defaultPath(os.homedir(), '.dot-bridge/prepared-go-modules');
+  for (const lock of ['xx', 'yy']) { const meta = path.join(homeStore, lock, 'k', 'metadata.json'); fs.mkdirSync(path.dirname(meta), { recursive: true, mode: 0o700 }); fs.writeFileSync(meta, '{}\n', { mode: 0o400 }); const when = new Date(now - (lock === 'xx' ? 9 : 8) * D); fs.utimesSync(meta, when, when); }
+  assert.equal(pruneGoStore({ keep: 1, now }).renamed.length, 1, 'the default Go store under HOME');
+  const guarded = make('ff', 5 * H); // one more than keep, but under a day old
+  assert.equal(pruneGoStore({ cacheDir: base, keep: 1, now }).renamed.length, 0, 'nothing under a day old is touched');
+  assert(fs.existsSync(guarded));
 });
 
 const budgets = { cpu_ms: 60000, wall_ms: 90000, memory_bytes: 1024 * 1024 * 1024, processes: 128, disk_write_bytes: 256 * 1024 * 1024, output_bytes: 65536 };

@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { hash, failure, readRegular, checkDirectory, checkParents, validateTree, freezeTree, thawTree, shellQuote, prepareInChild } from './prepared-node-modules.mjs';
+import { pruneNodeStore } from './prepared-store-prune.mjs';
+import { hash, failure, markUsed, readRegular, checkDirectory, checkParents, validateTree, freezeTree, thawTree, shellQuote, prepareInChild } from './prepared-node-modules.mjs';
 
 // A Go repository's dependencies and its pinned toolchain live in one module cache, prepared on the host (with network)
 // from go.mod and go.sum alone, then mounted read-only at the sandbox's GOMODCACHE. The sandbox has no network, so the cache
@@ -51,11 +52,14 @@ function lookup(input, base) {
     const metadata = JSON.parse(readRegular(metaPath));
     if (JSON.stringify(metadata.identity) !== JSON.stringify(input.identity)) throw new Error('identity mismatch');
     const treePath = path.join(entry, 'modcache'); validateTree(treePath);
+    markUsed(entry);
     return { treePath, ...input.identity };
   } catch {
     throw failure('dependencies_unprepared', `missing or invalid preparation; owner recovery: ${recovery(input.root)}`);
   }
 }
+// Keep the newest N entries by last use; the rules (a day's grace, rename then delete an hour later) are those of the node_modules store.
+export const pruneGoStore = (options = {}) => pruneNodeStore({ ...options, base: store(options) });
 export function resolvePreparedGoModules(sourceDir, options = {}) {
   const input = inputs(sourceDir);
   return input ? lookup(input, store(options)) : null;
