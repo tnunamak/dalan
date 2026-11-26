@@ -1104,7 +1104,8 @@ export class Workspace {
       const diff=this.diff(dir,input.base_sha,this.diffFilter(a.assignment),this.diffScope(a));
       if(!diff.paths.length) return null;
       if(!availableChecks(input.github_repo,dir).includes(CHECK_BEFORE_FINISH)) return null;
-      const covered=this.store.db.prepare("SELECT 1 FROM check_jobs WHERE request_id=? AND claim_id=? AND diff_sha256=? AND status='completed' LIMIT 1").get(requestId,claimId,diff.sha256);
+      // Covered means a check ran to its check phase on this diff: a job that ended in the install phase, or never completed, shows no test result.
+      const covered=this.store.db.prepare("SELECT 1 FROM check_jobs j JOIN check_runs r ON r.id=j.id WHERE j.request_id=? AND j.claim_id=? AND j.diff_sha256=? AND j.status='completed' AND r.phase='check' LIMIT 1").get(requestId,claimId,diff.sha256);
       if(covered) return null;
       // One automatic attempt per diff: when that attempt ended without a completed result, a retried finish stores the report
       // rather than start the same check again.

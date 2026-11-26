@@ -185,6 +185,15 @@ try {
   assert(reported(m),'finish waited for the worker\'s own check even with no patch');
   await slow2;
   console.log('PASS finish waits for the worker\'s own check even when there is no patch to check');
+
+  // 10. A worker check that ended in the install phase shows no test result and does not cover the diff.
+  const n=submit('host'),nClaim=await claimJob(n);
+  await call('apply_patch',{request_id:n,claim_id:nClaim,patch:patch('hello.txt')});
+  assert.equal((await call('run_check',{request_id:n,claim_id:nClaim,check_id:'default'})).status,'completed');
+  const db2=new Store(dbPath);try{db2.db.prepare("UPDATE check_runs SET phase='install' WHERE request_id=?").run(n);}finally{db2.db.close();}
+  await finish(n,nClaim);
+  assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',n)[0].n,2,'the bridge ran its own check after an install-only worker check');
+  console.log('PASS a worker check that ended in the install phase does not cover the diff');
 } finally {
   await stopChild(service);
   await new Promise(resolve => jwks.close(resolve));
