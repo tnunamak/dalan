@@ -12,7 +12,9 @@ import { createHash } from 'node:crypto';
 // The 2 GiB memory ceiling covers the heaviest measured suite-class workload
 // on the deployment host (a 1592 MB peak in the test-sandbox run ledger,
 // 2026-11-24) with about 27% margin; one unit runs per user at a time.
-export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 2 * 1024 ** 3, processes: 128, disk_write_bytes: 256 * 1024 ** 2, output_bytes: 1024 ** 2 });
+export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 2 * 1024 ** 3, processes: 128, disk_write_bytes: 512 * 1024 ** 2, output_bytes: 1024 ** 2 });
+// The 512 MiB disk ceiling (the tmpfs also holds the candidate copy) covers a cold Go build: the build cache of a mid-size module
+// (clawmeter: 143 MB cached, about the same again in $WORK) did not fit in 256 MiB, measured 2026-11-26. A check asks for what it needs.
 // A workload the kernel OOM-killed is not restarted at once: the same workload
 // on the same unit fails fast with reason "oom" until this delay passes, so a
 // caller's restart loop cannot re-kill it second after second. The production
