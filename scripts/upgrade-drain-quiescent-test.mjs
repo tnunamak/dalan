@@ -146,7 +146,7 @@ test('until-quiescent leaves the gate closed after a successful poll and never r
 const runWith=(root,args,timeout='3000')=>spawnSync(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),...args],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:timeout},encoding:'utf8',timeout:15000});
 // A fake CLI with state: `paused` lives in a file that `pause` and `resume` change. quiesce: 'http404' (legacy), 'transport' (always a
 // transport error), 'flaky' (one transport error, then counters), 'nocounters' (HTTP 200 without counters). claims: 'empty', 'live' (a
-// lease that never ends) or 'fail'.
+// lease that never ends), 'fail' or 'malformed' (a successful reply with no claims array).
 const service=(root,{quiesce='http404',claims='empty',paused=false}={})=>{
   const bin=path.join(root,'bin');fs.mkdirSync(bin,{recursive:true});
   fs.writeFileSync(path.join(root,'paused'),String(paused));
@@ -168,6 +168,7 @@ else if(args[0]==='pause'){fs.writeFileSync(flag,'true');out({paused:true});}
 else if(args[0]==='resume'){fs.writeFileSync(flag,'false');out({paused:false});}
 else if(args[0]==='claims'){
   if(${JSON.stringify(claims)}==='fail')err({error:'claims unavailable',kind:'local'});
+  if(${JSON.stringify(claims)}==='malformed'){out({});process.exit(0);}
   out({claims:${JSON.stringify(claims)}==='live'?[{request_id:'req_live',lease_expires_at:new Date(Date.now()+3600000).toISOString()}]:[]});
 }
 else out({ok:true});
@@ -239,6 +240,16 @@ test('a pause drain that fails after its own pause releases that pause',withRoot
   const seen=calls(root);
   assert.ok(seen.indexOf('pause --reason upgrade drain')>=0&&seen.indexOf('resume')>seen.indexOf('pause --reason upgrade drain'),seen.join('|'));
   assert.match(result.stderr,/claims resumed/);
+  assert.equal(paused(root),false);
+}));
+
+test('a pause drain whose claims reply has no claims array stops and releases its own pause',withRoot(root=>{
+  service(root,{quiesce:'http404',claims:'malformed'});
+  const result=runWith(root,[]);
+  assert.equal(result.status,1,result.stdout+result.stderr);
+  assert.doesNotMatch(result.stdout,/No unexpired claims/i);
+  const seen=calls(root);
+  assert.ok(seen.indexOf('resume')>seen.indexOf('pause --reason upgrade drain'),seen.join('|'));
   assert.equal(paused(root),false);
 }));
 

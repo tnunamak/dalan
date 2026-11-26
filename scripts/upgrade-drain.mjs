@@ -100,7 +100,8 @@ async function main() {
     console.log('Claims paused. New submissions are still accepted while the drain waits.');
   }
   while(true) {
-    const {claims=[]}=cli('claims');
+    const {claims}=cli('claims');
+    if(!Array.isArray(claims))fail('the claims list came back without a claims array. Nothing is known about live leases; retry.');
     const open=claims.filter(claim=>{
       const expiry=Date.parse(claim.lease_expires_at);
       return !Number.isFinite(expiry)||expiry>Date.now();
