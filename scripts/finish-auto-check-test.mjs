@@ -194,6 +194,18 @@ try {
   await finish(n,nClaim);
   assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',n)[0].n,2,'the bridge ran its own check after an install-only worker check');
   console.log('PASS a worker check that ended in the install phase does not cover the diff');
+  // 11. A registered default outside the host allowlist is skipped, not started.
+  writeCheck('console.log("DEFAULT_MUST_NOT_START")');
+  fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:[{repo:'example-owner/fixture',check_id:'slow'}]}),{mode:0o600});
+  const denied=submit('host'),deniedClaim=await claimJob(denied);
+  await call('apply_patch',{request_id:denied,claim_id:deniedClaim,patch:patch('hello.txt')});
+  await finish(denied,deniedClaim);
+  const deniedEvents=events(denied);
+  assert.deepEqual(deniedEvents.map(e=>e.type),['check_skipped'],JSON.stringify(deniedEvents));
+  assert.match(deniedEvents[0].reason,/host_check_not_allowlisted/);
+  assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',denied)[0].n,0);
+  assert(reported(denied),'a policy-skipped default check does not prevent storing the worker report');
+  console.log('PASS a registered default outside the host allowlist is skipped without starting a check job');
 } finally {
   await stopChild(service);
   await new Promise(resolve => jwks.close(resolve));
