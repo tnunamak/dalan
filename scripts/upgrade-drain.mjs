@@ -77,7 +77,10 @@ async function main() {
       :'The running service has no quiesce gate: pausing claims and waiting for live leases (claims stay refused until the longest lease ends).');
   }
   if(untilQuiescent) {
-    gateClosed=true;
+    // A gate that was already closed belongs to the operator (or another drain) and is never reopened here.
+    const alreadyClosed=cli('quiesce','status')?.on===true;
+    if(alreadyClosed)console.log('Admission was already quiesced; this drain leaves the gate as it is.');
+    else gateClosed=true;
     if(cli('quiesce','on')?.on!==true)fail('dalan quiesce on did not report the gate as closed.');
     console.log('Admission is quiesced. Live leases survive a restart using the same database and are not waited on.');
     const names=gateCounters;
@@ -106,7 +109,8 @@ async function main() {
     const {claims}=cli('claims');
     if(!Array.isArray(claims))fail('the claims list came back without a claims array. Nothing is known about live leases; retry.');
     const open=claims.filter(claim=>{
-      const expiry=Date.parse(claim.lease_expires_at);
+      // Only a full ISO timestamp counts as a lease end; anything else (a number, a bare year) is treated as a live lease.
+      const expiry=typeof claim.lease_expires_at==='string'&&/^\d{4}-\d\d-\d\dT/.test(claim.lease_expires_at)?Date.parse(claim.lease_expires_at):NaN;
       return !Number.isFinite(expiry)||expiry>Date.now();
     });
     if(!open.length)break;

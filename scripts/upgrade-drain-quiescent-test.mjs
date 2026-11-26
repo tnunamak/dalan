@@ -17,10 +17,14 @@ const fake=(root,states,live=3)=>{
   fs.writeFileSync(path.join(bin,'dot-worker.mjs'),`import fs from 'node:fs';
 const args=process.argv.slice(2),log=${JSON.stringify(path.join(root,'calls.log'))},states=${JSON.stringify(states)},counter=${JSON.stringify(path.join(root,'n'))};
 fs.appendFileSync(log,args.filter(a=>a!=='--json').join(' ')+'\\n');
-if(args[0]==='quiesce'&&args[1]==='status'){const n=fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0;fs.writeFileSync(counter,String(n+1));
-  process.stdout.write(JSON.stringify({on:true,live_leases:${live},...states[Math.min(n,states.length-1)]}));}
+const gate=${JSON.stringify(path.join(root,'gate'))},isOn=()=>fs.existsSync(gate)&&fs.readFileSync(gate,'utf8')==='true';
+if(args[0]==='quiesce'&&args[1]==='status'){
+  // The first status call is the "was it already closed?" read; the scripted states belong to the poll after quiesce on.
+  if(!isOn()&&!fs.existsSync(counter+'.pre')){fs.writeFileSync(counter+'.pre','1');process.stdout.write(JSON.stringify({on:false,live_leases:${live},admitted_in_flight:0,delivery_in_flight:0,host_checks_unverified:0}));}
+  else{const n=fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0;fs.writeFileSync(counter,String(n+1));
+  process.stdout.write(JSON.stringify({on:true,live_leases:${live},...states[Math.min(n,states.length-1)]}));}}
 else if(args[0]==='claims')process.stdout.write(JSON.stringify({claims:[{request_id:'req_live',lease_expires_at:new Date(Date.now()+3600000).toISOString()}]}));
-else process.stdout.write(JSON.stringify({on:args[1]!=='off',ok:true}));
+else{if(args[0]==='quiesce')fs.writeFileSync(gate,String(args[1]==='on'));process.stdout.write(JSON.stringify({on:args[1]!=='off',ok:true}));}
 `);
 };
 const run=(root,timeout='4000')=>spawnSync(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),'--until-quiescent'],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:timeout},encoding:'utf8',timeout:15000});
@@ -70,7 +74,7 @@ test('until-quiescent refuses malformed counters and tells the operator how to r
     assert.notEqual(result.status,0);
     assert.match(result.stderr,/invalid in-flight counters/i);
     assert.match(result.stderr,/dalan quiesce off/);
-    assert.deepEqual(calls(root),['quiesce on','quiesce status','quiesce off'],'a failed drain reopens the gate');
+    assert.deepEqual(calls(root),['quiesce status','quiesce on','quiesce status','quiesce off'],'a failed drain reopens the gate');
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
 
@@ -146,7 +150,7 @@ test('until-quiescent leaves the gate closed after a successful poll and never r
 const runWith=(root,args,timeout='3000')=>spawnSync(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),...args],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:timeout},encoding:'utf8',timeout:15000});
 // A fake CLI with state: `paused` lives in a file that `pause` and `resume` change. quiesce: 'http404' (legacy), 'transport' (always a
 // transport error), 'flaky' (one transport error, then counters), 'nocounters' (HTTP 200 without counters). claims: 'empty', 'live' (a
-// lease that never ends), 'fail' or 'malformed' (a successful reply with no claims array).
+// lease that never ends), 'fail' or 'malformed' (a successful reply with no claims array) or 'odd' (a lease end of numeric 0).
 const service=(root,{quiesce='http404',claims='empty',paused=false,lie=''}={})=>{
   const bin=path.join(root,'bin');fs.mkdirSync(bin,{recursive:true});
   fs.writeFileSync(path.join(root,'paused'),String(paused));
@@ -170,6 +174,7 @@ else if(args[0]==='resume'){if(lie!=='resume')fs.writeFileSync(flag,'false');out
 else if(args[0]==='claims'){
   if(${JSON.stringify(claims)}==='fail')err({error:'claims unavailable',kind:'local'});
   if(${JSON.stringify(claims)}==='malformed'){out({});process.exit(0);}
+  if(${JSON.stringify(claims)}==='odd'){out({claims:[{request_id:'req_odd',lease_expires_at:0}]});process.exit(0);}
   out({claims:${JSON.stringify(claims)}==='live'?[{request_id:'req_live',lease_expires_at:new Date(Date.now()+3600000).toISOString()}]:[]});
 }
 else out({ok:true});
@@ -276,6 +281,23 @@ test('a gate reopen whose reply still shows the gate closed is reported as uncon
   assert.equal(result.status,1,result.stdout+result.stderr);
   assert.match(result.stderr,/gate could NOT be confirmed reopened/);
   assert.doesNotMatch(result.stderr,/gate reopened/);
+}));
+
+test('a gate that was already closed is left closed when the drain aborts',withRoot(root=>{
+  service(root,{quiesce:'busy'});
+  fs.writeFileSync(path.join(root,'gate'),'true');
+  const result=runWith(root,['--until-quiescent'],'1000');
+  assert.equal(result.status,1,result.stdout+result.stderr);
+  assert.match(result.stdout,/already quiesced/);
+  assert.ok(!calls(root).includes('quiesce off'),calls(root).join('|'));
+}));
+
+test('a lease end that is not an ISO timestamp counts as a live lease',withRoot(root=>{
+  service(root,{quiesce:'http404',claims:'odd'});
+  const result=runWith(root,[]);
+  assert.equal(result.status,1,result.stdout+result.stderr);
+  assert.doesNotMatch(result.stdout,/No unexpired claims/);
+  assert.match(result.stderr,/timed out/);
 }));
 
 test('a pause drain that times out on a live lease releases its own pause',withRoot(root=>{
