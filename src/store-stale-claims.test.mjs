@@ -320,6 +320,32 @@ test('try refuses conflicting local and public modes in either order', async () 
   assert.equal(parseTryArgs(['--public', '--public']).mode, 'public');
 });
 
+
+test('try rejects an unrecognizable pending list or incomplete attempt', async () => {
+  const { parsePending } = await import('./try.mjs');
+  assert.throws(() => parsePending({ window: null }), /no pending list/);
+  assert.throws(() => parsePending({ window: {}, pending: [] }), /bad window/);
+  assert.throws(() => parsePending({ window: null, pending: [{ code: 'fixture-only' }] }),
+    /attempt without client_id/);
+  assert.deepEqual(parsePending({ window: null, pending: [] }), { window: null, pending: [] });
+});
+
+test('try suggests only the newest live native attempt without hiding browser attempts', async () => {
+  const { parsePending } = await import('./try.mjs');
+  const attempt = (code, native, superseded = false) => ({
+    code, native, superseded, client_id: 'fixture-app', redirect_uri: 'https://client.invalid/return',
+    scopes: ['read'], expires_in_seconds: 45,
+  });
+  const entries = [
+    attempt('prior', true), attempt('browser', false), attempt('current', true), attempt('closed', true, true),
+  ];
+  const parsed = parsePending({ window: { worker: 'fixture' }, pending: entries });
+  assert.deepEqual(parsed.pending.map(({ code, superseded }) => [code, superseded]),
+    [['prior', true], ['browser', false], ['current', false], ['closed', true]]);
+  assert.equal(entries[0].superseded, false, 'input is not rewritten');
+  assert.equal(parsed.pending[2].expires_in_seconds, 45);
+});
+
 test('lineBuffer assembles split CRLF lines and flushes an unterminated final line once', async () => {
   const { lineBuffer } = await import('./try-exposure.mjs');
   const lines = [];
