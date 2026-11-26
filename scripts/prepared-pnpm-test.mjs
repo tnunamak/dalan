@@ -118,6 +118,9 @@ test('unsupported repositories fail closed with a stated reason', () => {
   assert.match(reasonOf(base({ 'pnpm-lock.yaml': linked('file:vendor/x.tgz') })), /not workspace packages/);
   assert.match(reasonOf(base({ 'pnpm-lock.yaml': lockText() + "  y@file:vendor:\n    resolution: {directory: vendor, type: directory}\n" })), /local file or directory/);
   assert.match(reasonOf(base({ 'pnpm-lock.yaml': lockText() + "  y@file:vendor/y.tgz:\n    resolution: {tarball: file:vendor/y.tgz}\n" })), /local file or directory/);
+  // A git-hosted or URL tarball dependency would make fetch run packaging code or contact a host the lock does not vouch for.
+  assert.match(reasonOf(base({ 'pnpm-lock.yaml': lockText() + "  z@https://example.com/z.tgz:\n    resolution: {tarball: https://example.com/z.tgz}\n" })), /git and URL dependencies/);
+  assert.match(reasonOf(base({ 'pnpm-lock.yaml': lockText() + "  z@git+https://example.com/z.git:\n    resolution: {commit: abc, repo: https://example.com/z.git, type: git}\n" })), /git and URL dependencies/);
 });
 
 // ---- validateTree link rules (synthetic trees) ----

@@ -34,7 +34,7 @@ export function parseLock(lockText) {
     const spec = /^\s+(?:version|specifier):\s*['"]?(link|file|portal):(\S*?)['"]?\s*$/.exec(line);
     if (spec && current !== null) links.push({ importer: current, kind: spec[1], target: spec[2] });
   }
-  const rest = lines.slice(start + 1).filter(line => /^\s+resolution:/.test(line) && /(directory:|tarball:\s*['"]?file:)/.test(line));
+  const rest = lines.slice(start + 1).filter(line => /^\s+resolution:/.test(line) && /(directory:|tarball:|type:\s*git|repo:)/.test(line));
   return { importers, links, localResolutions: rest.length, patched: lines.some(line => /^patchedDependencies:/.test(line)) };
 }
 
@@ -104,7 +104,7 @@ export function pnpmUnsupportedReason(read) {
   const parsed = parseLock(lock.toString('utf8'));
   if (parsed.error) return parsed.error;
   if (parsed.patched) return 'patchedDependencies are unsupported';
-  if (parsed.localResolutions) return 'local file or directory dependencies are unsupported';
+  if (parsed.localResolutions) return 'local file or directory, git and URL dependencies are unsupported';
   const importers = new Set(parsed.importers);
   if (!importers.has('.')) return 'the pnpm lock has no root importer';
   for (const name of importers) if (name !== '.' && !safeImporter(name)) return 'an importer path is unsupported';
@@ -206,7 +206,9 @@ export function preparePnpm(sourceDir, options = {}) {
     // Settings come from the host environment only: an empty user and global rc, no repository rc (refused above).
     const empty = path.join(stage, 'empty-npmrc'); fs.writeFileSync(empty, '', { mode: 0o600 });
     // HOME stays the owner's so pnpm finds the pinned release it switches to; the stage-private store and XDG_CACHE_HOME (pnpm's metadata cache) hold everything this install fetches: the offline install reads the package metadata that fetch cached.
-    const childEnv = { ...safeEnv(env), XDG_CACHE_HOME: cache, CI: 'true', COREPACK_ENABLE_AUTO_PIN: '0', npm_config_userconfig: empty, npm_config_globalconfig: empty };
+    const childEnv = { ...safeEnv(env), XDG_CACHE_HOME: cache, CI: 'true', COREPACK_ENABLE_AUTO_PIN: '0', npm_config_userconfig: empty, npm_config_globalconfig: empty,
+      // `pnpm fetch` has no --ignore-scripts flag; a lifecycle or prepare script must not run on the host during fetch either.
+      npm_config_ignore_scripts: 'true', pnpm_config_ignore_scripts: 'true' };
     const run = (args, label) => {
       const result = spawnSync('pnpm', args, { cwd: work, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', maxBuffer: 1 << 20, timeout: options.timeoutMs ?? 600000, env: childEnv });
       if (result.error || result.status !== 0) {
