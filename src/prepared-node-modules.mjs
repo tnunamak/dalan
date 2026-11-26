@@ -146,7 +146,7 @@ export function addScratchMountpoints(tree) {
   if (!missing.length) return;
   fs.chmodSync(tree, st.mode | 0o200);
   try { for (const name of missing) fs.mkdirSync(path.join(tree, name), { mode: 0o555 }); }
-  finally { fs.chmodSync(tree, st.mode & 0o7777); }
+  finally { fs.chmodSync(tree, st.mode & 0o7555); } // never restore a write bit: a concurrent repair may have read the mode inside this one's writable window
 }
 // An entry published before this existed gets its mount points the next time any lookup validates it (the owner's process owns the store).
 // Best effort: without them the check still runs, vite just cannot bundle its config.
