@@ -6,7 +6,7 @@ import path from 'node:path';
 import {prepareHostReceipts,assertHostReceiptIsolation,readVerifiedHostStop} from './host-budget-receipts.mjs';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 // The fixed production unit reserves one active envelope per Unix user.
 // The 2 GiB memory ceiling covers the heaviest measured suite-class workload
@@ -22,6 +22,7 @@ export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180
 // one job's memory kill must not fail another job's check.
 export const HOST_CHECK_OOM_RETRY_DELAY_MS = 60_000;
 const oomKilledReservations = new Map();
+let processUnitSuffix;
 const minima = { cpu_ms: 50, wall_ms: 100, memory_bytes: 128 * 1024 ** 2, processes: 16, disk_write_bytes: 1024 ** 2, output_bytes: 1024 };
 const service = fileURLToPath(new URL('./host-budget-service.mjs', import.meta.url));
 const stopRecorder = fileURLToPath(new URL('./host-budget-stop.mjs', import.meta.url));
@@ -107,8 +108,9 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
     'LimitCORE=0', 'UMask=0077',
     `ExecStopPost=${[process.execPath, stopRecorder,...(receipts?['--check-run-id',receipts.checkRunId,'--receipt-dir',receipts.receiptDir]:[])].map(propertyArg).join(' ')}`,
   ];
-  // Test suites isolate their reservation without changing the production default.
-  const suffix = process.env.NODE_ENV === 'production' ? undefined : process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
+  // Only a process started with NODE_ENV=production uses the fixed unit. Any other process (a test, a bare script run) uses
+  // the suffix its suite set, or else a unit of its own, so it can never occupy the unit the live bridge needs.
+  const suffix = process.env.NODE_ENV === 'production' ? undefined : (process.env.DALAN_HOST_CHECK_UNIT_SUFFIX || (processUnitSuffix ??= `proc-${process.pid}-${randomUUID()}`));
   if (suffix && !/^[a-zA-Z0-9-]{1,80}$/.test(suffix)) throw new Error('invalid DALAN_HOST_CHECK_UNIT_SUFFIX');
   const unit = `dot-bridge-host-check${suffix ? '-' + suffix : ''}.service`;
   const oomKey = `${unit}#${createHash('sha256').update(JSON.stringify({ dir: workingDir, phases, budgets })).digest('hex')}`;
