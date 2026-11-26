@@ -37,7 +37,7 @@ await new Promise(resolve => jwks.listen(0, '127.0.0.1', resolve));
 const jwksPort = jwks.address().port, issuer = `http://127.0.0.1:${jwksPort}/realm`;
 fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{workspaceAllowed:true,connections:[{issuer,subject:'dot',client_id:'fixture-client'}],repos:['example-owner/fixture']}}}),{mode:0o600});
 fs.writeFileSync(path.join(config, 'oauth.env'), `OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=${audience}\nOAUTH_JWKS_URI=http://127.0.0.1:${jwksPort}/jwks\nOAUTH_ALLOWED_SUBJECTS=dot\n`, { mode: 0o600 });
-const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_T3_DRY_RUN: '1', DALAN_HOST_CHECKS: '1', DOT_BRIDGE_WORKSPACE_ROOT: path.join(home, 'work'), DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE: repo };
+const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_T3_DRY_RUN: '1', DALAN_HOST_CHECKS: '1', DALAN_FINISH_CHECK_WAIT_MS: '24000', DOT_BRIDGE_WORKSPACE_ROOT: path.join(home, 'work'), DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE: repo };
 const service = spawn(process.execPath, ['src/server.mjs'], { cwd: path.resolve(new URL('..', import.meta.url).pathname), env, stdio: ['ignore', 'pipe', 'pipe'] });
 let ready = false, stderr = '';
 let stdout = '';
@@ -65,7 +65,7 @@ try {
   const { Store } = await import('../src/store.mjs');
   const dbPath = path.join(home, '.local/share/dot-bridge/bridge.db');
   const budget={cpu_ms:10000,wall_ms:15000,memory_bytes:256*1024**2,processes:32,disk_write_bytes:8*1024**2,output_bytes:8192};
-  const writeCheck=code=>fs.writeFileSync(path.join(config,'checks.json'),JSON.stringify({'example-owner/fixture':{checks:{default:{argv:['/runtime/node','-e',code],host_budget:budget,timeout_ms:15000,output_bytes:8192}}}}),{mode:0o600});
+  const writeCheck=(code,wallMs=15000)=>fs.writeFileSync(path.join(config,'checks.json'),JSON.stringify({'example-owner/fixture':{checks:{default:{argv:['/runtime/node','-e',code],host_budget:{...budget,wall_ms:wallMs},timeout_ms:wallMs,output_bytes:8192}}}}),{mode:0o600});
   writeCheck('console.log("AUTO_CHECK_RAN")');
   fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:[{repo:'example-owner/fixture',check_id:'default'}]}),{mode:0o600});
   const patch=name=>`diff --git a/${name} b/${name}\nnew file mode 100644\n--- /dev/null\n+++ b/${name}\n@@ -0,0 +1 @@\n+hello\n`;
@@ -79,6 +79,10 @@ try {
   const events=id=>rows("SELECT type,actor,reason FROM lifecycle_events WHERE request_id=? AND type LIKE 'check_%' ORDER BY id",id);
   const claimJob=async id=>{const claim=await call('claim',{request_id:id,claimant:'dot'});assert(claim.claim_id,JSON.stringify(claim));return claim.claim_id;};
   const finish=(id,claim_id)=>call('finish',{request_id:id,claim_id,outcome:'completed',summary:'done',result:'done'});
+  const finishRaw=async(id,claim_id)=>{
+    const response=await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${auth}`},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'finish',arguments:{request_id:id,claim_id,outcome:'completed',summary:'done',result:'done'}}})});
+    return (await response.json()).result;
+  };
   const reported=id=>rows('SELECT 1 FROM reports WHERE request_id=?',id).length===1;
 
   // 1. A patch and no run_check: the bridge runs the check and records the outcome.
@@ -130,6 +134,33 @@ try {
   await finish(f,fClaim);
   assert.deepEqual(events(f),[],'a job without host execution is never checked by the bridge');
   console.log('PASS no patch and no host execution run no automatic check');
+
+  // 6. A check that is still running when the wait ends stops this finish with a retryable error; the next finish takes the result.
+  // check() answers 'running' after 20 s; the wait budget (24 s here, 330 s by default) covers that time, so the wait ends 4 s later.
+  writeCheck('setTimeout(()=>console.log("SLOW_CHECK_DONE"),30000)',60000);
+  const g=submit('host'),gClaim=await claimJob(g);
+  await call('apply_patch',{request_id:g,claim_id:gClaim,patch:patch('hello.txt')});
+  const early=await finishRaw(g,gClaim);
+  assert(early.isError,'a check still running after the wait must stop the finish '+JSON.stringify(early).slice(0,300)+JSON.stringify(events(g)));
+  assert.match(early.content[0].text,/default check is still running; call finish again/);
+  assert(!reported(g),'no report while the check runs');
+  for(let i=0;i<400&&rows("SELECT 1 FROM check_jobs WHERE request_id=? AND status='running'",g).length;i++)await new Promise(resolve=>setTimeout(resolve,100));
+  await finish(g,gClaim);
+  assert(reported(g),'the retried finish stores the report');
+  assert.deepEqual(events(g).map(e=>e.type),['check_started','check_passed'],JSON.stringify(events(g)));
+  assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',g)[0].n,1,'the retry reuses the first check');
+  console.log('PASS a check still running after the wait stops finish with a retryable error and the retry stores the report');
+
+  // 7. A check job that failed to complete does not stand in for a check of that diff.
+  writeCheck('console.log("AUTO_CHECK_RAN")');
+  const h=submit('host'),hClaim=await claimJob(h);
+  await call('apply_patch',{request_id:h,claim_id:hClaim,patch:patch('hello.txt')});
+  assert.equal((await call('run_check',{request_id:h,claim_id:hClaim,check_id:'default'})).status,'completed');
+  const db=new Store(dbPath);try{db.db.prepare("UPDATE check_jobs SET status='failed' WHERE request_id=?").run(h);}finally{db.db.close();}
+  await finish(h,hClaim);
+  assert.equal(rows("SELECT COUNT(*) n FROM check_jobs WHERE request_id=? AND status='completed'",h)[0].n,1,'the bridge ran its own check');
+  assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',h)[0].n,2);
+  console.log('PASS a failed check job does not count as a check of that diff');
 } finally {
   await stopChild(service);
   await new Promise(resolve => jwks.close(resolve));

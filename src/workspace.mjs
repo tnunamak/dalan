@@ -212,7 +212,8 @@ const absBytes=(dir,name)=>Buffer.concat([Buffer.from(dir+path.sep),nameBytes(na
 // The diff stays bounded: the cap keeps `git diff --binary` output (base85, about 1.25x) well under its 12 MiB buffer.
 const UNTRACKED_FILE_CAP=8*2**20, UNTRACKED_FILE_COUNT=200, DIFF_TOTAL_CAP=24*2**20;
 // The check the bridge runs for a patch the worker did not check, and how long finish waits for it (the host wall budget is 180 s).
-const CHECK_BEFORE_FINISH='default', CHECK_BEFORE_FINISH_WAIT_MS=330000;
+class FinishCheckPending extends Error { constructor() { super('the default check is still running; call finish again when it ends'); } }
+const CHECK_BEFORE_FINISH='default', CHECK_BEFORE_FINISH_WAIT_MS=Number(process.env.DALAN_FINISH_CHECK_WAIT_MS)||330000;
 const DIGEST_DEADLINE_MS=120000, CHANGED_PATHS_SHOWN=100, PREVIEW_SHOWN=25, DETAIL_ARTIFACT_CAP=2**20;
 // What every receipt says it does not identify. Fixed text: no counts and no walk, so there is no partial number to misread.
 export const NOT_IDENTIFIED='Ignored files, generated or dependency directories (node_modules, .venv, target, __pycache__, build output), unreadable or special files, content conversions (eol and ident attributes), nested repositories and submodule paths, and anything outside git\'s view of the workspace are not identified by this receipt. A check can read and execute them.';
@@ -1078,8 +1079,9 @@ export class Workspace {
   }
   // A patch must not reach finish unchecked. When the worker finishes an implementation job on a host repository with a diff and
   // no check has run on that exact diff, the bridge runs the owner's `default` check itself and waits for it, so a check_passed or
-  // check_failed event exists whether or not the worker remembered run_check. It never blocks finish on its own failure: a check that
-  // cannot start leaves the worker's report as it was (check() already records check_skipped with the reason).
+  // check_failed event exists whether or not the worker remembered run_check. A check that cannot start or that fails leaves the
+  // worker's report as it was (check() already records check_skipped with the reason). Only a check still running after the wait stops
+  // this finish, with a retryable error: the snapshot cannot be taken while a check runs, and the next finish picks the check up.
   async checkBeforeFinish(requestId,claimId,subject,worker='dot',{waitMs=CHECK_BEFORE_FINISH_WAIT_MS}={}) {
     try {
       const a=this.store.get(requestId);
@@ -1089,16 +1091,21 @@ export class Workspace {
       const diff=this.diff(dir,input.base_sha,this.diffFilter(a.assignment),this.diffScope(a));
       if(!diff.paths.length) return null;
       if(!availableChecks(input.github_repo,dir).includes(CHECK_BEFORE_FINISH)) return null;
-      const covered=this.store.db.prepare("SELECT 1 FROM check_jobs WHERE request_id=? AND claim_id=? AND diff_sha256=? AND status IN ('completed','failed') LIMIT 1").get(requestId,claimId,diff.sha256);
+      const covered=this.store.db.prepare("SELECT 1 FROM check_jobs WHERE request_id=? AND claim_id=? AND diff_sha256=? AND status='completed' LIMIT 1").get(requestId,claimId,diff.sha256);
       if(covered) return null;
+      const began=Date.now();
       const started=await this.check(requestId,claimId,subject,CHECK_BEFORE_FINISH,worker);
       const work=this.checkEffects.get(requestId);
       if(work) {
+        // waitMs bounds the whole step, including the time check() already spent before it answered 'running'.
         let timer;
-        try { await Promise.race([work,new Promise(resolve=>{timer=setTimeout(resolve,waitMs);})]); } finally { clearTimeout(timer); }
+        try { await Promise.race([work,new Promise(resolve=>{timer=setTimeout(resolve,Math.max(0,waitMs-(Date.now()-began)));})]); } finally { clearTimeout(timer); }
+        // A check still running now would make the finish snapshot throw 'check still running'. Say so plainly: the check keeps going
+        // and the next finish waits for it, so nothing is lost.
+        if(this.activeChecks.has(requestId)) throw new FinishCheckPending();
       }
       return {check_id:CHECK_BEFORE_FINISH,started:started?.check_run_id??null};
-    } catch { return null; }
+    } catch(error) { if(error instanceof FinishCheckPending) throw error; return null; }
   }
   // Classify original output before redacting metadata and storing the row atomically;
   // preview truncation must not discard skipped-segment metadata.
