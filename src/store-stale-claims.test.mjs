@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store, loadRedeliveryLimits } from './store.mjs';
-import { HOST_BUDGET_CEILINGS, parseHostBudget } from './host-budget.mjs';
+import { HOST_BUDGET_CEILINGS, parseHostBudget, resolveHostStopEvidence } from './host-budget.mjs';
 
 test('CLI guidance uses the stable command for the executable on PATH, but npx in npm exec', async t => {
   const { cliCommand } = await import('./cli-name.mjs');
@@ -230,6 +230,24 @@ test('host budget names the misaligned memory or disk limit', () => {
     const budget = {...HOST_BUDGET_CEILINGS, [limit]: HOST_BUDGET_CEILINGS[limit] - 1};
     assert.throws(() => parseHostBudget(budget), new RegExp('invalid host_budget\\.' + limit + ': expected a multiple of 4096'));
   }
+});
+
+test('host stop evidence stays unverified when remaining processes are reported or unknown', () => {
+  const base = { verified: true, reason: 'synthetic test receipt' };
+  assert.deepEqual(resolveHostStopEvidence(null, null), null);
+  for (const evidence of [base, { ...base, remaining_pids: [123] }]) {
+    assert.deepEqual(resolveHostStopEvidence(null, evidence), { ...evidence, verified: false });
+    assert.equal(evidence.verified, true, 'validation must not mutate the supplied evidence');
+  }
+  assert.deepEqual(resolveHostStopEvidence(null, { ...base, remaining_pids: [] }),
+    { ...base, remaining_pids: [] });
+});
+
+test('host budget rejects one over the process ceiling with a named limit', () => {
+  const atLimit = { ...HOST_BUDGET_CEILINGS };
+  assert.deepEqual(parseHostBudget(atLimit), atLimit);
+  assert.throws(() => parseHostBudget({ ...atLimit, processes: atLimit.processes + 1 }),
+    /invalid host_budget\.processes/);
 });
 
 test('idle warning configuration defaults, validates, and is distinct from legacy lease setting',t=>{
