@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { hash, failure, readRegular, checkDirectory, checkParents, validateTree, freezeTree, thawTree, shellQuote, prepareInChild, preparedNodeStore } from './prepared-node-modules.mjs';
+import { hash, failure, markUsed, readRegular, checkDirectory, checkParents, validateTree, freezeTree, thawTree, shellQuote, prepareInChild, preparedNodeStore } from './prepared-node-modules.mjs';
 
 // A pnpm repository's dependencies are prepared on the host (with network) from its lock alone, then mounted read-only like an npm
 // workspace tree set: the root node_modules plus each importer's own node_modules. `pnpm fetch` fills a stage-private store from
@@ -14,7 +14,22 @@ const SAFE_SEGMENT = /^[A-Za-z0-9_@.+-]+$/;
 const safeImporter = value => typeof value === 'string' && value.split('/').every(part => SAFE_SEGMENT.test(part) && part !== '.' && part !== '..' && part !== 'node_modules' && part !== '.git');
 // Repository files that make pnpm read repo-controlled settings or run repository code during install.
 const SETTINGS_FILES = ['.npmrc', '.pnpmfile.cjs', '.pnpmfile.mjs', 'pnpmfile.cjs'];
-const UNSAFE_WORKSPACE_KEYS = /^(registry|registries|pnpmfile|globalPnpmfile|patchedDependencies|hooks|npmrcAuthFile|configDependencies|storeDir|virtualStoreDir)\s*:/m;
+// pnpm-workspace.yaml is an allow-list, not a deny-list: pnpm reads any top-level key as a setting, and quoted or flow-style spellings of
+// registry, pnpmfile or configDependencies keys are real settings that run repository code or reach other hosts. A key that is not here,
+// or any YAML shape this line reader does not understand, makes the repository unsupported.
+const WORKSPACE_KEYS = new Set(['packages', 'catalog', 'catalogs', 'overrides', 'publicHoistPattern', 'hoistPattern', 'childConcurrency', 'allowBuilds', 'onlyBuiltDependencies', 'ignoredBuiltDependencies', 'neverBuiltDependencies', 'minimumReleaseAge', 'minimumReleaseAgeExclude']);
+// package.json#pnpm: the same rule for the root manifest's `pnpm` block.
+const MANIFEST_PNPM_KEYS = new Set(['overrides', 'onlyBuiltDependencies', 'ignoredBuiltDependencies', 'neverBuiltDependencies', 'allowBuilds', 'peerDependencyRules']);
+export function workspaceYamlReason(yaml) {
+  for (const line of String(yaml).split('\n')) {
+    if (/^\s*(#|$)/.test(line) || /^[ \t]/.test(line) || /^-(\s|$)/.test(line)) continue; // comments, blank lines, indented values, unindented sequence items
+    if (/^---\s*$/.test(line)) continue;
+    const key = /^(?:'([^']+)'|"([^"]+)"|([A-Za-z][A-Za-z0-9_]*))\s*:(?:\s|$)/.exec(line);
+    if (!key) return 'pnpm-workspace.yaml has a shape this reader does not understand';
+    if (!WORKSPACE_KEYS.has(key[1] ?? key[2] ?? key[3])) return `pnpm-workspace.yaml sets ${key[1] ?? key[2] ?? key[3]}, which is unsupported`;
+  }
+  return null;
+}
 
 // importers: keys of the lock's `importers:` block, and the link:/file: specs inside it. A small fail-closed line parser: any shape it
 // does not recognise yields null (unsupported) rather than a guess.
@@ -29,12 +44,13 @@ export function parseLock(lockText) {
   let current = null;
   for (const line of lines.slice(start + 1)) {
     if (/^\S/.test(line)) break; // the next top-level block ends importers
-    const key = /^ {2}(?:'([^']+)'|"([^"]+)"|([^\s'"#][^:]*)):\s*$/.exec(line);
+    const key = /^ {2}(?:'([^']+)'|"([^"]+)"|([^\s'"#][^:]*)):\s*(?:\{\s*\})?\s*$/.exec(line);
     if (key) { current = key[1] ?? key[2] ?? key[3]; importers.push(current); continue; }
     const spec = /^\s+(?:version|specifier):\s*['"]?(link|file|portal):(\S*?)['"]?\s*$/.exec(line);
     if (spec && current !== null) links.push({ importer: current, kind: spec[1], target: spec[2] });
   }
-  const rest = lines.slice(start + 1).filter(line => /^\s+resolution:/.test(line) && /(directory:|tarball:|type:\s*git|repo:)/.test(line));
+  // Any line, in any block or flow layout, that names a tarball URL, a git repository, a directory or a downloaded binary runtime.
+  const rest = lines.filter(line => /(?:^|[\s{,])(?:tarball|directory|repo|commit|url):\s/.test(line) || /\btype:\s*['"]?(?:git|directory|binary|variations)\b/.test(line));
   return { importers, links, localResolutions: rest.length, patched: lines.some(line => /^patchedDependencies:/.test(line)) };
 }
 
@@ -74,18 +90,19 @@ function workspaceDirectories(root, globs) {
 
 const manager = manifest => { const match = /^pnpm@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+.*)?$/.exec(String(JSON.parse(manifest).packageManager ?? '')); return match ? match[1] : null; };
 const safeEnv = env => Object.fromEntries(Object.entries(env).filter(([name]) => /^(PATH|HOME|LANG|TMPDIR|XDG_.*|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|(npm|pnpm)_config_(registry|fetch_retries|fetch_retry_.*)|(https?|no)_proxy)$/i.test(name)));
-const versions = new Map();
+const versions = new Map(), FAILED_VERSION_TTL_MS = 60e3;
 // The version `pnpm` reports for a package.json that pins `packageManager` (pnpm switches to the pinned release when it has it). Run in a
 // scratch directory, not the repository, so no repository setting is read. null when pnpm is missing or reports another version.
-function hostPnpmVersion(pinned, env) {
+function hostPnpmVersion(pinned, env, timeout = 5000) {
   const key = `${pinned}\0${env.PATH ?? ''}`;
-  if (versions.has(key)) return versions.get(key);
+  const known = versions.get(key);
+  if (known && (known.reported !== null || Date.now() - known.at < FAILED_VERSION_TTL_MS)) return known.reported;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-pnpm-version-'));
   try {
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'v', packageManager: `pnpm@${pinned}` }));
-    const run = spawnSync('pnpm', ['--version'], { cwd: dir, env: { ...safeEnv(env), COREPACK_ENABLE_AUTO_PIN: '0' }, encoding: 'utf8', timeout: 30000 });
+    const run = spawnSync('pnpm', ['--version'], { cwd: dir, env: { ...safeEnv(env), COREPACK_ENABLE_AUTO_PIN: '0' }, encoding: 'utf8', timeout }); // callers on the claim path keep the 5 s default (spawnSync blocks the bridge); `dalan prepare-deps` allows a download. A failure is remembered for a minute only
     const reported = run.status === 0 ? run.stdout.trim() : null;
-    versions.set(key, reported);
+    versions.set(key, { reported, at: Date.now() });
     return reported;
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
@@ -98,13 +115,13 @@ export function pnpmUnsupportedReason(read) {
   const manifest = read('package.json');
   if (!manifest) return 'a pnpm lock needs a root package.json';
   if (read('package-lock.json')) return 'both package-lock.json and pnpm-lock.yaml are present';
-  let pinned;
-  try { pinned = manager(manifest); } catch { return null; }
+  let pinned, packageJson;
+  try { packageJson = JSON.parse(manifest); pinned = manager(manifest); } catch { return 'package.json is not valid JSON'; }
   if (!pinned) return 'package.json must pin packageManager to an exact pnpm version';
   const parsed = parseLock(lock.toString('utf8'));
   if (parsed.error) return parsed.error;
   if (parsed.patched) return 'patchedDependencies are unsupported';
-  if (parsed.localResolutions) return 'local file or directory, git and URL dependencies are unsupported';
+  if (parsed.localResolutions) return 'local file or directory, git and URL dependencies (and downloaded runtimes) are unsupported';
   const importers = new Set(parsed.importers);
   if (!importers.has('.')) return 'the pnpm lock has no root importer';
   for (const name of importers) if (name !== '.' && !safeImporter(name)) return 'an importer path is unsupported';
@@ -114,9 +131,9 @@ export function pnpmUnsupportedReason(read) {
     if (!target || !(importers.has(target) || (safeImporter(target) && inWorkspaceGlobs(globs, target)))) return 'link or file dependencies that are not workspace packages are unsupported';
   }
   for (const name of SETTINGS_FILES) if (read(name)) return `a repository ${name} is unsupported`;
-  if (UNSAFE_WORKSPACE_KEYS.test(yaml)) return 'pnpm-workspace.yaml sets registries, hooks or patches, which are unsupported';
-  const packageJson = JSON.parse(manifest);
-  if (packageJson.pnpm?.patchedDependencies) return 'patchedDependencies are unsupported';
+  const yamlReason = workspaceYamlReason(yaml);
+  if (yamlReason) return yamlReason;
+  for (const name of Object.keys(packageJson.pnpm ?? {})) if (!MANIFEST_PNPM_KEYS.has(name)) return `package.json sets pnpm.${name}, which is unsupported`;
   return null;
 }
 // For the offer filter: version check included, memoised per packageManager.
@@ -133,7 +150,7 @@ export function pnpmInputFiles(lock) {
   return ['pnpm-lock.yaml', 'package.json', ...(parsed.importers ?? []).filter(name => name !== '.').map(name => `${name}/package.json`)].sort();
 }
 
-function inputs(source, env = process.env) {
+function inputs(source, env = process.env, versionTimeoutMs = 5000) {
   const root = path.resolve(source);
   if (fs.realpathSync(root) !== root || !fs.lstatSync(root).isDirectory()) throw failure('dependencies_invalid', 'source directory must be canonical');
   const read = name => readRegular(path.join(root, name), true);
@@ -143,7 +160,7 @@ function inputs(source, env = process.env) {
   if (unsupported) throw failure('dependencies_unsupported', unsupported);
   const manifest = readRegular(path.join(root, 'package.json')), workspaceYaml = read('pnpm-workspace.yaml') ?? Buffer.alloc(0);
   const pinned = manager(manifest);
-  const reported = hostPnpmVersion(pinned, env);
+  const reported = hostPnpmVersion(pinned, env, versionTimeoutMs);
   if (reported !== pinned) throw failure('dependencies_unsupported', `the host's pnpm (${reported ?? 'missing'}) is not the pinned packageManager pnpm@${pinned}`);
   const importers = parseLock(lock.toString('utf8')).importers.filter(name => name !== '.').sort();
   const files = new Map();
@@ -172,6 +189,7 @@ function lookup(input, base) {
     const places = [{ dir: '', treePath: path.join(entry, 'node_modules') }, ...(metadata.trees ?? []).map(name => ({ dir: name, treePath: path.join(entry, 'workspaces', name, 'node_modules') }))];
     if (places.slice(1).some(place => !input.importers.includes(place.dir))) throw new Error('unexpected workspace tree');
     for (const place of places) validateTree(place.treePath, placeFor(input, place.dir));
+    markUsed(entry);
     return { treePath: places[0].treePath, workspaceTrees: places.slice(1).map(({ dir, treePath }) => ({ path: dir, treePath })), ...input.identity };
   } catch {
     throw failure('dependencies_unprepared', `missing or invalid preparation; owner recovery: ${recovery(input.root)} --replace-invalid`);
@@ -184,7 +202,7 @@ export function resolvePreparedPnpm(sourceDir, options = {}) {
 
 export function preparePnpm(sourceDir, options = {}) {
   const env = options.env ?? process.env;
-  const input = inputs(sourceDir, env);
+  const input = inputs(sourceDir, env, options.versionTimeoutMs ?? 120000);
   if (!input) throw failure('dependencies_invalid', 'root pnpm-lock.yaml required');
   const base = preparedNodeStore(options);
   fs.mkdirSync(base, { recursive: true, mode: 0o700 });
@@ -218,8 +236,8 @@ export function preparePnpm(sourceDir, options = {}) {
       }
     };
     // fetch also fills the virtual store (node_modules/.pnpm), so it needs copy import too: hardlinks there would survive into the published tree.
-    run(['fetch', '--package-import-method=copy', '--store-dir', store], 'fetch');
-    run(['install', '--offline', '--frozen-lockfile', '--ignore-scripts', '--package-import-method=copy', '--store-dir', store], 'install');
+    run(['fetch', '--ignore-pnpmfile', '--package-import-method=copy', '--store-dir', store], 'fetch');
+    run(['install', '--offline', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile', '--package-import-method=copy', '--store-dir', store], 'install');
     const trees = [];
     fs.mkdirSync(path.join(work, 'node_modules'), { recursive: true, mode: 0o700 });
     fs.renameSync(path.join(work, 'node_modules'), path.join(stage, 'node_modules'));

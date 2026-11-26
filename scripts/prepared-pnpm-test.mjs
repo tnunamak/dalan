@@ -17,6 +17,7 @@ const thaw = dir => { try { const st = fs.lstatSync(dir); if (!st.isDirectory() 
 process.on('exit', () => { thaw(root); fs.rmSync(root, { recursive: true, force: true }); });
 const { preparePnpm, resolvePreparedPnpm, pnpmUnsupportedReason, pnpmUnsupported, pnpmInputFiles, parseLock } = await import('../src/prepared-pnpm.mjs');
 const { validateTree, freezeTree, npmCliPath } = await import('../src/prepared-node-modules.mjs');
+const { markUsed } = await import('../src/prepared-node-modules.mjs');
 const { pruneNodeStore } = await import('../src/prepared-store-prune.mjs');
 const { runHostBudget, HOST_BUDGET_CEILINGS } = await import('../src/host-budget.mjs');
 
@@ -94,6 +95,31 @@ test('lock parser: importers come from the project document of a two-document lo
   assert.match(parseLock("lockfileVersion: '6.0'\nimporters:\n").error, /version 9/);
   assert.match(parseLock("lockfileVersion: '9.0'\n").error, /importers/);
   assert.deepEqual(pnpmInputFiles(Buffer.from(lockText())), ['package.json', 'packages/w1/package.json', 'pnpm-lock.yaml']);
+});
+test('lock parser: an importer written as `{}` is still an importer', () => {
+  assert.deepEqual(parseLock("lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/w2: {}\n").importers, ['.', 'packages/w2']);
+});
+test('repository settings that run code or reach other hosts are refused however they are spelled', () => {
+  const yamlReason = yaml => reasonOf(base({ 'pnpm-workspace.yaml': yaml }));
+  const pkg = 'packages:\n  - "packages/*"\n';
+  for (const bad of ['"pnpmfile": ./hook.cjs\n', "'registry': https://evil.example/\n", '"configDependencies":\n  x: 1.0.0\n', 'registry : https://evil.example/\n', 'globalPnpmfile: x.cjs\n', 'hooks: {}\n', 'patchedDependencies:\n  x: p\n', 'storeDir: /tmp/x\n'])
+    assert.match(yamlReason(pkg + bad), /unsupported|does not understand/, bad);
+  for (const bad of ['{packages: [a], registry: https://evil.example/}\n', '? pnpmfile\n: x.cjs\n', '<<: *x\n'])
+    assert.match(yamlReason(bad), /does not understand/, bad);
+  // pdpp's own settings stay supported.
+  assert.equal(yamlReason(pkg + "overrides:\n  a: 1.0.0\n  \"@pdpp/x\": \"workspace:*\"\n# comment\npublicHoistPattern:\n  - \"@types/react\"\nchildConcurrency: 1\nallowBuilds:\n  \"esbuild\": true\nminimumReleaseAgeExclude:\n  - a@1.0.0\n"), null);
+  const manifestReason = pnpm => reasonOf(base({ 'package.json': JSON.stringify({ packageManager: 'pnpm@12.0.0', pnpm }) }));
+  assert.match(manifestReason({ pnpmfile: 'hook.cjs' }), /pnpm\.pnpmfile/);
+  assert.match(manifestReason({ configDependencies: { x: '1.0.0' } }), /pnpm\.configDependencies/);
+  assert.equal(manifestReason({ overrides: { a: '1.0.0' } }), null);
+  assert.match(reasonOf(base({ 'package.json': '{not json' })), /valid JSON/);
+});
+test('git, URL, directory and runtime resolutions are refused in block layout as well as one line', () => {
+  const block = entry => reasonOf(base({ 'pnpm-lock.yaml': lockText() + entry }));
+  assert.match(block("  z@https://example.com/z.tgz:\n    resolution:\n      tarball: https://example.com/z.tgz\n"), /URL dependencies/);
+  assert.match(block("  z@git+https://example.com/z.git:\n    resolution:\n      type: git\n      repo: https://example.com/z.git\n      commit: abc\n"), /git/);
+  assert.match(block("  node@runtime:20.0.0:\n    resolution:\n      type: binary\n      url: https://nodejs.org/node.tar.gz\n"), /runtime/);
+  assert.match(block("  y@file:vendor:\n    resolution:\n      directory: vendor\n      type: directory\n"), /local file/);
 });
 test('unsupported repositories fail closed with a stated reason', () => {
   assert.equal(reasonOf({}), null, 'no lock: nothing to prepare');
@@ -187,8 +213,8 @@ test('prepare publishes the root tree and each importer tree; identity binds eve
   const prepared = preparePnpm(dir, { cacheDir, env });
   assert.deepEqual(resolvePreparedPnpm(dir, { cacheDir, env }), prepared);
   assert.equal(prepared.kind, 'pnpm');
-  assert.deepEqual(Object.keys(prepared.workspaces), ['packages/w1'], 'only importers named by the lock');
-  assert.deepEqual(prepared.workspaceTrees.map(tree => tree.path), ['packages/w1']);
+  assert.deepEqual(Object.keys(prepared.workspaces), ['packages/w1', 'packages/w2'], 'importers named by the lock, including one written as `{}`');
+  assert.deepEqual(prepared.workspaceTrees.map(tree => tree.path), ['packages/w1'], 'a tree only where the install made one');
   assert.equal(prepared.runtime.pnpm, pnpmVersion);
   assert(fs.existsSync(path.join(prepared.treePath, 'tiny-a/index.js')));
   assert(fs.lstatSync(path.join(prepared.workspaceTrees[0].treePath, 'tiny-b')).isSymbolicLink(), 'an importer dependency is a link into the root tree');
@@ -204,7 +230,7 @@ test('prepare publishes the root tree and each importer tree; identity binds eve
     restore();
   }
   put(dir, 'packages/w2/package.json', { name: 'w2', version: '9.9.9' });
-  assert.deepEqual(resolvePreparedPnpm(dir, { cacheDir, env }), prepared, 'a dependency-free workspace package is not part of the identity');
+  assert.throws(() => resolvePreparedPnpm(dir, { cacheDir, env }), { code: 'dependencies_unprepared' }, 'a dependency-free importer (`{}` in the lock) is bound by the identity too');
 });
 test('a pinned packageManager the host does not have is refused', real, () => {
   const dir = makeRepo('repo-version');
@@ -339,4 +365,39 @@ test('dalan prepare-deps --prune runs against the store under HOME and refuses a
   assert.deepEqual(JSON.parse(ok.stdout).kept, []);
   assert.notEqual(run('--prune', '--keep', '0').status, 0);
   assert.notEqual(run('--prune', '--keep').status, 0);
+});
+
+// ---- what the host pnpm is asked to do (a fake pnpm records it; no registry, no network) ----
+test('fetch and install run with hooks and scripts off, copy import, and only an allow-listed environment', { skip: linux ? false : 'sh only' }, () => {
+  const dir = path.join(root, 'fake-pnpm-repo'), bin = path.join(root, 'fake-pnpm-bin'), log = path.join(root, 'fake-pnpm.log');
+  put(dir, 'package.json', { name: 'r', packageManager: 'pnpm@12.0.0' }); put(dir, 'pnpm-lock.yaml', lockText(['.']));
+  put(bin, 'pnpm', `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 12.0.0; exit 0; fi\necho "ARGS $*" >> '${log}'\nenv | grep -E '^(npm|pnpm)_config_ignore_scripts=|^SECRET_TOKEN=|^npm_config_userconfig=' | sed 's/^/ENV /' >> '${log}'\n[ "$1" = install ] && mkdir -p node_modules\nexit 0\n`);
+  fs.chmodSync(path.join(bin, 'pnpm'), 0o755);
+  const cacheDir = cacheOf('cache-fake');
+  preparePnpm(dir, { cacheDir, env: { PATH: `${bin}:${process.env.PATH}`, HOME: process.env.HOME, SECRET_TOKEN: 'leak' } });
+  const lines = fs.readFileSync(log, 'utf8').split('\n');
+  const args = name => lines.find(line => line.startsWith(`ARGS ${name} `)) ?? '';
+  for (const flag of ['--ignore-pnpmfile', '--package-import-method=copy']) { assert(args('fetch').includes(flag), `fetch ${flag}`); assert(args('install').includes(flag), `install ${flag}`); }
+  for (const flag of ['--ignore-scripts', '--offline', '--frozen-lockfile']) assert(args('install').includes(flag), `install ${flag}`);
+  assert.equal(lines.filter(line => line === 'ENV npm_config_ignore_scripts=true').length, 2, 'both calls see ignore-scripts through npm_config_*');
+  assert.equal(lines.filter(line => line === 'ENV pnpm_config_ignore_scripts=true').length, 2, 'and through pnpm_config_* (fetch has no flag)');
+  assert(!lines.some(line => line.startsWith('ENV SECRET_TOKEN')), 'an environment variable outside the allow-list is not passed');
+  assert.equal(lines.filter(line => line.startsWith('ENV npm_config_userconfig=')).length, 2, 'an empty user rc replaces the owner rc');
+});
+
+// ---- prune against a preparation that is still running, and ranking by last use ----
+test('prune leaves the empty lock directory of a preparation that is still fetching', () => {
+  const now = Date.now(), { base } = fakeStore('prune-fetching', [10 * D], now);
+  const fetching = path.join(base, 'f'.repeat(64)); fs.mkdirSync(fetching, { mode: 0o700 });
+  const idle = path.join(base, 'e'.repeat(64)); fs.mkdirSync(idle, { mode: 0o700 }); fs.utimesSync(idle, new Date(now - 2 * D), new Date(now - 2 * D));
+  pruneNodeStore({ cacheDir: base, keep: 4, now });
+  assert(fs.existsSync(fetching), 'a lock directory the publisher just created survives, so its rename can still land');
+  assert(!fs.existsSync(idle), 'one that stayed empty for two days is removed');
+});
+test('prune ranks by last use: an entry a check resolved lately outlives newer idle ones', () => {
+  const now = Date.now(), { base, entries } = fakeStore('prune-last-use', [20 * D, 15 * D, 14 * D, 13 * D], now); // entries 1..3 are newer than 0
+  markUsed(entries[0], now); // a check resolved the oldest entry just now
+  const result = pruneNodeStore({ cacheDir: base, keep: 3, now });
+  assert(fs.existsSync(entries[0]), 'the recently used entry is kept');
+  assert.deepEqual(result.renamed, [entries[1]], 'the least recently used goes');
 });

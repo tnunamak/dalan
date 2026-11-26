@@ -128,6 +128,12 @@ export function validateTree(root, place = null) {
   walk(root);
 }
 function entryPath(base, input) { return path.join(base, input.identity.lock_sha256, input.key); }
+// Record that a check resolved this entry: the prune ranks entries by the mtime of metadata.json. Touching at most hourly keeps the
+// metadata write rare; an owner-only 0400 file can still have its times set by its owner, and a failure here never fails a lookup.
+export function markUsed(entry, now = Date.now()) {
+  const meta = path.join(entry, 'metadata.json');
+  try { if (now - fs.lstatSync(meta).mtimeMs >= 3600e3) fs.utimesSync(meta, now / 1000, now / 1000); } catch { /* best effort */ }
+}
 export const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 function lookup(input, base) {
   const entry = entryPath(base, input);
@@ -142,6 +148,7 @@ function lookup(input, base) {
     if (places.slice(1).some(place => !input.workspaces.includes(place.dir))) throw new Error('unexpected workspace tree');
     const workspaces = input.workspaces.map(name => path.posix.normalize(name));
     for (const place of places) validateTree(place.treePath, { dir: place.dir, workspaces });
+    markUsed(entry);
     return { treePath: places[0].treePath, workspaceTrees: places.slice(1).map(({ dir, treePath }) => ({ path: dir, treePath })), ...input.identity };
   } catch (e) {
     throw failure('dependencies_unprepared', `missing or invalid preparation; owner recovery: ${recovery(input.root)} --replace-invalid`);
