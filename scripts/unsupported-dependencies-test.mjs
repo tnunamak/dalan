@@ -12,7 +12,7 @@ const { Workspace } = await import('../src/workspace.mjs');
 // Which manifests and locks the host can never prepare, so run_check is not offered for them.
 const pkg = extra => JSON.stringify({ name: 'f', version: '1.0.0', ...extra });
 const lock = (packages = {}, extra = {}) => JSON.stringify({ name: 'f', version: '1.0.0', lockfileVersion: 3, packages: { '': { name: 'f', version: '1.0.0' }, ...packages }, ...extra });
-const reason = /without workspaces|local or workspace/;
+const reason = /workspaces|local or link|lockfiles of version/;
 
 assert.equal(unsupportedDependencies(pkg(), lock({ 'node_modules/a': { version: '1.0.0', resolved: 'https://registry.npmjs.org/a/-/a-1.0.0.tgz' } })), null, 'a plain registry lockfile is supported');
 assert.equal(unsupportedDependencies(pkg(), null), null, 'no lockfile: nothing to prepare, not unsupported');
@@ -24,6 +24,19 @@ assert.match(unsupportedDependencies(pkg(), lock({ 'node_modules/a': { resolved:
 assert.match(unsupportedDependencies(pkg(), lock({ '': { name: 'f', dependencies: { a: 'workspace:*' } } })), reason, 'workspace: dependency');
 assert.match(unsupportedDependencies(pkg(), lock({}, { lockfileVersion: 1 })), reason, 'lockfileVersion 1');
 console.log('PASS unsupported dependencies are recognised without preparing');
+
+// A Go repository is offered or withheld by the same rule: go.mod with a local replace, or a go.work file, cannot be prepared.
+{
+  const goDir = fs.realpathSync(fs.mkdtempSync(path.join(home, 'go-')));
+  const verdict = () => Workspace.prototype.dependenciesUnsupported.call({}, null, goDir, 'dot');
+  fs.writeFileSync(path.join(goDir, 'go.mod'), 'module a\n\ngo 1.21\n');
+  assert.equal(verdict(), null, 'a plain go.mod is supported');
+  fs.writeFileSync(path.join(goDir, 'go.mod'), 'module a\n\ngo 1.21\n\nreplace example.org/dep => ../dep\n');
+  assert.match(verdict(), /local replace/, 'a local replace is withheld');
+  fs.writeFileSync(path.join(goDir, 'go.mod'), 'module a\n\ngo 1.21\n'); fs.writeFileSync(path.join(goDir, 'go.work'), 'go 1.21\n');
+  assert.match(verdict(), /go\.work/, 'go.work is withheld');
+  console.log('PASS Go repositories are withheld on a local replace or go.work');
+}
 
 // The verdict for a pinned base is memoised: a second claim or get on the same base reads nothing, and the memo is bounded.
 try {
