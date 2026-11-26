@@ -175,6 +175,16 @@ try {
   assert.deepEqual(events(k).map(e=>e.type),['check_started','check_passed'],JSON.stringify(events(k)));
   assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',k)[0].n,1,'a completed check of any id covers the exact diff');
   console.log('PASS finish waits for a check the worker started under another id, and that check covers the diff');
+
+  // 9. The worker's own check is running and there is nothing for the bridge to check (no patch): finish still waits for it.
+  const m=submit('host'),mClaim=await claimJob(m);
+  const slow2=call('run_check',{request_id:m,claim_id:mClaim,check_id:'slow'});
+  for(let i=0;i<100&&!events(m).length;i++)await new Promise(resolve=>setTimeout(resolve,50));
+  assert.equal(events(m).length,1,'the slow check is running on an empty diff');
+  await finish(m,mClaim);
+  assert(reported(m),'finish waited for the worker\'s own check even with no patch');
+  await slow2;
+  console.log('PASS finish waits for the worker\'s own check even when there is no patch to check');
 } finally {
   await stopChild(service);
   await new Promise(resolve => jwks.close(resolve));

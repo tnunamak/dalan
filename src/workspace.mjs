@@ -461,7 +461,7 @@ function runtimeVersions() {
 
 const UNSUPPORTED_MEMO_MAX=256;
 export class Workspace {
-  constructor(store,recover=true,{freeBytes,checkResponseOptions,stopReverify}={}) { this.checkResponseOptions=checkResponseOptions;this.stopReverify=stopReverify; if(freeBytes) this.freeBytes=freeBytes; this.store=store;this.activeChecks=new Set();this.checkEffects=new Map();this.cleanupInFlight=new Set();fs.mkdirSync(worktrees,{recursive:true,mode:0o700});fs.mkdirSync(artifacts,{recursive:true,mode:0o700});fs.mkdirSync(caches,{recursive:true,mode:0o700});if(recover) this.sweepDigestScratch();if(recover) store.transaction(()=>{ for(const job of store.db.prepare("SELECT id,request_id,claim_id,check_id FROM check_jobs WHERE status='running'").all()) { store.db.prepare("UPDATE check_jobs SET status='interrupted',stop_verified=NULL,finished_at=? WHERE id=?").run(new Date().toISOString(),job.id); store.lifecycle(job.request_id,'check_failed','system',checkOutcome({...job,status:'interrupted'})[1],{claim_id:job.claim_id}); } });if(recover) this.reconcileHostStops(); }
+  constructor(store,recover=true,{freeBytes,checkResponseOptions,stopReverify}={}) { this.checkResponseOptions=checkResponseOptions;this.stopReverify=stopReverify; if(freeBytes) this.freeBytes=freeBytes; this.store=store;this.activeChecks=new Set();this.autoChecked=new Set();this.checkEffects=new Map();this.cleanupInFlight=new Set();fs.mkdirSync(worktrees,{recursive:true,mode:0o700});fs.mkdirSync(artifacts,{recursive:true,mode:0o700});fs.mkdirSync(caches,{recursive:true,mode:0o700});if(recover) this.sweepDigestScratch();if(recover) store.transaction(()=>{ for(const job of store.db.prepare("SELECT id,request_id,claim_id,check_id FROM check_jobs WHERE status='running'").all()) { store.db.prepare("UPDATE check_jobs SET status='interrupted',stop_verified=NULL,finished_at=? WHERE id=?").run(new Date().toISOString(),job.id); store.lifecycle(job.request_id,'check_failed','system',checkOutcome({...job,status:'interrupted'})[1],{claim_id:job.claim_id}); } });if(recover) this.reconcileHostStops(); }
   // Only called after expiry/revocation: the host supervisor observes loss of
   // authority and stops the whole unit. Await its receipt and discarded output.
   async quiesce(requestId) {
@@ -1086,11 +1086,6 @@ export class Workspace {
     try {
       const a=this.store.get(requestId);
       if(a.status!=='claimed'||a.assignment.execution_scope!=='implementation'||!a.assignment.inputs?.some(input=>input.github_repo)) return null;
-      if(this.store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(requestId)?.execution!=='host') return null;
-      const {dir,input}=this.ensure(requestId,claimId,subject,true,worker);
-      const diff=this.diff(dir,input.base_sha,this.diffFilter(a.assignment),this.diffScope(a));
-      if(!diff.paths.length) return null;
-      if(!availableChecks(input.github_repo,dir).includes(CHECK_BEFORE_FINISH)) return null;
       // waitMs bounds the whole step. A check still running when it ends would make the finish snapshot throw 'check still running'
       // with no hint what to do, so say so plainly: the check keeps going and the next finish picks it up, so nothing is lost.
       const began=Date.now();
@@ -1101,10 +1096,21 @@ export class Workspace {
         try { await Promise.race([work.catch(()=>{}),new Promise(resolve=>{timer=setTimeout(resolve,Math.max(0,waitMs-(Date.now()-began)));})]); } finally { clearTimeout(timer); }
         if(this.activeChecks.has(requestId)) throw new FinishCheckPending();
       };
-      // A check the worker started on its own (any check id) must end first: only then is it clear whether the diff is covered.
+      // A check the worker started (any check id) must end first, whether or not the bridge would start one itself: the snapshot
+      // below cannot be taken while any check runs.
       await settle();
+      if(this.store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(requestId)?.execution!=='host') return null;
+      const {dir,input}=this.ensure(requestId,claimId,subject,true,worker);
+      const diff=this.diff(dir,input.base_sha,this.diffFilter(a.assignment),this.diffScope(a));
+      if(!diff.paths.length) return null;
+      if(!availableChecks(input.github_repo,dir).includes(CHECK_BEFORE_FINISH)) return null;
       const covered=this.store.db.prepare("SELECT 1 FROM check_jobs WHERE request_id=? AND claim_id=? AND diff_sha256=? AND status='completed' LIMIT 1").get(requestId,claimId,diff.sha256);
       if(covered) return null;
+      // One automatic attempt per diff: when that attempt ended without a completed result, a retried finish stores the report
+      // rather than start the same check again.
+      const attempt=`${requestId}:${claimId}:${diff.sha256}`;
+      if(this.autoChecked.has(attempt)) return null;
+      this.autoChecked.add(attempt);
       const started=await this.check(requestId,claimId,subject,CHECK_BEFORE_FINISH,worker);
       await settle();
       return {check_id:CHECK_BEFORE_FINISH,started:started?.check_run_id??null};
