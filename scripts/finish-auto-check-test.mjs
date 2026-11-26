@@ -65,9 +65,9 @@ try {
   const { Store } = await import('../src/store.mjs');
   const dbPath = path.join(home, '.local/share/dot-bridge/bridge.db');
   const budget={cpu_ms:10000,wall_ms:15000,memory_bytes:256*1024**2,processes:32,disk_write_bytes:8*1024**2,output_bytes:8192};
-  const writeCheck=(code,wallMs=15000)=>fs.writeFileSync(path.join(config,'checks.json'),JSON.stringify({'example-owner/fixture':{checks:{default:{argv:['/runtime/node','-e',code],host_budget:{...budget,wall_ms:wallMs},timeout_ms:wallMs,output_bytes:8192}}}}),{mode:0o600});
+  const writeCheck=(code,wallMs=15000)=>fs.writeFileSync(path.join(config,'checks.json'),JSON.stringify({'example-owner/fixture':{checks:{default:{argv:['/runtime/node','-e',code],host_budget:{...budget,wall_ms:wallMs},timeout_ms:wallMs,output_bytes:8192},slow:{argv:['/runtime/node','-e','setTimeout(()=>console.log("SLOW_DONE"),6000)'],host_budget:budget,timeout_ms:15000,output_bytes:8192}}}}),{mode:0o600});
   writeCheck('console.log("AUTO_CHECK_RAN")');
-  fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:[{repo:'example-owner/fixture',check_id:'default'}]}),{mode:0o600});
+  fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:[{repo:'example-owner/fixture',check_id:'default'},{repo:'example-owner/fixture',check_id:'slow'}]}),{mode:0o600});
   const patch=name=>`diff --git a/${name} b/${name}\nnew file mode 100644\n--- /dev/null\n+++ b/${name}\n@@ -0,0 +1 @@\n+hello\n`;
   const submit=execution=>{
     const id=`req_${randomUUID()}`,assignment={schema_version:1,request_id:id,brief:'fixture',inputs:[{github_repo:'example-owner/fixture',base_sha:base}],expected_output:'report',execution_scope:'implementation'};
@@ -161,6 +161,20 @@ try {
   assert.equal(rows("SELECT COUNT(*) n FROM check_jobs WHERE request_id=? AND status='completed'",h)[0].n,1,'the bridge ran its own check');
   assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',h)[0].n,2);
   console.log('PASS a failed check job does not count as a check of that diff');
+
+  // 8. The worker started a different check and finishes while it runs: finish waits for it. Its completed run covers the diff.
+  writeCheck('console.log("AUTO_CHECK_RAN")');
+  const k=submit('host'),kClaim=await claimJob(k);
+  await call('apply_patch',{request_id:k,claim_id:kClaim,patch:patch('hello.txt')});
+  const slow=call('run_check',{request_id:k,claim_id:kClaim,check_id:'slow'});
+  for(let i=0;i<100&&!events(k).length;i++)await new Promise(resolve=>setTimeout(resolve,50));
+  assert.equal(events(k).length,1,'the slow check is running');
+  await finish(k,kClaim);
+  assert(reported(k),'finish waited for the worker\'s own check and stored the report');
+  await slow;
+  assert.deepEqual(events(k).map(e=>e.type),['check_started','check_passed'],JSON.stringify(events(k)));
+  assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',k)[0].n,1,'a completed check of any id covers the exact diff');
+  console.log('PASS finish waits for a check the worker started under another id, and that check covers the diff');
 } finally {
   await stopChild(service);
   await new Promise(resolve => jwks.close(resolve));

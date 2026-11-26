@@ -1073,7 +1073,7 @@ export class Workspace {
       });
       this.reconcileHostStops(requestId);
       return {check_run_id:checkRunId,status:'failed',error:error.message};
-    } finally {if(scratch) fs.rmSync(scratch,{recursive:true,force:true});this.activeChecks.delete(requestId);this.checkEffects.delete(requestId);} })();
+    } finally {try{if(scratch) fs.rmSync(scratch,{recursive:true,force:true});}finally{this.activeChecks.delete(requestId);this.checkEffects.delete(requestId);}} })();
     this.checkEffects.set(requestId,work);
     return checkResponse(work,{check_run_id:checkRunId,status:'running'},this.checkResponseOptions);
   }
@@ -1091,19 +1091,22 @@ export class Workspace {
       const diff=this.diff(dir,input.base_sha,this.diffFilter(a.assignment),this.diffScope(a));
       if(!diff.paths.length) return null;
       if(!availableChecks(input.github_repo,dir).includes(CHECK_BEFORE_FINISH)) return null;
+      // waitMs bounds the whole step. A check still running when it ends would make the finish snapshot throw 'check still running'
+      // with no hint what to do, so say so plainly: the check keeps going and the next finish picks it up, so nothing is lost.
+      const began=Date.now();
+      const settle=async()=>{
+        const work=this.checkEffects.get(requestId);
+        if(!work||!this.activeChecks.has(requestId)) return;
+        let timer;
+        try { await Promise.race([work.catch(()=>{}),new Promise(resolve=>{timer=setTimeout(resolve,Math.max(0,waitMs-(Date.now()-began)));})]); } finally { clearTimeout(timer); }
+        if(this.activeChecks.has(requestId)) throw new FinishCheckPending();
+      };
+      // A check the worker started on its own (any check id) must end first: only then is it clear whether the diff is covered.
+      await settle();
       const covered=this.store.db.prepare("SELECT 1 FROM check_jobs WHERE request_id=? AND claim_id=? AND diff_sha256=? AND status='completed' LIMIT 1").get(requestId,claimId,diff.sha256);
       if(covered) return null;
-      const began=Date.now();
       const started=await this.check(requestId,claimId,subject,CHECK_BEFORE_FINISH,worker);
-      const work=this.checkEffects.get(requestId);
-      if(work) {
-        // waitMs bounds the whole step, including the time check() already spent before it answered 'running'.
-        let timer;
-        try { await Promise.race([work,new Promise(resolve=>{timer=setTimeout(resolve,Math.max(0,waitMs-(Date.now()-began)));})]); } finally { clearTimeout(timer); }
-        // A check still running now would make the finish snapshot throw 'check still running'. Say so plainly: the check keeps going
-        // and the next finish waits for it, so nothing is lost.
-        if(this.activeChecks.has(requestId)) throw new FinishCheckPending();
-      }
+      await settle();
       return {check_id:CHECK_BEFORE_FINISH,started:started?.check_run_id??null};
     } catch(error) { if(error instanceof FinishCheckPending) throw error; return null; }
   }
