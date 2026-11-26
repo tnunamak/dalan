@@ -65,6 +65,30 @@ test('busy lock with no readable owner keeps the busy code and names no pid', ()
   assert.equal(error.message, 'this session is active in another adapter (pid unknown)');
 });
 
+test('private JSON pretty mode round-trips and replaces the previous object', async t => {
+  const { readJsonPrivate, writeJsonPrivate } = await import('../src/session-store.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'subdir', 'session.json');
+  writeJsonPrivate(target, { previous: true });
+  writeJsonPrivate(target, { fixture: [1, 2] }, { pretty: true });
+  assert.equal(fs.readFileSync(target, 'utf8'), JSON.stringify({ fixture: [1, 2] }, null, 2));
+  assert.deepEqual(readJsonPrivate(target), { fixture: [1, 2] });
+  assert.deepEqual(fs.readdirSync(path.dirname(target)), ['session.json']);
+});
+
+test('removing private JSON twice leaves the missing-state sentinel', async t => {
+  const { readJsonPrivate, removePrivate, writeJsonPrivate } = await import('../src/session-store.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'session.json');
+  assert.equal(readJsonPrivate(target), null);
+  writeJsonPrivate(target, { fixture: true });
+  removePrivate(target);
+  removePrivate(target);
+  assert.equal(readJsonPrivate(target), null);
+});
+
 test('acquire writes the record; release removes only our own token', async () => {
   const dir = tmp(), file = path.join(dir, 's.lock');
   const a = await acquireLock(file);
