@@ -6,13 +6,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+export const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const runtime = () => ({ node: process.version, abi: process.versions.modules, platform: process.platform, arch: process.arch });
 const store = options => path.resolve(options.cacheDir ?? defaultPath(os.homedir(),'.dot-bridge/prepared-node-modules'));
-const failure = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
+export const failure = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
 const recovery = source => `dalan prepare-deps ${shellQuote(path.resolve(source))}`;
 
-function readRegular(file, optional = false) {
+export function readRegular(file, optional = false) {
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -50,18 +50,22 @@ function inputs(source) {
   const identity = { lock_sha256: hash(lock), manifest_sha256: hash(manifest), runtime: runtime() };
   return { root, lock, manifest, identity, key: hash(JSON.stringify(identity.runtime)) };
 }
-function checkDirectory(dir, privateMode = false) {
+// Remove every write bit under a prepared tree so the sandbox's read-only mount and the owner agree on what the bytes are.
+export function freezeTree(dir) { const s = fs.lstatSync(dir); if (s.isSymbolicLink()) return; if (s.isDirectory()) for (const name of fs.readdirSync(dir)) freezeTree(path.join(dir, name)); else if (!s.isFile()) throw failure('dependencies_invalid', 'special file in dependency tree'); fs.chmodSync(dir, s.mode & 0o555); }
+// Make a staging tree removable again after freezeTree.
+export function thawTree(dir) { const st=fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) return; fs.chmodSync(dir, 0o700); for (const name of fs.readdirSync(dir)) thawTree(path.join(dir,name)); }
+export function checkDirectory(dir, privateMode = false) {
   const s = fs.lstatSync(dir);
   if (!s.isDirectory() || s.uid !== process.getuid() || (s.mode & (privateMode ? 0o077 : 0o022))) throw failure('dependencies_invalid', 'unsafe cache directory ownership or mode');
 }
-function checkParents(dir) {
+export function checkParents(dir) {
   for (let p = dir; ; p = path.dirname(p)) {
     const s = fs.lstatSync(p);
     if (!s.isDirectory() || (s.uid !== process.getuid() && s.uid !== 0) || (s.mode & 0o022)) throw failure('dependencies_invalid', 'unsafe cache parent');
     if (p === '/') break;
   }
 }
-function validateTree(root) {
+export function validateTree(root) {
   const walk = dir => {
     const st = fs.lstatSync(dir);
     if (st.uid !== process.getuid() || (!st.isSymbolicLink() && (st.mode & 0o222))) throw failure('dependencies_invalid', 'dependency tree ownership or mode invalid');
@@ -74,7 +78,7 @@ function validateTree(root) {
   walk(root);
 }
 function entryPath(base, input) { return path.join(base, input.identity.lock_sha256, input.key); }
-const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+export const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 function lookup(input, base) {
   const entry = entryPath(base, input);
   try {
@@ -133,8 +137,7 @@ export function prepareNodeModules(sourceDir, options = {}) {
     }
     const tree = path.join(stage, 'node_modules');
     if (!fs.existsSync(tree)) fs.mkdirSync(tree, { mode: 0o700 });
-    const freeze = dir => { const s = fs.lstatSync(dir); if (s.isSymbolicLink()) return; if (s.isDirectory()) for (const name of fs.readdirSync(dir)) freeze(path.join(dir, name)); else if (!s.isFile()) throw failure('dependencies_invalid', 'special file in dependency tree'); fs.chmodSync(dir, s.mode & 0o555); };
-    freeze(tree); validateTree(tree);
+    freezeTree(tree); validateTree(tree);
     fs.rmSync(path.join(stage, 'package.json')); fs.rmSync(path.join(stage, 'package-lock.json'));
     fs.writeFileSync(path.join(stage, 'metadata.json'), JSON.stringify({ identity: input.identity }) + '\n', { mode: 0o400 });
     if(fs.existsSync(destination)) {
@@ -149,8 +152,7 @@ export function prepareNodeModules(sourceDir, options = {}) {
     fs.renameSync(stage, destination);
     return lookup(input, base);
   } finally { if (fs.existsSync(stage)) {
-    const thaw = dir => { const st=fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) return; fs.chmodSync(dir, 0o700); for (const name of fs.readdirSync(dir)) thaw(path.join(dir,name)); };
-    thaw(stage); fs.rmSync(stage, { recursive: true, force: true });
+    thawTree(stage); fs.rmSync(stage, { recursive: true, force: true });
   } }
 }
 
@@ -163,16 +165,18 @@ export function prepareNodeModulesInChild(sourceDir, { timeoutMs = 600000, env =
   const root = fs.realpathSync(sourceDir);
   const input = inputs(root);
   if (!input) return Promise.resolve(null);
-  const key = `${input.identity.lock_sha256}:${input.key}`;
+  return prepareInChild({ root, key: `${input.identity.lock_sha256}:${input.key}`, base: store({}), flags: [], timeoutMs, env });
+}
+// Shared by every kind of preparation: one in-flight child per key, own process group, stage cleanup after a timeout kill.
+export function prepareInChild({ root, key, base, flags, timeoutMs = 600000, env = process.env }) {
   const running = inFlight.get(key);
   if (running) return running;
   const cli = fileURLToPath(new URL('../bin/dot-worker.mjs', import.meta.url));
-  const childEnv = Object.fromEntries(Object.entries(env).filter(([name]) => /^(PATH|HOME|LANG|TMPDIR|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|npm_config_.*|(https?|no)_proxy)$/i.test(name)));
-  const base = store({});
+  const childEnv = Object.fromEntries(Object.entries(env).filter(([name]) => /^(PATH|HOME|LANG|TMPDIR|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|npm_config_.*|GOPROXY|GOSUMDB|(https?|no)_proxy)$/i.test(name)));
   const stagesBefore = new Set(listStages(base));
   const done = new Promise((resolve, reject) => {
     // Own process group: npm runs under the CLI's synchronous spawn, so killing the CLI alone would leave npm installing.
-    const child = spawn(process.execPath, [cli, 'prepare-deps', root, '--json'], { env: childEnv, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [cli, 'prepare-deps', root, '--json', ...flags], { env: childEnv, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '', timedOut = false;
     child.stdout.on('data', chunk => { if (out.length < 1 << 20) out += chunk; });
     child.stderr.on('data', chunk => { if (err.length < 1 << 16) err += chunk; });

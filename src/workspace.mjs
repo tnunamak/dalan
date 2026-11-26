@@ -14,6 +14,7 @@ import { hostBackend, hostReadiness, capabilityNotAvailable, TRUST, withEvidence
 import { redactSecrets, redactOutput, privateKeyHeader } from './redaction.mjs';
 import { hostCheckRefusal, hostCheckAuthorization } from './host-execution-policy.mjs';
 import { resolvePreparedNodeModules, prepareNodeModulesInChild, unsupportedDependencies } from './prepared-node-modules.mjs';
+import { resolvePreparedGoModules, prepareGoModulesInChild, goModulesUnsupported } from './prepared-go-modules.mjs';
 import { ownerReportArtifactBytes } from './owner-report-artifact.mjs';
 import { withCheckCoverage } from './check-coverage.mjs';
 import { runHostBudget, parseHostBudget } from './host-budget.mjs';
@@ -852,7 +853,7 @@ export class Workspace {
     try {
       if(dir) {
         const read=file=>{try{return fs.readFileSync(path.join(dir,file));}catch{return null;}};
-        return unsupportedDependencies(read('package.json'),read('package-lock.json'));
+        return unsupportedDependencies(read('package.json'),read('package-lock.json'))??goModulesUnsupported(read('go.mod'),read('go.work'));
       }
       // The pinned base commit never changes, so its verdict is memoised (most recently used 256 kept): claim and get poll often,
       // and reading and parsing a multi-megabyte lockfile each time blocks the bridge's event loop.
@@ -861,7 +862,7 @@ export class Workspace {
       const mirror=this.mirrorFor(input,worker);
       git(['-C',mirror,'cat-file','-e',`${input.base_sha}^{commit}`]); // no commit yet: throw, so a missing mirror is never memoised as "supported"
       const show=file=>{try{return git(['-C',mirror,'show',`${input.base_sha}:${file}`],{encoding:'buffer'});}catch{return null;}};
-      const verdict=unsupportedDependencies(show('package.json'),show('package-lock.json'));
+      const verdict=unsupportedDependencies(show('package.json'),show('package-lock.json'))??goModulesUnsupported(show('go.mod'),show('go.work'));
       memo.set(key,verdict);
       while(memo.size>UNSUPPORTED_MEMO_MAX) memo.delete(memo.keys().next().value);
       return verdict;
@@ -1093,13 +1094,15 @@ export class Workspace {
   // an absent entry is built once here instead of failing every check with an owner-only recovery command. A changed
   // manifest or lock is the worker's own input, so it is never installed here: the check fails as before.
   async prepareDependencies(dir,baseSha) {
-    try { resolvePreparedNodeModules(dir);return; }
-    catch(error) { if(error.code!=='dependencies_unprepared') return; }
-    for(const file of ['package.json','package-lock.json']) {
-      let pinned;try{pinned=git(['-C',dir,'show',`${baseSha}:${file}`],{encoding:'buffer'});}catch{return;}
-      if(!fs.readFileSync(path.join(dir,file)).equals(pinned)) return;
-    }
-    await prepareNodeModulesInChild(dir);
+    const unchangedFromBase=files=>files.every(file=>{
+      let pinned;try{pinned=git(['-C',dir,'show',`${baseSha}:${file}`],{encoding:'buffer'});}catch{return false;}
+      try{return fs.readFileSync(path.join(dir,file)).equals(pinned);}catch{return false;}
+    });
+    const unprepared=resolve=>{try{resolve(dir);return false;}catch(error){return error.code==='dependencies_unprepared';}};
+    if(unprepared(resolvePreparedNodeModules)&&unchangedFromBase(['package.json','package-lock.json'])) await prepareNodeModulesInChild(dir);
+    // A Go repository: the module cache and toolchain come from go.mod and go.sum alone, under the same pinned-base rule. go.sum may be absent from the base, and then must be absent here.
+    const sumInBase=(()=>{try{git(['-C',dir,'cat-file','-e',`${baseSha}:go.sum`]);return true;}catch{return false;}})();
+    if(unprepared(resolvePreparedGoModules)&&unchangedFromBase(sumInBase?['go.mod','go.sum']:['go.mod'])&&(sumInBase||!fs.existsSync(path.join(dir,'go.sum')))) await prepareGoModulesInChild(dir);
   }
   async runConfined(requestId,dir,command,spec,{cancelled,checkRunId,repo=null,checkId=null,expectedSpec=null}={}) {
     // Policy is rechecked at the only launch boundary; repository metadata

@@ -29,6 +29,8 @@ if sys.argv[1] != '--inside':
     guest_config = dict(config)
     if config['dependencies']:
         guest_config['dependencies'] = {key: value for key, value in config['dependencies'].items() if key != 'treePath'}
+    if config.get('goModules'):
+        guest_config['goModules'] = {key: value for key, value in config['goModules'].items() if key != 'treePath'}
     os.write(config_fd,json.dumps(guest_config).encode())
     os.lseek(config_fd,0,0)
     extra_fds=[config_fd]
@@ -48,6 +50,9 @@ if sys.argv[1] != '--inside':
         command += ['--ro-bind', npm, '/runtime/npm']
     if config['dependencies']:
         command += ['--ro-bind', config['dependencies']['treePath'], '/budget/workspace/node_modules']
+    # The prepared Go module cache (modules plus the toolchain go.mod asks for) is the sandbox's GOMODCACHE, read-only.
+    if config.get('goModules'):
+        command += ['--ro-bind', config['goModules']['treePath'], '/budget/cache/go/pkg/mod']
     # Empty sensitive files and host-approved source overlays stay read-only.
     for name in config['maskPaths']:
         empty=os.memfd_create('dot-host-mask')
@@ -75,6 +80,7 @@ if sys.argv[1] != '--inside':
                 '--setenv', 'PATH', '/budget/bin:/runtime:/usr/bin:/bin', '--setenv', 'HOME', '/home/worker', '--setenv', 'TMPDIR', '/tmp',
                 '--setenv', 'XDG_CACHE_HOME', '/cache/xdg', '--setenv', 'npm_config_cache', '/cache/npm', '--setenv', 'UV_CACHE_DIR', '/cache/uv',
                 '--setenv', 'CARGO_HOME', '/cache/cargo', '--setenv', 'GOPATH', '/cache/go', '--setenv', 'GOMODCACHE', '/cache/go/pkg/mod',
+                '--setenv', 'GOPROXY', 'off', '--setenv', 'GOFLAGS', '-mod=readonly',
                 '--', '/usr/bin/python3', '/supervisor.py', '--inside', str(read_fd)]
     child = subprocess.Popen(command, pass_fds=[read_fd,*extra_fds], stdin=sys.stdin)
     os.close(read_fd)
@@ -170,6 +176,17 @@ try:
                     raise ValueError('dependencies_invalid: copied dependency inputs changed')
     elif os.path.lexists('/workspace/package-lock.json'):
         raise ValueError('dependencies_invalid: copied lock appeared after admission')
+    go_modules = config.get('goModules')
+    if go_modules:
+        for name, key in [('go.mod', 'go_mod_sha256'), ('go.sum', 'go_sum_sha256')]:
+            data = b''
+            if os.path.lexists('/workspace/' + name):
+                with open('/workspace/' + name, 'rb') as stream:
+                    data = stream.read()
+            if hashlib.sha256(data).hexdigest() != go_modules[key]:
+                raise ValueError('dependencies_invalid: copied Go module inputs changed')
+    elif os.path.lexists('/workspace/go.mod'):
+        raise ValueError('dependencies_invalid: copied go.mod appeared after admission')
     for name in ['npm', 'npx']:
         file = '/budget/bin/' + name
         with open(file, 'w') as stream:
