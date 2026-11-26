@@ -115,7 +115,7 @@ const storedMeta=(meta,legacy)=>({...meta,objective_key:storedObjectiveKey(meta.
 function submitIntentDigest(identity,delivery,environmentId,review,priority,meta,targetWorker,execution,requiredCapabilities,destinationRevision=null,legacyFixNames=true) {
   return hash(JSON.stringify(canonical({payload:identity,delivery,environmentId:environmentId??'',review:!!review,priority,meta:storedMeta(normalizeMeta(meta),legacyFixNames),targetWorker,execution,requiredCapabilities,...(destinationRevision===null?{}:{destination_revision:destinationRevision})})));
 }
-const defaultRedeliveryLimits={intervalMs:600000,maxCount:3,silenceMs:1200000,claimIdleWarningMs:900000,leaseMs:3600000,workerClaimLeaseMs:{},workerPostStartHoldMs:{},workerClaimMinGapMs:{},laneCapacity:6,rewakeMs:90000,rewakeWindowMs:7200000,rewakeStaleMs:1200000,breakSilenceMs:1200000,breakProbeMs:1800000,maxClaimsPerHour:90,maxToolCallsPerHour:1000,maxToolCallsPer24h:10000,maxResponseBytesPerHour:8000000,maxResponseBytesPer24h:100000000};
+const defaultRedeliveryLimits={intervalMs:600000,maxCount:3,silenceMs:1200000,claimIdleWarningMs:900000,leaseMs:3600000,workerClaimLeaseMs:{},workerPostStartHoldMs:{},workerClaimHint:{},workerClaimMinGapMs:{},laneCapacity:6,rewakeMs:90000,rewakeWindowMs:7200000,rewakeStaleMs:1200000,breakSilenceMs:1200000,breakProbeMs:1800000,maxClaimsPerHour:90,maxToolCallsPerHour:1000,maxToolCallsPer24h:10000,maxResponseBytesPerHour:8000000,maxResponseBytesPer24h:100000000};
 const HOUR=3600000, iso=ms=>new Date(ms).toISOString();
 export const QUEUE_WINDOW=Object.freeze({minSamples:5,factor:3,minMs:15*60000,maxMs:12*HOUR});
 const queueKindSql=canonicalKindSql("COALESCE(a.task_kind,json_extract(a.payload,'$.task_kind'),CASE WHEN a.review=1 THEN 'review' ELSE json_extract(a.payload,'$.execution_scope') END,'unknown')");
@@ -188,6 +188,11 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(value.worker_post_start_hold_ms===null||typeof workerPostStartHoldMs!=='object'||Array.isArray(workerPostStartHoldMs)||
     Object.entries(workerPostStartHoldMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<0||ms>604800000))
     throw new Error('invalid worker_post_start_hold_ms');
+  // Guidance only: how many claims the bridge tells a worker to hold at once. It never refuses a claim (max_claimed_outer_assignments does that).
+  const workerClaimHint=value.worker_claim_hint??{};
+  if(value.worker_claim_hint===null||typeof workerClaimHint!=='object'||Array.isArray(workerClaimHint)||
+    Object.entries(workerClaimHint).some(([worker,n])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(n)||n<1||n>10))
+    throw new Error('invalid worker_claim_hint');
   const workerClaimMinGapMs=value.worker_claim_min_gap_ms??{};
   if(value.worker_claim_min_gap_ms===null||typeof workerClaimMinGapMs!=='object'||Array.isArray(workerClaimMinGapMs)||
     Object.entries(workerClaimMinGapMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<1000||ms>600000))
@@ -223,7 +228,7 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(!Number.isInteger(maxResponseBytesPerHour)||maxResponseBytesPerHour<100000||maxResponseBytesPerHour>1000000000) throw new Error('invalid max_response_bytes_per_hour');
   const maxResponseBytesPer24h=value.max_response_bytes_per_24h??defaultRedeliveryLimits.maxResponseBytesPer24h;
   if(!Number.isInteger(maxResponseBytesPer24h)||maxResponseBytesPer24h<1000000||maxResponseBytesPer24h>10000000000) throw new Error('invalid max_response_bytes_per_24h');
-  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,workerPostStartHoldMs,workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
+  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,workerPostStartHoldMs,workerClaimHint,workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
 }
 
 // Gates that cap one rolling hour. They hold background work before agent-requested work (see rollingUsage).
@@ -2698,7 +2703,17 @@ export class Store {
   // A claimed assignment left its lane: the next reannounceQueued tick may wake the worker at once instead of waiting out rewakeMs.
   laneFreed() { this.dispatchWake=true; }
   // Up to `free` live queued assignments in list_pending order (oldest, normal work first), never `exceptId`, with the one-line prompt to claim them.
+  // The claim count the bridge suggests to a worker (limits.json worker_claim_hint), or null. A suggestion only: free_lanes and every claim check stay as they are.
+  claimHint(worker) { const hints=this.limits.workerClaimHint??{}; return Object.hasOwn(hints,worker)?hints[worker]:null; }
+  // Claims the worker touched within the last 3 minutes. An older one is likely a dead run's and is listed to resume, so it does not count against the hint.
+  recentClaimCount(worker) {
+    const since=this.nowMs()-180000;
+    return this.db.prepare("SELECT c.* FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND c.state='active' AND c.worker=?").all(worker)
+      .filter(c=>Date.parse(c.last_claim_activity_at??c.claimed_at)>=since).length;
+  }
   nextQueued(free,exceptId=null,worker='dot') {
+    const hint=this.claimHint(worker);
+    if(hint!==null) free=Math.min(free,Math.max(0,hint-this.recentClaimCount(worker)));
     if(free<=0) return {};
     const all=this.listPending(worker).filter(x=>x.kind==='assignment'&&!x.blocked&&x.request_id!==exceptId);
     if(!all.length) return {};
