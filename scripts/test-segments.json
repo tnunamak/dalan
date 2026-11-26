@@ -82,6 +82,7 @@
   "node --test scripts/setup-start-wait-test.mjs",
   "timeout --kill-after=5s 90s nice -n 10 node --test scripts/prepared-dependencies-host-test.mjs",
   "node scripts/host-check-allowlist-test.mjs && node scripts/host-check-allowlist-http-test.mjs && node scripts/host-check-withheld-claim-test.mjs",
+  "node scripts/finish-auto-check-test.mjs",
   "node scripts/owner-report-artifact-e2e.mjs",
   "node --test scripts/auth-repository-security-test.mjs",
   "node --test scripts/check-skip-reporting-test.mjs",
