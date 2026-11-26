@@ -150,3 +150,56 @@ test('until-quiescent leaves the gate closed after a successful poll and never r
     assert.ok(!calls(root).includes('quiesce off'),'the restart reopens the gate, not the drain');
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
+
+// The default mode: quiesce when the running service answers `quiesce status` with the in-flight counters, pause only when it cannot.
+const runWith=(root,args,timeout='3000')=>spawnSync(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),...args],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:timeout},encoding:'utf8',timeout:15000});
+const oldService=(root,statusExit)=>{
+  const bin=path.join(root,'bin');fs.mkdirSync(bin,{recursive:true});
+  fs.writeFileSync(path.join(bin,'dot-worker.mjs'),`import fs from 'node:fs';
+const args=process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(path.join(root,'calls.log'))},args.filter(a=>a!=='--json').join(' ')+'\\n');
+if(args[0]==='quiesce'){${statusExit?`process.stderr.write('unknown admin route');process.exit(1);`:`process.stdout.write(JSON.stringify({ok:true}));`}}
+else if(args[0]==='claims')process.stdout.write(JSON.stringify({claims:[]}));
+else process.stdout.write(JSON.stringify({ok:true}));
+`);
+};
+
+test('with no flag, a service that has the gate is drained by quiesce and is never paused',()=>{
+  const root=scratch();
+  try {
+    fake(root,[idle]);
+    const result=runWith(root,[]);
+    assert.equal(result.status,0,result.stderr);
+    const seen=calls(root);
+    assert.ok(seen.includes('quiesce on'),seen.join('|'));
+    assert.ok(!seen.some(c=>c.startsWith('pause')||c.startsWith('claims')),'no pause and no lease wait: '+seen.join('|'));
+    assert.match(result.stdout,/has the quiesce gate/);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
+
+for(const [label,statusExit] of [['answers quiesce status with an error',true],['answers quiesce status without counters',false]]) test(`with no flag, a service that ${label} is drained by the pause`,()=>{
+  const root=scratch();
+  try {
+    oldService(root,statusExit);
+    const result=runWith(root,[]);
+    assert.equal(result.status,0,result.stderr);
+    const seen=calls(root);
+    assert.ok(seen.some(c=>c.startsWith('pause')),seen.join('|'));
+    assert.ok(!seen.includes('quiesce on'),'a service without the gate is never asked to quiesce');
+    assert.match(result.stdout,/no quiesce gate/);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('--pause forces the pause drain even when the service has the gate; the two flags exclude each other',()=>{
+  const root=scratch();
+  try {
+    fake(root,[idle]);
+    const result=runWith(root,['--pause']);
+    const seen=calls(root);
+    assert.ok(seen.some(c=>c.startsWith('pause')),seen.join('|'));
+    assert.ok(!seen.some(c=>c.startsWith('quiesce')),'--pause must not probe or close the gate: '+seen.join('|'));
+    const both=runWith(root,['--pause','--until-quiescent']);
+    assert.equal(both.status,2);
+    assert.match(both.stderr,/exclude each other/);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
