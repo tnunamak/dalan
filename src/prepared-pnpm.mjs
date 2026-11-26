@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { hash, failure, markUsed, readRegular, checkDirectory, checkParents, validateTree, freezeTree, thawTree, shellQuote, prepareInChild, preparedNodeStore } from './prepared-node-modules.mjs';
+import { hash, failure, markUsed, addScratchMountpoints, repairScratchMountpoints, readRegular, checkDirectory, checkParents, validateTree, freezeTree, thawTree, shellQuote, prepareInChild, preparedNodeStore } from './prepared-node-modules.mjs';
 
 // A pnpm repository's dependencies are prepared on the host (with network) from its lock alone, then mounted read-only like an npm
 // workspace tree set: the root node_modules plus each importer's own node_modules. `pnpm fetch` fills a stage-private store from
@@ -189,6 +189,7 @@ function lookup(input, base) {
     const places = [{ dir: '', treePath: path.join(entry, 'node_modules') }, ...(metadata.trees ?? []).map(name => ({ dir: name, treePath: path.join(entry, 'workspaces', name, 'node_modules') }))];
     if (places.slice(1).some(place => !input.importers.includes(place.dir))) throw new Error('unexpected workspace tree');
     for (const place of places) validateTree(place.treePath, placeFor(input, place.dir));
+    repairScratchMountpoints(places.map(place => place.treePath));
     markUsed(entry);
     return { treePath: places[0].treePath, workspaceTrees: places.slice(1).map(({ dir, treePath }) => ({ path: dir, treePath })), ...input.identity };
   } catch {
@@ -249,7 +250,7 @@ export function preparePnpm(sourceDir, options = {}) {
     }
     for (const name of ['work', 'store', 'cache']) fs.rmSync(path.join(stage, name), { recursive: true, force: true });
     fs.rmSync(empty, { force: true });
-    for (const [dir, tree] of [['', path.join(stage, 'node_modules')], ...trees.map(name => [name, path.join(stage, 'workspaces', name, 'node_modules')])]) { freezeTree(tree); validateTree(tree, placeFor(input, dir)); }
+    for (const [dir, tree] of [['', path.join(stage, 'node_modules')], ...trees.map(name => [name, path.join(stage, 'workspaces', name, 'node_modules')])]) { addScratchMountpoints(tree); freezeTree(tree); validateTree(tree, placeFor(input, dir)); }
     fs.writeFileSync(path.join(stage, 'metadata.json'), JSON.stringify({ identity: input.identity, trees }) + '\n', { mode: 0o400 });
     if (fs.existsSync(destination)) {
       try { return lookup(input, base); }

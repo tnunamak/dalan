@@ -64,6 +64,11 @@ test('prepare publishes the root tree and each workspace tree, frozen, and any m
   assert.equal(fs.readlinkSync(path.join(prepared.treePath, 'a')), '../packages/a', 'the workspace link points at the source checkout');
   assert.equal(fs.statSync(path.join(prepared.treePath, 'tarpkg', 'index.js')).mode & 0o222, 0, 'frozen');
   assert.equal(prepared.workspaces['packages/a'].length, 64);
+  for (const tree of [prepared.treePath, prepared.workspaceTrees[0].treePath]) for (const name of ['.cache', '.vite', '.vite-temp', '.vitest', '.vitest-cache']) { const st = fs.lstatSync(path.join(tree, name)); assert(st.isDirectory() && !(st.mode & 0o222), `${name} is an empty read-only mount point for the sandbox's scratch tmpfs`); assert.deepEqual(fs.readdirSync(path.join(tree, name)), []); }
+  // An entry published before the mount points existed gets them back when anything resolves it, still read-only.
+  const rootTree = prepared.treePath; fs.chmodSync(rootTree, 0o755); fs.rmdirSync(path.join(rootTree, '.vite-temp')); fs.chmodSync(rootTree, 0o555);
+  resolvePreparedNodeModules(source, { cacheDir });
+  assert(fs.lstatSync(path.join(rootTree, '.vite-temp')).isDirectory()); assert.equal(fs.statSync(rootTree).mode & 0o222, 0);
   const original = read('packages/a/package.json');
   fs.appendFileSync(path.join(source, 'packages/a/package.json'), '\n');
   assert.throws(() => resolvePreparedNodeModules(source, { cacheDir }), { code: 'dependencies_unprepared' }, 'a changed workspace manifest');

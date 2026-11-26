@@ -48,11 +48,22 @@ if sys.argv[1] != '--inside':
                '--dir', '/home', '--symlink', '/budget/home', '/home/worker']
     if os.path.isdir(npm):
         command += ['--ro-bind', npm, '/runtime/npm']
+    # Tools cache and bundle under node_modules (vite's config bundle goes to .vite-temp and aborts the run without it). Where a prepared tree
+    # carries one of these empty mount points, a small tmpfs goes over it: the tree stays read-only, the writes vanish with the sandbox, and
+    # each tmpfs is capped (its pages count against the cgroup memory budget). Names match SCRATCH_DIRS in prepared-node-modules.mjs.
+    def scratch(tree_path, dest):
+        mounts = []
+        for name in ('.cache', '.vite', '.vite-temp', '.vitest', '.vitest-cache'):
+            source = os.path.join(tree_path, name)
+            if os.path.isdir(source) and not os.path.islink(source):
+                mounts += ['--size', str(16 * 1024 * 1024), '--tmpfs', dest + '/' + name]
+        return mounts
     if config['dependencies']:
-        command += ['--ro-bind', config['dependencies']['treePath'], '/budget/workspace/node_modules']
+        command += ['--ro-bind', config['dependencies']['treePath'], '/budget/workspace/node_modules', *scratch(config['dependencies']['treePath'], '/budget/workspace/node_modules')]
         # A workspace's own node_modules (versions that conflict with the root's) sits beside its source, read-only like the root tree.
         for tree in config['dependencies'].get('workspaceTrees', []):
-            command += ['--ro-bind', tree['treePath'], '/budget/workspace/' + tree['path'] + '/node_modules']
+            dest = '/budget/workspace/' + tree['path'] + '/node_modules'
+            command += ['--ro-bind', tree['treePath'], dest, *scratch(tree['treePath'], dest)]
     # The prepared Go module cache (modules plus the toolchain go.mod asks for) is the sandbox's GOMODCACHE, read-only.
     if config.get('goModules'):
         command += ['--ro-bind', config['goModules']['treePath'], '/budget/cache/go/pkg/mod']
