@@ -282,6 +282,40 @@ test('the sandbox runs a check against the prepared trees', { skip: !pnpmVersion
   } finally { process.env.HOME = realHome; }
 });
 
+// vite bundles its config into node_modules/.vite-temp and aborts the whole run when it cannot create it: any vitest repository failed in 1.4 s on the
+// read-only tree. Each published tree now carries empty scratch mount points and the sandbox puts a small tmpfs over them.
+const viteProbe = ["const fs = require('fs');",
+  "for (const tree of ['/workspace/node_modules', '/workspace/packages/w1/node_modules']) {",
+  "  fs.mkdirSync(tree + '/.vite-temp', { recursive: true });", // what vite does first
+  "  fs.writeFileSync(tree + '/.vite-temp/vite.config.mjs.123.mjs', 'export default { ok: true }');",
+  "  fs.mkdirSync(tree + '/.cache', { recursive: true }); fs.writeFileSync(tree + '/.cache/x', '1');",
+  "}",
+  "import('/workspace/node_modules/.vite-temp/vite.config.mjs.123.mjs').then(m => console.log('IMPORTED', JSON.stringify(m.default)));",
+  "for (const bad of ['/workspace/node_modules/tiny-a/new.js', '/workspace/node_modules/.other/x']) { try { fs.mkdirSync(require('path').dirname(bad), { recursive: true }); fs.writeFileSync(bad, 'x'); console.log('WROTE', bad); } catch { console.log('REFUSED', bad); } }"].join('\n');
+test('vite can bundle its config in the sandbox: scratch mount points get a tmpfs and the store stays read-only', { skip: !pnpmVersion ? 'pnpm is not installed' : !linux ? 'linux only' : false }, async () => {
+  const dir = makeRepo('repo-scratch'), home = path.join(root, 'scratch-home'), cacheDir = path.join(home, '.dalan', 'prepared-node-modules');
+  fs.mkdirSync(path.join(home, '.dalan'), { recursive: true, mode: 0o700 }); fs.chmodSync(home, 0o700);
+  put(dir, 'probe.cjs', viteProbe);
+  const prepared = preparePnpm(dir, { cacheDir, env: offlineEnv() });
+  const trees = [prepared.treePath, ...prepared.workspaceTrees.map(tree => tree.treePath)];
+  for (const tree of trees) for (const name of ['.cache', '.vite', '.vite-temp', '.vitest', '.vitest-cache']) assert(fs.lstatSync(path.join(tree, name)).isDirectory(), `${tree} has ${name}`);
+  const run = async () => {
+    const options = { dir, enabled: true, budgets: { ...HOST_BUDGET_CEILINGS }, phases: [{ name: 'check', argv: ['/usr/bin/sh', '-c', 'cd /workspace && node probe.cjs'] }] };
+    process.env.HOME = home;
+    try { return (await runHostBudget(options)).bytes.toString(); } finally { process.env.HOME = realHome; }
+  };
+  const out = await run();
+  assert.match(out, /IMPORTED {"ok":true}/, out);
+  assert.match(out, /REFUSED \/workspace\/node_modules\/tiny-a\/new\.js/, 'a package directory is still read-only');
+  assert.match(out, /REFUSED \/workspace\/node_modules\/\.other\/x/, 'only the named scratch directories are writable');
+  for (const tree of trees) for (const name of ['.cache', '.vite-temp']) assert.deepEqual(fs.readdirSync(path.join(tree, name)), [], `${tree}/${name} in the store stays empty`);
+  // An entry published before the scratch mount points existed gets them back the next time anything resolves it, and stays read-only.
+  for (const tree of trees) { fs.chmodSync(tree, 0o755); for (const name of ['.cache', '.vite', '.vite-temp', '.vitest', '.vitest-cache']) fs.rmdirSync(path.join(tree, name)); fs.chmodSync(tree, 0o555); }
+  resolvePreparedPnpm(dir, { cacheDir, env: offlineEnv() });
+  for (const tree of trees) { assert.equal(fs.statSync(tree).mode & 0o222, 0, 'the tree is read-only again'); for (const name of ['.cache', '.vite-temp', '.vitest-cache']) assert(fs.lstatSync(path.join(tree, name)).isDirectory(), `${name} restored in ${tree}`); }
+  assert.match(await run(), /IMPORTED {"ok":true}/, 'and vite works again'); 
+});
+
 test('a pinned-base checkout is prepared once in a child; a changed lock or a repository .npmrc is not', real, async () => {
   const dir = makeRepo('repo-workspace'), home = path.join(root, 'workspace-home'), cacheDir = path.join(home, '.dalan', 'prepared-node-modules');
   fs.mkdirSync(path.join(home, '.dalan'), { recursive: true, mode: 0o700 }); fs.chmodSync(home, 0o700);

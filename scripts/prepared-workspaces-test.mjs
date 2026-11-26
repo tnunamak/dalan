@@ -14,7 +14,7 @@ process.env.HOME = path.join(root, 'home'); // the default prepared store lives 
 fs.mkdirSync(process.env.HOME, { recursive: true, mode: 0o700 });
 const thaw = dir => { try { const st = fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) return; fs.chmodSync(dir, 0o700); for (const name of fs.readdirSync(dir)) thaw(path.join(dir, name)); } catch {} };
 process.on('exit', () => { thaw(root); fs.rmSync(root, { recursive: true, force: true }); });
-const { npmCliPath, prepareNodeModules, resolvePreparedNodeModules, unsupportedDependencies, localInputFiles } = await import('../src/prepared-node-modules.mjs');
+const { npmCliPath, prepareNodeModules, resolvePreparedNodeModules, addScratchMountpoints, unsupportedDependencies, localInputFiles } = await import('../src/prepared-node-modules.mjs');
 const { runHostBudget } = await import('../src/host-budget.mjs');
 const linux = process.platform === 'linux';
 const npm = (cwd, ...args) => { const r = spawnSync(process.execPath, [npmCliPath(), ...args], { cwd, encoding: 'utf8', env: { ...process.env, npm_config_offline: 'true', npm_config_cache: path.join(root, 'npm-cache') } }); if (r.status !== 0) throw new Error(r.stderr || r.stdout); };
@@ -64,6 +64,13 @@ test('prepare publishes the root tree and each workspace tree, frozen, and any m
   assert.equal(fs.readlinkSync(path.join(prepared.treePath, 'a')), '../packages/a', 'the workspace link points at the source checkout');
   assert.equal(fs.statSync(path.join(prepared.treePath, 'tarpkg', 'index.js')).mode & 0o222, 0, 'frozen');
   assert.equal(prepared.workspaces['packages/a'].length, 64);
+  for (const tree of [prepared.treePath, prepared.workspaceTrees[0].treePath]) for (const name of ['.cache', '.vite', '.vite-temp', '.vitest', '.vitest-cache']) { const st = fs.lstatSync(path.join(tree, name)); assert(st.isDirectory() && !(st.mode & 0o222), `${name} is an empty read-only mount point for the sandbox's scratch tmpfs`); assert.deepEqual(fs.readdirSync(path.join(tree, name)), []); }
+  // An entry published before the mount points existed gets them back when anything resolves it, still read-only.
+  const rootTree = prepared.treePath; fs.chmodSync(rootTree, 0o755); fs.rmdirSync(path.join(rootTree, '.vite-temp')); fs.chmodSync(rootTree, 0o555);
+  // A second repair that read the mode while the first had the tree writable must not restore the write bit.
+  fs.chmodSync(rootTree, 0o755); fs.rmSync(path.join(rootTree, '.vite-temp'), { recursive: true, force: true }); addScratchMountpoints(rootTree); assert.equal(fs.statSync(rootTree).mode & 0o222, 0);
+  resolvePreparedNodeModules(source, { cacheDir });
+  assert(fs.lstatSync(path.join(rootTree, '.vite-temp')).isDirectory()); assert.equal(fs.statSync(rootTree).mode & 0o222, 0);
   const original = read('packages/a/package.json');
   fs.appendFileSync(path.join(source, 'packages/a/package.json'), '\n');
   assert.throws(() => resolvePreparedNodeModules(source, { cacheDir }), { code: 'dependencies_unprepared' }, 'a changed workspace manifest');

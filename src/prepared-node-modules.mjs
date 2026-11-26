@@ -134,6 +134,23 @@ export function markUsed(entry, now = Date.now()) {
   const meta = path.join(entry, 'metadata.json');
   try { if (now - fs.lstatSync(meta).mtimeMs >= 3600e3) fs.utimesSync(meta, now / 1000, now / 1000); } catch { /* best effort */ }
 }
+// Tools write caches and temp files under node_modules: vite bundles its config into node_modules/.vite-temp (and fails the whole run when it
+// cannot), vitest and vite keep results in .vite, babel, eslint and prettier in .cache. The sandbox mounts the tree read-only, so each of these
+// names is a real empty directory in every published tree, and the sandbox mounts a small tmpfs over it (host-budget-storage.py names the same
+// directories). The store stays read-only and untouched; the writes vanish with the sandbox. A mount point can only exist if the tree has it.
+export const SCRATCH_DIRS = ['.cache', '.vite', '.vite-temp', '.vitest', '.vitest-cache'];
+export function addScratchMountpoints(tree) {
+  const st = fs.lstatSync(tree);
+  if (!st.isDirectory() || st.isSymbolicLink()) return;
+  const missing = SCRATCH_DIRS.filter(name => { try { fs.lstatSync(path.join(tree, name)); return false; } catch { return true; } });
+  if (!missing.length) return;
+  fs.chmodSync(tree, st.mode | 0o200);
+  try { for (const name of missing) fs.mkdirSync(path.join(tree, name), { mode: 0o555 }); }
+  finally { fs.chmodSync(tree, st.mode & 0o7555); } // never restore a write bit: a concurrent repair may have read the mode inside this one's writable window
+}
+// An entry published before this existed gets its mount points the next time any lookup validates it (the owner's process owns the store).
+// Best effort: without them the check still runs, vite just cannot bundle its config.
+export function repairScratchMountpoints(trees) { for (const tree of trees) { try { addScratchMountpoints(tree); } catch { /* see above */ } } }
 export const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 function lookup(input, base) {
   const entry = entryPath(base, input);
@@ -148,6 +165,7 @@ function lookup(input, base) {
     if (places.slice(1).some(place => !input.workspaces.includes(place.dir))) throw new Error('unexpected workspace tree');
     const workspaces = input.workspaces.map(name => path.posix.normalize(name));
     for (const place of places) validateTree(place.treePath, { dir: place.dir, workspaces });
+    repairScratchMountpoints(places.map(place => place.treePath));
     markUsed(entry);
     return { treePath: places[0].treePath, workspaceTrees: places.slice(1).map(({ dir, treePath }) => ({ path: dir, treePath })), ...input.identity };
   } catch (e) {
@@ -211,11 +229,11 @@ export function prepareNodeModules(sourceDir, options = {}) {
       fs.renameSync(tree, path.join(stage, 'workspaces', name, 'node_modules')); trees.push(name);
     }
     fs.rmSync(work, { recursive: true, force: true });
-    for (const [dir, tree] of [['', path.join(stage, 'node_modules')], ...trees.map(name => [name, path.join(stage, 'workspaces', name, 'node_modules')])]) { freezeTree(tree); validateTree(tree, { dir, workspaces }); }
+    for (const [dir, tree] of [['', path.join(stage, 'node_modules')], ...trees.map(name => [name, path.join(stage, 'workspaces', name, 'node_modules')])]) { addScratchMountpoints(tree); freezeTree(tree); validateTree(tree, { dir, workspaces }); }
     fs.writeFileSync(path.join(stage, 'metadata.json'), JSON.stringify({ identity: input.identity, trees }) + '\n', { mode: 0o400 });
     if(fs.existsSync(destination)) {
       // Recheck after npm: a concurrent owner preparation may have finished.
-      try { return lookup(input,base); }
+      try { return lookup(input, base); }
       catch(error) { if(!options.replaceInvalid)throw error; }
       // Preserve old inodes for any active read-only mount. An explicit owner
       // repair publishes new bytes without modifying a running check's input.
