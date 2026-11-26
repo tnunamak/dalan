@@ -38,7 +38,25 @@ const jwksPort = jwks.address().port, issuer = `http://127.0.0.1:${jwksPort}/rea
 fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{workspaceAllowed:true,connections:[{issuer,subject:'dot',client_id:'fixture-client'}],repos:['example-owner/fixture']}}}),{mode:0o600});
 fs.writeFileSync(path.join(config, 'oauth.env'), `OAUTH_ISSUER=${issuer}\nOAUTH_AUDIENCE=${audience}\nOAUTH_JWKS_URI=http://127.0.0.1:${jwksPort}/jwks\nOAUTH_ALLOWED_SUBJECTS=dot\n`, { mode: 0o600 });
 const env = { ...process.env, HOME: home, DOT_BRIDGE_PORT: '0', DOT_BRIDGE_AUTH_MODE: 'oauth', DOT_BRIDGE_TEST_OAUTH: '1', DOT_BRIDGE_ENABLE_WORKSPACE: '1', DOT_BRIDGE_T3_DRY_RUN: '1', DALAN_HOST_CHECKS: '1', DALAN_FINISH_CHECK_WAIT_MS: '24000', DOT_BRIDGE_WORKSPACE_ROOT: path.join(home, 'work'), DALAN_GITHUB_URL_EXAMPLE_OWNER_FIXTURE: repo };
-const service = spawn(process.execPath, ['src/server.mjs'], { cwd: path.resolve(new URL('..', import.meta.url).pathname), env, stdio: ['ignore', 'pipe', 'pipe'] });
+// Inject a one-shot cleanup failure in the fixture server only, on its private digest scratch.
+const cleanupFault = path.join(home, 'throw-on-digest-cleanup');
+const cleanupMarker = path.join(home, 'digest-cleanup-threw');
+const installCleanupFault = `
+  import fs from 'node:fs';
+  import path from 'node:path';
+  const marker = ${JSON.stringify(cleanupMarker)};
+  const trigger = ${JSON.stringify(cleanupFault)};
+  const remove = fs.rmSync;
+  fs.rmSync = (target, options) => {
+    if (typeof target === 'string' && target.startsWith(${JSON.stringify(home + path.sep)}) &&
+        path.basename(target).startsWith('digest-') && fs.existsSync(trigger)) {
+      fs.unlinkSync(trigger);
+      fs.writeFileSync(marker, 'synthetic cleanup failure');
+      throw new Error('synthetic digest cleanup failure');
+    }
+    return remove(target, options);
+  };`;
+const service = spawn(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(installCleanupFault), 'src/server.mjs'], { cwd: path.resolve(new URL('..', import.meta.url).pathname), env, stdio: ['ignore', 'pipe', 'pipe'] });
 let ready = false, stderr = '';
 let stdout = '';
 service.stdout.on('data', b => { stdout += String(b); port = portFromListeningBanner(stdout); if (port) ready = true; });
@@ -194,7 +212,34 @@ try {
   await finish(n,nClaim);
   assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',n)[0].n,2,'the bridge ran its own check after an install-only worker check');
   console.log('PASS a worker check that ended in the install phase does not cover the diff');
-  // 11. A registered default outside the host allowlist is skipped, not started.
+  // 11. A cleanup exception after recording the check must not strand finish.
+  const cleanup=submit('host'),cleanupClaim=await claimJob(cleanup);
+  await call('apply_patch',{request_id:cleanup,claim_id:cleanupClaim,patch:patch('cleanup.txt')});
+  fs.writeFileSync(cleanupFault,'armed');
+  await finish(cleanup,cleanupClaim);
+  assert.equal(fs.readFileSync(cleanupMarker,'utf8'),'synthetic cleanup failure');
+  assert(reported(cleanup),'finish stores one report despite scratch cleanup failure');
+  assert.deepEqual(events(cleanup).map(e=>e.type),['check_started','check_passed']);
+  assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',cleanup)[0].n,1);
+  console.log('PASS scratch cleanup failure after recording the check does not strand finish');
+
+  // 12. A late failing automatic check is recorded once; retry does not restart it.
+  writeCheck('setTimeout(()=>process.exit(3),30000)',60000);
+  const late=submit('host'),lateClaim=await claimJob(late);
+  await call('apply_patch',{request_id:late,claim_id:lateClaim,patch:patch('late.txt')});
+  const lateEarly=await finishRaw(late,lateClaim);
+  assert(lateEarly.isError,JSON.stringify(lateEarly));
+  assert.match(lateEarly.content[0].text,/default check is still running; call finish again/);
+  assert(!reported(late),'no report while the late check runs');
+  for(let i=0;i<400&&rows("SELECT 1 FROM check_jobs WHERE request_id=? AND status='running'",late).length;i++)await new Promise(resolve=>setTimeout(resolve,100));
+  await finish(late,lateClaim);
+  assert(reported(late),'retry stores exactly one report after the failure');
+  assert.deepEqual(events(late).map(e=>e.type),['check_started','check_failed']);
+  assert.match(events(late)[1].reason,/phase=check/);
+  assert.equal(rows('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?',late)[0].n,1);
+  console.log('PASS retry after a late failed automatic check stores the report without starting another check');
+
+  // 13. A registered default outside the host allowlist is skipped, not started.
   writeCheck('console.log("DEFAULT_MUST_NOT_START")');
   fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:[{repo:'example-owner/fixture',check_id:'slow'}]}),{mode:0o600});
   const denied=submit('host'),deniedClaim=await claimJob(denied);
