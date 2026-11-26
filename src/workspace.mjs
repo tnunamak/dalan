@@ -88,7 +88,7 @@ function closedWorkspace(a,requestId,claimId,claimEpoch,currentEpoch) {
   if(a.status==='claimed'&&claimEpoch!==undefined&&currentEpoch!==undefined&&claimEpoch!==currentEpoch) return coded('claim_superseded',`claim ${claimId} for ${requestId} was superseded by epoch ${currentEpoch}; stop using this claim. This affects only ${requestId}.`);
   return coded('assignment_not_claimed',`assignment ${requestId} is not claimed (status ${a.status}); its workspace is not open. This affects only ${requestId}.`);
 }
-const CHECK_GUIDANCE='run_check runs a listed check in the bridge sandbox on this claim\'s workspace, with your applied patches. It does not run on your machine. Call run_check with check_id (not check or name) after apply_patch and before finish. Its receipt is bridge-verified evidence; a test you ran yourself is not. available_check_details says what each id runs.';
+const CHECK_GUIDANCE='run_check runs a listed check in the bridge sandbox on this claim\'s workspace, with your applied patches. It does not run on your machine. Call run_check with check_id (not check or name) after apply_patch and before finish. Its receipt is bridge-verified evidence; a test you ran yourself is not. available_check_details says what each id runs. If you finish with a patch and have not run the default check on it, the bridge runs default itself before it stores your report.';
 function git(args,opts={}) { const r=spawnSync('git',args,{encoding:'utf8',timeout:10000,maxBuffer:12*1024*1024,...opts,env:gitEnv(opts.env)}); if(r.error||r.status!==0) throw new Error(`git failed: ${(r.stderr||r.error?.message||'').slice(0,300)}`); return r.stdout; }
 function relative(p,allowDot=false) { if (allowDot && (p===undefined||p==='')) return ''; if(typeof p!=='string'||!p||Buffer.byteLength(p)>1024||p.includes('\0')||path.isAbsolute(p)||p.split('/').some(x=>!x||x==='.'||x==='..'||x==='.git'||x.includes('\\'))) throw new Error('invalid project-relative path'); return p; }
 function safePath(dir,p,existing=false) { p=relative(p); let cursor=dir; for(const part of p.split('/')) { cursor=path.join(cursor,part); try { if(fs.lstatSync(cursor).isSymbolicLink()) throw new Error('symlink traversal denied'); } catch(e) { if(e.code!=='ENOENT') throw e; if(existing) throw new Error('file not found'); } } return cursor; }
@@ -211,6 +211,8 @@ const absBytes=(dir,name)=>Buffer.concat([Buffer.from(dir+path.sep),nameBytes(na
 // An untracked file above the cap, or one that cannot be read, is left out of the diff and named in `omissions` ({path,size,reason}).
 // The diff stays bounded: the cap keeps `git diff --binary` output (base85, about 1.25x) well under its 12 MiB buffer.
 const UNTRACKED_FILE_CAP=8*2**20, UNTRACKED_FILE_COUNT=200, DIFF_TOTAL_CAP=24*2**20;
+// The check the bridge runs for a patch the worker did not check, and how long finish waits for it (the host wall budget is 180 s).
+const CHECK_BEFORE_FINISH='default', CHECK_BEFORE_FINISH_WAIT_MS=330000;
 const DIGEST_DEADLINE_MS=120000, CHANGED_PATHS_SHOWN=100, PREVIEW_SHOWN=25, DETAIL_ARTIFACT_CAP=2**20;
 // What every receipt says it does not identify. Fixed text: no counts and no walk, so there is no partial number to misread.
 export const NOT_IDENTIFIED='Ignored files, generated or dependency directories (node_modules, .venv, target, __pycache__, build output), unreadable or special files, content conversions (eol and ident attributes), nested repositories and submodule paths, and anything outside git\'s view of the workspace are not identified by this receipt. A check can read and execute them.';
@@ -1073,6 +1075,30 @@ export class Workspace {
     } finally {if(scratch) fs.rmSync(scratch,{recursive:true,force:true});this.activeChecks.delete(requestId);this.checkEffects.delete(requestId);} })();
     this.checkEffects.set(requestId,work);
     return checkResponse(work,{check_run_id:checkRunId,status:'running'},this.checkResponseOptions);
+  }
+  // A patch must not reach finish unchecked. When the worker finishes an implementation job on a host repository with a diff and
+  // no check has run on that exact diff, the bridge runs the owner's `default` check itself and waits for it, so a check_passed or
+  // check_failed event exists whether or not the worker remembered run_check. It never blocks finish on its own failure: a check that
+  // cannot start leaves the worker's report as it was (check() already records check_skipped with the reason).
+  async checkBeforeFinish(requestId,claimId,subject,worker='dot',{waitMs=CHECK_BEFORE_FINISH_WAIT_MS}={}) {
+    try {
+      const a=this.store.get(requestId);
+      if(a.status!=='claimed'||a.assignment.execution_scope!=='implementation'||!a.assignment.inputs?.some(input=>input.github_repo)) return null;
+      if(this.store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(requestId)?.execution!=='host') return null;
+      const {dir,input}=this.ensure(requestId,claimId,subject,true,worker);
+      const diff=this.diff(dir,input.base_sha,this.diffFilter(a.assignment),this.diffScope(a));
+      if(!diff.paths.length) return null;
+      if(!availableChecks(input.github_repo,dir).includes(CHECK_BEFORE_FINISH)) return null;
+      const covered=this.store.db.prepare("SELECT 1 FROM check_jobs WHERE request_id=? AND claim_id=? AND diff_sha256=? AND status IN ('completed','failed') LIMIT 1").get(requestId,claimId,diff.sha256);
+      if(covered) return null;
+      const started=await this.check(requestId,claimId,subject,CHECK_BEFORE_FINISH,worker);
+      const work=this.checkEffects.get(requestId);
+      if(work) {
+        let timer;
+        try { await Promise.race([work,new Promise(resolve=>{timer=setTimeout(resolve,waitMs);})]); } finally { clearTimeout(timer); }
+      }
+      return {check_id:CHECK_BEFORE_FINISH,started:started?.check_run_id??null};
+    } catch { return null; }
   }
   // Classify original output before redacting metadata and storing the row atomically;
   // preview truncation must not discard skipped-segment metadata.

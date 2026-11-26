@@ -1086,6 +1086,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
           // Recheck after the last await. The evidence capture below runs inside the finish transaction, after finishOnce's own
           // connection check, so a patch artifact is never committed for a holder that lost the connection.
           workspaceFence();
+          if(workerWorkspaceEnabled&&request.status==='claimed'&&a.outcome==='completed') { await workspace.checkBeforeFinish(requestId,claimId,subject,worker);workspaceFence(); }
           if(workerWorkspaceEnabled&&request.status==='claimed'&&(request.assignment.execution_scope==='implementation'||request.assignment.output_paths?.length))
             captureEvidence=onRollback=>workspace.snapshotInTransaction(requestId,claimId,subject,worker,onRollback);
           if(request.status==='claimed'&&request.assignment.execution_scope==='read-only') {
