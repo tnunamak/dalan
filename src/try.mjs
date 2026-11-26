@@ -133,9 +133,10 @@ export function parsePending(result) {
   const pending = result.pending.map(p => {
     for (const key of ['code', 'client_id', 'redirect_uri']) if (typeof p?.[key] !== 'string' || !p[key]) throw bad(`attempt without ${key}`);
     if (!Array.isArray(p.scopes)) throw bad('attempt without scopes');
+    if (p.scopes.some(scope => typeof scope !== 'string' || scope.length === 0)) throw bad('attempt with invalid scopes');
     return {
       code: p.code, worker: typeof p.worker === 'string' ? p.worker : '', client_id: p.client_id, client_name: typeof p.client_name === 'string' ? p.client_name : '', redirect_uri: p.redirect_uri,
-      resource: typeof p.resource === 'string' ? p.resource : '', scopes: p.scopes.map(String), superseded: p.superseded === true, native: p.native === true,
+      resource: typeof p.resource === 'string' ? p.resource : '', scopes: [...p.scopes], superseded: p.superseded === true, native: p.native === true,
       expires_in_seconds: Number.isFinite(p.expires_in_seconds) ? p.expires_in_seconds : null,
     };
   });

@@ -333,6 +333,22 @@ test('lineBuffer assembles split CRLF lines and flushes an unterminated final li
   assert.deepEqual(lines, ['one', 'two', 'last']);
 });
 
+test('try refuses malformed scope entries instead of coercing them for display', async () => {
+  const { parsePending } = await import('./try.mjs');
+  const attempt = {
+    code: 'fixture', client_id: 'fixture-app', redirect_uri: 'https://client.invalid/return',
+  };
+  for (const scopes of [[17], ['read', null], ['']]) {
+    assert.throws(() => parsePending({ window: null, pending: [{ ...attempt, scopes }] }),
+      /attempt with invalid scopes/);
+  }
+  for (const scopes of [[], ['read', 'write']]) {
+    const parsed = parsePending({ window: null, pending: [{ ...attempt, scopes }] });
+    assert.deepEqual(parsed.pending[0].scopes, scopes);
+    assert.notEqual(parsed.pending[0].scopes, scopes);
+  }
+});
+
 test('lineBuffer retains the configured tail while waiting for a final newline', async () => {
   const { lineBuffer } = await import('./try-exposure.mjs');
   const lines = [];
