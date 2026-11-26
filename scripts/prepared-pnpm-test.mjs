@@ -182,6 +182,8 @@ test('validateTree: refused links', () => {
   refuse(({ aTree }) => fs.symlinkSync('../../../a/src', path.join(aTree, 'src')), 'a');                                              // inside an importer directory but not the directory itself
   refuse(({ aTree }) => fs.symlinkSync('../../../c/node_modules/z', path.join(aTree, 'other')), 'a');                                  // a tree of a path that is not an importer
   refuse(({ rootTree }) => fs.symlinkSync('../../outside', path.join(rootTree, 'esc')), 'root');                                      // root tree escaping
+  // A `..` after a name: lexically it cancels the name, but the name is a link to an importer directory, so it climbs out of the tree.
+  refuse(({ rootTree }) => { fs.mkdirSync(path.join(rootTree, '@s')); fs.symlinkSync('../../packages/a', path.join(rootTree, '@s/a')); fs.symlinkSync('@s/a/../..', path.join(rootTree, 'foo')); }, 'root');
 });
 test('validateTree: npm behaviour is unchanged (no treeDirs, no cross-tree links)', () => {
   const { rootTree, aTree } = syntheticEntry();
