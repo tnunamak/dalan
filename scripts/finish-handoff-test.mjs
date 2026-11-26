@@ -376,6 +376,21 @@ try {
     pass('only_when_empty: queued work is listed, not handed, and not waited for; an empty queue hands the job that arrives in the wait');
   }
 
+  // The claim hint only shapes what a worker is told. The handoff picks from every eligible row: with hint 1 and a lapsed row at the head,
+  // the pick must reach the fresh row behind it, not stop at a one-row window that the lapsed filter empties.
+  {
+    const b = await start('hint-lapsed', { finish_handoff: { wait_ms: WAIT_MS, idle_lease_ms: 2000 } }, { max_claimed_outer_assignments: 4, worker_claim_hint: { dot: 1 } });
+    const f1 = await b.claimNew('req_hl_first');
+    await b.submit('req_hl_a');
+    assert.equal((await b.finish(f1)).next_job.request_id, 'req_hl_a');
+    await sleep(4500);
+    assert.equal((await b.ok('get', { request_id: 'req_hl_a' })).status, 'queued', 'the untouched handoff lapsed');
+    await b.submit('req_hl_fresh');
+    const f2 = await b.claimNew('req_hl_second');
+    assert.equal((await b.finish(f2)).next_job?.request_id, 'req_hl_fresh', 'the fresh row behind the lapsed one is handed, hint or not');
+    pass('claim hint + finish handoff: the handoff pick ignores the hint and reaches the fresh row behind a lapsed one');
+  }
+
 } finally {
   await Promise.all(bridges.map(b => b.stop()));
 }

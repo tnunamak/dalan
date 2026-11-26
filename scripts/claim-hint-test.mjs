@@ -27,11 +27,14 @@ try {
   assert.equal(hinted.claimHint('dot'),3);
   assert.equal(hinted.claimHint('muse'),null);
   assert.equal(suggested(hinted),3,'a worker holding nothing is told to take 3, not the 6 queued or the 8 free lanes');
+  assert.match(hinted.nextQueued(8,null,'dot').next_action,/8 lanes free, 3 suggested: claim hinted-0, hinted-1, hinted-2 now/,'free lanes keep their real count; the smaller number is labelled as the suggestion');
+  assert.equal(hinted.nextQueued(64,null,'dot',{applyHint:false}).next_queued.length,6,'a bridge pick that sets applyHint false sees every queued row');
   claim(hinted,'hinted-0');
   assert.equal(suggested(hinted),2,'it holds one, so two more');
   claim(hinted,'hinted-1');claim(hinted,'hinted-2');
   assert.equal(suggested(hinted),0,'it holds three: no suggestion');
   assert.deepEqual(hinted.nextQueued(5,null,'dot'),{},'no next_action either');
+  assert.equal(hinted.nextQueued(64,null,'dot',{applyHint:false}).next_queued.length,3,'holding the hint number of claims, a bridge pick still sees every queued row');
   assert.equal(hinted.freeLanes('subject','dot',CAP,CAP),CAP-3,'free_lanes is unchanged');
   claim(hinted,'hinted-3'); // the hint refuses nothing
   now=START+4*minute;
