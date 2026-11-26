@@ -15,6 +15,7 @@ import { redactSecrets, redactOutput, privateKeyHeader } from './redaction.mjs';
 import { hostCheckRefusal, hostCheckAuthorization } from './host-execution-policy.mjs';
 import { resolvePreparedNodeModules, prepareNodeModulesInChild, unsupportedDependencies, localInputFiles } from './prepared-node-modules.mjs';
 import { resolvePreparedGoModules, prepareGoModulesInChild, goModulesUnsupported } from './prepared-go-modules.mjs';
+import { resolvePreparedPnpm, preparePnpmInChild, pnpmUnsupported, pnpmInputFiles } from './prepared-pnpm.mjs';
 import { ownerReportArtifactBytes } from './owner-report-artifact.mjs';
 import { withCheckCoverage } from './check-coverage.mjs';
 import { runHostBudget, parseHostBudget } from './host-budget.mjs';
@@ -856,7 +857,7 @@ export class Workspace {
     try {
       if(dir) {
         const read=file=>{try{return fs.readFileSync(path.join(dir,file));}catch{return null;}};
-        return unsupportedDependencies(read('package.json'),read('package-lock.json'))??goModulesUnsupported(read('go.mod'),read('go.work'));
+        return unsupportedDependencies(read('package.json'),read('package-lock.json'))??goModulesUnsupported(read('go.mod'),read('go.work'))??pnpmUnsupported(read);
       }
       // The pinned base commit never changes, so its verdict is memoised (most recently used 256 kept): claim and get poll often,
       // and reading and parsing a multi-megabyte lockfile each time blocks the bridge's event loop.
@@ -865,7 +866,7 @@ export class Workspace {
       const mirror=this.mirrorFor(input,worker);
       git(['-C',mirror,'cat-file','-e',`${input.base_sha}^{commit}`]); // no commit yet: throw, so a missing mirror is never memoised as "supported"
       const show=file=>{try{return git(['-C',mirror,'show',`${input.base_sha}:${file}`],{encoding:'buffer'});}catch{return null;}};
-      const verdict=unsupportedDependencies(show('package.json'),show('package-lock.json'))??goModulesUnsupported(show('go.mod'),show('go.work'));
+      const verdict=unsupportedDependencies(show('package.json'),show('package-lock.json'))??goModulesUnsupported(show('go.mod'),show('go.work'))??pnpmUnsupported(show);
       memo.set(key,verdict);
       while(memo.size>UNSUPPORTED_MEMO_MAX) memo.delete(memo.keys().next().value);
       return verdict;
@@ -1145,6 +1146,11 @@ export class Workspace {
     // Workspace manifests and local tarballs are inputs of the prepared tree too: each must equal the pinned base.
     const localFiles=()=>{try{return localInputFiles(fs.readFileSync(path.join(dir,'package-lock.json')));}catch{return [];}};
     if(unprepared(resolvePreparedNodeModules)&&unchangedFromBase(['package.json','package-lock.json'])&&unchangedFromBase(localFiles())) await prepareNodeModulesInChild(dir);
+    // A pnpm repository: pnpm-lock.yaml, the root and importer manifests must equal the pinned base; pnpm-workspace.yaml may be absent from the base, and then must be absent here.
+    const pnpmInputs=()=>{try{return pnpmInputFiles(fs.readFileSync(path.join(dir,'pnpm-lock.yaml')));}catch{return null;}};
+    const yamlInBase=(()=>{try{git(['-C',dir,'cat-file','-e',`${baseSha}:pnpm-workspace.yaml`]);return true;}catch{return false;}})();
+    const pnpmFiles=pnpmInputs();
+    if(pnpmFiles&&unprepared(resolvePreparedPnpm)&&unchangedFromBase(yamlInBase?[...pnpmFiles,'pnpm-workspace.yaml']:pnpmFiles)&&(yamlInBase||!fs.existsSync(path.join(dir,'pnpm-workspace.yaml')))) await preparePnpmInChild(dir);
     // A Go repository: the module cache and toolchain come from go.mod and go.sum alone, under the same pinned-base rule. go.sum may be absent from the base, and then must be absent here.
     const sumInBase=(()=>{try{git(['-C',dir,'cat-file','-e',`${baseSha}:go.sum`]);return true;}catch{return false;}})();
     if(unprepared(resolvePreparedGoModules)&&unchangedFromBase(sumInBase?['go.mod','go.sum']:['go.mod'])&&(sumInBase||!fs.existsSync(path.join(dir,'go.sum')))) await prepareGoModulesInChild(dir);

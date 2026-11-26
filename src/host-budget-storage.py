@@ -173,14 +173,28 @@ try:
             archive.extractall('/workspace', filter='data')
     dependencies = config['dependencies']
     if dependencies:
-        checks = [('package-lock.json', dependencies['lock_sha256']), ('package.json', dependencies['manifest_sha256'])]
+        if dependencies.get('kind') == 'pnpm':
+            checks = [('pnpm-lock.yaml', dependencies['lock_sha256']), ('package.json', dependencies['manifest_sha256'])]
+            if os.path.lexists('/workspace/package-lock.json'):
+                raise ValueError('dependencies_invalid: copied lock appeared after admission')
+            # pnpm-workspace.yaml is optional: an absent file must hash as empty, like the empty bytes the host recorded.
+            data = b''
+            if os.path.lexists('/workspace/pnpm-workspace.yaml'):
+                with open('/workspace/pnpm-workspace.yaml', 'rb') as stream:
+                    data = stream.read()
+            if hashlib.sha256(data).hexdigest() != dependencies['workspace_yaml_sha256']:
+                raise ValueError('dependencies_invalid: copied dependency inputs changed')
+        else:
+            checks = [('package-lock.json', dependencies['lock_sha256']), ('package.json', dependencies['manifest_sha256'])]
+            if os.path.lexists('/workspace/pnpm-lock.yaml'):
+                raise ValueError('dependencies_invalid: copied lock appeared after admission')
         checks += [(name + '/package.json', digest) for name, digest in dependencies.get('workspaces', {}).items()]
         checks += list(dependencies.get('local_files', {}).items())
         for name, digest in checks:
             with open('/workspace/' + name, 'rb') as stream:
                 if hashlib.sha256(stream.read()).hexdigest() != digest:
                     raise ValueError('dependencies_invalid: copied dependency inputs changed')
-    elif os.path.lexists('/workspace/package-lock.json'):
+    elif os.path.lexists('/workspace/package-lock.json') or os.path.lexists('/workspace/pnpm-lock.yaml'):
         raise ValueError('dependencies_invalid: copied lock appeared after admission')
     go_modules = config.get('goModules')
     if go_modules:

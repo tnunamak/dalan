@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 export const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const runtime = () => ({ node: process.version, abi: process.versions.modules, platform: process.platform, arch: process.arch });
-const store = options => path.resolve(options.cacheDir ?? defaultPath(os.homedir(),'.dot-bridge/prepared-node-modules'));
+export const preparedNodeStore = options => path.resolve(options.cacheDir ?? defaultPath(os.homedir(),'.dot-bridge/prepared-node-modules'));
 export const failure = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
 const recovery = source => `dalan prepare-deps ${shellQuote(path.resolve(source))}`;
 
@@ -117,6 +117,8 @@ export function validateTree(root, place = null) {
         const inRepo = path.posix.join(place.dir, 'node_modules', path.relative(root, path.dirname(dir)).split(path.sep).join('/'));
         const target = path.posix.normalize(path.posix.join(inRepo, fs.readlinkSync(dir)));
         if (!path.isAbsolute(fs.readlinkSync(dir)) && place.workspaces.includes(target)) return;
+        // pnpm: a relative link may also point into the root tree or another allowed importer's tree (place.treeDirs); only lexical targets count.
+        if (!path.isAbsolute(fs.readlinkSync(dir)) && place.treeDirs?.some(tree => target === tree || target.startsWith(tree + '/'))) return;
       }
       const target = fs.realpathSync(dir);
       if (!target.startsWith(root + path.sep)) throw failure('dependencies_invalid', 'dependency link escapes tree');
@@ -161,12 +163,12 @@ export function npmCliPath({ execPath = process.execPath, env = process.env } = 
 }
 export function resolvePreparedNodeModules(sourceDir, options = {}) {
   const input = inputs(sourceDir);
-  return input ? lookup(input, store(options)) : null;
+  return input ? lookup(input, preparedNodeStore(options)) : null;
 }
 export function prepareNodeModules(sourceDir, options = {}) {
   const input = inputs(sourceDir);
   if (!input) throw failure('dependencies_invalid', 'root package-lock.json required');
-  const base = store(options);
+  const base = preparedNodeStore(options);
   fs.mkdirSync(base, { recursive: true, mode: 0o700 });
   checkParents(base); checkDirectory(base, true);
   const lockDir = path.join(base, input.identity.lock_sha256);
@@ -230,14 +232,14 @@ export function prepareNodeModulesInChild(sourceDir, { timeoutMs = 600000, env =
   const root = fs.realpathSync(sourceDir);
   const input = inputs(root);
   if (!input) return Promise.resolve(null);
-  return prepareInChild({ root, key: `${input.identity.lock_sha256}:${input.key}`, base: store({}), flags: [], timeoutMs, env });
+  return prepareInChild({ root, key: `${input.identity.lock_sha256}:${input.key}`, base: preparedNodeStore({}), flags: [], timeoutMs, env });
 }
 // Shared by every kind of preparation: one in-flight child per key, own process group, stage cleanup after a timeout kill.
 export function prepareInChild({ root, key, base, flags, timeoutMs = 600000, env = process.env }) {
   const running = inFlight.get(key);
   if (running) return running;
   const cli = fileURLToPath(new URL('../bin/dot-worker.mjs', import.meta.url));
-  const childEnv = Object.fromEntries(Object.entries(env).filter(([name]) => /^(PATH|HOME|LANG|TMPDIR|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|npm_config_.*|GOPROXY|GOSUMDB|(https?|no)_proxy)$/i.test(name)));
+  const childEnv = Object.fromEntries(Object.entries(env).filter(([name]) => /^(PATH|HOME|LANG|TMPDIR|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|(npm|pnpm)_config_.*|GOPROXY|GOSUMDB|(https?|no)_proxy)$/i.test(name)));
   const done = new Promise((resolve, reject) => {
     // Own process group: npm runs under the CLI's synchronous spawn, so killing the CLI alone would leave npm installing.
     const child = spawn(process.execPath, [cli, 'prepare-deps', root, '--json', ...flags], { env: childEnv, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
