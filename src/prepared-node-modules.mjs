@@ -113,12 +113,16 @@ export function validateTree(root, place = null) {
     const st = fs.lstatSync(dir);
     if (st.uid !== process.getuid() || (!st.isSymbolicLink() && (st.mode & 0o222))) throw failure('dependencies_invalid', 'dependency tree ownership or mode invalid');
     if (st.isSymbolicLink()) {
-      if (place) {
+      const text = fs.readlinkSync(dir);
+      // The lexical rules below read the link text as plain path arithmetic. That is sound only when `..` comes first: a `..` after a name
+      // climbs from where a directory link points, not from where the name sits, so such a text is left to the realpath check.
+      const parts = text.split('/'), leading = parts.findIndex(part => part !== '..');
+      if (place && !path.isAbsolute(text) && !parts.slice(leading < 0 ? parts.length : leading).includes('..')) {
         const inRepo = path.posix.join(place.dir, 'node_modules', path.relative(root, path.dirname(dir)).split(path.sep).join('/'));
-        const target = path.posix.normalize(path.posix.join(inRepo, fs.readlinkSync(dir)));
-        if (!path.isAbsolute(fs.readlinkSync(dir)) && place.workspaces.includes(target)) return;
+        const target = path.posix.normalize(path.posix.join(inRepo, text));
+        if (place.workspaces.includes(target)) return;
         // pnpm: a relative link may also point into the root tree or another allowed importer's tree (place.treeDirs); only lexical targets count.
-        if (!path.isAbsolute(fs.readlinkSync(dir)) && place.treeDirs?.some(tree => target === tree || target.startsWith(tree + '/'))) return;
+        if (place.treeDirs?.some(tree => target === tree || target.startsWith(tree + '/'))) return;
       }
       const target = fs.realpathSync(dir);
       if (!target.startsWith(root + path.sep)) throw failure('dependencies_invalid', 'dependency link escapes tree');
