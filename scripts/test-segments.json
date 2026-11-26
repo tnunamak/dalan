@@ -286,6 +286,7 @@
   "node scripts/capability-table-test.mjs",
   "node scripts/sandbox-stop-test.mjs",
   "node --test scripts/host-stop-path-audit-test.mjs",
+  "node scripts/capability-gate.mjs",
   "node scripts/sandbox-probe-fd-result-test.mjs",
   "node scripts/receipt-repair-test.mjs",
   "node scripts/artifact-index-test.mjs",
