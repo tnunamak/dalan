@@ -213,6 +213,10 @@ test('default off and all six finite integer budgets are mandatory', async () =>
     for (const value of [0, -1, Infinity, NaN, 1.5, '1000', Number.MAX_SAFE_INTEGER]) assert.throws(() => parseHostBudget({ ...budgets, [key]: value }), /host_budget/);
   }
   assert.throws(() => parseHostBudget({ ...budgets, extra: 1 }), /host_budget/);
+  // The memory ceiling is 4 GiB: a 2.75 GiB suite fits, anything above the ceiling is refused.
+  assert.equal(parseHostBudget({ ...budgets, memory_bytes: 2816 * 1024 * 1024 }).memory_bytes, 2816 * 1024 * 1024);
+  assert.equal(parseHostBudget({ ...budgets, memory_bytes: 4 * 1024 ** 3 }).memory_bytes, 4 * 1024 ** 3);
+  assert.throws(() => parseHostBudget({ ...budgets, memory_bytes: 4 * 1024 ** 3 + 4096 }), /expected 134217728\.\.4294967296/);
   await assert.rejects(runHostBudget({ dir: home, budgets, enabled: false, phases: [] }), /host_execution_disabled/);
 });
 
