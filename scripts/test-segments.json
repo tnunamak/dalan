@@ -76,6 +76,7 @@
   "node scripts/prepared-node-modules-test.mjs",
   "timeout --kill-after=5s 150s nice -n 10 node --test scripts/prepared-go-modules-test.mjs",
   "timeout --kill-after=5s 150s nice -n 10 node --test scripts/prepared-workspaces-test.mjs",
+  "timeout --kill-after=5s 240s nice -n 10 node --test scripts/prepared-pnpm-test.mjs",
   "node scripts/check-adoption-test.mjs",
   "node scripts/unsupported-dependencies-test.mjs",
   "node scripts/prepare-kill-scope-test.mjs",

@@ -2,6 +2,7 @@ import { readEnv } from './env.mjs';
 import fs from 'node:fs';
 import {resolvePreparedNodeModules} from './prepared-node-modules.mjs';
 import {resolvePreparedGoModules} from './prepared-go-modules.mjs';
+import {resolvePreparedPnpm} from './prepared-pnpm.mjs';
 import path from 'node:path';
 import {prepareHostReceipts,assertHostReceiptIsolation,readVerifiedHostStop} from './host-budget-receipts.mjs';
 import { fileURLToPath } from 'node:url';
@@ -77,9 +78,9 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   if (!Array.isArray(phases) || !phases.length || phases.length > 2 || phases.some(p => !['install', 'check'].includes(p.name) || !Array.isArray(p.argv) || !p.argv.length || p.argv.some(a => typeof a !== 'string' || a.includes('\0')))) throw new Error('invalid host phases');
   const receipts=prepareHostReceipts({checkRunId,receiptDir});
   const workingDir=fs.realpathSync(dir);
-  const dependencies=resolvePreparedNodeModules(workingDir);
+  const dependencies=resolvePreparedNodeModules(workingDir)??resolvePreparedPnpm(workingDir);
   const goModules=resolvePreparedGoModules(workingDir);
-  const protectedPaths=['node_modules','package.json','package-lock.json','go.mod','go.sum',...Object.keys(dependencies?.workspaces??{}).flatMap(name=>[`${name}/node_modules`,`${name}/package.json`]),...Object.keys(dependencies?.local_files??{})];
+  const protectedPaths=['node_modules','package.json','package-lock.json','pnpm-lock.yaml','pnpm-workspace.yaml','go.mod','go.sum',...Object.keys(dependencies?.workspaces??{}).flatMap(name=>[`${name}/node_modules`,`${name}/package.json`]),...Object.keys(dependencies?.local_files??{})];
   const overlaps=(a,b)=>a===b||a.startsWith(b+'/')||b.startsWith(a+'/');
   for(const name of [...maskPaths,...sourceExemptions.map(entry=>entry.path)]) {
     if(typeof name!=='string'||!name||path.posix.normalize(name)!==name||name.startsWith('/')||name==='..'||name.startsWith('../')||protectedPaths.some(p=>overlaps(name,p))) throw new Error('dependencies_invalid: overlay overlaps dependency inputs');
@@ -189,5 +190,5 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const bytes = Buffer.concat(phaseResults.map(p => p.bytes)).subarray(0, budgets.output_bytes);
   const notStarted=provesHostNotStarted({spawnError:exit.error,pid,stopped}); // stderr is not trusted for this decision.
   const usage = message?.usage ? { ...partialUsage, ...message.usage } : partialUsage;
-  return { unit, dependencies: dependencies ? {lock_sha256:dependencies.lock_sha256,manifest_sha256:dependencies.manifest_sha256,runtime:dependencies.runtime,...(dependencies.workspaces?{workspaces:dependencies.workspaces}:{})} : null, go_modules: goModules ? {go_mod_sha256:goModules.go_mod_sha256,go_sum_sha256:goModules.go_sum_sha256,runtime:goModules.runtime} : null, exit: error ? { code: 125 } : message?.exit ?? { code: 125 }, error, budgets, usage, usage_complete: !!message?.usage && !!message?.phases?.length && stopped?.result !== 'timeout' && !stopped?.oom_kill, bytes, phases: phaseResults, stop, notStarted, timedOut: error === 'budget exceeded: wall', cancelled: !!message?.cancelled, truncated: error === 'budget exceeded: output', duration_ms: Math.round(performance.now()-started) };
+  return { unit, dependencies: dependencies ? {lock_sha256:dependencies.lock_sha256,manifest_sha256:dependencies.manifest_sha256,runtime:dependencies.runtime,...(dependencies.kind?{kind:dependencies.kind,workspace_yaml_sha256:dependencies.workspace_yaml_sha256}:{}),...(dependencies.workspaces?{workspaces:dependencies.workspaces}:{})} : null, go_modules: goModules ? {go_mod_sha256:goModules.go_mod_sha256,go_sum_sha256:goModules.go_sum_sha256,runtime:goModules.runtime} : null, exit: error ? { code: 125 } : message?.exit ?? { code: 125 }, error, budgets, usage, usage_complete: !!message?.usage && !!message?.phases?.length && stopped?.result !== 'timeout' && !stopped?.oom_kill, bytes, phases: phaseResults, stop, notStarted, timedOut: error === 'budget exceeded: wall', cancelled: !!message?.cancelled, truncated: error === 'budget exceeded: output', duration_ms: Math.round(performance.now()-started) };
 }

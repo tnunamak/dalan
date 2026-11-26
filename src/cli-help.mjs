@@ -120,7 +120,7 @@ export const COMMANDS = [
   { name: 'break-usage-backfill', internal: true, summary: 'Backfill usage for a capacity break', usage: 'dalan break-usage-backfill --id N [--log PATH] [--json]' },
   { name: 'as-init', internal: true, summary: 'Create built-in authorization server files (older form of init)', usage: 'dalan as-init --public-url https://HOST [--json]' },
   { name: 'as-rotate-keys', summary: 'Rotate the authorization server keys', usage: 'dalan as-rotate-keys [--jwks-only|--cookies-only] [--json]  (stop the bridge first)' },
-  { name: 'prepare-deps', internal: true, summary: 'Prepare dependencies for a source directory', usage: 'dalan prepare-deps SOURCE_DIRECTORY [--go] [--json] [--replace-invalid]' },
+  { name: 'prepare-deps', internal: true, summary: 'Prepare dependencies for a source directory', usage: 'dalan prepare-deps SOURCE_DIRECTORY [--go|--pnpm] [--json] [--replace-invalid] | dalan prepare-deps --prune [--keep N]' },
 ];
 
 const GROUPS = [['start', 'Getting started'], ['everyday', 'Everyday'], ['operator', 'Operator']];
