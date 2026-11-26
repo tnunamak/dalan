@@ -62,16 +62,6 @@ test('until-quiescent times out when work stays in flight and names the reopen s
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('the default mode is unchanged: it pauses claims and waits for leases',()=>{
-  const root=scratch(),bin=path.join(root,'bin');fs.mkdirSync(bin,{recursive:true});
-  try {
-    fs.writeFileSync(path.join(bin,'dot-worker.mjs'),`process.stdout.write(JSON.stringify({claims:[]}));\n`);
-    const result=spawnSync(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs')],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:'5000'},encoding:'utf8',timeout:5000});
-    assert.equal(result.status,0,result.stderr);
-    assert.match(result.stdout,/Claims paused/);
-  } finally {fs.rmSync(root,{recursive:true,force:true});}
-});
-
 test('until-quiescent refuses malformed counters and tells the operator how to reopen',()=>{
   const root=scratch();
   try {
@@ -151,55 +141,138 @@ test('until-quiescent leaves the gate closed after a successful poll and never r
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
 
-// The default mode: quiesce when the running service answers `quiesce status` with the in-flight counters, pause only when it cannot.
+// The default mode: quiesce when the running service answers `quiesce status` with the in-flight counters; pause only when it answers
+// HTTP 404 for the route (a legacy service). Any other failure stops the drain without touching the service.
 const runWith=(root,args,timeout='3000')=>spawnSync(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),...args],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:timeout},encoding:'utf8',timeout:15000});
-const oldService=(root,statusExit)=>{
+// A fake CLI with state: `paused` lives in a file that `pause` and `resume` change. quiesce: 'http404' (legacy), 'transport' (always a
+// transport error), 'flaky' (one transport error, then counters), 'nocounters' (HTTP 200 without counters). claims: 'empty', 'live' (a
+// lease that never ends) or 'fail'.
+const service=(root,{quiesce='http404',claims='empty',paused=false}={})=>{
   const bin=path.join(root,'bin');fs.mkdirSync(bin,{recursive:true});
+  fs.writeFileSync(path.join(root,'paused'),String(paused));
   fs.writeFileSync(path.join(bin,'dot-worker.mjs'),`import fs from 'node:fs';
-const args=process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(path.join(root,'calls.log'))},args.filter(a=>a!=='--json').join(' ')+'\\n');
-if(args[0]==='quiesce'){${statusExit?`process.stderr.write('unknown admin route');process.exit(1);`:`process.stdout.write(JSON.stringify({ok:true}));`}}
-else if(args[0]==='claims')process.stdout.write(JSON.stringify({claims:[]}));
-else process.stdout.write(JSON.stringify({ok:true}));
+const args=process.argv.slice(2),dir=${JSON.stringify(root)},flag=dir+'/paused',counter=dir+'/n';
+fs.appendFileSync(dir+'/calls.log',args.filter(a=>a!=='--json').join(' ')+'\\n');
+const out=v=>process.stdout.write(JSON.stringify(v)),err=v=>{process.stderr.write(JSON.stringify(v));process.exit(1);};
+if(args[0]==='quiesce'&&args[1]==='status'){
+  const n=fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0;fs.writeFileSync(counter,String(n+1));
+  const counters={on:false,admitted_in_flight:0,delivery_in_flight:0,host_checks_unverified:0};
+  if(${JSON.stringify(quiesce)}==='http404')err({error:'not found',kind:'http',http_status:404});
+  else if(${JSON.stringify(quiesce)}==='transport'||(${JSON.stringify(quiesce)}==='flaky'&&n===0))err({error:'admin request timed out after 30000 ms',kind:'transport'});
+  else if(${JSON.stringify(quiesce)}==='nocounters')out({ok:true});
+  else out(counters);
+}
+else if(args[0]==='quiesce')out({on:args[1]==='on',ok:true});
+else if(args[0]==='status')out({paused:fs.readFileSync(flag,'utf8')==='true',pause_reason:null});
+else if(args[0]==='pause'){fs.writeFileSync(flag,'true');out({paused:true});}
+else if(args[0]==='resume'){fs.writeFileSync(flag,'false');out({paused:false});}
+else if(args[0]==='claims'){
+  if(${JSON.stringify(claims)}==='fail')err({error:'claims unavailable',kind:'local'});
+  out({claims:${JSON.stringify(claims)}==='live'?[{request_id:'req_live',lease_expires_at:new Date(Date.now()+3600000).toISOString()}]:[]});
+}
+else out({ok:true});
 `);
 };
+const paused=root=>fs.readFileSync(path.join(root,'paused'),'utf8')==='true';
+const withRoot=fn=>()=>{const root=scratch();try{return fn(root);}finally{fs.rmSync(root,{recursive:true,force:true});}};
 
-test('with no flag, a service that has the gate is drained by quiesce and is never paused',()=>{
+test('with no flag, a service that has the gate is drained by quiesce and is never paused',withRoot(root=>{
+  service(root,{quiesce:'counters'});
+  const result=runWith(root,[]);
+  assert.equal(result.status,0,result.stderr);
+  const seen=calls(root);
+  assert.ok(seen.includes('quiesce on'),seen.join('|'));
+  assert.ok(!seen.some(c=>c.startsWith('pause')||c.startsWith('claims')),'no pause and no lease wait: '+seen.join('|'));
+  assert.match(result.stdout,/has the quiesce gate/);
+}));
+
+test('with no flag, a service that answers HTTP 404 for the route (legacy) is drained by the pause',withRoot(root=>{
+  service(root,{quiesce:'http404'});
+  const result=runWith(root,[]);
+  assert.equal(result.status,0,result.stderr);
+  const seen=calls(root);
+  assert.ok(seen.includes('pause --reason upgrade drain'),seen.join('|'));
+  assert.ok(!seen.includes('quiesce on'),'a service without the gate is never asked to quiesce');
+  assert.match(result.stdout,/no quiesce gate/);
+  assert.equal(paused(root),true,'a completed drain leaves the pause for the restart');
+  assert.ok(!seen.includes('resume'));
+}));
+
+for(const quiesce of ['transport','nocounters']) test(`with no flag, a status call that fails or lacks counters (${quiesce}) stops the drain without touching the service`,withRoot(root=>{
+  service(root,{quiesce});
+  const result=runWith(root,[]);
+  assert.equal(result.status,1,result.stdout);
+  assert.match(result.stderr,/could not tell whether the running service has the quiesce gate/);
+  assert.match(result.stderr,/--until-quiescent or --pause/);
+  const seen=calls(root);
+  assert.equal(seen.filter(c=>c==='quiesce status').length,3,'three tries');
+  assert.deepEqual(seen.filter(c=>c!=='quiesce status'),[],'no pause, no quiesce, no resume: '+seen.join('|'));
+  assert.equal(paused(root),false);
+}));
+
+test('with no flag, one transient status failure is retried and the gate drain still runs',withRoot(root=>{
+  service(root,{quiesce:'flaky'});
+  const result=runWith(root,[]);
+  assert.equal(result.status,0,result.stderr);
+  const seen=calls(root);
+  assert.ok(seen.includes('quiesce on'),seen.join('|'));
+  assert.ok(!seen.some(c=>c.startsWith('pause')),'a transport error is not proof of a legacy service: '+seen.join('|'));
+}));
+
+test('--pause forces the pause drain to success, never probes the gate, and excludes --until-quiescent',withRoot(root=>{
+  service(root,{quiesce:'counters'});
+  const result=runWith(root,['--pause']);
+  assert.equal(result.status,0,result.stderr);
+  const seen=calls(root);
+  assert.ok(seen.includes('pause --reason upgrade drain'),seen.join('|'));
+  assert.ok(!seen.some(c=>c.startsWith('quiesce')),'--pause must not probe or close the gate: '+seen.join('|'));
+  assert.equal(paused(root),true);
+  const both=runWith(root,['--pause','--until-quiescent']);
+  assert.equal(both.status,2);
+  assert.match(both.stderr,/exclude each other/);
+}));
+
+test('a pause drain that fails after its own pause releases that pause',withRoot(root=>{
+  service(root,{quiesce:'http404',claims:'fail'});
+  const result=runWith(root,[]);
+  assert.equal(result.status,1);
+  const seen=calls(root);
+  assert.ok(seen.indexOf('pause --reason upgrade drain')>=0&&seen.indexOf('resume')>seen.indexOf('pause --reason upgrade drain'),seen.join('|'));
+  assert.match(result.stderr,/claims resumed/);
+  assert.equal(paused(root),false);
+}));
+
+test('a pause drain that times out on a live lease releases its own pause',withRoot(root=>{
+  service(root,{quiesce:'http404',claims:'live'});
+  const result=runWith(root,[],'1500');
+  assert.equal(result.status,1);
+  assert.match(result.stderr,/timed out/i);
+  assert.equal(paused(root),false);
+}));
+
+test('a pause that was already there is not released by a failed drain, and is not re-issued',withRoot(root=>{
+  service(root,{quiesce:'http404',claims:'fail',paused:true});
+  const result=runWith(root,[]);
+  assert.equal(result.status,1);
+  const seen=calls(root);
+  assert.ok(!seen.some(c=>c.startsWith('pause')||c==='resume'),seen.join('|'));
+  assert.equal(paused(root),true,'the operator pause stays');
+}));
+
+test('SIGTERM during the lease wait releases the pause the drain issued',async()=>{
   const root=scratch();
   try {
-    fake(root,[idle]);
-    const result=runWith(root,[]);
-    assert.equal(result.status,0,result.stderr);
-    const seen=calls(root);
-    assert.ok(seen.includes('quiesce on'),seen.join('|'));
-    assert.ok(!seen.some(c=>c.startsWith('pause')||c.startsWith('claims')),'no pause and no lease wait: '+seen.join('|'));
-    assert.match(result.stdout,/has the quiesce gate/);
-  } finally {fs.rmSync(root,{recursive:true,force:true});}
-});
-
-for(const [label,statusExit] of [['answers quiesce status with an error',true],['answers quiesce status without counters',false]]) test(`with no flag, a service that ${label} is drained by the pause`,()=>{
-  const root=scratch();
-  try {
-    oldService(root,statusExit);
-    const result=runWith(root,[]);
-    assert.equal(result.status,0,result.stderr);
-    const seen=calls(root);
-    assert.ok(seen.some(c=>c.startsWith('pause')),seen.join('|'));
-    assert.ok(!seen.includes('quiesce on'),'a service without the gate is never asked to quiesce');
-    assert.match(result.stdout,/no quiesce gate/);
-  } finally {fs.rmSync(root,{recursive:true,force:true});}
-});
-
-test('--pause forces the pause drain even when the service has the gate; the two flags exclude each other',()=>{
-  const root=scratch();
-  try {
-    fake(root,[idle]);
-    const result=runWith(root,['--pause']);
-    const seen=calls(root);
-    assert.ok(seen.some(c=>c.startsWith('pause')),seen.join('|'));
-    assert.ok(!seen.some(c=>c.startsWith('quiesce')),'--pause must not probe or close the gate: '+seen.join('|'));
-    const both=runWith(root,['--pause','--until-quiescent']);
-    assert.equal(both.status,2);
-    assert.match(both.stderr,/exclude each other/);
+    service(root,{quiesce:'http404',claims:'live'});
+    const child=spawn(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),'--pause'],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:'60000'},stdio:['ignore','pipe','pipe']});
+    let stderr='';child.stderr.on('data',d=>stderr+=d);
+    const exited=new Promise(resolve=>child.on('exit',(code,signal)=>resolve({code,signal})));
+    for(let i=0;i<100&&!(fs.existsSync(path.join(root,'calls.log'))&&calls(root).some(c=>c.startsWith('claims')));i++)await new Promise(r=>setTimeout(r,50));
+    assert.ok(calls(root).some(c=>c.startsWith('claims')),'the drain reached the lease wait');
+    child.kill('SIGTERM');
+    const {code}=await exited;
+    assert.equal(code,143);
+    assert.ok(calls(root).includes('resume'),calls(root).join('|'));
+    assert.equal(paused(root),false);
+    assert.match(stderr,/claims resumed/);
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
