@@ -656,7 +656,7 @@ async function handOffNextJob(args) {
 // Returns {jobs}, {empty,waited_ms} or {} (no handoff: the caller keeps the old hint). Never throws: the finish is stored.
 // A finish hands over up to maxJobs claimed jobs, never more than the free lanes: the first claim is keyed handoff-<claim_id>,
 // the others handoff-<claim_id>-n<n>, so a repeated finish gets the same jobs back and takes no more.
-async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,idleLeaseMs,signal}) {
+async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,idleLeaseMs,onlyWhenEmpty=false,signal}) {
   const jobs=[]; // claimed so far: an error after a claim must still report it, or the job idles until its lease ends
   try {
     const {worker,subject}=principal;
@@ -680,6 +680,8 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,idleLeas
     }
     const started=Date.now(),tried=new Set();
     let sawQueued=false;
+    // only_when_empty: work queued at the finish is the worker's to claim; no handoff, and the finish is not held.
+    if(onlyWhenEmpty&&store.hasQueuedFor([worker])) return {};
     // Rows whose last handoff lapsed untouched are left for the worker's own list_pending: the same rows were handed ten times and never started.
     const pick=free=>(store.nextQueued(HANDOFF_PICK_WINDOW+tried.size,null,worker).next_queued??[]).filter(x=>!tried.has(x.request_id)&&!store.handoffLapsed(x.request_id,worker)).slice(0,free);
     for(;;) {
@@ -721,7 +723,7 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,idleLeas
 async function finishReply(reply,{principal,requestId,claimId,signal}) {
   const setting=workers.workers.get(principal.worker)?.finishHandoff;
   if(setting&&reply.receipt_id&&!store.isProtocolJob(requestId)) {
-    const {jobs,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,maxJobs:setting.maxJobs,idleLeaseMs:setting.idleLeaseMs,signal}),job=jobs?.[0];
+    const {jobs,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,maxJobs:setting.maxJobs,idleLeaseMs:setting.idleLeaseMs,onlyWhenEmpty:setting.onlyWhenEmpty,signal}),job=jobs?.[0];
     log({kind:'finish_handoff',request_id:requestId,next_request_id:job?.request_id??null,jobs:jobs?.length??0,result:job?'claimed':empty?'empty':'none',waited_ms:waited_ms??0});
     const {next_queued,next_action,...rest}=reply;
     if(job&&setting.maxJobs>1) return {...rest,next_job:job,next_jobs:jobs,guidance:`Your next ${jobs.length===1?'job':'jobs'} ${jobs.map(j=>j.request_id).join(', ')} ${jobs.length===1?'is':'are'} already claimed for you; the claim results are in next_jobs. Start all of them now, in parallel, in this turn, and call finish for each as soon as it is done. ${job.lease_expires_at?`The first lease ends at ${job.lease_expires_at}`:'The leases are short'}; every tool call on a job renews its lease.`};

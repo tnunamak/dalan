@@ -70,8 +70,10 @@ const pass = message => console.log(`PASS ${message}`);
   assert.deepEqual(parse({ max_jobs: 1 }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 120000 });
   assert.deepEqual(parse({ wait_ms: 0, max_jobs: 8 }), { waitMs: 0, maxJobs: 8, idleLeaseMs: 120000 });
   assert.deepEqual(parse({ idle_lease_ms: 60000 }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 60000 });
+  assert.deepEqual(parse({ only_when_empty: true }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 120000, onlyWhenEmpty: true });
+  assert.deepEqual(parse({ only_when_empty: false }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 120000 });
   assert.deepEqual(parse({ idle_lease_ms: 1000 }), { waitMs: 20000, maxJobs: 1, idleLeaseMs: 1000 });
-  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }, { max_jobs: 0 }, { max_jobs: 9 }, { max_jobs: 1.5 }, { max_jobs: '3' }, { max_jobs: null }, { idle_lease_ms: -1 }, { idle_lease_ms: 999 }, { idle_lease_ms: 120001 }, { idle_lease_ms: 1.5 }, { idle_lease_ms: '60000' }, { idle_lease_ms: null }])
+  for (const bad of ['yes', 1, null, [], { wait_ms: -1 }, { wait_ms: 45001 }, { wait_ms: 1.5 }, { wait_ms: null }, { wait_ms: '20' }, { extra: 1 }, { only_when_empty: 'yes' }, { only_when_empty: 1 }, { only_when_empty: null }, { max_jobs: 0 }, { max_jobs: 9 }, { max_jobs: 1.5 }, { max_jobs: '3' }, { max_jobs: null }, { idle_lease_ms: -1 }, { idle_lease_ms: 999 }, { idle_lease_ms: 120001 }, { idle_lease_ms: 1.5 }, { idle_lease_ms: '60000' }, { idle_lease_ms: null }])
     assert.throws(() => parse(bad), /finish_handoff|expected object|wait_ms|max_jobs|idle_lease_ms/, `rejects ${JSON.stringify(bad)}`);
   pass('finish_handoff config: off by default; true, {} and {wait_ms 0..45000} accepted; everything else refused');
 }
@@ -347,6 +349,31 @@ try {
     assert.equal(done.next_job.request_id, 'req_one_q1');
     assert.equal(done.next_jobs, undefined, JSON.stringify(done));
     pass('max_jobs 1 (default) keeps the single next_job reply');
+  }
+
+  // only_when_empty: with work queued the finish hands nothing and does not wait; the job stays queued for the worker's own claim.
+  // Only an empty queue is handed, the job that arrives during the wait.
+  {
+    const e = await start('empty-only', { finish_handoff: { wait_ms: WAIT_MS, only_when_empty: true } });
+    const first = await e.claimNew('req_eo_first');
+    await e.submit('req_eo_q1');
+    const started = Date.now();
+    const done = await e.finish(first);
+    assert.ok(Date.now() - started < 1000, 'no wait when a job is queued');
+    assert.equal(done.next_job, undefined, `work is queued, so nothing is handed: ${JSON.stringify(done)}`);
+    assert.equal(done.queue_empty, undefined);
+    assert.deepEqual(done.next_queued?.map(x => x.request_id), ['req_eo_q1'], 'the reply lists the queued job for the worker to claim');
+    assert.deepEqual(await e.queuedIds(), ['req_eo_q1'], 'the job stays queued and visible: no handed claim hides it');
+    const mine = await e.ok('claim', { request_id: 'req_eo_q1', claimant: 'fixture-worker' });
+    // Queue now empty: a job submitted during the wait is handed.
+    const pending = e.finish(mine);
+    await sleep(400);
+    await e.submit('req_eo_q2');
+    const handed = await pending;
+    assert.equal(handed.next_job?.request_id, 'req_eo_q2', JSON.stringify(handed));
+    const last = await e.finish(handed.next_job);
+    assert.equal(last.queue_empty, true, JSON.stringify(last));
+    pass('only_when_empty: queued work is listed, not handed, and not waited for; an empty queue hands the job that arrives in the wait');
   }
 
 } finally {
