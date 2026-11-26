@@ -5,7 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import { prepareNodeModules } from '../src/prepared-node-modules.mjs';
-import { prepareGoModules } from '../src/prepared-go-modules.mjs';
+import { prepareGoModules, pruneGoStore } from '../src/prepared-go-modules.mjs';
 import { preparePnpm } from '../src/prepared-pnpm.mjs';
 import { pruneNodeStore } from '../src/prepared-store-prune.mjs';
 import fs from 'node:fs';
@@ -796,7 +796,7 @@ async function main() {
       if(args.includes('--prune')) {
         const at=args.indexOf('--keep'),keep=at<0?4:Number(args[at+1]);
         if(args.some((a,i)=>!['--prune','--json','--keep'].includes(a)&&!(at>=0&&i===at+1))||!Number.isInteger(keep)||keep<1) throw new Error(usage);
-        result=pruneNodeStore({keep});
+        result={...pruneNodeStore({keep}),go:pruneGoStore({keep})};
         break;
       }
       const positional=args.filter(a=>!['--json','--replace-invalid','--go','--pnpm'].includes(a));
@@ -807,8 +807,8 @@ async function main() {
       if(args.includes('--go')) result=prepareGoModules(source,{replaceInvalid});
       else if(args.includes('--pnpm')||(has('pnpm-lock.yaml')&&!has('package-lock.json'))) result=preparePnpm(source,{replaceInvalid});
       else result=prepareNodeModules(source,{replaceInvalid});
-      // Keep the shared node_modules store bounded: the newest entries stay, and nothing under a day old is touched.
-      if(!args.includes('--go')) { try { pruneNodeStore({}); } catch {} }
+      // Keep the shared store that was just written bounded: the newest entries stay, and nothing under a day old is touched.
+      try { if(args.includes('--go')) pruneGoStore({}); else pruneNodeStore({}); } catch {}
       break;
     }
     case 'doctor': {
