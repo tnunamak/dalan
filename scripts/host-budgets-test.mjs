@@ -265,26 +265,39 @@ test('a production-mode child ignores an inherited test unit suffix', { skip: !l
   assert.equal(child.status,0,child.stderr || child.stdout);
 });
 
-test('production default names the fixed unit when the test seam is unset', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
-  const suffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX, originalSpawn = childProcess.spawn;
+async function unitsNamedBy(env) {
+  const priorSuffix = process.env.DALAN_HOST_CHECK_UNIT_SUFFIX, priorMode = process.env.NODE_ENV, originalSpawn = childProcess.spawn;
   const intercepted = new Error('host-check spawn intercepted');
-  delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
-  let unit;
+  delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX; delete process.env.NODE_ENV;
+  Object.assign(process.env, env);
+  const units = [];
   childProcess.spawn = (file, args) => {
     assert.equal(file, '/usr/bin/systemd-run');
-    unit = args.find(arg => arg.startsWith('--unit='));
+    units.push(args.find(arg => arg.startsWith('--unit=')));
     throw intercepted;
   };
   syncBuiltinESMExports();
   try {
-    await assert.rejects(runHostBudget({dir:home,budgets,enabled:true,phases:[{name:'check',argv:['/usr/bin/true']}]}), error => error === intercepted);
-    assert.equal(unit, '--unit=dot-bridge-host-check.service');
+    for (let i = 0; i < 2; i++) await assert.rejects(runHostBudget({dir:home,budgets,enabled:true,phases:[{name:'check',argv:['/usr/bin/true']}]}), error => error === intercepted);
+    return units;
   } finally {
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
-    if (suffix === undefined) delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX;
-    else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = suffix;
+    if (priorSuffix === undefined) delete process.env.DALAN_HOST_CHECK_UNIT_SUFFIX; else process.env.DALAN_HOST_CHECK_UNIT_SUFFIX = priorSuffix;
+    if (priorMode === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = priorMode;
   }
+}
+
+test('production default names the fixed unit when the test seam is unset', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  assert.deepEqual(await unitsNamedBy({NODE_ENV:'production'}), Array(2).fill('--unit=dot-bridge-host-check.service'));
+});
+
+test('a non-production run with no suffix uses a unit of its own, never the live one', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+  const units = await unitsNamedBy({});
+  assert.equal(units[0], units[1], 'one process keeps one reservation');
+  assert.match(units[0], new RegExp(`^--unit=dot-bridge-host-check-proc-${process.pid}-[0-9a-f-]{36}\\.service$`));
+  assert.notEqual(units[0], '--unit=dot-bridge-host-check.service');
+  assert.deepEqual(await unitsNamedBy({DALAN_HOST_CHECK_UNIT_SUFFIX:'suite-a'}), Array(2).fill('--unit=dot-bridge-host-check-suite-a.service'), 'a suite suffix still wins');
 });
 
 test('one suite reservation refuses a second concurrent host check', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
