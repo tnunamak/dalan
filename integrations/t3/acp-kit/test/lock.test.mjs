@@ -7,6 +7,25 @@ import { spawn, spawnSync } from 'node:child_process';
 import { acquireLock, LockBusyError, ownerAlive } from '../src/lock.mjs';
 import { readJsonPrivate, writeJsonPrivate } from '../src/session-store.mjs';
 
+import { CANCEL_BUDGET_MS, REFUSE_CODE, cancelBudgetMs, createRefuse } from '../src/errors.mjs';
+
+test('bad cancel budgets fall back to the bounded default', () => {
+  for (const value of [undefined, '', 'not numeric', 0, -1, Infinity, NaN]) {
+    assert.equal(cancelBudgetMs(value), CANCEL_BUDGET_MS);
+  }
+  assert.equal(cancelBudgetMs('2500'), 2500);
+});
+
+test('refusal preserves explicit diagnostic data without inventing data for an omitted argument', () => {
+  class FixtureRequestError extends Error {
+    constructor(...args) { super(args[1]); this.args = args; }
+  }
+  const refuse = createRefuse(FixtureRequestError);
+  assert.deepEqual(refuse('fixture rejected').args, [REFUSE_CODE, 'fixture rejected']);
+  assert.deepEqual(refuse('fixture rejected', null).args, [REFUSE_CODE, 'fixture rejected', null]);
+  assert.deepEqual(refuse('fixture rejected', false).args, [REFUSE_CODE, 'fixture rejected', false]);
+});
+
 const tmp = () => fs.mkdtempSync(path.join(os.homedir(), '.tmp-acpkit-'));
 const worker = path.join(import.meta.dirname, 'lock-worker.mjs');
 const deadPid = async () => {
