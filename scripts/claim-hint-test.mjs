@@ -28,6 +28,7 @@ try {
   assert.equal(hinted.claimHint('muse'),null);
   assert.equal(suggested(hinted),3,'a worker holding nothing is told to take 3, not the 6 queued or the 8 free lanes');
   assert.match(hinted.nextQueued(8,null,'dot').next_action,/8 lanes free, 3 suggested: claim hinted-0, hinted-1, hinted-2 now/,'free lanes keep their real count; the smaller number is labelled as the suggestion');
+  assert.match(hinted.nextQueued(8,null,'dot').next_action,/^6 queued and 8 lanes free, 3 suggested:/,'the count in the text is the count of listed rows');
   assert.equal(hinted.nextQueued(64,null,'dot',{applyHint:false}).next_queued.length,6,'a bridge pick that sets applyHint false sees every queued row');
   claim(hinted,'hinted-0');
   assert.equal(suggested(hinted),2,'it holds one, so two more');
@@ -40,6 +41,7 @@ try {
   now=START+4*minute;
   assert.equal(hinted.recentClaimCount('dot'),0,'claims untouched for 3 minutes no longer count: a new run resumes them');
   assert.equal(suggested(hinted),2,'nothing recent, so the hint allows 3, but only 2 of the 6 jobs are still queued');
+  assert.match(hinted.nextQueued(hinted.freeLanes('subject','dot',CAP,CAP),null,'dot').next_action,/^2 queued and 4 lanes free, 2 suggested: claim hinted-4, hinted-5 now/,'the hint allows 3 but 2 rows are listed, so the text says 2 suggested');
   hinted.progress('hinted-0',hinted.get('hinted-0').claim.claim_id,'working','subject');
   assert.equal(hinted.recentClaimCount('dot'),1,'progress makes a claim recent again');
 

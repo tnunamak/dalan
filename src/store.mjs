@@ -2719,7 +2719,7 @@ export class Store {
     const all=this.listPending(worker).filter(x=>x.kind==='assignment'&&!x.blocked&&x.request_id!==exceptId);
     if(!all.length) return {};
     const next=all.slice(0,free).map(x=>Object.fromEntries(['request_id','title',...TRIAGE_KEYS].filter(k=>x[k]!==undefined).map(k=>[k,x[k]])));
-    const lanes=free<lanesFree?`${lanesFree} ${lanesFree===1?'lane':'lanes'} free, ${free} suggested`:`${free} ${free===1?'lane':'lanes'} free`;
+    const lanes=free<lanesFree?`${lanesFree} ${lanesFree===1?'lane':'lanes'} free, ${next.length} suggested`:`${free} ${free===1?'lane':'lanes'} free`;
     return {next_queued:next,next_action:`${all.length} queued and ${lanes}: claim ${next.map(x=>x.request_id).join(', ')} now (oldest first)`};
   }
   freeLanes(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity) { return Math.max(0,Math.min(laneCapacity,claimCapacity)-this.activeClaims(subject,worker).length); }
