@@ -18,11 +18,13 @@ const quiesceRecovery='If the old service is still quiesced, keep it running and
 // The gate must never stay closed after an aborted drain: a closed gate starves every worker with no signal. It stays closed only
 // after the poll succeeds, because the restart that follows reopens it. The reopen call has its own timeout, not the drain deadline.
 let gateClosed=false;
+// A cleanup call counts only when its reply shows the state it asked for; exit 0 alone does not.
+const jsonOf=text=>{try{return JSON.parse(text);}catch{return null;}};
 function reopenGate(why) {
   if(!gateClosed)return;
   const result=spawnSync(process.execPath,['bin/dot-worker.mjs','quiesce','off','--json'],{encoding:'utf8',timeout:10000,killSignal:'SIGKILL'});
-  if(result.status===0){gateClosed=false;console.error(`drain aborted (${why}); gate reopened`);}
-  else console.error(`drain aborted (${why}); the gate could NOT be reopened: ${(result.stderr||result.stdout||`exit ${result.status}`).trim()}`);
+  if(result.status===0&&jsonOf(result.stdout)?.on===false){gateClosed=false;console.error(`drain aborted (${why}); gate reopened`);}
+  else console.error(`drain aborted (${why}); the gate could NOT be confirmed reopened: ${(result.stderr||result.stdout||`exit ${result.status}`).trim()}`);
 }
 // A pause this run issued must not outlive an aborted run: claims would stay refused with no signal. A pause that was already there
 // belongs to the operator and is never released here. After the drain completes, the pause is the documented handoff to the restart.
@@ -30,8 +32,8 @@ let pausedByRun=false;
 function resumeOwnedPause(why) {
   if(!pausedByRun)return;
   const result=spawnSync(process.execPath,['bin/dot-worker.mjs','resume','--json'],{encoding:'utf8',timeout:10000,killSignal:'SIGKILL'});
-  if(result.status===0){pausedByRun=false;console.error(`drain aborted (${why}); claims resumed`);}
-  else console.error(`drain aborted (${why}); the pause could NOT be released: ${(result.stderr||result.stdout||`exit ${result.status}`).trim()}`);
+  if(result.status===0&&jsonOf(result.stdout)?.paused===false){pausedByRun=false;console.error(`drain aborted (${why}); claims resumed`);}
+  else console.error(`drain aborted (${why}); the pause could NOT be confirmed released: ${(result.stderr||result.stdout||`exit ${result.status}`).trim()}`);
 }
 const abortCleanup=why=>{reopenGate(why);resumeOwnedPause(why);};
 for(const [name,code] of [['SIGINT',130],['SIGTERM',143],['SIGHUP',129]])process.on(name,()=>{abortCleanup(name);process.exit(code);});
@@ -76,13 +78,14 @@ async function main() {
   }
   if(untilQuiescent) {
     gateClosed=true;
-    cli('quiesce','on');
+    if(cli('quiesce','on')?.on!==true)fail('dalan quiesce on did not report the gate as closed.');
     console.log('Admission is quiesced. Live leases survive a restart using the same database and are not waited on.');
     const names=gateCounters;
     for(;;) {
       const status=cli('quiesce','status');
       if(!status||typeof status!=='object'||names.some(name=>!Number.isSafeInteger(status[name])||status[name]<0))
         fail('dalan quiesce status returned invalid in-flight counters.');
+      if(status.on!==true)fail('dalan quiesce status says admission is open after quiesce on.');
       if(names.every(name=>status[name]===0))break;
       if(Date.now()>=deadline)fail('Upgrade drain timed out while work was still in flight.');
       await delay(Math.min(1000,Math.max(0,deadline-Date.now())));
@@ -96,7 +99,7 @@ async function main() {
   if(before.paused)console.log(`Claims were already paused${before.pause_reason?` (${before.pause_reason})`:''}; this drain leaves that pause as it is.`);
   else {
     pausedByRun=true;
-    cli('pause','--reason','upgrade drain');
+    if(cli('pause','--reason','upgrade drain')?.paused!==true)fail('dalan pause did not report claims as paused.');
     console.log('Claims paused. New submissions are still accepted while the drain waits.');
   }
   while(true) {

@@ -20,7 +20,7 @@ fs.appendFileSync(log,args.filter(a=>a!=='--json').join(' ')+'\\n');
 if(args[0]==='quiesce'&&args[1]==='status'){const n=fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0;fs.writeFileSync(counter,String(n+1));
   process.stdout.write(JSON.stringify({on:true,live_leases:${live},...states[Math.min(n,states.length-1)]}));}
 else if(args[0]==='claims')process.stdout.write(JSON.stringify({claims:[{request_id:'req_live',lease_expires_at:new Date(Date.now()+3600000).toISOString()}]}));
-else process.stdout.write(JSON.stringify({on:true,ok:true}));
+else process.stdout.write(JSON.stringify({on:args[1]!=='off',ok:true}));
 `);
 };
 const run=(root,timeout='4000')=>spawnSync(process.execPath,[path.join(repo,'scripts/upgrade-drain.mjs'),'--until-quiescent'],{cwd:root,env:{...process.env,DALAN_UPGRADE_DRAIN_TIMEOUT_MS:timeout},encoding:'utf8',timeout:15000});
@@ -147,25 +147,26 @@ const runWith=(root,args,timeout='3000')=>spawnSync(process.execPath,[path.join(
 // A fake CLI with state: `paused` lives in a file that `pause` and `resume` change. quiesce: 'http404' (legacy), 'transport' (always a
 // transport error), 'flaky' (one transport error, then counters), 'nocounters' (HTTP 200 without counters). claims: 'empty', 'live' (a
 // lease that never ends), 'fail' or 'malformed' (a successful reply with no claims array).
-const service=(root,{quiesce='http404',claims='empty',paused=false}={})=>{
+const service=(root,{quiesce='http404',claims='empty',paused=false,lie=''}={})=>{
   const bin=path.join(root,'bin');fs.mkdirSync(bin,{recursive:true});
   fs.writeFileSync(path.join(root,'paused'),String(paused));
+  fs.writeFileSync(path.join(root,'gate'),'false');
   fs.writeFileSync(path.join(bin,'dot-worker.mjs'),`import fs from 'node:fs';
-const args=process.argv.slice(2),dir=${JSON.stringify(root)},flag=dir+'/paused',counter=dir+'/n';
+const args=process.argv.slice(2),dir=${JSON.stringify(root)},flag=dir+'/paused',gate=dir+'/gate',counter=dir+'/n',lie=${JSON.stringify(lie)};
 fs.appendFileSync(dir+'/calls.log',args.filter(a=>a!=='--json').join(' ')+'\\n');
 const out=v=>process.stdout.write(JSON.stringify(v)),err=v=>{process.stderr.write(JSON.stringify(v));process.exit(1);};
 if(args[0]==='quiesce'&&args[1]==='status'){
   const n=fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0;fs.writeFileSync(counter,String(n+1));
-  const counters={on:false,admitted_in_flight:0,delivery_in_flight:0,host_checks_unverified:0};
+  const counters={on:fs.readFileSync(gate,'utf8')==='true',admitted_in_flight:${JSON.stringify(quiesce)}==='busy'?1:0,delivery_in_flight:0,host_checks_unverified:0};
   if(${JSON.stringify(quiesce)}==='http404')err({error:'not found',kind:'http',http_status:404});
   else if(${JSON.stringify(quiesce)}==='transport'||(${JSON.stringify(quiesce)}==='flaky'&&n===0))err({error:'admin request timed out after 30000 ms',kind:'transport'});
   else if(${JSON.stringify(quiesce)}==='nocounters')out({ok:true});
   else out(counters);
 }
-else if(args[0]==='quiesce')out({on:args[1]==='on',ok:true});
+else if(args[0]==='quiesce'){if(lie!==args[1]+'-quiesce')fs.writeFileSync(gate,String(args[1]==='on'));out({on:fs.readFileSync(gate,'utf8')==='true',ok:true});}
 else if(args[0]==='status')out({paused:fs.readFileSync(flag,'utf8')==='true',pause_reason:null});
-else if(args[0]==='pause'){fs.writeFileSync(flag,'true');out({paused:true});}
-else if(args[0]==='resume'){fs.writeFileSync(flag,'false');out({paused:false});}
+else if(args[0]==='pause'){if(lie!=='pause')fs.writeFileSync(flag,'true');out({paused:fs.readFileSync(flag,'utf8')==='true'});}
+else if(args[0]==='resume'){if(lie!=='resume')fs.writeFileSync(flag,'false');out({paused:fs.readFileSync(flag,'utf8')==='true'});}
 else if(args[0]==='claims'){
   if(${JSON.stringify(claims)}==='fail')err({error:'claims unavailable',kind:'local'});
   if(${JSON.stringify(claims)}==='malformed'){out({});process.exit(0);}
@@ -251,6 +252,30 @@ test('a pause drain whose claims reply has no claims array stops and releases it
   const seen=calls(root);
   assert.ok(seen.indexOf('resume')>seen.indexOf('pause --reason upgrade drain'),seen.join('|'));
   assert.equal(paused(root),false);
+}));
+
+test('a gate that does not close stops the drain and never reports ready',withRoot(root=>{
+  service(root,{quiesce:'counters',lie:'on-quiesce'});
+  const result=runWith(root,['--until-quiescent']);
+  assert.equal(result.status,1,result.stdout+result.stderr);
+  assert.match(result.stderr,/did not report the gate as closed/);
+  assert.doesNotMatch(result.stdout,/No admitted calls/);
+}));
+
+test('a pause that does not take stops the pause drain and never reports ready',withRoot(root=>{
+  service(root,{quiesce:'http404',lie:'pause'});
+  const result=runWith(root,[]);
+  assert.equal(result.status,1,result.stdout+result.stderr);
+  assert.match(result.stderr,/did not report claims as paused/);
+  assert.doesNotMatch(result.stdout,/No unexpired claims/);
+}));
+
+test('a gate reopen whose reply still shows the gate closed is reported as unconfirmed',withRoot(root=>{
+  service(root,{quiesce:'busy',lie:'off-quiesce'});
+  const result=runWith(root,['--until-quiescent'],'1000');
+  assert.equal(result.status,1,result.stdout+result.stderr);
+  assert.match(result.stderr,/gate could NOT be confirmed reopened/);
+  assert.doesNotMatch(result.stderr,/gate reopened/);
 }));
 
 test('a pause drain that times out on a live lease releases its own pause',withRoot(root=>{
