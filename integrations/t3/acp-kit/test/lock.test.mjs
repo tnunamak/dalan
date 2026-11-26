@@ -5,6 +5,38 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { acquireLock, LockBusyError, ownerAlive } from '../src/lock.mjs';
+import { readJsonPrivate, writeJsonPrivate } from '../src/session-store.mjs';
+
+import { CANCEL_BUDGET_MS, REFUSE_CODE, cancelBudgetMs, createRefuse } from '../src/errors.mjs';
+
+test('bad cancel budgets fall back to the bounded default', () => {
+  for (const value of [undefined, '', 'not numeric', 0, -1, Infinity, NaN]) {
+    assert.equal(cancelBudgetMs(value), CANCEL_BUDGET_MS);
+  }
+  assert.equal(cancelBudgetMs('2500'), 2500);
+});
+
+test('refusal preserves explicit diagnostic data without inventing data for an omitted argument', () => {
+  class FixtureRequestError extends Error {
+    constructor(...args) { super(args[1]); this.args = args; }
+  }
+  const refuse = createRefuse(FixtureRequestError);
+  assert.deepEqual(refuse('fixture rejected').args, [REFUSE_CODE, 'fixture rejected']);
+  assert.deepEqual(refuse('fixture rejected', null).args, [REFUSE_CODE, 'fixture rejected', null]);
+  assert.deepEqual(refuse('fixture rejected', false).args, [REFUSE_CODE, 'fixture rejected', false]);
+});
+
+test('a failed session promotion removes its temporary file and preserves the destination', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-session-rename-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const destination = path.join(dir, 'session.json');
+  fs.mkdirSync(destination);
+  const existing = path.join(destination, 'keep.txt');
+  fs.writeFileSync(existing, 'fixture already present');
+  assert.throws(() => writeJsonPrivate(destination, { marker: 'fixture' }));
+  assert.equal(fs.readFileSync(existing, 'utf8'), 'fixture already present');
+  assert.deepEqual(fs.readdirSync(dir), ['session.json']);
+});
 
 const tmp = () => fs.mkdtempSync(path.join(os.homedir(), '.tmp-acpkit-'));
 const worker = path.join(import.meta.dirname, 'lock-worker.mjs');
@@ -29,6 +61,30 @@ test('busy lock with no readable owner keeps the busy code and names no pid', ()
   assert.equal(error.code, 'session_busy');
   assert.equal(error.pid, null);
   assert.equal(error.message, 'this session is active in another adapter (pid unknown)');
+});
+
+test('private JSON pretty mode round-trips and replaces the previous object', async t => {
+  const { readJsonPrivate, writeJsonPrivate } = await import('../src/session-store.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'subdir', 'session.json');
+  writeJsonPrivate(target, { previous: true });
+  writeJsonPrivate(target, { fixture: [1, 2] }, { pretty: true });
+  assert.equal(fs.readFileSync(target, 'utf8'), JSON.stringify({ fixture: [1, 2] }, null, 2));
+  assert.deepEqual(readJsonPrivate(target), { fixture: [1, 2] });
+  assert.deepEqual(fs.readdirSync(path.dirname(target)), ['session.json']);
+});
+
+test('removing private JSON twice leaves the missing-state sentinel', async t => {
+  const { readJsonPrivate, removePrivate, writeJsonPrivate } = await import('../src/session-store.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'session.json');
+  assert.equal(readJsonPrivate(target), null);
+  writeJsonPrivate(target, { fixture: true });
+  removePrivate(target);
+  removePrivate(target);
+  assert.equal(readJsonPrivate(target), null);
 });
 
 test('acquire writes the record; release removes only our own token', async () => {
@@ -72,6 +128,37 @@ test('releasing twice leaves the temporary lock directory empty', async t => {
   assert.deepEqual(fs.readdirSync(dir), []);
   assert.doesNotThrow(() => lock.release());
   assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test('a serialization error leaves the committed session readable and untouched', {skip: process.platform === 'win32'}, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-session-serialize-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.json');
+  const old = {step: 'saved'};
+  writeJsonPrivate(file, old);
+  const bytes = fs.readFileSync(file);
+  const circular = {};
+  circular.self = circular;
+  assert.throws(() => writeJsonPrivate(file, circular), TypeError);
+  assert.deepEqual(readJsonPrivate(file), old);
+  assert.deepEqual(fs.readFileSync(file), bytes);
+  assert.deepEqual(fs.readdirSync(dir), ['session.json']);
+});
+
+test('a leftover partial temp file does not change the committed session', {skip: process.platform === 'win32'}, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-session-staged-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.json');
+  const partial = `${file}.${process.pid}.tmp`;
+  const committed = {step: 'confirmed'};
+  writeJsonPrivate(file, committed);
+  fs.writeFileSync(partial, '{"step":', {mode: 0o600});
+  assert.deepEqual(readJsonPrivate(file), committed);
+  assert.equal(fs.readFileSync(partial, 'utf8'), '{"step":');
+  const next = {step: 'continued'};
+  writeJsonPrivate(file, next);
+  assert.deepEqual(readJsonPrivate(file), next);
+  assert.deepEqual(fs.readdirSync(dir), ['session.json']);
 });
 
 test('a dead owner is stale and is taken over', async () => {
@@ -130,6 +217,28 @@ test('lock contention without a readable owner reports busy with an unknown PID'
   assert.equal(error.code, 'session_busy');
   assert.equal(error.pid, null);
   assert.equal(error.message, 'this session is active in another adapter (pid unknown)');
+});
+
+test('a fresh partial record reports busy and preserves the incomplete bytes', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-partial-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const partial = '{"pid":';
+  fs.writeFileSync(file, partial);
+  await assert.rejects(acquireLock(file), { name: 'LockBusyError', code: 'session_busy', pid: null });
+  assert.equal(fs.readFileSync(file, 'utf8'), partial);
+  assert.deepEqual(fs.readdirSync(dir), ['session.lock']);
+});
+
+test('a lock target that is a fresh directory reports busy without touching it', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-directory-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  fs.mkdirSync(file);
+  fs.writeFileSync(path.join(file, 'keep.txt'), 'owned test fixture');
+  await assert.rejects(acquireLock(file), { name: 'LockBusyError', code: 'session_busy', pid: null });
+  assert.deepEqual(fs.readdirSync(file), ['keep.txt']);
+  assert.equal(fs.readFileSync(path.join(file, 'keep.txt'), 'utf8'), 'owned test fixture');
 });
 
 test('an empty file from the old flock adapter is stale; a fresh empty file is busy', async () => {
@@ -215,6 +324,42 @@ test('a live lock reports a stable busy code and owner pid', async t => {
     });
     assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, lock.token);
   } finally { lock.release(); }
+});
+
+test('a fresh truncated lock is protected, then recoverable after the grace window', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-truncated-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const partial = '{"pid":';
+  fs.writeFileSync(file, partial, { mode: 0o600 });
+  await assert.rejects(acquireLock(file), { code: 'session_busy', pid: null });
+  assert.equal(fs.readFileSync(file, 'utf8'), partial);
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(file, old, old);
+  const acquired = await acquireLock(file);
+  try {
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, acquired.token);
+    assert.deepEqual(fs.readdirSync(dir), ['session.lock']);
+  } finally { acquired.release(); }
+});
+
+test('a waiting acquirer gets the lock after the live takeover guard releases', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-guard-release-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const stale = await deadPid();
+  plant(file, { pid: stale });
+  const guard = `${file}.takeover.${'ab'.repeat(8)}.0`;
+  plant(guard, { pid: process.pid });
+  const pending = acquireLock(file, { guardWaitMs: 1000 });
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).pid, stale);
+  assert.ok(fs.existsSync(guard));
+  fs.unlinkSync(guard);
+  const acquired = await pending;
+  try {
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, acquired.token);
+    assert.deepEqual(fs.readdirSync(dir), ['session.lock']);
+  } finally { acquired.release(); }
 });
 
 test('a normal adapter exit releases a forgotten lock without a takeover', t => {
@@ -315,6 +460,21 @@ test('release succeeds when the temporary lock file is already absent', async t 
   assert.deepEqual(fs.readdirSync(dir), []);
 });
 
+test('release leaves a replacement of the original fixture directory alone', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-moved-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const parent = path.join(dir, 'session');
+  const moved = path.join(dir, 'moved');
+  const file = path.join(parent, 'session.lock');
+  const lock = await acquireLock(file);
+  fs.renameSync(parent, moved);
+  fs.writeFileSync(parent, 'ordinary replacement file');
+
+  assert.doesNotThrow(() => lock.release());
+  assert.equal(fs.readFileSync(parent, 'utf8'), 'ordinary replacement file');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(moved, 'session.lock'), 'utf8')).token, lock.token);
+});
+
 test('acquire creates missing fixture directories and release keeps the directories', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-nested-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -326,4 +486,31 @@ test('acquire creates missing fixture directories and release keeps the director
     assert.deepEqual(fs.readdirSync(parent), ['session.lock']);
   } finally { lock.release(); }
   assert.deepEqual(fs.readdirSync(parent), []);
+});
+
+test('a released handle cannot remove a newly acquired lock at the same path', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-reacquire-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.lock');
+  const old = await acquireLock(file);
+  old.release();
+
+  const current = await acquireLock(file);
+  try {
+    old.release();
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, current.token);
+  } finally { current.release(); }
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test('reusing an existing fixture directory preserves its POSIX mode', { skip: process.platform === 'win32' }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-lock-mode-existing-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const parent = path.join(dir, 'existing');
+  fs.mkdirSync(parent);
+  fs.chmodSync(parent, 0o750);
+  const lock = await acquireLock(path.join(parent, 'session.lock'));
+  try { assert.equal(fs.statSync(parent).mode & 0o777, 0o750); }
+  finally { lock.release(); }
+  assert.equal(fs.statSync(parent).mode & 0o777, 0o750);
 });

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store, loadRedeliveryLimits } from './store.mjs';
-import { HOST_BUDGET_CEILINGS, parseHostBudget } from './host-budget.mjs';
+import { HOST_BUDGET_CEILINGS, parseHostBudget, resolveHostStopEvidence } from './host-budget.mjs';
 
 test('CLI guidance uses the stable command for the executable on PATH, but npx in npm exec', async t => {
   const { cliCommand } = await import('./cli-name.mjs');
@@ -16,6 +16,28 @@ test('CLI guidance uses the stable command for the executable on PATH, but npx i
   assert.equal(cliCommand(bin, { PATH: dir, npm_command: 'exec' }), 'npx @tnunamak/dalan');
 });
 
+test('suite self-test accepts a Node executable path containing spaces and an apostrophe', { skip: process.platform === 'win32' }, async t => {
+  const { spawnSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-segments-node-path-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const scripts = path.join(dir, 'scripts');
+  const fakeNode = path.join(dir, "operator's node");
+  fs.mkdirSync(scripts);
+  fs.symlinkSync(process.execPath, fakeNode);
+  const runner = path.join(scripts, 'test-segments.mjs');
+  const preload = path.join(dir, 'path-fixture.mjs');
+  fs.copyFileSync(new URL('../scripts/test-segments.mjs', import.meta.url), runner);
+  fs.writeFileSync(path.join(scripts, 'test-segments-test.mjs'), '');
+  fs.writeFileSync(preload, 'Object.defineProperty(process, "execPath", { value: process.env.FIXTURE_NODE_PATH });');
+  const result = spawnSync(process.execPath, ['--import', preload, runner, '--self-test'], {
+    env: { HOME: dir, TMPDIR: dir, PATH: process.env.PATH, FIXTURE_NODE_PATH: fakeNode },
+    encoding: 'utf8', timeout: 10000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /PASS segment runner continues after failures/);
+});
+
 test('CLI guidance falls back to the checkout when a different dalan is first on PATH', async t => {
   const { cliCommand } = await import('./cli-name.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-cli-fallback-'));
@@ -24,6 +46,47 @@ test('CLI guidance falls back to the checkout when a different dalan is first on
   fs.writeFileSync(checkout, '', { mode: 0o700 });
   fs.writeFileSync(path.join(dir, 'dalan'), '', { mode: 0o700 });
   assert.equal(cliCommand(checkout, { PATH: dir }), "node '" + fs.realpathSync(checkout) + "'");
+});
+
+async function selfCheckFailureFixture(t) {
+  const { spawnSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-selfcheck-failure-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'scripts'));
+  fs.mkdirSync(path.join(dir, 'src'));
+  const cli = path.join(dir, 'scripts', 'dalan-try-selfcheck.mjs');
+  fs.copyFileSync(new URL('../scripts/dalan-try-selfcheck.mjs', import.meta.url), cli);
+  fs.writeFileSync(path.join(dir, 'src', 'redirect-policy.mjs'), 'export const validateRedirectUri = () => ({ ok: true });');
+  fs.writeFileSync(path.join(dir, 'src', 'try-selfcheck.mjs'), `
+    export const SELFCHECK_REDIRECT = 'https://example.invalid/callback';
+    export async function runSelfCheck({ url }) {
+      throw new Error('fixture connection failed at ' + url);
+    }
+  `);
+  return (vars = {}) => {
+    const result = spawnSync(process.execPath, [cli, '--home', dir], {
+      env: { HOME: dir, USERPROFILE: dir, ...vars }, encoding: 'utf8', timeout: 5000,
+    });
+    assert.ifError(result.error);
+    return result;
+  };
+}
+
+test('trial self-check reports usage when the supplied home lacks a resource-url file', async t => {
+  const invoke = await selfCheckFailureFixture(t);
+  const result = invoke();
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /^usage:/);
+  assert.equal(result.stdout, '');
+});
+
+test('trial self-check reports the failed result without echoing the attempted URL', async t => {
+  const invoke = await selfCheckFailureFixture(t);
+  const url = 'https://example.invalid/fixture-marker';
+  const result = invoke({ DALAN_TRY_URL: url });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /RESULT FAIL/);
+  assert.doesNotMatch(result.stdout + result.stderr, /fixture-marker|fixture connection failed/);
 });
 
 const minute=60000;
@@ -127,6 +190,24 @@ test('host budget names the misaligned memory or disk limit', () => {
   }
 });
 
+test('host stop evidence stays unverified when remaining processes are reported or unknown', () => {
+  const base = { verified: true, reason: 'synthetic test receipt' };
+  assert.deepEqual(resolveHostStopEvidence(null, null), null);
+  for (const evidence of [base, { ...base, remaining_pids: [123] }]) {
+    assert.deepEqual(resolveHostStopEvidence(null, evidence), { ...evidence, verified: false });
+    assert.equal(evidence.verified, true, 'validation must not mutate the supplied evidence');
+  }
+  assert.deepEqual(resolveHostStopEvidence(null, { ...base, remaining_pids: [] }),
+    { ...base, remaining_pids: [] });
+});
+
+test('host budget rejects one over the process ceiling with a named limit', () => {
+  const atLimit = { ...HOST_BUDGET_CEILINGS };
+  assert.deepEqual(parseHostBudget(atLimit), atLimit);
+  assert.throws(() => parseHostBudget({ ...atLimit, processes: atLimit.processes + 1 }),
+    /invalid host_budget\.processes/);
+});
+
 test('idle warning configuration defaults, validates, and is distinct from legacy lease setting',t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-idle-warning-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
@@ -165,6 +246,32 @@ test('try refuses conflicting local and public modes in either order', async () 
   assert.equal(parseTryArgs(['--public', '--public']).mode, 'public');
 });
 
+
+test('try rejects an unrecognizable pending list or incomplete attempt', async () => {
+  const { parsePending } = await import('./try.mjs');
+  assert.throws(() => parsePending({ window: null }), /no pending list/);
+  assert.throws(() => parsePending({ window: {}, pending: [] }), /bad window/);
+  assert.throws(() => parsePending({ window: null, pending: [{ code: 'fixture-only' }] }),
+    /attempt without client_id/);
+  assert.deepEqual(parsePending({ window: null, pending: [] }), { window: null, pending: [] });
+});
+
+test('try suggests only the newest live native attempt without hiding browser attempts', async () => {
+  const { parsePending } = await import('./try.mjs');
+  const attempt = (code, native, superseded = false) => ({
+    code, native, superseded, client_id: 'fixture-app', redirect_uri: 'https://client.invalid/return',
+    scopes: ['read'], expires_in_seconds: 45,
+  });
+  const entries = [
+    attempt('prior', true), attempt('browser', false), attempt('current', true), attempt('closed', true, true),
+  ];
+  const parsed = parsePending({ window: { worker: 'fixture' }, pending: entries });
+  assert.deepEqual(parsed.pending.map(({ code, superseded }) => [code, superseded]),
+    [['prior', true], ['browser', false], ['current', false], ['closed', true]]);
+  assert.equal(entries[0].superseded, false, 'input is not rewritten');
+  assert.equal(parsed.pending[2].expires_in_seconds, 45);
+});
+
 test('lineBuffer assembles split CRLF lines and flushes an unterminated final line once', async () => {
   const { lineBuffer } = await import('./try-exposure.mjs');
   const lines = [];
@@ -178,6 +285,22 @@ test('lineBuffer assembles split CRLF lines and flushes an unterminated final li
   assert.deepEqual(lines, ['one', 'two', 'last']);
 });
 
+test('try refuses malformed scope entries instead of coercing them for display', async () => {
+  const { parsePending } = await import('./try.mjs');
+  const attempt = {
+    code: 'fixture', client_id: 'fixture-app', redirect_uri: 'https://client.invalid/return',
+  };
+  for (const scopes of [[17], ['read', null], ['']]) {
+    assert.throws(() => parsePending({ window: null, pending: [{ ...attempt, scopes }] }),
+      /attempt with invalid scopes/);
+  }
+  for (const scopes of [[], ['read', 'write']]) {
+    const parsed = parsePending({ window: null, pending: [{ ...attempt, scopes }] });
+    assert.deepEqual(parsed.pending[0].scopes, scopes);
+    assert.notEqual(parsed.pending[0].scopes, scopes);
+  }
+});
+
 test('lineBuffer retains the configured tail while waiting for a final newline', async () => {
   const { lineBuffer } = await import('./try-exposure.mjs');
   const lines = [];
@@ -187,4 +310,30 @@ test('lineBuffer retains the configured tail while waiting for a final newline',
   push('\n');
   push.end();
   assert.deepEqual(lines, ['kept']);
+});
+
+async function runUpgradeDrainFixture(t, args, extraEnv = {}) {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const cli = fileURLToPath(new URL('../scripts/upgrade-drain.mjs', import.meta.url));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-drain-args-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  // A regression must never reach a real bin/dot-worker.mjs or use the host HOME.
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd,
+    env: { HOME: cwd, USERPROFILE: cwd, SYSTEMROOT: process.env.SYSTEMROOT, ...extraEnv },
+    encoding: 'utf8',
+    timeout: 2000,
+  });
+}
+
+test('upgrade-drain rejects a subminimum timeout before pausing or quiescing', async t => {
+  for (const args of [[], ['--until-quiescent']]) {
+    const result = await runUpgradeDrainFixture(t, args, { DALAN_UPGRADE_DRAIN_TIMEOUT_MS: '999' });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /DALAN_UPGRADE_DRAIN_TIMEOUT_MS must be an integer of at least 1000/);
+    assert.match(result.stderr, args.length ? /quiesce off/ : /dalan resume/);
+    assert.equal(result.stdout, '');
+  }
 });

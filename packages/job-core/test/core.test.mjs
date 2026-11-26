@@ -2,6 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { assertClaimAuthority, canonicalJson, canonicalValue, decide } from '../index.mjs';
 
+test('canonical JSON does not mutate deep-frozen request data while ordering keys', () => {
+  const row = Object.freeze({ z: 'last', a: 'first' });
+  const payload = Object.freeze({ rows: Object.freeze([row]) });
+  assert.equal(canonicalJson(payload), '{"rows":[{"a":"first","z":"last"}]}');
+  assert.deepEqual(Object.keys(row), ['z', 'a']);
+  assert.equal(payload.rows[0], row);
+});
+
+test('canonical JSON requires the caller to encode raw bytes explicitly', () => {
+  assert.throws(() => canonicalJson({ payload: new Uint8Array([65, 66]) }, 'invalid_payload'), {
+    code: 'invalid_payload', message: 'invalid_payload',
+  });
+  assert.equal(canonicalJson({ payload: [65, 66] }), '{"payload":[65,66]}');
+});
+
 test('canonical JSON keeps Unicode keys and values in deterministic key order', () => {
   const document = { '中': ['茶'], 'é': 'été', a: '🐟' };
   assert.equal(canonicalJson(document), '{"a":"🐟","é":"été","中":["茶"]}');
@@ -47,6 +62,13 @@ test('canonical JSON writes negative zero as zero in object and array values', (
   assert.equal(canonicalJson({ n: 0, array: [0, { n: 0 }] }), expected);
 });
 
+test('canonical JSON rejects a missing array cell rather than inventing an explicit null', () => {
+  const incomplete = ['first', 'second'];
+  delete incomplete[1];
+  assert.throws(() => canonicalJson(incomplete, 'invalid_fixture'), { code: 'invalid_fixture' });
+  assert.equal(canonicalJson(['first', null]), '["first",null]');
+});
+
 test('canonical JSON rejects an undefined array cell instead of serializing it as null', () => {
   assert.throws(() => canonicalJson({ values: [1, undefined] }), {
     name: 'Error', code: 'invalid_json', message: 'invalid_json',
@@ -74,6 +96,27 @@ test('claim authority requires matching epoch and an unexpired deadline', () => 
 });
 
 
+test('claim authority requires explicit boolean activation, not truthiness', () => {
+  const command = Object.freeze({ job: 'j', subject: 's', worker: 'w', claim: 'c', epoch: 2 });
+  const lease = Object.freeze({ ...command, leaseUntil: 1 });
+  for (const active of [1, 'true', null]) {
+    const authority = Object.freeze({ ...lease, active });
+    assert.throws(() => assertClaimAuthority(command, authority, 0), { code: 'stale_authority' });
+  }
+  assert.doesNotThrow(() => assertClaimAuthority(command, { ...lease, active: true }, 0));
+});
+
+test('renewal requires an explicit, positive integral caller ceiling', () => {
+  const snapshot = Object.freeze({ revision: 7 });
+  const command = Object.freeze({ expectedRevision: 7, operation: 'renew', args: Object.freeze({ leaseMs: 1 }) });
+  for (const context of [undefined, { now: 3 }, { now: 3, maxLeaseMs: 0 }, { now: 3, maxLeaseMs: 1.5 }]) {
+    assert.throws(() => decide(snapshot, command, context), { code: 'invalid_lease' });
+  }
+  assert.deepEqual(decide(snapshot, command, { now: 3, maxLeaseMs: 1 }), {
+    events: [], effects: [{ type: 'advance_revision', expectedRevision: 7 }], leaseUntil: 4,
+  });
+});
+
 test('renewal reports invalid lease when duration is missing, zero, or fractional', () => {
   const snapshot = Object.freeze({ revision: 2 });
   for (const args of [undefined, {}, { leaseMs: 0 }, { leaseMs: 1.5 }]) {
@@ -87,6 +130,30 @@ test('a stale revision is reported before validating a renewal duration', () => 
   const command = { expectedRevision: 1, operation: 'renew', args: { leaseMs: 0 } };
   assert.throws(() => decide({ revision: 2 }, command, { now: 10, maxLeaseMs: 9 }),
     { code: 'revision_conflict' });
+});
+
+test('a matching but unrepresentable finish revision produces no decision', () => {
+  for (const revision of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const snapshot = Object.freeze({ revision });
+    const command = Object.freeze({ expectedRevision: revision, operation: 'finish' });
+    assert.throws(() => decide(snapshot, command), { code: 'invalid_revision', message: 'invalid_revision' });
+    assert.deepEqual(snapshot, { revision });
+  }
+});
+
+test('renewal refuses missing or invalid server clock context before emitting an effect', () => {
+  const snapshot = Object.freeze({ revision: 4 });
+  const command = Object.freeze({
+    expectedRevision: 4, operation: 'renew', args: Object.freeze({ leaseMs: 2 }),
+  });
+  for (const context of [undefined, { now: -1, maxLeaseMs: 8 },
+    { now: 10.5, maxLeaseMs: 8 }, { now: 10, maxLeaseMs: 0 }]) {
+    assert.throws(() => decide(snapshot, command, context), {
+      code: 'invalid_lease', message: 'invalid_lease',
+    });
+    assert.deepEqual(snapshot, { revision: 4 });
+  }
+  assert.equal(decide(snapshot, command, { now: 10, maxLeaseMs: 8 }).leaseUntil, 12);
 });
 
 test('revision and lease decisions use supplied time', () => {
@@ -246,4 +313,21 @@ test('canonical JSON rejects a Map instead of dropping its entries', () => {
 
 test('canonical JSON rejects boxed scalars instead of coercing them', () => {
   assert.throws(() => canonicalJson([Object(false)]), {code: 'invalid_json'});
+});
+
+test('canonical JSON keeps punctuation in object field names without turning it into structure', () => {
+  const value = { 'two words': true, 'quoted"field': 'fixture', 'line\nbreak': 1 };
+  const encoded = canonicalJson(value);
+  assert.equal(encoded, '{"line\\nbreak":1,"quoted\\"field":"fixture","two words":true}');
+  assert.deepEqual(JSON.parse(encoded), value);
+});
+
+test('renewal at the initial supplied clock advances a frozen revision without altering it', () => {
+  const snapshot = Object.freeze({ revision: 0, leaseUntil: 50 });
+  const command = Object.freeze({ expectedRevision: 0, operation: 'renew', args: Object.freeze({ leaseMs: 10 }) });
+  const context = Object.freeze({ now: 0, maxLeaseMs: 10 });
+  assert.deepEqual(decide(snapshot, command, context), {
+    events: [], effects: [{ type: 'advance_revision', expectedRevision: 0 }], leaseUntil: 10,
+  });
+  assert.equal(snapshot.leaseUntil, 50);
 });
