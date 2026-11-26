@@ -175,6 +175,7 @@ try:
     if dependencies:
         checks = [('package-lock.json', dependencies['lock_sha256']), ('package.json', dependencies['manifest_sha256'])]
         checks += [(name + '/package.json', digest) for name, digest in dependencies.get('workspaces', {}).items()]
+        checks += list(dependencies.get('local_files', {}).items())
         for name, digest in checks:
             with open('/workspace/' + name, 'rb') as stream:
                 if hashlib.sha256(stream.read()).hexdigest() != digest:

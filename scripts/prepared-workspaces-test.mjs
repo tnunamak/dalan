@@ -81,6 +81,18 @@ test('prepare publishes the root tree and each workspace tree, frozen, and any m
   assert.throws(() => resolvePreparedNodeModules(source, { cacheDir }), { code: 'dependencies_unprepared' }, 'a link to a path that is not a workspace');
 });
 
+test('two checkouts with one lock and different workspace manifests keep separate entries', { skip: !linux }, () => {
+  const cacheDir = path.join(root, 'store-coexist'), other = path.join(root, 'source-other');
+  fs.cpSync(source, other, { recursive: true });
+  fs.writeFileSync(path.join(other, 'packages/b/package.json'), JSON.stringify({ name: 'b', version: '1.0.0', scripts: { test: 'true' } }));
+  const first = prepareNodeModules(source, { cacheDir }), second = prepareNodeModules(other, { cacheDir });
+  assert.equal(first.lock_sha256, second.lock_sha256, 'the lock is shared');
+  assert.notEqual(first.treePath, second.treePath, 'each identity has its own slot');
+  assert.notEqual(first.workspaces['packages/b'] ?? first.manifest_sha256, second.workspaces['packages/b'] ?? second.manifest_sha256);
+  assert.deepEqual(resolvePreparedNodeModules(source, { cacheDir }), first, 'the first entry survives the second preparation');
+  assert.deepEqual(resolvePreparedNodeModules(other, { cacheDir }), second);
+});
+
 const budgets = { cpu_ms: 60000, wall_ms: 90000, memory_bytes: 1024 * 1024 * 1024, processes: 128, disk_write_bytes: 128 * 1024 * 1024, output_bytes: 65536 };
 test('the sandbox resolves the root tree, the workspace tree and the workspace links, read-only', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
   prepareNodeModules(source); // the default store under HOME, where a host check looks

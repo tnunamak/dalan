@@ -83,7 +83,13 @@ function inputs(source) {
   const manifests = new Set(workspaces.map(name => `${name}/package.json`));
   const tarballs = [...files.keys()].filter(name => !manifests.has(name));
   if (tarballs.length) identity.local_files = Object.fromEntries(tarballs.map(name => [name, hash(files.get(name))]));
-  return { root, lock, manifest, files, workspaces, identity, key: hash(JSON.stringify(identity.runtime)) };
+  // The slot under the lock is the runtime alone for a repository without workspaces or local files (layout unchanged, so existing entries
+  // stay valid). With them, the full identity selects the slot: two checkouts with one lock and different workspace manifests or
+  // tarballs each keep their own entry instead of fighting over one.
+  const key = identity.workspaces || identity.local_files
+    ? hash(JSON.stringify({ runtime: identity.runtime, manifest_sha256: identity.manifest_sha256, workspaces: identity.workspaces ?? {}, local_files: identity.local_files ?? {} }))
+    : hash(JSON.stringify(identity.runtime));
+  return { root, lock, manifest, files, workspaces, identity, key };
 }
 // Remove every write bit under a prepared tree so the sandbox's read-only mount and the owner agree on what the bytes are.
 export function freezeTree(dir) { const s = fs.lstatSync(dir); if (s.isSymbolicLink()) return; if (s.isDirectory()) for (const name of fs.readdirSync(dir)) freezeTree(path.join(dir, name)); else if (!s.isFile()) throw failure('dependencies_invalid', 'special file in dependency tree'); fs.chmodSync(dir, s.mode & 0o555); }
