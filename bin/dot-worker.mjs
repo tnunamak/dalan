@@ -5,6 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import { prepareNodeModules } from '../src/prepared-node-modules.mjs';
+import { prepareGoModules } from '../src/prepared-go-modules.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -789,9 +790,11 @@ async function main() {
     case 'reconcile': { const id=args[0]; if(!id) throw new Error('reconcile requires id'); const adopt=args.includes('--adopt'); let ownerToken; if(adopt) ownerToken=writeReceipt(id,randomBytes(32).toString('hex'),'', '').token; result=await request('/reconcile','POST',{id,adopt,owner_token:ownerToken},{'x-operator-key':operator()}); break; }
     case 'verify-stops': { const id=args.find(a=>a!=='--json'); result=await request('/verify-stops','POST',id?{id}:{},{'x-operator-key':operator()}); break; }
     case 'prepare-deps': {
-      const positional=args.filter(a=>!['--json','--replace-invalid'].includes(a));
-      if(positional.length!==1||positional[0].startsWith('-')) throw new Error('usage: dalan prepare-deps SOURCE_DIRECTORY [--json] [--replace-invalid]');
-      result=prepareNodeModules(positional[0],{replaceInvalid:args.includes('--replace-invalid')});
+      const positional=args.filter(a=>!['--json','--replace-invalid','--go'].includes(a));
+      if(positional.length!==1||positional[0].startsWith('-')) throw new Error('usage: dalan prepare-deps SOURCE_DIRECTORY [--go] [--json] [--replace-invalid]');
+      const replaceInvalid=args.includes('--replace-invalid');
+      // --go prepares the Go module cache (and the toolchain go.mod asks for); without it the npm tree, as before.
+      result=args.includes('--go')?prepareGoModules(positional[0],{replaceInvalid}):prepareNodeModules(positional[0],{replaceInvalid});
       break;
     }
     case 'doctor': {

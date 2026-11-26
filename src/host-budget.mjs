@@ -1,6 +1,7 @@
 import { readEnv } from './env.mjs';
 import fs from 'node:fs';
 import {resolvePreparedNodeModules} from './prepared-node-modules.mjs';
+import {resolvePreparedGoModules} from './prepared-go-modules.mjs';
 import path from 'node:path';
 import {prepareHostReceipts,assertHostReceiptIsolation,readVerifiedHostStop} from './host-budget-receipts.mjs';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,9 @@ import { createHash } from 'node:crypto';
 // The 2 GiB memory ceiling covers the heaviest measured suite-class workload
 // on the deployment host (a 1592 MB peak in the test-sandbox run ledger,
 // 2026-11-24) with about 27% margin; one unit runs per user at a time.
-export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 2 * 1024 ** 3, processes: 128, disk_write_bytes: 256 * 1024 ** 2, output_bytes: 1024 ** 2 });
+export const HOST_BUDGET_CEILINGS = Object.freeze({ cpu_ms: 120000, wall_ms: 180000, memory_bytes: 2 * 1024 ** 3, processes: 128, disk_write_bytes: 512 * 1024 ** 2, output_bytes: 1024 ** 2 });
+// The 512 MiB disk ceiling (the tmpfs also holds the candidate copy) covers a cold Go build: the build cache of a mid-size module
+// (clawmeter: 143 MB cached, about the same again in $WORK) did not fit in 256 MiB, measured 2026-11-26. A check asks for what it needs.
 // A workload the kernel OOM-killed is not restarted at once: the same workload
 // on the same unit fails fast with reason "oom" until this delay passes, so a
 // caller's restart loop cannot re-kill it second after second. The production
@@ -74,7 +77,8 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const receipts=prepareHostReceipts({checkRunId,receiptDir});
   const workingDir=fs.realpathSync(dir);
   const dependencies=resolvePreparedNodeModules(workingDir);
-  const protectedPaths=['node_modules','package.json','package-lock.json'];
+  const goModules=resolvePreparedGoModules(workingDir);
+  const protectedPaths=['node_modules','package.json','package-lock.json','go.mod','go.sum'];
   const overlaps=(a,b)=>a===b||a.startsWith(b+'/')||b.startsWith(a+'/');
   for(const name of [...maskPaths,...sourceExemptions.map(entry=>entry.path)]) {
     if(typeof name!=='string'||!name||path.posix.normalize(name)!==name||name.startsWith('/')||name==='..'||name.startsWith('../')||protectedPaths.some(p=>overlaps(name,p))) throw new Error('dependencies_invalid: overlay overlaps dependency inputs');
@@ -88,9 +92,9 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
       path.resolve(path.dirname(process.execPath),'../lib/node_modules/npm'),service,stopRecorder,
       cgroupReader,processSignaler,
       fileURLToPath(new URL('./host-budget-storage.py',import.meta.url)),fileURLToPath(new URL('./host-budget-seccomp.py',import.meta.url)),
-      ...sourceExemptions.map(entry=>entry.hostPath),...(dependencies?[dependencies.treePath]:[])]);
+      ...sourceExemptions.map(entry=>entry.hostPath),...(dependencies?[dependencies.treePath]:[]),...(goModules?[goModules.treePath]:[])]);
   }
-  const config = { dir: workingDir, budgets, phases, maskPaths, sourceExemptions, dependencies, node: process.execPath, ...(receipts?{receipts}:{}) };
+  const config = { dir: workingDir, budgets, phases, maskPaths, sourceExemptions, dependencies, goModules, node: process.execPath, ...(receipts?{receipts}:{}) };
   const serialized = JSON.stringify(config);
   if (Buffer.byteLength(serialized) > 65536) throw new Error('host budget configuration exceeds 64 KiB');
   const properties = [
@@ -180,5 +184,5 @@ async function runHostBudgetAttempt({ dir, budgets, phases, maskPaths = [], sour
   const bytes = Buffer.concat(phaseResults.map(p => p.bytes)).subarray(0, budgets.output_bytes);
   const notStarted=provesHostNotStarted({spawnError:exit.error,pid,stopped}); // stderr is not trusted for this decision.
   const usage = message?.usage ? { ...partialUsage, ...message.usage } : partialUsage;
-  return { unit, dependencies: dependencies ? {lock_sha256:dependencies.lock_sha256,manifest_sha256:dependencies.manifest_sha256,runtime:dependencies.runtime} : null, exit: error ? { code: 125 } : message?.exit ?? { code: 125 }, error, budgets, usage, usage_complete: !!message?.usage && !!message?.phases?.length && stopped?.result !== 'timeout' && !stopped?.oom_kill, bytes, phases: phaseResults, stop, notStarted, timedOut: error === 'budget exceeded: wall', cancelled: !!message?.cancelled, truncated: error === 'budget exceeded: output', duration_ms: Math.round(performance.now()-started) };
+  return { unit, dependencies: dependencies ? {lock_sha256:dependencies.lock_sha256,manifest_sha256:dependencies.manifest_sha256,runtime:dependencies.runtime} : null, go_modules: goModules ? {go_mod_sha256:goModules.go_mod_sha256,go_sum_sha256:goModules.go_sum_sha256,runtime:goModules.runtime} : null, exit: error ? { code: 125 } : message?.exit ?? { code: 125 }, error, budgets, usage, usage_complete: !!message?.usage && !!message?.phases?.length && stopped?.result !== 'timeout' && !stopped?.oom_kill, bytes, phases: phaseResults, stop, notStarted, timedOut: error === 'budget exceeded: wall', cancelled: !!message?.cancelled, truncated: error === 'budget exceeded: output', duration_ms: Math.round(performance.now()-started) };
 }
