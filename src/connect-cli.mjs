@@ -1,13 +1,15 @@
 import { defaultPath } from './paths.mjs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertPrivateDir, untrusted, writeAtomic } from './as-files.mjs';
+import { createHash } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
+import { assertPrivateDir, isLoopbackCallback, untrusted, writeAtomic } from './as-files.mjs';
 import { normalizeCode, PAIRING_MINUTES } from './as-files.mjs';
 const WAKE_POLL_SECONDS = 60;
 
 // `dalan connect ...`: the owner's side of the built-in authorization server. Every call goes through the owner Unix
 // socket with the operator key; none of it exists on the public listener.
-const USAGE = 'usage: dalan connect add-client --redirect-uri URI [--name NAME] [--json] | clients [--json] | remove-client CLIENT_ID | start --worker NAME [--minutes N] | stop | reset | pending | approve CODE --worker NAME [--confirm-redirect URI] [--replace] | list | revoke NAME | allow-callback PATTERN | signal-token [--worker NAME] [--rotate] [--json]';
+const USAGE = 'usage: dalan connect add-client --redirect-uri URI [--name NAME] [--json] | clients [--json] | remove-client CLIENT_ID | start --worker NAME [--minutes N] | stop | reset | pending | approve CODE --worker NAME [--confirm-redirect URI] [--replace] | complete URL --worker NAME [--replace] [--json] | list | revoke NAME | allow-callback PATTERN | signal-token [--worker NAME] [--rotate] [--json]';
 
 // Terminal-safe text: vendor-supplied strings never reach the terminal as raw bytes.
 const q = value => JSON.stringify(String(value ?? '').replace(/[\p{C}\p{Z}]+/gu, ' ').trim());
@@ -32,6 +34,140 @@ export function formatClients(result) {
     `client_id   ${q(client.client_id)}`, `type        ${client.type}`, `client_name [untrusted] ${q(client.client_name)}`,
     `redirect_uris ${client.redirect_uris.map(q).join(' ')}`, `created_at  ${client.created_at}`,
   ].join('\n')).join('\n\n');
+}
+
+const fingerprint = value => createHash('sha256').update(value).digest('base64url');
+const redirectStatus = status => [301, 302, 303, 307, 308].includes(status);
+const authorityEndpoint = url => url.origin + url.pathname;
+
+// A short-lived, one-issuer in-memory cookie jar. No cookie or operator header is
+// sent with the final local callback. No redirect is followed by the HTTP client.
+function interactionBrowser(issuer, signal) {
+  const jar = new Map();
+  return async function get(url) {
+    if (url.origin !== issuer.origin || url.username || url.password || url.hash) throw new Error('Bridge sent an unexpected authorization redirect.');
+    const now = Date.now();
+    const headers = {};
+    const cookies = [...jar.values()].filter(c => c.expires > now && (!c.secure || url.protocol === 'https:')
+      && (url.pathname === c.path || url.pathname.startsWith(c.path.endsWith('/') ? c.path : c.path + '/')));
+    if (cookies.length) headers.cookie = cookies.sort((a, b) => b.path.length - a.path.length).map(c => c.part).join('; ');
+    let response;
+    try { response = await fetch(url, { headers, signal, redirect: 'manual' }); }
+    catch { throw new Error('Could not load the bridge authorization page.'); }
+    const cookieHeaders = response.headers.getSetCookie();
+    for (const line of cookieHeaders) {
+      const [part, ...attrs] = line.split(';').map(s => s.trim());
+      const name = part.slice(0, part.indexOf('='));
+      if (!name || !/^[A-Za-z0-9_.-]+$/.test(name) || /[\r\n]/.test(part)) continue;
+      const options = new Map(attrs.map(attr => {
+        const i = attr.indexOf('=');
+        return i < 0 ? [attr.toLowerCase(), true] : [attr.slice(0, i).toLowerCase(), attr.slice(i + 1)];
+      }));
+      // The authorization server's interaction cookies are host-only.
+      if (options.has('domain')) continue;
+      const candidate = options.get('path');
+      const cookiePath = typeof candidate === 'string' && candidate.startsWith('/') ? candidate : (url.pathname.slice(0, url.pathname.lastIndexOf('/')) || '/');
+      const maxAge = options.has('max-age') ? Number(options.get('max-age')) : NaN;
+      const expiresAt = options.has('expires') ? Date.parse(options.get('expires')) : NaN;
+      const expires = Number.isFinite(maxAge) ? now + maxAge * 1000 : Number.isFinite(expiresAt) ? expiresAt : Infinity;
+      const key = name + '\0' + cookiePath;
+      if (expires <= now) jar.delete(key);
+      else jar.set(key, { part, path: cookiePath, secure: options.has('secure'), expires });
+    }
+    const location = response.headers.get('location');
+    if (response.body) await response.body.cancel().catch(() => {});
+    return { status: response.status, location };
+  };
+}
+
+function nextUrl(response, base) {
+  if (!redirectStatus(response.status) || !response.location) return null;
+  try {
+    const url = new URL(response.location, base);
+    return !url.username && !url.password && !url.hash ? url : null;
+  } catch { return null; }
+}
+
+function isLocalRedirect(raw) {
+  if (typeof raw !== 'string' || !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|\?|$)/i.test(raw)) return false;
+  try { return isLoopbackCallback(new URL(raw)); } catch { return false; }
+}
+
+function sameLocalCallback(given, expected, original, issuer) {
+  if (!given || !isLocalRedirect(given.href)
+      || given.origin !== expected.origin || given.pathname !== expected.pathname) return false;
+  if (given.searchParams.getAll('code').length !== 1 || !given.searchParams.get('code')
+      || given.searchParams.has('error') || given.searchParams.getAll('state').length > 1
+      || given.searchParams.get('state') !== original.searchParams.get('state')
+      || (given.searchParams.has('iss') && (given.searchParams.getAll('iss').length !== 1 || given.searchParams.get('iss') !== issuer.href))) return false;
+  const params = new URLSearchParams(given.searchParams);
+  for (const key of ['code', 'state', 'iss', 'session_state']) params.delete(key);
+  return params.toString() === expected.searchParams.toString();
+}
+
+function sendLocalCallback(url, signal) {
+  // No proxy, cookie, referrer or redirect handling. localhost is resolved only
+  // against literal loopback addresses, regardless of machine DNS configuration.
+  const loopbacks = [{ address: '127.0.0.1', family: 4 }, { address: '::1', family: 6 }];
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, { agent: false, signal, autoSelectFamily: true,
+      lookup(_host, options, done) { if (options.all) done(null, loopbacks); else done(null, loopbacks[0].address, 4); },
+    }, response => {
+      const ok = response.statusCode >= 200 && response.statusCode < 400;
+      response.destroy();
+      if (ok) resolve();
+      else reject(new Error('The local client did not accept the callback after approval.'));
+    });
+    req.on('error', () => reject(new Error('Could not deliver the callback to the local client after approval.')));
+    req.end();
+  });
+}
+
+async function completeLocalConnection(input, worker, replace, request, headers) {
+  let auth;
+  try { auth = new URL(input); } catch { throw new Error('Use this bridge’s exact authorization endpoint URL.'); }
+  if (!['http:', 'https:'].includes(auth.protocol) || auth.username || auth.password || auth.hash) throw new Error('Use this bridge’s exact authorization endpoint URL.');
+  const owner = async (route, method, body) => {
+    try { return await request(route, method, body, headers()); }
+    catch { throw new Error('The bridge owner operation was refused. Check the local operator key and pairing window; use --replace only to replace a connection you own.'); }
+  };
+  const pending = () => owner('/connect/pending', 'GET', null);
+  const view = await pending();
+  if (view.authorization_endpoint_fingerprint !== fingerprint(authorityEndpoint(auth))) throw new Error('Use this bridge’s exact authorization endpoint URL.');
+  if (view.window?.worker !== worker) throw new Error('No pairing window is open for that worker.');
+  const redirects = auth.searchParams.getAll('redirect_uri');
+  if (redirects.length !== 1 || !isLocalRedirect(redirects[0])) throw new Error('A canonical loopback callback is required.');
+  const issuer = new URL(auth.pathname.slice(0, -'/auth'.length), auth.origin);
+  const signal = AbortSignal.timeout(10000);
+  const get = interactionBrowser(issuer, signal);
+  const interaction = nextUrl(await get(auth), auth);
+  const interactionPrefix = issuer.pathname + '/interaction/';
+  if (!interaction || interaction.origin !== issuer.origin || interaction.search || !interaction.pathname.startsWith(interactionPrefix)
+      || !/^[A-Za-z0-9_-]{10,64}$/.test(interaction.pathname.slice(interactionPrefix.length))) {
+    throw new Error('The bridge did not start an authorization interaction.');
+  }
+  if ((await get(interaction)).status !== 200) throw new Error('The bridge did not open a pending pairing.');
+  const current = await pending();
+  if (current.window?.worker !== worker) throw new Error('No pairing window is open for that worker.');
+  const uid = interaction.pathname.slice(interactionPrefix.length);
+  const matches = current.pending.filter(p => p.interaction_fingerprint === fingerprint(uid));
+  const pairing = matches[0];
+  if (matches.length !== 1 || pairing.worker !== worker || !pairing.native || pairing.redirect_uri !== redirects[0]) {
+    throw new Error('Could not verify the exact loopback pairing for this authorization request.');
+  }
+  const result = await owner('/connect/approve', 'POST', { worker, replace, code: pairing.code, confirm_redirect: pairing.redirect_uri });
+  const expected = new URL(pairing.redirect_uri);
+  let step = interaction;
+  for (let hop = 0; hop < 5; hop++) {
+    const target = nextUrl(await get(step), step);
+    if (sameLocalCallback(target, expected, auth, issuer)) {
+      await sendLocalCallback(target, signal);
+      return { connection_id: result.connection_id };
+    }
+    if (!target || target.origin !== issuer.origin || !target.pathname.startsWith(issuer.pathname + '/auth/')) break;
+    step = target;
+  }
+  throw new Error('The bridge did not return the approved local callback. Check the connection before retrying.');
 }
 
 export async function connectCommand(args, { request, operator, option, json }) {
@@ -82,7 +218,14 @@ export async function connectCommand(args, { request, operator, option, json }) 
     case 'pending': {
       if (positional.length) throw new Error(USAGE);
       const result = await request('/connect/pending', 'GET', null, headers());
-      return json ? { result } : { result: formatPending(result), plain: true };
+      const publicView = { window: result.window, pending: result.pending.map(({ interaction_fingerprint, ...item }) => item) };
+      return json ? { result: publicView } : { result: formatPending(publicView), plain: true };
+    }
+    case 'complete': {
+      if (positional.length !== 1 || !worker || args.filter(arg => arg === '--worker').length !== 1
+          || args.some((arg, i) => arg.startsWith('--') && !['--worker', '--replace', '--json'].includes(arg))) throw new Error(USAGE);
+      const result = await completeLocalConnection(positional[0], worker, args.includes('--replace'), request, headers);
+      return json ? { result } : { result: 'Connected: ' + q(result.connection_id), plain: true };
     }
     case 'approve': {
       if (positional.length !== 1 || !worker) throw new Error(USAGE);
