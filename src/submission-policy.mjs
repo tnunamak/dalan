@@ -569,12 +569,20 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       }
     }
     for(const file of scan.files.filter(f=>scope.includes(f))) inspectPath(file);
-    // A symlink inside a directory scope: the workspace never follows one (list skips it, read refuses), so read-only work
-    // with excludeSensitive records it as dropped instead of refusing the scope. A named symlink still refuses.
-    for(const file of scan.symlinks||[]) if(within(file,scope)&&!scope.includes(file)&&excludeSensitive&&rendered.execution_scope!=='implementation') dropped.push({path:file,reason:'symlink (the workspace never follows symlinks)'});
-    // A scope whose narrowing needs more than maxNarrowedEntries entries is refused (fail closed): keeping the broad scope
-    // would rest on an exact-path exclusion that a case or Unicode alias on a case-insensitive filesystem can miss.
-    if(dropped.length) narrowedScope=repositoryImplementation?scope:narrowScope(scope,[...new Set([...scan.files,...scan.diffFiles])],dropped.map(d=>d.path));
+    // For a whole repository the workspace withholds unnamed entries before
+    // materialization; a directory still uses the existing read-only narrowing.
+    // Do not allow a named symlink just because another rule already dropped it.
+    const explicit=new Set(scope.map(outputPathKeys[3]));
+    for(const file of scan.symlinks||[]) {
+      if(!within(file,scope)) continue;
+      if(explicit.has(outputPathKeys[3](file))) throw new Error(`symlink in repository scope: ${file}`);
+      if(repositoryImplementation||(excludeSensitive&&rendered.execution_scope!=='implementation')) {
+        if(!dropped.some(d=>d.path===file)) dropped.push({path:file,reason:'symlink (the workspace never follows symlinks)'});
+      }
+    }
+    // The workspace enforces broad exclusions under canonical names and proves
+    // physical absence before checks. Directory scopes still have the narrow cap.
+    if(dropped.length) narrowedScope=scope.includes('.')?scope:narrowScope(scope,[...new Set([...scan.files,...scan.diffFiles])],dropped.map(d=>d.path));
     for(const file of scan.symlinks||[]) if(within(file,narrowedScope??scope)&&!dropped.some(d=>d.path===file)) throw new Error(`symlink in repository scope: ${file}`);
     if(input.input_patch) {
       if(/^new (?:file )?mode 120000$/m.test(input.input_patch)) throw new Error('symlink in input patch scope');
