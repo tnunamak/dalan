@@ -72,14 +72,15 @@ try {
         if(line){clearTimeout(timeout);resolve(line[1]);}
       });
     });
-    const preview=raw=>new Promise((resolve,reject)=>{
+    const requestAssignment=(raw,route='/submit-preview')=>new Promise((resolve,reject)=>{
       const body=typeof raw==='string'?raw:JSON.stringify(raw);
-      const req=request({socketPath,path:'/submit-preview',method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(body)}},res=>{
+      const req=request({socketPath,path:route,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(body)}},res=>{
         const parts=[];res.on('data',chunk=>parts.push(chunk));res.on('error',reject);
         res.on('end',()=>{try{resolve({status:res.statusCode,value:JSON.parse(Buffer.concat(parts).toString())});}catch(error){reject(error);}});
       });
       req.on('error',reject);req.setTimeout(5000,()=>req.destroy(new Error('fixture request timed out')));req.end(body);
     });
+    const preview=raw=>requestAssignment(raw);
     const fixture={owner_token:'fixture-owner',delivery:'none',assignment:{schema_version:1,request_id:'preview-fixture',brief:'Check fixture',inputs:[],execution_scope:'read-only',expected_output:'review report'}};
     const bad=await preview({...fixture,assignment:{...fixture.assignment,request_id:'preview-head-mismatch',execution_scope:'implementation',
       inputs:[{github_repo:'tnunamak/dalan',base_sha:'a'.repeat(40),head_sha:'b'.repeat(40)}]}});
@@ -92,6 +93,40 @@ try {
     const good=await preview(fixture);
     assert.equal(good.status,200);assert.equal(good.value.verdict,'admissible');
     assert.ok(good.value.admission);assert.equal(good.value.stored,false);
+    const protectedRepo={...fixture,worker:'local',assignment:{...fixture.assignment,
+      request_id:'preview-private-repo',inputs:[{github_repo:'example-owner/absent',base_sha:'a'.repeat(40)}]}};
+    const blocked=await preview(protectedRepo);
+    assert.equal(blocked.status,200);
+    assert.notEqual(blocked.value.verdict,'admissible');
+    assert.equal(blocked.value.stored,false);
+    assert.ok(blocked.value.reasons.length>0);
+    assert.equal('admission' in blocked.value,false,'repo authorization precedes advisory access');
+
+    const realRefusal=await requestAssignment(protectedRepo,'/submit');
+    assert.ok(realRefusal.status>=400);
+    assert.equal('admission' in realRefusal.value,false,'real refusal never returns advisory data');
+
+    const withId=request_id=>({...fixture,worker:'local',assignment:{...fixture.assignment,request_id}});
+    const missing=await preview({...withId('preview-missing-supersedes'),
+      supersedes:{target_id:'missing-fixture-row',target_token:fixture.owner_token}});
+    assert.equal(missing.status,200);
+    assert.notEqual(missing.value.verdict,'admissible');
+    assert.equal(missing.value.stored,false);
+    assert.match(JSON.stringify(missing.value.reasons),/supersed|not found/i);
+
+    for(const id of ['preview-replacement-target','preview-unrelated-job']){
+      const seeded=await requestAssignment(withId(id),'/submit');
+      assert.equal(seeded.status,200,JSON.stringify(seeded.value));
+      assert.equal(seeded.value.status,'queued');
+    }
+    const proposed=withId('preview-replacement');
+    const ordinary=await preview(proposed);
+    const replacement=await preview({...proposed,
+      supersedes:{target_id:'preview-replacement-target',target_token:fixture.owner_token}});
+    assert.equal(replacement.value.stored,false);
+    assert.equal(replacement.value.admission.ahead.count,ordinary.value.admission.ahead.count-1);
+    const unchanged=await preview(proposed);
+    assert.equal(unchanged.value.admission.ahead.count,ordinary.value.admission.ahead.count,'neither preview stores or replaces a job');
   } finally {
     child.kill();
     await closed;
