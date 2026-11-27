@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **`status` no longer reports a dispatch gap for jobs the worker chose to skip.** The dispatch count and oldest age now count only live, uncancelled jobs the worker has not passed over.
 - **A T3 child task no longer reports "queue full" when the target worker has room.** The ACP preflight now counts the jobs of the worker the job will go to (the reported default, or the only configured worker), not the whole bridge.
 - **A requester can name the tests a job must pass, and the worker can run exactly those.** An implementation assignment may list up to eight `node <path>` commands in `checks`; the worker runs them as `named/1`..`named/8` with `run_check`, only where the owner's allowlist permits (repository, `named`) and the repository has an owner `default` check. See "Checks the requester names" in docs/usage.md.
 - **The admission answer includes the worker's track record.** `admission.track_record` counts how this worker's recent jobs of the same kind ended: landed, check passed, checks failed, refused by the provider, unable to run, owner cancelled, or finished without a check. Each job counts once, and these are never folded into one success rate.

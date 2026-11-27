@@ -1829,9 +1829,10 @@ export class Store {
     const hasLiveClaim=liveClaims.some(c=>now-Date.parse(c.last_claim_activity_at??c.claimed_at)<this.claimLeaseMs(c));
     const atCapacity=liveSubs.length>0&&liveSubs.every(sub=>this.subscriptionFreeLanes(sub,limits.laneCapacity??6,capacity)===0);
     const hasSubscription=liveSubs.length>0;
-    const items=this.db.prepare(`SELECT request_id,created_at,NOT (${live(now)}) expired FROM assignments WHERE target_worker=? AND status='queued' AND cancelled_at IS NULL ORDER BY created_at`).all(worker).map(row=>{
+    const items=this.db.prepare(`SELECT request_id,created_at,skipped_at,NOT (${live(now)}) expired FROM assignments WHERE target_worker=? AND status='queued' AND cancelled_at IS NULL ORDER BY created_at`).all(worker).map(row=>{
       // A queued row past its preparation's valid_until, or a protocol row past its retention, is 'expired', never alive_not_claiming: the worker cannot claim it.
       if(row.expired) return {request_id:row.request_id,class:'expired',event_2xx_age_ms:null};
+      if(row.skipped_at!==null) return {request_id:row.request_id,class:null,event_2xx_age_ms:null};
       const first=this.db.prepare("SELECT min(COALESCE(attempt_started_at,created_at)) at FROM notifications WHERE kind='event' AND request_id=? AND state='delivered'").get(row.request_id).at;
       const eventAge=first?age(first):null;
       let cls=null;
@@ -3492,7 +3493,7 @@ export class Store {
     const lastClaim=this.db.prepare("SELECT max(claimed_at) last_claim FROM claims WHERE worker='dot'").get().last_claim;
     const uncertain=this.db.prepare("SELECT count(*) n FROM notifications WHERE state='uncertain' AND kind IN ('t3','watch','blocker','break','event')").get().n;
     const pause=this.db.prepare('SELECT paused_at,reason FROM operator_state WHERE id=1').get();
-    const queued=this.queuedRows().filter(row=>row.target_worker==='dot').length;
+    const {n:queued,oldest:oldestUnskipped}=this.db.prepare(`SELECT count(*) n,min(created_at) oldest FROM assignments WHERE target_worker='dot' AND status='queued' AND cancelled_at IS NULL AND skipped_at IS NULL AND ${live(this.nowMs())}`).get();
     const dotQueuedWithoutSubscription=active.length===0&&!!this.db.prepare(`SELECT 1 FROM assignments WHERE target_worker='dot' AND status='queued' AND ${live(this.nowMs())} LIMIT 1`).get();
     const subscription={state:!sub?'absent':sub.state==='revoked'?'revoked':sub.rotation_blocked?'rotation_blocked':sub.auth_failures>=3?'callback_blocked':sub.expires_at<=this.stamp()?'expired':'active',expires_at:sub?.expires_at||null,last_verified_at:sub?.verified_at||null,last_event_2xx_at:sub?.last_event_2xx_at||null,last_claim_at:lastClaim,principal:sub?.principal||null,auth_failures:sub?.auth_failures||0};
     const priority_counts=Object.fromEntries(['normal','background'].map(priority=>[priority,Object.fromEntries(['queued','claimed'].map(status=>[status,this.db.prepare(`SELECT count(*) n FROM assignments WHERE priority=? AND status=? AND (status<>'queued' OR ${live(this.nowMs())})`).get(priority,status).n]))]));
@@ -3504,7 +3505,7 @@ export class Store {
     const dotCapacity=this.workerCapacityEvidence('dot',active,limits,capacity);
     const freeLanes=dotCapacity.free_lanes;
     const legacyScope=this.workers.legacy===true||this.workers.workers.has('dot')?'dot':'none';
-    const dispatch={scope:legacyScope,state:pause.paused_at?'paused':freeLanes===null?'unknown':freeLanes<=0?'full':queued>0?'dispatch_gap':'supply_gap',free_lanes:freeLanes,queued_live:queued,oldest_unclaimed_age_ms:oldest?this.nowMs()-Date.parse(oldest):null};
+    const dispatch={scope:legacyScope,state:pause.paused_at?'paused':freeLanes===null?'unknown':freeLanes<=0?'full':queued>0?'dispatch_gap':'supply_gap',free_lanes:freeLanes,queued_live:queued,oldest_unclaimed_age_ms:oldestUnskipped?this.nowMs()-Date.parse(oldestUnskipped):null};
     const workerNames=new Set([...this.workers.workers.keys(),...this.db.prepare('SELECT DISTINCT target_worker worker FROM assignments').all().map(r=>r.worker),...this.db.prepare('SELECT DISTINCT worker FROM claims').all().map(r=>r.worker)]);
     const by_worker=Object.fromEntries([...workerNames].sort().map(worker=>{
       const workerSubscriptions=worker==='dot'?active:this.activeSubscriptions().filter(row=>row.worker===worker);

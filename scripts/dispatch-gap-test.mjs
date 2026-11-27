@@ -118,6 +118,34 @@ try {
     s.setPause('maintenance');d=dispatch(s);assert(d.state==='paused','paused '+JSON.stringify(d));
     log('status.dispatch reports dispatch_gap, supply_gap, full and paused; explain carries dispatch=');
   }
+  // Skipped rows remain in the queue but do not signal a dispatch failure.
+  {
+    const s=fresh('status-skipped');
+    const skippedAt=now;
+    submit(s,'skip-old');
+    now+=5*MIN;
+    const readyAt=now;
+    submit(s,'still-ready');
+    // Control the first event's exact timestamp independently from wake coalescing.
+    s.db.prepare("DELETE FROM notifications WHERE kind='event' AND request_id IN ('skip-old','still-ready')").run();
+    const event=s.db.prepare("INSERT INTO notifications(id,kind,request_id,state,wake_kind,created_at,subscription_id) VALUES(?,'event',?,'delivered','rewake',?,'sub_a')");
+    event.run('evt_skip','skip-old',new Date(skippedAt+SEC).toISOString());
+    event.run('evt_ready','still-ready',new Date(readyAt+SEC).toISOString());
+    const skip=s.db.prepare('UPDATE assignments SET skipped_at=?,passed_over=3 WHERE request_id=?');
+    skip.run(s.stamp(),'skip-old');
+    now+=20*MIN;s.recordWorkerCall('owner','get');
+    let st=s.status({limits,capacity:3});
+    assert(st.dispatch.state==='dispatch_gap'&&st.dispatch.queued_live===1&&st.dispatch.oldest_unclaimed_age_ms===now-readyAt,'mixed queue: '+JSON.stringify(st.dispatch));
+    assert(st.by_worker.dot.queue_classes.alive_not_claiming===1,'only the live, unskipped row counts: '+JSON.stringify(st.by_worker.dot.queue_classes));
+    assert(st.by_worker.dot.oldest_unclaimed_event_2xx_age_ms===now-readyAt-SEC,'only the unskipped event sets the age');
+    skip.run(s.stamp(),'still-ready');
+    st=s.status({limits,capacity:3});
+    assert(st.dispatch.state==='supply_gap'&&st.dispatch.queued_live===0&&st.dispatch.oldest_unclaimed_age_ms===null,'all skipped: '+JSON.stringify(st.dispatch));
+    assert(st.by_worker.dot.queue_classes.alive_not_claiming===0&&st.by_worker.dot.oldest_unclaimed_event_2xx_age_ms===null,'skipped events do not look unclaimed');
+    s.db.prepare('UPDATE assignments SET valid_until=? WHERE request_id=?').run(new Date(now-1).toISOString(),'skip-old');
+    assert(s.status({limits,capacity:3}).by_worker.dot.queue_classes.expired===1,'skipped expired rows still count as expired');
+    log('status excludes skipped rows from dispatch and liveness signals, but still reports expired rows');
+  }
   // submit lint: an unknown scope path comes with a suggestion that drops it
   {
     const task={schema_version:1,request_id:'req_dispatch_scope',brief:'Read the docs.',expected_output:'A summary',execution_scope:'read-only',inputs:[{github_repo:'o/r',base_sha:'a'.repeat(40)}],scope_paths:['docs','nope/missing.md']};
