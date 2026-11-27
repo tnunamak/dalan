@@ -237,6 +237,45 @@ try {
   assert.equal(cancellation.status, 'cancelled', JSON.stringify(cancellation));
   assert.equal(textOf(await call('dalan_result', { request_id: cancelId })).status, 'cancelled');
   assert.equal((await call('dalan_accept', { request_id: 'req_unknown_verdict', verdict: 'accept' })).isError, true);
+  // These malformed identifiers are data, not real CLI options. The shared
+  // argument diagnostic is emitted before the owner operation can spawn.
+  for (const id of ['-fixture-id', '-x']) {
+    for (const [name, args] of [
+      ['dalan_cancel', { request_id: id }],
+      ['dalan_accept', { request_id: id, verdict: 'accept' }],
+      ['dalan_correct', { revises: id, assignment: { ...assignment, request_id: revisedId } }],
+      ['dalan_answer', { id, question_id: 'fixture-question', text: 'fixture answer' }],
+    ]) {
+      const refused = await call(name, args);
+      assert.equal(refused.isError, true, name);
+      assert.match(refused.content[0].text, /is not a valid request id.*cannot start with a dash/, name);
+    }
+  }
+  // Read schema and harmless boundary fixtures; no external command or target.
+  for(const name of ['dalan_result','dalan_wait','dalan_questions']) {
+    const key=name==='dalan_questions'?'id':'request_id';
+    const spec=byName[name].inputSchema.properties[key];
+    assert.match(spec.description,/cannot start with a dash/,name);
+    const pattern=new RegExp(spec.pattern);
+    for(const prefix of ['r','1','_']) {
+      for(const length of [8,128]) {
+        assert.match(prefix+'-'+'a'.repeat(length-2),pattern,name);
+      }
+    }
+    assert.doesNotMatch('r-'+'a'.repeat(5),pattern,name);
+    assert.doesNotMatch('r-'+'a'.repeat(127),pattern,name);
+    for(const length of [7,129]) {
+      const id='r-'+'a'.repeat(length-2);
+      const reply=await call(name,{[key]:id});
+      assert.equal(reply.isError,true,name);
+      assert.match(reply.content[0].text,/not a valid request id/,name);
+    }
+  }
+  for(const length of [8,128]) {
+    const id='r-'+'a'.repeat(length-2);
+    const reply=await call('dalan_result',{request_id:id});
+    assert.doesNotMatch(reply.content[0].text,/not a valid request id/,'shape-valid ID reaches lookup');
+  }
   for (const bad of ['-option', 'contains\u0000nul']) {
     for (const [name, args] of [
       ['dalan_cancel', { request_id: revisedId, reason: bad }],

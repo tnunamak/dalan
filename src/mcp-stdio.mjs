@@ -14,7 +14,7 @@ export const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '202
 export const RESULT_CAP_BYTES = 32 * 1024;
 const WAIT_DEFAULT = 120, WAIT_MAX = 300;
 const CLI = path.join(import.meta.dirname, '../bin/dalan.mjs');
-const requestId = { type: 'string', pattern: '^[-\\w]{8,128}$', description: 'The request_id of a submitted job.' };
+const requestId = { type: 'string', pattern: '^\\w[-\\w]{7,127}$', description: 'The request_id of a submitted job; it cannot start with a dash.' };
 
 const submitProperties = {
   assignment: { type: 'object', description: 'The assignment: request_id (8-128 letters, digits, _ or -), brief, inputs (array; [] for none), expected_output, and the other fields `dalan submit` accepts.',
@@ -97,7 +97,7 @@ function validate(tool, args) {
     if (spec.type === 'object' ? !value || typeof value !== 'object' || Array.isArray(value)
       : spec.type === 'integer' ? !Number.isInteger(value) : typeof value !== spec.type) throw fail(`argument "${key}" must be ${spec.type === 'object' ? 'an object' : `a ${spec.type}`}`);
     if (spec.enum && !spec.enum.includes(value)) throw fail(`argument "${key}" must be one of ${spec.enum.join(', ')}`);
-    if (spec.pattern && !new RegExp(spec.pattern).test(value)) throw fail(`argument "${key}" is not a valid request id (8-128 letters, digits, _ or -)`);
+    if (spec.pattern && !new RegExp(spec.pattern).test(value)) throw fail(`argument "${key}" is not a valid request id (8-128 letters, digits, _ or -; cannot start with a dash)`);
     if (spec.type === 'string' && value.startsWith('--')) throw fail(`argument "${key}" must not start with --`);
   }
   return args;
