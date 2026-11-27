@@ -4,6 +4,8 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **An owner can cap how many claims one worker holds (`worker_max_claims` in limits.json).** A worker in the map is refused a claim while it already holds that many live claims, across all its connections; `/status` and the lane counts report the cap. Workers not in the map behave as before.
+- **A zip with bytes in front of it is scanned before download.** The scan finds a zip by its end-of-central-directory record, as zip readers do, so a self-extracting or prefixed archive is decoded and checked. Archive magic bytes that occur by chance in an ordinary binary do not change how it is scanned.
 - **A finish_handoff reply says the next job is already claimed, and when that claim lapses.** Each handed-off grant carries `already_claimed: true` and its `lease_expires_at`. The reply tells the worker not to call `claim` again and to send `progress` first, which keeps the claim.
 - **A failed patch apply restores both ends of a rename, and a materialize grant file with setuid, setgid or sticky bits is refused.** The file list behind the snapshot now includes a rename's old path as well as its new one. The grant check now requires a mode of exactly 0600, including the special bits.
 - **`dalan forecast` and `submit --dry-run` show the real reason for a refused job.** A dry run that was refused or needed clarification used to fail inside the admission forecast and report a generic `refused` reason. A refused dry run now carries its own reasons and no forecast.
