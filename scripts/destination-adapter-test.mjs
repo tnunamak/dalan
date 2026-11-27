@@ -8,10 +8,36 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createT3Destination, quietReason } from '../src/destinations/t3.mjs';
 import { createNoneDestination } from '../src/destinations/none.mjs';
-import { createDestinations, destinationName } from '../src/destinations/index.mjs';
+import { createDestinations, destinationName, registerDestination } from '../src/destinations/index.mjs';
+import { parseDelivery } from '../src/delivery.mjs';
 import { Store } from '../src/store.mjs';
 import { sendArgs, marker, inspectThread, deliverT3, reconcileMarker, readArgs, classifyThread, generationDrift } from '../src/t3.mjs';
 import { r4ThreadStates, r4Inspect } from './fixtures/t3-r4-thread-states.mjs';
+
+{
+  const seen=[];
+  let loads=0;
+  registerDestination('peer',{parse(address) {
+    if(address!=='abc') throw Error('invalid peer address');
+    return {mode:'peer',address};
+  },load:()=>{ loads++; return {name:'peer',send:async item=>{ seen.push(item.id); return {state:'delivered'}; }}; }});
+  const routes=createDestinations({});
+  const parsed=parseDelivery('peer:abc');
+  assert.deepEqual(parsed,{mode:'peer',address:'abc'});
+  assert.equal(destinationName(parsed),'peer');
+  assert.equal(destinationName('peer:abc'),'peer');
+  assert.equal(loads,0);
+  const adapter=await routes.for('peer:abc');
+  assert.equal(adapter,await routes.for(parsed));
+  assert.deepEqual(await adapter.send({id:'fixture-notice'}),{state:'delivered'});
+  assert.deepEqual(seen,['fixture-notice']);
+  assert.equal(loads,1);
+  assert.deepEqual(parseDelivery('t3:mcp:opaque-thread'),{mode:'t3',threadId:'mcp:opaque-thread'});
+  assert.deepEqual(parseDelivery('none'),{mode:'none',threadId:null});
+  assert.throws(()=>parseDelivery('foo:x'),/none.*t3.*peer/);
+  assert.throws(()=>parseDelivery('peer:bad'),/invalid delivery/);
+  assert.throws(()=>registerDestination('peer',{parse:()=>{},load:()=>{}}),/already registered/);
+}
 
 const thread='thread-under-test', environment='env-under-test', rid='req_adapter_test';
 const report={outcome:'completed',summary:'x'.repeat(600)};
