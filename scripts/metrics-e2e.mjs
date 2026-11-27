@@ -88,7 +88,7 @@ try {
   const metrics=await cli('metrics','--json');
   assert.equal(metrics.code,0,metrics.err);
   const m=metrics.value, n=x=>({value:x,unit:'count'});
-  assert.deepEqual(Object.keys(m).sort(),['acceptance','checks','claim_to_first_activity','duplicates','lane_utilization','late_evidence','notes','objective_coverage','orphaned_claims','queue_latency','resume_wake','rework','throughput','time','utilization','window']);
+  assert.deepEqual(Object.keys(m).sort(),['acceptance','by_kind','checks','claim_to_first_activity','duplicates','lane_utilization','late_evidence','notes','objective_coverage','orphaned_claims','queue_latency','resume_wake','rework','throughput','time','utilization','window']);
   assert.equal(m.queue_latency.n.value,1); assert.equal(m.queue_latency.p50.unit,'ms'); assert.ok(m.queue_latency.p50.value>=0);
   assert.equal(m.claim_to_first_activity.n.value,1); assert.ok(m.claim_to_first_activity.p50.value>=0);
   assert.ok(m.time.claimed.value>0&&m.time.working.value===m.time.claimed.value,'a short claim with steady activity should be all working time');
@@ -97,6 +97,11 @@ try {
   assert.deepEqual(m.throughput.by_kind,{'implementation/normal':n(1)}); assert.deepEqual(m.throughput.completed,n(1));
   assert.deepEqual(m.checks,{passed:n(0),failed:n(0),skipped:n(1),pass_rate:{value:0,unit:'ratio'},started:n(0)});
   assert.deepEqual(m.acceptance,{finished:n(1),accepted:n(1),rejected:n(0),consumed_only:n(0),unknown:n(0),accept_rate:{value:1,unit:'ratio'},integrated:n(1)});
+  assert.deepEqual(m.by_kind, {'implementation/normal': {
+    n:n(1),outcomes:{completed:n(1),blocked:n(0),failed:n(0)},
+    checks:{passed:n(0),failed:n(0),skipped:n(1),pass_rate:{value:0,unit:'ratio'}},
+    acceptance:{accepted:n(1),rejected:n(0),unknown:n(0),accept_rate:{value:1,unit:'ratio'}},
+  }});
   assert.equal(m.rework.value,null); assert.match(m.rework.unknown_reason,/objective_key/);
   assert.deepEqual(m.orphaned_claims,{current:n(0),lease_expired_takeovers:n(0),abandoned:n(0)});
   assert.equal(m.window.rolled_up,false);
@@ -116,6 +121,22 @@ try {
   const explainedJson=await cli('status','--explain','--json');
   assert.equal(explainedJson.value.metrics.acceptance.accepted.value,1); assert.match(explainedJson.value.explanation,/\nmetrics\(since=/);
   pass('status --explain carries a short metrics section');
+  const second=`req_${randomUUID()}`;
+  fs.writeFileSync(file,JSON.stringify({schema_version:1,request_id:second,brief:'metrics e2e: review hello.txt',inputs:[{github_repo:'example-owner/fixture',base_sha:base}],scope_paths:['hello.txt'],expected_output:'a review',execution_scope:'read-only'}));
+  const submittedSecond=await cli('submit','--file',file,'--execution','none','--json');
+  assert.equal(submittedSecond.code,0,submittedSecond.err);
+  const claimedSecond=await tool('claim',{request_id:second,claimant:'dot'});
+  await tool('finish',{request_id:second,claim_id:claimedSecond.claim_id,outcome:'blocked',summary:'review blocked',result:'cannot finish review'});
+  const two=await cli('metrics','--json'); assert.equal(two.code,0,two.err);
+  const grouped=two.value.by_kind;
+  assert.equal(grouped['read-only/normal'].outcomes.blocked.value,1);
+  assert.equal(grouped['read-only/normal'].acceptance.unknown.value,1);
+  const kinds=Object.values(grouped);
+  assert.equal(kinds.reduce((sum,kind)=>sum+kind.n.value,0),two.value.acceptance.finished.value);
+  for(const key of ['passed','failed','skipped'])
+    assert.equal(kinds.reduce((sum,kind)=>sum+kind.checks[key].value,0),two.value.checks[key].value);
+  for(const key of ['accepted','rejected','unknown'])
+    assert.equal(kinds.reduce((sum,kind)=>sum+kind.acceptance[key].value,0),two.value.acceptance[key].value);
   db.close();
 } catch(error) { console.error('FAIL',error); process.exitCode=1; }
 finally { service.kill('SIGTERM'); await new Promise(r=>service.once('exit',r)); await new Promise(r=>jwks.close(r)); fs.rmSync(home,{recursive:true,force:true}); }
