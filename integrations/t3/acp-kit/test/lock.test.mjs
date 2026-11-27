@@ -143,6 +143,33 @@ test('acquire writes the record; release removes only our own token', async () =
   fs.rmSync(dir, { recursive: true });
 });
 
+test('private state reports unreadable JSON without echoing its contents or replacing the file', { skip: process.platform === 'win32' }, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-unreadable-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  const damaged = '{"fixturePrivateText":';
+  fs.writeFileSync(file, damaged, { mode: 0o600 });
+  assert.throws(() => readJsonPrivate(file), error => {
+    assert.equal(error.code, 'invalid_session_state');
+    assert.match(error.message, /start a new session or restore/);
+    assert.doesNotMatch(error.message, /fixturePrivateText/);
+    return true;
+  });
+  assert.equal(fs.readFileSync(file, 'utf8'), damaged);
+});
+
+test('valid saved state still refuses a nonprivate file and leaves it unchanged', { skip: process.platform === 'win32' }, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-unsafe-mode-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  const saved = '{"fixture":true}';
+  fs.writeFileSync(file, saved);
+  fs.chmodSync(file, 0o644);
+  assert.throws(() => readJsonPrivate(file), { code: 'state_permissions' });
+  assert.equal(fs.statSync(file).mode & 0o777, 0o644);
+  assert.equal(fs.readFileSync(file, 'utf8'), saved);
+});
+
 test('release frees the lock for the next acquirer', async () => {
   const dir = tmp(), file = path.join(dir, 's.lock');
   (await acquireLock(file)).release();
