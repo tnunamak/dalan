@@ -291,7 +291,13 @@ cases.set(10, async () => {
   assert.equal(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 2 }), 10, 'dot'), null);
   assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 10 }), 10, 'dot'), /queue is full \(10 queued/);
   assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12 }), 10, 'dot'), /queue is full \(12 queued/);
-  assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 2 }), 10), /queue is full \(17 queued/);
+  assert.equal(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 2 }), 10), null);
+  assert.equal(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 12 }), 10, null, 'background'), null);
+  assert.match(bridge.bridgeRefusal(scoped({ queued_normal: 2, queued_background: 10 }), 10, null, 'background'), /queue is full \(10 queued/);
+  assert.equal(bridge.bridgeRefusal({ counts, by_worker: {} }, 10, 'missing', 'normal'), null);
+  assert.equal(bridge.bridgeRefusal({ counts, by_worker: { dot: { queued_normal: 12 }, muse: { queued_normal: 0 } }, default_worker: 'muse' }, 10, null, 'normal'), null);
+  assert.match(bridge.bridgeRefusal({ counts, by_worker: { muse: { queued_normal: 10 } } }, 10, null, 'normal'), /queue is full \(10 queued/);
+  assert.equal(bridge.bridgeRefusal({ counts }, 10, null, 'background'), null);
   assert.equal(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 0 }), 10, 'dot'), null);
 });
 // P5: ACP form elicitation mirrors T3's acp_titled_multiselect fixture at 3dbefda28.

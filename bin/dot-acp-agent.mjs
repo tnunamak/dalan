@@ -107,7 +107,7 @@ async function acquire(s, parsed) {
       return { root: parsed.requestRoot, rid, attempt, briefHash, admission: {status:row.status, execution:row.execution}, validUntil: row.assignment.valid_until ?? null, notes: [], startedAt: Date.now() };
     }
     const status = await call('/status', null);
-    const refusal = bridgeRefusal(status, IN_FLIGHT_CAP, WORKER);
+    const refusal = bridgeRefusal(status, IN_FLIGHT_CAP, WORKER, parsed.priority);
     if (refusal) throw new Refusal(refusal,'deferred',{failure_type_source:'bridge_status_refusal',verdict:'defer'});
     let prepared=preparedByAttempt.get(rid);
     if(!prepared) {
