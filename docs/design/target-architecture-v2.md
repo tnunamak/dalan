@@ -84,6 +84,8 @@ The rule: **the caller uses the subagent call its host already has.** Dalan supp
 
 `dalan mcp` gets the full verb set (`dalan_delegate`, `dalan_forecast`, `dalan_status`, `dalan_result`, `dalan_questions`, `dalan_answer`, `dalan_correct`, `dalan_cancel`, `dalan_accept`) and every work field. The reply to `dalan_delegate` carries the forecast and a `next` text in the host's own style ("Completion wakes this session. Do not poll."). This holds only where a wake adapter (4.3) exists for that host. Where none exists, the reply says plainly that the caller must poll.
 
+Native protocol route for MCP hosts: the MCP Tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663, MCP 2026-07-28). Here `dalan_delegate` returns `resultType: task` instead of a final result. The host polls `tasks/get`, which reports `working`, `input_required`, `completed`, `failed` or `cancelled`. Dalan questions map to keyed `inputRequests`, and the caller's `tasks/update` answer maps to Dalan's keyed answer. Claude Code documents support for this on its 2026-07-28 connection. Codex, ChatGPT and Cursor show no verified support as of 2026-11 (research library entry, 2026-11-27). Dalan offers Tasks only when the host negotiates the extension. It is polling by the host, not a wake, so for Claude Code it complements the inbox-socket wake in 4.3.
+
 ### 4.3 Wake adapters for hosts outside T3
 
 | Host | Native wake Dalan can drive | Status |
