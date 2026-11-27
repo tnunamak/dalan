@@ -35,7 +35,7 @@ refused('Check main_test.go next to src/app.js',/undeclared instruction path: ga
 assert.deepEqual(ok('Restyle web/styles/tokens.css and design-tokens.json',['web/styles','design-tokens.json']),[]);
 assert.deepEqual(ok('Adjust the colors in tokens.css',['web/styles']),[],'bare tokens.css in scope');
 refused('Edit config/settings.json',/sensitive scope path: config\/auth-token\.json/,['config']);
-refused('Rotate config/auth-token.json',/sensitive scope path: config\/auth-token\.json/,['config/auth-token.json']);
+refused('Rotate config/auth-token.json',/sensitive scope path: config\/auth-token\.json; soft sensitive name: auth; rename the file or redact it and give it a name that does not look like a secret, or leave it out of scope_paths/,['config/auth-token.json']);
 refused('Inspect .env.production',/hard sensitive/);
 refused('Install deploy/server.key',/hard sensitive/,['deploy']);
 refused('Use the gh-tokens.txt file',/sensitive scope path: gh-tokens\.txt/);

@@ -35,7 +35,22 @@ assert.throws(() => scanGit('fixture', ['diff'], () => ({ error: Object.assign(n
 assert.throws(() => scanGit('fixture', ['diff'], () => ({ status: 1 })), { code: 'DOT_BRIDGE_INFRASTRUCTURE' });
 assert.equal(scanGit('fixture', ['diff'], () => ({ status: 0, stdout: 'ok' })), 'ok');
 
-// unit: without the option the whole submit fails, as before
+// A soft name inside a read-only directory is withheld even without the option.
+{
+  // Markdown docs are exempt from the soft basename rule; use a non-code suffix.
+  const safe='docs/README.md', soft='docs/signature.txt', hard='docs/.'+'env';
+  const scanDocs=(files)=>()=>({files,diffFiles:[],diff:'',symlinks:[]});
+  const warnings=[];
+  const selected=validateSubmission(task(['docs']),{scanInput:scanDocs([safe,soft]),warnings});
+  assert.deepEqual(selected.scope_paths,[safe]);
+  assert.deepEqual(selected.scope_excluded,[{path:soft,reason:'soft sensitive name (dropped, not refused)'}]);
+  assert.ok(warnings.some(note=>note.includes(soft)));
+  assert.throws(()=>validateSubmission(task(['docs']),{scanInput:scanDocs([safe,soft,hard])}),/hard sensitive path exclusion/);
+  assert.throws(()=>validateSubmission(task([soft]),{scanInput:scanDocs([safe,soft])}),/sensitive scope path: docs\/signature\.txt; soft sensitive name: signing/);
+  assert.throws(()=>validateSubmission(task(['docs'],{execution_scope:'implementation'}),{scanInput:scanDocs([safe,soft])}),/sensitive scope path/);
+}
+
+// Without the option a hard name still refuses a directory scope.
 assert.throws(() => validateSubmission(task(['codex-rs']), { scanInput: scan }), /(?:sensitive scope path|hard sensitive path exclusion): /);
 // a code file named for what it handles is not sensitive by name (auth_session.rs, credential-setup.test.ts); config and images still are
 { const code = ['src/auth_session.rs', 'src/logout-cancels-credential-setup.test.ts', 'docs/agent-authored/design.md', 'img/auth.png', 'src/auth.json', 'scripts/secrets.sh'];
@@ -67,7 +82,7 @@ assert.deepEqual(out.scope_paths, ['codex-rs/app-server/schema/Other.json', 'cod
 assert.deepEqual(out.scope_excluded.map(d => d.path).sort(), ['codex-rs/app-server/schema/ChatgptAuthTokensRefreshParams.json', 'codex-rs/app-server/src/auth_recovery_policy.yaml', 'codex-rs/core/.env']);
 assert.ok(out.scope_excluded.every(d => d.reason && !d.reason.includes('undefined')), JSON.stringify(out.scope_excluded));
 assert.match(out.scope_excluded.find(d => d.path.endsWith('.env')).reason, /hard sensitive/);
-assert.match(out.scope_excluded.find(d => d.path.endsWith('auth_recovery_policy.yaml')).reason, /lint/);
+assert.match(out.scope_excluded.find(d => d.path.endsWith('auth_recovery_policy.yaml')).reason, /soft sensitive name/);
 assert.match(out.brief, /Bridge scope note: 3 sensitive file\(s\) are outside scope_paths; do not read them/);
 assert.ok(warnings.some(w => /3 sensitive file\(s\) dropped/.test(w)), warnings.join('|'));
 // read_paths and read_list follow the narrowed scope, or they would still name the dropped files' directory
@@ -212,7 +227,7 @@ try {
   assert.equal(first.code, 0, first.err); const result = JSON.parse(first.out);
   assert.deepEqual(result.scope_paths, ['web/app.js', 'web/ok']);
   assert.deepEqual(result.scope_excluded.map(d => d.path), ['web/auth_helper.json']);
-  assert.match(result.scope_excluded[0].reason, /lint/);
+  assert.match(result.scope_excluded[0].reason, /soft sensitive name/);
   assert.ok(result.submission_warnings.some(w => /1 sensitive file\(s\) dropped/.test(w)));
   // the reason is recorded with the assignment the worker receives
   const stored = JSON.parse(await new Promise((done, fail) => { const q = http.request({ socketPath: join(root, 'admin.sock'), path: `/get?id=${id}`, headers: { 'x-owner-capability': JSON.parse(fs.readFileSync(receiptFor(id), 'utf8')).token } }, res => { let t = ''; res.on('data', b => t += b); res.on('end', () => done(t)); }); q.on('error', fail); q.end(); }));
