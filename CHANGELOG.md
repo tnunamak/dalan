@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **`dalan materialize ID --dry-run` shows whether a finished patch may be pushed, and changes nothing.** The owner names the repositories in `materialize.json` beside `checks.json` (mode 0600): `{"grant": ["org:<name>", "repo:<owner>/<name>"], "mode": "standing" | "per_pr"}`. The dry run lists the repository, base and files of the patch, the decision and the branch `dalan/<request_id>` it would push. No push exists yet.
 - **A requester can ask how soon a job would start without queuing it.** `dalan forecast` (CLI) and `dalan_forecast` (MCP, read-only) run the same checks as a dry-run submit and return the verdict, any reasons and the admission answer. `dalan correct ID` is the same as `dalan submit --revises ID`.
 - **`status` no longer reports a dispatch gap for jobs the worker chose to skip.** The dispatch count and oldest age now count only live, uncancelled jobs the worker has not passed over.
 - **A T3 child task no longer reports "queue full" when the target worker has room.** The ACP preflight now counts the jobs of the worker the job will go to (the reported default, or the only configured worker), not the whole bridge.
