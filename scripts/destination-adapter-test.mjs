@@ -48,6 +48,37 @@ import { r4ThreadStates, r4Inspect } from './fixtures/t3-r4-thread-states.mjs';
 }
 
 {
+  let loads=0, parses=0;
+  const load=()=>{loads++;return {name:'fixture'};};
+  registerDestination('fixture-parser',{parse(address) {
+    parses++;
+    if(address==='throws') throw Error('synthetic parser refusal');
+    if(address==='none') return null;
+    if(address==='different') return {mode:'none'};
+    return {mode:'fixture-parser',address};
+  },load});
+  const routes=createDestinations({});
+  for(const address of ['throws','none','different']) {
+    for(const delivery of ['fixture-parser:'+address,{mode:'fixture-parser',address}]) {
+      assert.throws(()=>destinationName(delivery),{code:'INVALID_DELIVERY_MODE'});
+      await assert.rejects(routes.for(delivery),{code:'INVALID_DELIVERY_MODE'});
+    }
+  }
+  const before=parses;
+  const wrongType={mode:'fixture-parser',address:42};
+  assert.throws(()=>destinationName(wrongType),{code:'INVALID_DELIVERY_MODE'});
+  await assert.rejects(routes.for(wrongType),{code:'INVALID_DELIVERY_MODE'});
+  assert.equal(parses,before,'non-string addresses must not reach a permissive parser');
+  assert.equal(loads,0,'refused records must not instantiate the adapter');
+  registerDestination('fixture-bare',{bare:true,
+    parse:address=>address===undefined?{mode:'fixture-bare'}:null,load});
+  assert.equal(destinationName('fixture-bare'),'fixture-bare');
+  assert.equal(destinationName({mode:'fixture-bare'}),'fixture-bare');
+  assert.equal(await routes.for('fixture-bare'),await routes.for({mode:'fixture-bare'}));
+  assert.equal(loads,1,'both valid encodings share one adapter');
+}
+
+{
   const store=new Store(':memory:');
   try {
     for(const [index,value] of [{mode:'t3',threadId:''},{mode:'t3'},{mode:'t3',threadId:42},{mode:'t3',threadId:'short'},{mode:'t3',threadId:'thread with spaces'}].entries()) {
