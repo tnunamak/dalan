@@ -1200,7 +1200,8 @@ export class Store {
   }
   // Use persisted worker progress for the start proxy. A reclaim resets the
   // first workspace call on the single current claim row, so mixing that time
-  // in would make a job's measured first start change as it is reclaimed.
+  // in would make a job's measured first start change as it is reclaimed. Notes the bridge writes itself (the resume note)
+  // start with `[bridge] ` and are not a start. A finished job with no worker note did start, at an unobserved time.
   admissionEvidence(worker,kind,days=7) {
     kind=canonicalKindLabel(kind);
     const since=iso(this.nowMs()-days*86400000);
@@ -1217,11 +1218,11 @@ export class Store {
         c.lease_deadline_at,c.lease_deadline_monotonic_ms,c.lease_boot_id,c.request_id has_claim,
         (SELECT p.created_at FROM progress p INDEXED BY progress_request WHERE p.request_id=a.request_id
           AND (p.worker IS NULL OR p.worker=a.target_worker)
-          AND p.note NOT LIKE '[bridge] run resumed: epoch % lease expired after % without activity; epoch % continues under a new claim'
+          AND p.note NOT LIKE '[bridge] %'
           ORDER BY p.id LIMIT 1) started
       FROM selected a JOIN lifecycle l ON l.request_id=a.request_id
       LEFT JOIN claims c ON c.request_id=a.request_id`).all(since,worker,kind);
-    const claimed=[], started=[], censored={expired_unclaimed:0,cancelled_unclaimed:0,claimed_not_started:0};
+    const claimed=[], started=[], censored={expired_unclaimed:0,cancelled_unclaimed:0,claimed_not_started:0,finished_unobserved_start:0};
     for (const row of rows) {
       if (!row.claimed) {
         if (row.status==='cancelled') {
@@ -1235,7 +1236,8 @@ export class Store {
       claimed.push(claimMs);
       const startMs=Date.parse(row.started)-created;
       if (Number.isFinite(startMs) && startMs>=claimMs) started.push(startMs);
-      else if (row.status==='finished' || row.status==='cancelled' || (row.has_claim && this.leaseExpired(row))) censored.claimed_not_started++;
+      else if (row.status==='finished') censored.finished_unobserved_start++;
+      else if (row.status==='cancelled' || (row.has_claim && this.leaseExpired(row))) censored.claimed_not_started++;
     }
     const summary=times=>{
       const n=times.length, insufficient_history=n<QUEUE_WINDOW.minSamples;

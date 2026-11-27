@@ -117,16 +117,22 @@ try {
       assert.equal(hist.get(expired).cancelled_reason,'expired');
       hist.cancel(create(),'expired'); // owner reason text is not a system expiry
       create(); // still-open unclaimed work is not an observation
-      claimed(20,20,'lark'); claimed(30,30,'dot','build');
+      // Another worker's claim and another kind are not observations here.
+      const lark=create('lark'); clock+=20; hist.lifecycle(lark,'claimed','system','fixture',{claim_id:'claim_lark',epoch:1,worker:'lark'});
+      claimed(30,30,'dot','build');
       const summary=(n,p50_ms,p90_ms)=>({n,p50_ms,p90_ms,insufficient_history:false});
       const cut=()=>hist.admissionEvidence('dot','review');
       assert.deepEqual(cut(),{worker:'dot',kind:'review',window_days:7,min_samples:QUEUE_WINDOW.minSamples,
         claimed:summary(6,3000,6000),started:thin(3),
-        censored:{expired_unclaimed:1,cancelled_unclaimed:1,claimed_not_started:0}});
+        censored:{expired_unclaimed:1,cancelled_unclaimed:1,claimed_not_started:0,finished_unobserved_start:0}});
       claimed(7000,1000); claimed(8000,1000);
       assert.deepEqual(cut().started,summary(5,6000,9000));
       clock+=2*3600000;
-      assert.deepEqual(cut().censored,{expired_unclaimed:1,cancelled_unclaimed:1,claimed_not_started:3});
+      assert.deepEqual(cut().censored,{expired_unclaimed:1,cancelled_unclaimed:1,claimed_not_started:3,finished_unobserved_start:0});
+      // A job that finished without a worker note did start; only its start time is unknown.
+      const quiet=claimed(1000); hist.finish(quiet.id,quiet.grant.claim_id,'completed','done','done');
+      assert.equal(cut().censored.finished_unobserved_start,1);
+      assert.equal(cut().censored.claimed_not_started,3);
     } finally { hist.db.close(); }
     log('admission evidence: claim vs durable progress, sparse history, separately censored work');
   }
