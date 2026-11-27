@@ -8,7 +8,7 @@ const agentPath = resolve(new URL('../bin/dot-acp-agent.mjs', import.meta.url).p
 
 export function startAdapter(env, cwd = process.cwd()) {
   const child = spawn(process.execPath, [agentPath], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env }, cwd });
-  const pending = new Map(), updates = [], errors = [];
+  const pending = new Map(), updates = [], requests = [], errors = [];
   let id = 0, stderr = '';
   child.stderr.on('data', b => { stderr += b; });
   // A dead adapter answers every open request with an error instead of leaving the test waiting forever.
@@ -21,12 +21,14 @@ export function startAdapter(env, cwd = process.cwd()) {
     try { m = JSON.parse(line); } catch { errors.push(`non-JSON stdout line: ${line.slice(0, 120)}`); return; }
     if (m.jsonrpc !== '2.0') errors.push(`non-protocol frame: ${line.slice(0, 120)}`);
     if (m.id !== undefined && (m.result !== undefined || m.error)) { pending.get(m.id)?.(m); pending.delete(m.id); }
+    else if (m.id !== undefined && m.method) requests.push(m);
     else if (m.method === 'session/update') updates.push(m.params.update);
   });
   const send = (method, params) => new Promise(res => { const i = ++id; pending.set(i, res); child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: i, method, params }) + '\n'); });
   const notify = (method, params) => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
   const api = {
-    child, updates, errors, exited, send, notify, stderr: () => stderr,
+    child, updates, requests, errors, exited, send, notify,
+    respond: (id, result) => child.stdin.write(JSON.stringify({jsonrpc:"2.0", id, result}) + "\n"), stderr: () => stderr,
     async init() {
       const r = await send('initialize', { protocolVersion: 2, info: { name: 't3-code', version: '0' }, capabilities: { elicitation: { form: {} } }, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 't3-code', version: '0' } });
       return r.result;
@@ -37,8 +39,8 @@ export function startAdapter(env, cwd = process.cwd()) {
     promptBlocks: (sessionId, prompt) => send('session/prompt', { sessionId, prompt }),
     cancel: sessionId => notify('session/cancel', { sessionId }),
     rawText: type => updates.filter(u => u.sessionUpdate === type).map(u => u.content.text).join(''),
-    // The result's closing 'decide:' line is asserted once (acp-e2e); every other check reads the text without it.
-    text: type => updates.filter(u => u.sessionUpdate === type).map(u => u.content.text).join('').replace(/\n\ndecide: (?:dalan|dot-worker) decide \S+ accepted\|applied\|useful_no_change\|useful_negative\|not_useful/g, ''),
+    // Legacy result assertions omit admission/cancel notices and the closing decision hint; rawText retains all chunks.
+    text: type => updates.filter(u => u.sessionUpdate === type && !/^(?:Work |requester_interrupted:)/.test(u.content.text)).map(u => u.content.text).join('').replace(/\n\ndecide: (?:dalan|dot-worker) decide \S+ accepted\|applied\|useful_no_change\|useful_negative\|not_useful/g, ''),
     kill: signal => child.kill(signal),
   };
   return api;

@@ -89,12 +89,12 @@ function rows(prefix = '') {
       .filter(r => r.request_id.startsWith(prefix));
   } finally { db.close(); }
 }
-// Session ownership locks (finding 5) leave `<id>.json.lock` files behind by design; only `.json` files are session state.
-const stateFiles = async () => (await readdir(stateDir)).filter(f => f.endsWith('.json'));
+// Count active sessions separately from retained terminal receipts and ownership locks.
+const stateFiles = async () => (await readdir(stateDir)).filter(f => f.endsWith('.json') && JSON.parse(readFileSync(join(stateDir,f),'utf8')).pending);
 const stateFile = id => join(stateDir, `${id}.json`);
 const frames = (a, id, type) => a.notifications.filter(n => n.sessionId === id && n.update.sessionUpdate === type);
 // The closing 'decide:' line (asserted in acp-e2e) is stripped so these checks compare the worker's result.
-const messages = (a, id) => frames(a, id, 'agent_message_chunk').map(n => n.update.content.text.replace(/\n\ndecide: (?:dalan|dot-worker) decide \S+ accepted\|applied\|useful_no_change\|useful_negative\|not_useful/, ''));
+const messages = (a, id) => frames(a, id, 'agent_message_chunk').filter(n => !/^(?:Work |requester_interrupted:)/.test(n.update.content.text)).map(n => n.update.content.text.replace(/\n\ndecide: (?:dalan|dot-worker) decide \S+ accepted\|applied\|useful_no_change\|useful_negative\|not_useful/, ''));
 const thoughts = (a, id) => frames(a, id, 'agent_thought_chunk').map(n => n.update.content.text).join('');
 async function adapter(cap) {
   const a = startAdapter({ ...env, DOT_ACP_SOCKET: socket, DOT_ACP_SECRET_FILE: secretFile,
@@ -183,9 +183,9 @@ async function concurrency(processCount, cap) {
   }
   assert.equal(rows(prefix).length, admitted.length, 'no duplicate assignments');
   assert.ok(rows(prefix).every(r => r.status === 'finished'));
-  assert.deepEqual(await stateFiles(), [], 'all delivered state files removed');
+  assert.deepEqual(await stateFiles(), [], 'no active work remains after delivery');
   await closeAdapters(pool);
-  console.log(`PASS concurrency: 20 sessions / ${processCount} processes, cap ${cap ?? 'default 10'}: ${admitted.length} admitted, ${refused.length} refused; isolated results and state cleanup`);
+  console.log(`PASS concurrency: 20 sessions / ${processCount} processes, cap ${cap ?? 'default 10'}: ${admitted.length} admitted, ${refused.length} refused; isolated results and terminal retention`);
 }
 
 try {
@@ -214,7 +214,7 @@ try {
   assert.equal((await within(turn.done, 'result after bridge restart')).result?.stopReason, 'end_turn');
   assert.deepEqual(messages(a, id), ['RECOVERED RESULT']);
   assert.equal(rows().length, before.length, 'outage never resubmits');
-  assert.ok(!existsSync(stateFile(id)));
+  assert.equal(JSON.parse(readFileSync(stateFile(id),'utf8')).pending,null,'completed work keeps its terminal receipt');
   console.log('PASS outage: queued prompt waits through 5 seconds down, then delivers once from the same assignment');
 
   const offlineId = await newSession(a), offlineRid = 'outage_submit_01';
@@ -234,25 +234,17 @@ try {
   const steerId = await newSession(a), steerRid = 'steer_claimed_01';
   const first = prompt(a, steerId, steerRid, 'Original immutable brief');
   await waitFor(() => rows(steerRid)[0]?.status === 'queued' && existsSync(stateFile(steerId)), 'steer assignment queued');
-  const claimId = await claim(steerRid), beforeSteer = rows().length;
+  await claim(steerRid);
+  const beforeSteer = rows().length;
   a.cancel(steerId);
   assert.equal((await within(first.done, 'cancel claimed turn', 9000)).result?.stopReason, 'cancelled');
-  assert.equal(rows(steerRid)[0].status, 'claimed');
+  assert.equal(rows(steerRid)[0].status, 'cancelled');
   assert.deepEqual(messages(a, steerId), [], 'cancelled turn delivers no result');
-  const steerText = 'Also inspect the retry behavior';
-  // Finding 3: tags inside an unwrapped follow-up are user text and are preserved, not stripped.
-  const steerPrompt = `${steerText}\n<runtime_info>test runtime</runtime_info>`;
-  const second = a.prompt(steerId, steerPrompt);
-  await waitFor(() => thoughts(a, steerId).includes(`re-attached to ${steerRid}`), 'steer reattachment');
-  assert.equal(rows().length, beforeSteer, 'steer did not submit another assignment');
-  assert.equal(JSON.parse(rows(steerRid)[0].payload).brief, 'Original immutable brief');
-  await finish(steerRid, claimId, 'ORIGINAL RESULT');
-  assert.equal((await within(second, 'steered result')).result?.stopReason, 'end_turn');
-  assert.deepEqual(messages(a, steerId), [`ORIGINAL RESULT\n\nnot sent to the worker: ${steerPrompt}`]);
-  assert.equal(rows().length, beforeSteer, 'exactly one assignment across cancel and steer');
-  assert.deepEqual(await stateFiles(), []);
+  assert.match(frames(a,steerId,'agent_message_chunk').map(n=>n.update.content.text).join(''),/requester_interrupted: true; worker_state: stop_requested/);
+  assert.equal(rows().length,beforeSteer,'cancel creates no second assignment');
+  assert.deepEqual(await stateFiles(),[]);
   await closeAdapters([a]);
-  console.log('PASS steer: claimed cancel/restart returns one result with unsent steer text and creates no second assignment');
+  console.log('PASS claimed cancel revokes authority and reports requester and compute separately');
   console.log(`ACP robustness completed in ${((Date.now() - started) / 1000).toFixed(1)} s`);
 } finally {
   emergencyCleanup();
