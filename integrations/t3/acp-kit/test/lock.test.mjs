@@ -129,6 +129,29 @@ test('removing private JSON twice leaves the missing-state sentinel', async t =>
   assert.equal(readJsonPrivate(target), null);
 });
 
+test('corrupt saved session is distinct from a missing session and preserves the original bytes', {skip: process.platform === 'win32'}, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-corrupt-session-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  const incomplete = Buffer.from('{"stage":');
+  assert.equal(readJsonPrivate(file), null);
+  fs.writeFileSync(file, incomplete, { mode: 0o600 });
+  assert.throws(() => readJsonPrivate(file), {
+    code: 'invalid_session_state',
+    message: 'Saved session is unreadable; start a new session or restore the saved state.',
+  });
+  assert.deepEqual(fs.readFileSync(file), incomplete);
+});
+
+test('saved-session path uses a canonical version-four ID and its requested suffix', async () => {
+  const { sessionPath } = await import('../src/session-store.mjs');
+  const root = path.join(os.tmpdir(), 'acp-fixture-root');
+  const id = 'aabbccdd-0000-4000-8000-abcdef012345';
+  assert.equal(sessionPath(root, id, '.lock'), path.join(root, id + '.lock'));
+  assert.throws(() => sessionPath(root, id.replace('-4000-', '-1000-')), { code: 'invalid_session_id' });
+  assert.throws(() => sessionPath(root, id.toUpperCase()), { code: 'invalid_session_id' });
+});
+
 test('acquire writes the record; release removes only our own token', async () => {
   const dir = tmp(), file = path.join(dir, 's.lock');
   const a = await acquireLock(file);
