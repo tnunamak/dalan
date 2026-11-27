@@ -44,6 +44,32 @@ test('dalan help still opens with trial mode present and no bridge home selected
   assert.equal(result.stderr,'');
 });
 
+test('dead-man CLI reports unsupported commands and extra status arguments without opening a state file', async t => {
+  const { mkdtemp, readdir, rm } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const root = await mkdtemp(join(tmpdir(), 'dalan-deadman-usage-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cli = fileURLToPath(new URL('../bin/dot-deadman.mjs', import.meta.url));
+  for (const [args, message] of [
+    [['report'], 'dalan-deadman: usage: dalan-deadman [serve|heartbeat|status|reconcile]'],
+    [['status', 'unexpected'], 'dalan-deadman: usage: dalan-deadman status'],
+  ]) {
+    const result = spawnSync(process.execPath, [cli, ...args], {
+      env: { HOME: root, USERPROFILE: root, DOT_DEADMAN_ENV: join(root, 'absent-env'),
+        DOT_DEADMAN_DB: join(root, 'must-not-open.sqlite') },
+      encoding: 'utf8', timeout: 5000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr.trim().split('\n').at(-1), message);
+    assert.deepEqual(await readdir(root), []);
+  }
+});
+
 const options = { id: 'job-original', cli: 'dalan', decideWords: 'accepted|rejected|applied' };
 async function reviewArgumentFailure(t, args) {
   const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
