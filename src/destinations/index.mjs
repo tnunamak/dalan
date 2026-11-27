@@ -39,15 +39,19 @@ registerDestination('t3',{
   load:deps=>deps.loadT3?deps.loadT3():import('./t3.mjs').then(({createT3Destination})=>createT3Destination(deps)),
 });
 
+function parseAddress(mode,adapter,address) {
+  if(!adapter.bare&&(typeof address!=='string'||!address)) return null;
+  try {
+    const parsed=adapter.parse(address);
+    return parsed?.mode===mode?parsed:null;
+  } catch { return null; } // Do not include opaque addresses in parser diagnostics.
+}
+
 export function parseDelivery(value) {
   if(typeof value==='string') {
     const [mode,address]=split(value), adapter=destinations.get(mode);
-    if(adapter&&(adapter.bare||address)) {
-      try {
-        const parsed=adapter.parse(address);
-        if(parsed?.mode===mode) return parsed;
-      } catch { /* Keep the admission diagnostic independent of the opaque address. */ }
-    }
+    const parsed=adapter&&parseAddress(mode,adapter,address);
+    if(parsed) return parsed;
   }
   const forms=[...destinations].map(([name,adapter])=>adapter.form??`${name}:<address>`);
   throw new Error(`invalid delivery; expected ${forms.join(' or ')}`);
@@ -57,7 +61,7 @@ export const destinationName=delivery=>{
   if(delivery===undefined) return 'none';
   const [mode,address]=typeof delivery==='string'?split(delivery):[delivery?.mode,undefined];
   const adapter=destinations.get(mode);
-  if(adapter&&(adapter.routes?adapter.routes(delivery,address):address!=='')) return mode;
+  if(adapter&&(adapter.routes?adapter.routes(delivery,address):parseAddress(mode,adapter,typeof delivery==='string'?address:delivery?.address))) return mode;
   const error=new Error(`invalid delivery mode: ${String(delivery)}`);
   error.code='INVALID_DELIVERY_MODE';
   throw error;

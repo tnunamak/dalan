@@ -22,6 +22,14 @@ import { r4ThreadStates, r4Inspect } from './fixtures/t3-r4-thread-states.mjs';
     return {mode:'peer',address};
   },load:()=>{ loads++; return {name:'peer',send:async item=>{ seen.push(item.id); return {state:'delivered'}; }}; }});
   const routes=createDestinations({});
+  // A parser-only adapter must validate persisted strings and normalized objects before loading.
+  for (const invalid of ['peer', 'peer:', 'peer:unknown', {mode:'peer'}, {mode:'peer',address:'unknown'}]) {
+    assert.throws(()=>destinationName(invalid),{code:'INVALID_DELIVERY_MODE'});
+    await assert.rejects(routes.for(invalid),{code:'INVALID_DELIVERY_MODE'});
+  }
+  assert.equal(destinationName(undefined),'none');
+  assert.equal(destinationName('none'),'none');
+  assert.equal(destinationName('t3:short'),'t3','legacy persisted routing remains explicit');
   const parsed=parseDelivery('peer:abc');
   assert.deepEqual(parsed,{mode:'peer',address:'abc'});
   assert.equal(destinationName(parsed),'peer');
