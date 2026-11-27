@@ -244,7 +244,6 @@ async function dispatchRouteOperation(query, recovery, remember, dispatch) {
   const { home, operationId } = query;
   if (!remember || !operationId) return dispatch(query);
   const ref = { home, operationId };
-  const neverDispatched = !recovery || routeNotDispatched(recovery);
   if (!recovery) remember({ ...ref, phase: 'prepared' });
   remember({ ...ref, phase: 'dispatching' });
   try {
@@ -253,8 +252,9 @@ async function dispatchRouteOperation(query, recovery, remember, dispatch) {
     return view;
   } catch (error) {
     if (error.route?.handle) remember({ ...ref, handle: error.route.handle });
-    else if (neverDispatched && PRE_ALLOCATION_REFUSALS.has(error.code)) {
-      // The SDK returns its retained view for refusals after reservation.
+    else if (!recovery?.handle && PRE_ALLOCATION_REFUSALS.has(error.code)) {
+      // A refusal before reservation leaves a handle-less reference ready to retry.
+      // The SDK supplies the retained view for refusals after reservation.
       remember({ ...ref, phase: 'prepared' });
     }
     throw error;
