@@ -155,7 +155,15 @@ try {
       assert.equal(normal.worker_state,'no_live_subscription');
       assert.deepEqual(normal.latency,snapshot.admissionEvidence('dot','review'));
       assert.deepEqual(snapshot.admissionAnswer('dot','review','background').ahead,{count:2,oldest_age_ms:3000});
-      assert.deepEqual(snapshot.admissionAnswer('dot','review','normal',{excludeId:'answer_normal'}).ahead,{count:0,oldest_age_ms:null});
+      assert.deepEqual(snapshot.admissionAnswer('dot','review','normal',{excludeIds:['answer_normal']}).ahead,{count:0,oldest_age_ms:null});
+      // A job submitted in the same millisecond is ahead; a job the worker passed over is behind a new job of its class
+      // but still ahead of any background job.
+      add('answer_same','normal');
+      assert.equal(snapshot.admissionAnswer('dot','review','normal').ahead.count,2);
+      snapshot.db.prepare('UPDATE assignments SET skipped_at=? WHERE request_id=?').run(iso(at),'answer_normal');
+      assert.deepEqual(snapshot.admissionAnswer('dot','review','normal').ahead,{count:1,oldest_age_ms:0});
+      assert.equal(snapshot.admissionAnswer('dot','review','background').ahead.count,3);
+      assert.equal(snapshot.admissionAnswer('dot','review','normal',{excludeIds:['answer_x','answer_same']}).ahead.count,0);
       snapshot.setPause('fixture pause');
       assert.equal(snapshot.admissionAnswer('dot','review','normal').worker_state,'paused');
     } finally { snapshot.db.close(); }

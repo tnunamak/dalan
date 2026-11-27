@@ -1347,7 +1347,8 @@ const adminServer=http.createServer(async(req,res)=>{
         const priority=body.background===true?'background':'normal';
         const kind=meta.task_kind??(body.review===true?'review':payload.execution_scope??'unknown');
         return store.admissionAnswer(storedTarget??target??'dot',kind,priority,
-          {excludeId:payload.request_id,createdBefore:existingRequest?.created_at??null});
+          // The job a supersede replaces leaves the queue when this one is stored, so it is not ahead.
+          {excludeIds:[payload.request_id,supersedes?.target_id??null],createdBefore:existingRequest?.created_at??null});
       };
       const disclosure=isNew?store.destinationSnapshot(target??'dot',jobExecution,payload):existingRequest.destination_approval?.snapshot??null;
       if(dryRun) {
