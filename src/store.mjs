@@ -147,7 +147,7 @@ const triageFields=(payload,row)=>{
   const paths=(name,list)=>{const all=Array.isArray(list)?list.filter(x=>typeof x==='string'):[];return all.length?{[name]:all.slice(0,TRIAGE_PATHS_SHOWN),[`${name}_total`]:all.length}:{};};
   return {execution_scope:typeof payload.execution_scope==='string'?payload.execution_scope:null,...(repos.length?{repos}:{}),...paths('scope_paths',payload.scope_paths),...paths('output_paths',payload.output_paths),priority:row.priority==='background'?'background':'normal',review:row.review===1||row.review===true};
 };
-const LIST_ORDER="CASE priority WHEN 'normal' THEN 0 ELSE 1 END,skipped_at IS NOT NULL,created_at";
+const LIST_ORDER="CASE priority WHEN 'normal' THEN 0 ELSE 1 END,skipped_at IS NOT NULL,created_at,rowid";
 // An item is marked skipped_by_worker when the worker passes it over, by either of two signals:
 //  - passed over: the worker claimed an assignment listed after it, SKIP_AFTER_PASSED times, while it had listed this one within
 //    PASSED_SEEN_MS. This detects items repeatedly pushed behind newer work before they enter the claimable window.
@@ -1263,15 +1263,20 @@ export class Store {
     };
     return {worker,kind,window_days:days,min_samples:QUEUE_WINDOW.minSamples,claimed:summary(claimed),started:summary(started),censored};
   }
-  // Jobs a claim serves before this one, in the worker list's order (LIST_ORDER): every normal job before a background one;
-  // within a class, jobs the worker has not passed over, oldest first. A new job is not skipped, so skipped peers of its class
-  // are behind it. Equal timestamps have no defined order in the list, so they count as ahead.
+  // Reuse the worker's list tuple. A prospective row is unskipped and comes last among rows at its timestamp.
   admissionAnswer(worker,kind,priority,{excludeIds=[],createdBefore=null}={}) {
     const now=this.nowMs(), at=iso(now), [first=null,second=null]=excludeIds;
+    const anchor=first===null?null:this.db.prepare(
+      'SELECT priority,skipped_at,created_at,CAST(rowid AS TEXT) queue_rowid FROM assignments WHERE request_id=? AND target_worker=?'
+    ).get(first,worker);
+    const rankPriority=(anchor?.priority??priority)==='normal'?0:1;
+    const rankSkipped=anchor?.skipped_at!=null?1:0;
+    const rankCreated=anchor?.created_at??createdBefore??at;
+    const rankRow=anchor?.queue_rowid??'9223372036854775807';
     const {count,oldest}=this.db.prepare(`SELECT count(*) count,min(created_at) oldest FROM assignments
       WHERE status='queued' AND target_worker=? AND request_id IS NOT ? AND request_id IS NOT ? AND ${live(now)}
-      AND ((priority=? AND skipped_at IS NULL AND created_at<=?) OR (?='background' AND priority='normal'))`)
-      .get(worker,first,second,priority,createdBefore??at,priority);
+      AND (${LIST_ORDER}) < (?, ?, ?, CAST(? AS INTEGER))`)
+      .get(worker,first,second,rankPriority,rankSkipped,rankCreated,rankRow);
     const workerBreak=worker==='dot'?this.holdingBreak():null;
     const worker_state=this.paused()?'paused':workerBreak?'break':
       this.activeSubscriptions().some(sub=>sub.worker===worker)?'live':'no_live_subscription';
