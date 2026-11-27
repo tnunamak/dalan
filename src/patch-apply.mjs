@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const git = (dir, args, input, env) => spawnSync('git', ['-C', dir, ...args], { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env });
+const git = (dir, args, input, env) => spawnSync((env ?? process.env).DALAN_GIT || 'git', ['-C', dir, ...args], { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env });
 
 const materializeName = '[A-Za-z0-9][A-Za-z0-9_.-]*';
 const materializeRepo = new RegExp('^' + materializeName + '/' + materializeName + '$');
@@ -53,6 +53,77 @@ export function materializeDecision(grant, repo, requestId) {
     reason: push ? 'standing_grant' : needs_approval ? 'per_pr_approval_required' : 'no_standing_grant' };
 }
 
+
+// Only a matching GitHub push URL is eligible. Match the exact path, not a substring
+// or an arbitrary remote helper. Do not use an implicit push refspec or default remote.
+function githubPushRepo(url) {
+  const ssh = /^git@github\.com:([a-z0-9_.-]+\/[a-z0-9_.-]+)$/i.exec(url);
+  const absolute = /^(?:https:\/\/github\.com|ssh:\/\/git@github\.com)\/([a-z0-9_.-]+\/[a-z0-9_.-]+)$/i.exec(url);
+  return (ssh?.[1] ?? absolute?.[1])?.replace(/\.git$/i, '').toLowerCase();
+}
+
+export async function materializePatch({dir, temp, body, sha256, baseSha, repo, branch, title, summary, recheck}) {
+  const ref = 'refs/heads/' + branch;
+  if (!materializeRepo.test(repo) || !/^dalan\/[-\w]{8,128}$/.test(branch) || !/^[a-f0-9]{40}$/.test(baseSha)) {
+    throw new Error('materialize needs a pinned GitHub repo and a scoped branch');
+  }
+  const run = (program, cwd, args, label) => {
+    const r = spawnSync(program, args, {cwd, encoding:'utf8', maxBuffer:1024*1024});
+    if(r.error || r.status!==0) throw new Error('materialize: '+label+' failed'+(r.status==null?'':' (exit '+r.status+')'));
+    return r.stdout.trim();
+  };
+  const gitCmd = (cwd, args, label) => run(process.env.DALAN_GIT || 'git',cwd,['-c','core.hooksPath=/dev/null', ...args],label);
+  const ghRepo = 'github.com/' + repo;
+  const ghCmd = (args, label) => run(process.env.DALAN_GH || 'gh',dir,args,label);
+  const urls = new Set();
+  for(const remote of gitCmd(dir,['remote'],'list remotes').split(/\r?\n/).filter(Boolean)) {
+    const values = gitCmd(dir,['remote','get-url','--push','--all','--',remote],'read push URL').split(/\r?\n/);
+    if (values.length === 1 && githubPushRepo(values[0]) === repo.toLowerCase()) urls.add(values[0]);
+  }
+  if (urls.size !== 1) throw new Error('materialize requires one matching GitHub push URL');
+  const [remote] = urls;
+  const targetBase = ghCmd(['repo','view',ghRepo,'--json','defaultBranchRef','--jq','.defaultBranchRef.name'],'read repository default branch');
+  if(!targetBase || targetBase===branch) throw new Error('materialize cannot target the default branch for a push');
+  gitCmd(dir,['check-ref-format','refs/heads/'+targetBase],'verify repository default branch');
+  const worktree = path.join(temp,'checkout');
+  gitCmd(dir,['worktree','add','--detach',worktree,baseSha],'create detached worktree');
+  let failure;
+  try {
+    applyPatch({dir:worktree, patch:body, sha256, baseSha});
+    gitCmd(worktree,['add','-A','--','.'],'stage patch');
+    gitCmd(worktree,['commit','--no-gpg-sign','-m','Materialize '+branch],'commit patch with local identity');
+    const tip = gitCmd(worktree,['ls-remote','--heads',remote,ref],'inspect scoped remote branch');
+    if(tip) {
+      const cols=tip.split(/\s+/);
+      if(cols.length!==2 || !/^[a-f0-9]{40}$/.test(cols[0]) || cols[1]!==ref) throw new Error('materialize received an invalid remote ref');
+      gitCmd(worktree,['fetch','--no-tags','--no-write-fetch-head',remote,cols[0]],'read the existing scoped branch');
+      const existing=gitCmd(worktree,['show','-s','--format=%P %T',cols[0]],'read existing branch tree');
+      const candidate=gitCmd(worktree,['show','-s','--format=%P %T','HEAD'],'read candidate tree');
+      if(existing!==candidate) throw new Error('materialize will not replace the existing branch with different content');
+    }
+    await recheck();
+    // Expect absence at the server, even if another publisher races this push.
+    if(!tip) gitCmd(worktree,['push','--no-follow-tags','--force-with-lease='+ref+':',remote,'HEAD:'+ref],'create scoped remote branch');
+    let pr_url;
+    try {
+      pr_url=ghCmd(['pr','create','--repo',ghRepo,'--draft','--base',targetBase,'--head',branch,
+        '--title',title,'--body',summary],'open draft pull request');
+      const prefix='https://github.com/'+repo.toLowerCase()+'/pull/';
+      if(!pr_url.toLowerCase().startsWith(prefix) || !/^[1-9]\d*$/.test(pr_url.slice(prefix.length))) {
+        throw new Error('materialize did not receive the draft pull request URL');
+      }
+    } catch(error) {
+      throw new Error('materialize branch '+branch+' exists; draft pull request not confirmed. '+error.message);
+    }
+    return {branch,pr_url};
+  } catch(error) {
+    failure=error;
+    throw error;
+  } finally {
+    try {gitCmd(dir,['worktree','remove','--force',worktree],'remove temporary worktree');}
+    catch(error) { if(!failure) throw error; }
+  }
+}
 
 // git apply from a subdirectory can silently skip root-relative paths.
 export function worktreeRoot(dir, env) {
