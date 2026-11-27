@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { checkOutcome } from './lifecycle.mjs';
 import { checkResponse } from './check-response.mjs';
 import { secretContent, isSensitiveRepoPath, isSourceExemptionPath, sensitivePolicyPaths } from './submission-policy.mjs';
-import { argvTestFiles, assignmentInput, prepareGithubRepo, detectCheck, detectCheckWithOrigin, availableChecks, workspaceCheck, mirrorPath, withCheckMetadata, checkSpecsAt, checkSummary } from './projects.mjs';
+import { argvTestFiles, assignmentInput, assignmentNamedCheck, isNamedCheck, prepareGithubRepo, detectCheck, detectCheckWithOrigin, availableChecks, workspaceCheck, mirrorPath, withCheckMetadata, checkSpecsAt, checkSummary } from './projects.mjs';
 import { hostBackend, hostReadiness, capabilityNotAvailable, TRUST, withEvidence } from './execution.mjs';
 import { redactSecrets, redactOutput, privateKeyHeader } from './redaction.mjs';
 import { hostCheckRefusal, hostCheckAuthorization } from './host-execution-policy.mjs';
@@ -31,6 +31,7 @@ const WORKSPACE_RETENTION_MS=6*3600000;
 const declaredOrNamedTestPaths=spec=>spec.test_paths??argvTestFiles(spec.argv);
 // First declared (not detected) test path absent from the checkout, or null. A path that resolves outside the checkout counts as absent.
 function missingDeclaredTestPath(dir,spec,origin) {
+  if(origin?.from==='requester_declared') return missingNamedTarget(dir,spec);
   if(origin?.from!=='owner_config'&&origin?.from!=='workspace_file') return null;
   let root;try{root=fs.realpathSync(dir);}catch{return null;}
   for(const p of spec.test_paths??[]) {
@@ -39,6 +40,17 @@ function missingDeclaredTestPath(dir,spec,origin) {
     return p;
   }
   return null;
+}
+// A named command promises a regular tracked or declared output file. Do not
+// follow file or directory symlinks at execution time, even inside the tree.
+function missingNamedTarget(dir,spec) {
+  const name=spec?.test_paths?.[0];
+  if (!name) return 'missing named entry';
+  try {
+    const root=fs.realpathSync(dir), target=path.join(root,name);
+    if (fs.lstatSync(target).isFile() && fs.realpathSync(target)===target) return null;
+  } catch {}
+  return name;
 }
 const yieldLoop=()=>new Promise(resolve=>setImmediate(resolve));
 function pathExistsOrThrow(file) {
@@ -832,6 +844,12 @@ export class Workspace {
       const repo=assignment.inputs[0].github_repo;
       const declared=dir?availableChecks(repo,dir):this.availableChecksFor(assignment,worker);
       if(execution!=='host') return {available_checks:declared};
+      const namedRequested=assignment.execution_scope==='implementation'&&Array.isArray(assignment.checks)&&assignment.checks.length>0;
+      const defaultSpec=namedRequested?(dir?detectCheck(repo,dir):this.checkMetadataFor(assignment,worker)?.default):null;
+      const named=namedRequested&&defaultSpec?assignment.checks.flatMap((_,index)=>{
+        const id=`named/${index+1}`, spec=assignmentNamedCheck(assignment,id,defaultSpec);
+        return spec?[[id,spec]]:[];
+      }):[];
       // Without a checkout (claim, get) the persisted exclusion record is checked against the pinned tree. A check still
       // proves physical absence in its own checkout before it launches.
       const absent=dir?excludedPathsAbsent(dir,assignment):excludedPathsAccountedAtBase(this.mirrorFor(assignmentInput(assignment),worker),assignment);
@@ -840,10 +858,18 @@ export class Workspace {
       // Every host check looks up prepared dependencies for the whole checkout, so a lockfile the host cannot prepare
       // (workspaces, local dependencies) fails them all: say so here instead of offering checks that cannot run.
       const unsupported=baseRefusal||!readiness.ready?null:this.dependenciesUnsupported(assignment,dir,worker);
-      const candidates=baseRefusal||!readiness.ready||unsupported?[]:declared.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
-      const reason=baseRefusal||(!readiness.ready?readiness.reason:null)||(unsupported?`dependencies_unsupported: ${unsupported}; run_check cannot run in this repository`:null)||(!candidates.length?'host_check_not_allowlisted: no permitted owner-configured check is runnable':null);
-      const details=candidates.length?this.checkDetails(assignment,repo,candidates,dir,worker):null;
-      return {available_checks:candidates,...(details?{available_check_details:details,check_guidance:CHECK_GUIDANCE}:{}),host_execution_available:candidates.length>0,host_execution_unavailable_reason:reason};
+      const noHost=baseRefusal||(!readiness.ready?readiness.reason:null)||(unsupported?`dependencies_unsupported: ${unsupported}; run_check cannot run in this repository`:null);
+      const ownerIds=namedRequested?declared.filter(id=>!isNamedCheck(id)):declared;
+      const candidates=noHost?[]:ownerIds.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
+      const namedRefusal=named.length?noHost||hostCheckRefusal(assignment,repo,named[0][0],null,absent):
+        namedRequested&&!defaultSpec?'named_check_default_missing: configure a default check before declaring checks':null;
+      const available=[...candidates,...named.map(([id])=>id)];
+      const details={...(candidates.length?this.checkDetails(assignment,repo,candidates,dir,worker):{})};
+      for(const [id,spec] of named) details[id]=checkSummary(spec)+(namedRefusal?` (not runnable: ${namedRefusal})`:'');
+      const runnable=candidates.length>0||named.some(([id])=>!noHost&&!hostCheckRefusal(assignment,repo,id,null,absent));
+      const reason=noHost||namedRefusal||(!runnable?'host_check_not_allowlisted: no permitted owner-configured check is runnable':null);
+      return {available_checks:available,...(available.length?{available_check_details:details,check_guidance:CHECK_GUIDANCE}:{}),
+        host_execution_available:runnable,host_execution_unavailable_reason:reason};
     } catch(error) {
       if(!String(error?.message??'').includes('check metadata')) throw error;
       if(execution==='host'&&assignment.execution_scope!=='implementation') throw error;
@@ -892,7 +918,7 @@ export class Workspace {
     const inputSnap=checkInput||installInput||candidateInput,diffPaths=changed??inputDiff?.paths??[];
     const differs=inputSnap.sha256&&baseTree?inputSnap.sha256!==baseTree:diffPaths.length>0?true:'unknown';
     const mutated=inputSnap.sha256&&(rawPost??post).sha256?inputSnap.sha256!==(rawPost??post).sha256:null;
-    const source=origin.from==='owner_config'?'owner_config':baseSpec&&JSON.stringify(baseSpec)===JSON.stringify(spec)?'base':'modified';
+    const source=origin.from==='owner_config'?'owner_config':origin.from==='requester_declared'?'requester_declared':baseSpec&&JSON.stringify(baseSpec)===JSON.stringify(spec)?'base':'modified';
     const omissionsIn=inputDiff?.omissions??[],omissionsPost=postDiff?.omissions??[];
     const unverified=Object.entries(stops||{}).filter(([,x])=>!x?.verified).map(([phaseName,x])=>`${phaseName} (${x?.reason??'no stop record'})`);
     const evidence={schema:3,output_redaction_version:1,execution:'host',trust:TRUST.bridge,repo:input.github_repo,base_sha:input.base_sha,base_tree_sha256:baseTree,
@@ -953,14 +979,18 @@ export class Workspace {
       if(row?.claim_id===claimId&&row.check_id===checkId&&workspace&&row.diff_sha256===this.diff(workspace.path,workspace.base_sha).sha256) return {check_run_id:row.id,status:'running'};
       throw new Error('check already running');
     }
-    const {dir,input,claim,a}=this.ensure(requestId,claimId,subject,false,worker),origin=detectCheckWithOrigin(input.github_repo,dir,checkId),spec=origin?.spec;
+    const {dir,input,claim,a}=this.ensure(requestId,claimId,subject,false,worker);
+    const named=isNamedCheck(checkId)&&Array.isArray(a.assignment.checks)&&a.assignment.checks.length>0;
+    const namedAuthorization=named?hostCheckAuthorization(input.github_repo,checkId,null,a.assignment):null;
+    if(namedAuthorization?.refusal) return refuse(namedAuthorization.refusal);
+    const origin=named?{spec:namedAuthorization.spec,from:'requester_declared'}:detectCheckWithOrigin(input.github_repo,dir,checkId),spec=origin?.spec;
     if(!spec) { this.store.transaction(()=>this.store.lifecycle(requestId,'check_skipped',`worker:${subject}`,`check_id=${checkId};no_check_configured`,{claim_id:claimId})); return {check_id:checkId,skipped:true,reason:'no_check_configured',available_checks:availableChecks(input.github_repo,dir)}; }
     let currentAvailable;
     try { currentAvailable=availableChecks(input.github_repo,dir); }
     catch { return refuse('host_check_metadata_unavailable: current check metadata cannot be read'); }
-    if(!currentAvailable.includes(checkId)) return refuse('host_check_not_available: this check is not in the current metadata catalog');
-    const ownerAuthorization=hostCheckAuthorization(input.github_repo,checkId,spec);
-    if(origin.from!=='owner_config'||ownerAuthorization.refusal) return refuse(ownerAuthorization.refusal||'host_check_owner_definition_required: this check has no current owner-configured definition');
+    if(!named&&!currentAvailable.includes(checkId)) return refuse('host_check_not_available: this check is not in the current metadata catalog');
+    const ownerAuthorization=hostCheckAuthorization(input.github_repo,checkId,spec,a.assignment);
+    if((!named&&origin.from!=='owner_config')||ownerAuthorization.refusal) return refuse(ownerAuthorization.refusal||'host_check_owner_definition_required: this check has no current owner-configured definition');
     // A declared test path that is not in this checkout would make the command run a different set than the check promises: refuse before anything runs.
     const missingTestPath=missingDeclaredTestPath(dir,spec,origin);
     if(missingTestPath) {
@@ -970,13 +1000,13 @@ export class Workspace {
     }
     // The same definition resolved from the base commit alone: equal means the candidate did not change what the check is.
     let baseSpec=null;
-    try{baseSpec=withCheckMetadata(savedWorkspaceMirror(dir,requestId),input.base_sha,base=>detectCheck(input.github_repo,base,checkId));}catch{}
+    try{baseSpec=named?ownerAuthorization.spec:withCheckMetadata(savedWorkspaceMirror(dir,requestId),input.base_sha,base=>detectCheck(input.github_repo,base,checkId));}catch{}
     // The owner definition and budget authorize execution. A repository edit
     // may lower that budget, but cannot replace the owner command or raise any limit.
     let authorizedBudget,candidateBudget;
     try {
       authorizedBudget=parseHostBudget(ownerAuthorization.spec.host_budget);
-      const candidateSpec=workspaceCheck(input.github_repo,dir,checkId);
+      const candidateSpec=workspaceCheck(input.github_repo,dir,named?'default':checkId);
       candidateBudget=candidateSpec?.host_budget?parseHostBudget(candidateSpec.host_budget):authorizedBudget;
     } catch{return capabilityNotAvailable(execution,'host_budget_missing: declare a valid host_budget in owner configuration');}
     const jobBudget=Object.fromEntries(Object.entries(authorizedBudget).map(([key,value])=>[key,Math.min(value,candidateBudget[key])]));
@@ -1160,6 +1190,10 @@ export class Workspace {
     // cannot opt the operator in or bypass the whole-repository read grant.
     const refusal=hostCheckRefusal(this.store.get(requestId).assignment,repo,checkId,expectedSpec,excludedPathsAbsent(dir,this.store.get(requestId).assignment));
     if(refusal) throw new Error(refusal);
+    if(isNamedCheck(checkId)&&Array.isArray(this.store.get(requestId).assignment.checks)&&this.store.get(requestId).assignment.checks.length>0) {
+      const missing=missingNamedTarget(dir,expectedSpec);
+      if(missing) throw new Error(`check_test_path_missing: ${missing}`);
+    }
     const budgets=parseHostBudget(spec.host_budget);
     budgets.wall_ms=Math.min(budgets.wall_ms,spec.timeout_ms??budgets.wall_ms);
     budgets.output_bytes=Math.min(budgets.output_bytes,spec.output_bytes??budgets.output_bytes);

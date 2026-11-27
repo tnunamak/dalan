@@ -220,6 +220,14 @@ Partial check-definition example showing `argv` and `test_paths` only. This is n
 }}}}
 ```
 
+### Checks the requester names
+
+An implementation assignment may carry `checks`: up to eight commands, each exactly `node <repo-relative .js, .mjs or .cjs path>`, for example `"checks": ["node scripts/a-test.mjs"]`. The worker sees them as `named/1` to `named/8` in `available_checks` and can run them with `run_check` until they pass.
+
+- Submit refuses a malformed entry, a sensitive path, or a file that is not a regular file at the pinned revision (a new file must be in `output_paths`) with `invalid_named_check` and the entry number.
+- The owner keeps authority. A named check runs only when the host allowlist permits the pair (repository, `named`) and the repository has an owner-configured `default` check; it takes that check's install step, limits and `host_budget`. Otherwise it is listed with the reason, for example `host_check_not_allowlisted: allow (repo, named) to run requester-declared checks`.
+- At run time the bridge checks the stored entry, the allowlist pair and the owner's current `default` check again. Evidence records the exact argv as requester-declared, not as owner configuration.
+
 `dalan doctor --checks [--json]` lints the owner's `checks.json` against each repo's mirror on this host (files at HEAD and at the newest ref). For each repo it prints every check id with the test files its `argv` names, and warns when an id sounds like a test file that `argv` does not run (for example id `api-contract-check` and file `tests/api-contract.test.mjs` absent from `argv`). Invalid definitions print as `ERROR` and make the command exit 1; warnings never change the exit code. The name match is a heuristic on file stems and id words, so read each warning as a prompt to look, not a proof. A repo without a local mirror gets the file listing only. Run it after you edit `checks.json`.
 
 ## Work orders: dry run, verdicts, exit codes
