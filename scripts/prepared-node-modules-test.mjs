@@ -86,7 +86,24 @@ try {
     if (cli) { const cliDir = path.join(dir,cli); fs.mkdirSync(path.dirname(cliDir),{recursive:true}); fs.writeFileSync(cliDir,fakeNpmCli); }
     return { execPath: path.join(bin,'node'), cli: cli && path.join(dir,cli) };
   };
-  const marker2 = path.join(root,'fake-npm-marker'), env2 = { ...fixtureEnv(privateDir(path.join(root,'fake-home'))), FAKE_NPM_MARKER: marker2 };
+  const unrelatedCli = path.join(root,'ambient','npm-cli.js');
+  fs.mkdirSync(path.dirname(unrelatedCli));
+  fs.writeFileSync(unrelatedCli,fakeNpmCli);
+  const previousNpmExecpath=process.env.npm_execpath;
+  let env2;
+  const marker2 = path.join(root,'fake-npm-marker');
+  // npm test/CI can set this to the runner's unrelated npm. Keep it alive in
+  // the parent to prove these explicit fixture options isolate layout lookup.
+  try {
+    process.env.npm_execpath=unrelatedCli;
+    env2={ ...fixtureEnv(privateDir(path.join(root,'fake-home'))), FAKE_NPM_MARKER:marker2 };
+    delete env2.npm_execpath;
+    assert.equal(process.env.npm_execpath,unrelatedCli);
+    assert.equal(Object.hasOwn(env2,'npm_execpath'),false);
+  } finally {
+    if(previousNpmExecpath===undefined) delete process.env.npm_execpath;
+    else process.env.npm_execpath=previousNpmExecpath;
+  }
   const layouts = [['lib layout','lib/node_modules/npm/bin/npm-cli.js'],['bin layout','bin/node_modules/npm/bin/npm-cli.js']];
   for (const [label, cli] of layouts) {
     const fake = fakeNode(label.replace(' ','-'),{cli}), fakeOptions = { cacheDir: path.join(root,`cache-${label.replace(' ','-')}`), execPath: fake.execPath, env: env2 };
