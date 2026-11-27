@@ -2723,9 +2723,7 @@ export class Store {
     // Every new epoch of an existing claim (takeover, claim after abandon) waits for reconcile.
     if(old) this.assertNoUncertainDelivery(id);
     const active=this.activeClaims(subject,worker,id);
-    const max=this.workerMaxClaims(worker);
-    if(max!==null&&this.liveWorkerClaims(worker,id)>=max)
-      throw new Error(JSON.stringify({error:'capacity_full',message:`Worker ${worker} already holds its ${max} live claims`,worker}));
+    this.assertWorkerClaimSlot(worker,id);
     if(active.length>=capacity) throw new Error('capacity_full');
     this.assertClaimGap(id,subject,worker,active);
     this.recordPrPreflight(id,'claim',JSON.parse(a.payload),preflight,!!old);
@@ -2751,6 +2749,7 @@ export class Store {
     this.assertRegrantReady(old);
     this.assertLiveConnection(old.request_id,worker,connectionId);
     const id=old.request_id, idleS=Math.floor(this.claimIdleMs(old)/1000);
+    this.assertWorkerClaimSlot(worker,id);
     const destinationRefusal=this.destinationAdmissionInTransaction(id);
     if(destinationRefusal)return destinationRefusal;
     this.assertNoUncertainDelivery(id);
@@ -2771,6 +2770,7 @@ export class Store {
     if(!old||old.subject!==subject||a.status!=='claimed') throw new Error('no active claim for this subject');
     this.assertLiveConnection(id,old.worker,connectionId);
     this.assertRegrantReady(old);
+    this.assertWorkerClaimSlot(old.worker,id);
     const destinationRefusal=this.destinationAdmissionInTransaction(id);
     if(destinationRefusal)return destinationRefusal;
     this.assertNoUncertainDelivery(id);
@@ -2836,6 +2836,14 @@ export class Store {
     const next=all.slice(0,free).map(x=>Object.fromEntries(['request_id','title',...TRIAGE_KEYS].filter(k=>x[k]!==undefined).map(k=>[k,x[k]])));
     const lanes=free<lanesFree?`${lanesFree} ${lanesFree===1?'lane':'lanes'} free, ${next.length} suggested`:`${free} ${free===1?'lane':'lanes'} free`;
     return {next_queued:next,next_action:`${all.length} queued and ${lanes}: claim ${next.map(x=>x.request_id).join(', ')} now (oldest first)`};
+  }
+  // Every inactive-to-live transition must enforce the same worker cap.
+  // An exact retry of an already live grant never reaches this gate.
+  assertWorkerClaimSlot(worker,id) {
+    if(!this.db.isTransaction)protocolError('transaction_required');
+    const max=this.workerMaxClaims(worker);
+    if(max!==null&&this.liveWorkerClaims(worker,id)>=max)
+      throw new Error(JSON.stringify({error:'capacity_full',message:`Worker ${worker} already holds its ${max} live claims`,worker}));
   }
   workerMaxClaims(worker,limits=this.limits) {
     const caps=limits.workerMaxClaims??{};
