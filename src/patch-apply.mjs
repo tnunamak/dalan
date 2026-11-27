@@ -22,7 +22,7 @@ export function readMaterializeGrant(file) {
   }
   try {
     const state = fs.fstatSync(fd);
-    if (!state.isFile() || typeof process.getuid !== 'function' || state.uid !== process.getuid() || (state.mode & 0o777) !== 0o600) {
+    if (!state.isFile() || typeof process.getuid !== 'function' || state.uid !== process.getuid() || (state.mode & 0o7777) !== 0o600) {
       throw grantError('materialize_grant_unsafe', 'the owner grant must be a regular owner-owned mode 0600 file');
     }
     let parsed;
@@ -188,8 +188,8 @@ export function baseProblem(dir, baseSha, env) {
 }
 
 // The files a patch names, renames as old and new, read from the patch alone (no check against the tree).
-export function listPatchFiles(dir, body, env) {
-  const numstat = git(dir, ['apply', '--numstat', '-z', '-'], body, env);
+function patchPaths(dir, body, env, direction) {
+  const numstat = git(dir, ['apply', '--numstat', '-z', ...direction, '-'], body, env);
   if (numstat.error || numstat.status !== 0) throw new Error(`git apply --numstat failed: ${(numstat.stderr || numstat.error?.message || '').trim().slice(0, 300)}`);
   const records = numstat.stdout.split('\0');
   const files = [];
@@ -208,6 +208,13 @@ export function listPatchFiles(dir, body, env) {
     }
   }
   return files;
+}
+
+export function listPatchFiles(dir, body, env) {
+  // Some git apply versions report only the destination in forward numstat.
+  // Ask the same parser in reverse too, so rollback captures both endpoints
+  // without interpreting a human-readable rename summary or its quoting.
+  return [...new Set([...patchPaths(dir, body, env, []), ...patchPaths(dir, body, env, ['--reverse'])])];
 }
 
 // Checks the digest, the base and `git apply --check`, then applies. Preflight failures touch nothing; a failed apply
