@@ -534,12 +534,13 @@ cases.set(23, async () => fixture(async f => {
 }));
 async function terminalReadFixture(f, persistent) {
   const rid=persistent?'review_terminal_read_outage':'review_terminal_read_once';
-  let submitted=0,terminalWaits=0,failedReads=0;
+  let submitted=0,waits=0,rewaits=0,failedReads=0;
   f.hook(async ({url,rid:found,res,json}) => {
     if(found!==rid) return false;
     if(url.pathname==='/submit') submitted++;
-    if(url.pathname==='/wait'&&f.rows.get(rid)?.status==='finished') terminalWaits++;
-    if(url.pathname==='/get'&&terminalWaits&&(persistent||failedReads===0)) {
+    if(url.pathname==='/wait') { waits++; if(failedReads) rewaits++; }
+    // The read that follows the terminal /wait fails: once, or every time.
+    if(url.pathname==='/get'&&f.rows.get(rid)?.status==='finished'&&(persistent||failedReads===0)) {
       failedReads++;
       json(res,{error:'temporary fixture read fault'},503);
       return true;
@@ -550,10 +551,12 @@ async function terminalReadFixture(f, persistent) {
   const sid=(await a.newSession(f.cwd)).sessionId;
   const p=a.prompt(sid,'[dot-decision:'+rid+']\nkeep the same child active');
   await waitFor(()=>f.rows.has(rid),'one assignment submitted');
+  // Finish only once the child is in its wait loop, so the result arrives through /wait and its follow-up read.
+  await waitFor(()=>waits>0,'child waiting');
   f.finish(rid,'TERMINAL READ RESULT');
   const result=await bounded(p);
   assert.equal(submitted,1,'the same child retries reads, not submit');
-  assert.ok(terminalWaits>=2,'the terminal wait was re-read');
+  assert.ok(rewaits>=1,'the terminal wait was re-read after the failed read');
   if(persistent) {
     assert.ok(failedReads>=2);
     assert.equal(result.error?.code,-32000);
