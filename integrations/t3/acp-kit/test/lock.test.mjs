@@ -189,6 +189,21 @@ test('an ordinary file in place of the lock parent is left untouched', async t =
   assert.deepEqual(fs.readdirSync(dir), ['not-a-directory']);
 });
 
+test('a stale directory at the lock path remains intact and reports a busy session', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-directory-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lock = path.join(dir, 's.lock');
+  fs.mkdirSync(lock);
+  const sentinel = path.join(lock, 'keep.txt');
+  fs.writeFileSync(sentinel, 'fixture');
+  fs.utimesSync(lock, new Date(0), new Date(0));
+
+  await assert.rejects(acquireLock(lock), error =>
+    error instanceof LockBusyError && error.code === 'session_busy' && error.pid === null);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'fixture');
+  assert.deepEqual(fs.readdirSync(dir), ['s.lock'], 'no takeover guard is left behind');
+});
+
 test('releasing twice leaves the temporary lock directory empty', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-fixture-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
