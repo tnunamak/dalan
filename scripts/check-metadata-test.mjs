@@ -72,6 +72,27 @@ try {
   assert.match(hostCheckAuthorization('dalan-named-check-fixture/nonexistent','named/1',null,namedInput).refusal,
     /^host_check_not_allowlisted: allow \(repo, named\)/);
 
+  // Each named check keeps its own refusal; a good check makes the aggregate runnable.
+  const { summarizeCheckAvailability } = await import('../src/workspace.mjs');
+  const namedSpecs = [
+    ['named/1', { argv: ['node', 'scripts/first-test.mjs'], timeout_ms: 1000 }],
+    ['named/2', { argv: ['node', 'scripts/second-test.mjs'], timeout_ms: 1000 }],
+  ];
+  const firstBlocked = 'fixture: the first test is excluded';
+  const secondBlocked = 'fixture: the second test is excluded';
+  const mixed = summarizeCheckAvailability([], namedSpecs, null, null, id => id === 'named/1' ? firstBlocked : null);
+  assert.equal(mixed.runnable, true);
+  assert.equal(mixed.reason, null);
+  assert.match(mixed.namedDetails['named/1'], /not runnable: fixture: the first test is excluded/);
+  assert.doesNotMatch(mixed.namedDetails['named/2'], /not runnable/);
+  const both = summarizeCheckAvailability([], namedSpecs, null, null, id => id === 'named/1' ? firstBlocked : secondBlocked);
+  assert.equal(both.runnable, false);
+  assert.equal(both.reason, firstBlocked);
+  assert.match(both.namedDetails['named/2'], /not runnable: fixture: the second test is excluded/);
+  const owner = summarizeCheckAvailability(['default'], namedSpecs, null, null, () => firstBlocked);
+  assert.equal(owner.runnable, true);
+  assert.equal(owner.reason, null);
+
   // Regression-test rule: positives (refused).
   const impl=(expected_output,scope_paths)=>({execution_scope:'implementation',expected_output,scope_paths});
   for(const text of ['A patch with a regression test','Add regression tests.','patch + Regression-Test','Write a failing regression test first, then fix'])

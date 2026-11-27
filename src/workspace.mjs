@@ -473,6 +473,17 @@ function runtimeVersions() {
 }
 
 const UNSUPPORTED_MEMO_MAX=256;
+export function summarizeCheckAvailability(ownerIds,named,noHost,namedMissing,refusalFor) {
+  const refusals=named.map(([id])=>noHost||refusalFor(id));
+  const namedDetails=Object.fromEntries(named.map(([id,spec],index)=>[
+    id,checkSummary(spec)+(refusals[index]?` (not runnable: ${refusals[index]})`:''),
+  ]));
+  const runnable=ownerIds.length>0||refusals.some(refusal=>!refusal);
+  const reason=runnable?null:noHost||namedMissing||refusals[0]||
+    'host_check_not_allowlisted: no permitted owner-configured check is runnable';
+  return {namedDetails,runnable,reason};
+}
+
 export class Workspace {
   constructor(store,recover=true,{freeBytes,checkResponseOptions,stopReverify}={}) { this.checkResponseOptions=checkResponseOptions;this.stopReverify=stopReverify; if(freeBytes) this.freeBytes=freeBytes; this.store=store;this.activeChecks=new Set();this.autoChecked=new Set();this.checkEffects=new Map();this.cleanupInFlight=new Set();fs.mkdirSync(worktrees,{recursive:true,mode:0o700});fs.mkdirSync(artifacts,{recursive:true,mode:0o700});fs.mkdirSync(caches,{recursive:true,mode:0o700});if(recover) this.sweepDigestScratch();if(recover) store.transaction(()=>{ for(const job of store.db.prepare("SELECT id,request_id,claim_id,check_id FROM check_jobs WHERE status='running'").all()) { store.db.prepare("UPDATE check_jobs SET status='interrupted',stop_verified=NULL,finished_at=? WHERE id=?").run(new Date().toISOString(),job.id); store.lifecycle(job.request_id,'check_failed','system',checkOutcome({...job,status:'interrupted'})[1],{claim_id:job.claim_id}); } });if(recover) this.reconcileHostStops(); }
   // Only called after expiry/revocation: the host supervisor observes loss of
@@ -861,13 +872,11 @@ export class Workspace {
       const noHost=baseRefusal||(!readiness.ready?readiness.reason:null)||(unsupported?`dependencies_unsupported: ${unsupported}; run_check cannot run in this repository`:null);
       const ownerIds=namedRequested?declared.filter(id=>!isNamedCheck(id)):declared;
       const candidates=noHost?[]:ownerIds.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
-      const namedRefusal=named.length?noHost||hostCheckRefusal(assignment,repo,named[0][0],null,absent):
-        namedRequested&&!defaultSpec?'named_check_default_missing: configure a default check before declaring checks':null;
+      const namedMissing=namedRequested&&!defaultSpec?'named_check_default_missing: configure a default check before declaring checks':null;
       const available=[...candidates,...named.map(([id])=>id)];
-      const details={...(candidates.length?this.checkDetails(assignment,repo,candidates,dir,worker):{})};
-      for(const [id,spec] of named) details[id]=checkSummary(spec)+(namedRefusal?` (not runnable: ${namedRefusal})`:'');
-      const runnable=candidates.length>0||named.some(([id])=>!noHost&&!hostCheckRefusal(assignment,repo,id,null,absent));
-      const reason=noHost||namedRefusal||(!runnable?'host_check_not_allowlisted: no permitted owner-configured check is runnable':null);
+      const {namedDetails,runnable,reason}=summarizeCheckAvailability(candidates,named,noHost,namedMissing,
+        id=>hostCheckRefusal(assignment,repo,id,null,absent));
+      const details={...(candidates.length?this.checkDetails(assignment,repo,candidates,dir,worker):{}),...namedDetails};
       return {available_checks:available,...(available.length?{available_check_details:details,check_guidance:CHECK_GUIDANCE}:{}),
         host_execution_available:runnable,host_execution_unavailable_reason:reason};
     } catch(error) {
