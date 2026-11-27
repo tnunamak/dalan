@@ -15,7 +15,7 @@ if(process.argv[2]==='reserve') {
     let now=100000;const s=new Store(':memory:',{now:()=>now,resumeIdleMs:1,limits:{leaseMs:1000}}),id='req_wait_'+mode;
     const rotate=()=>{if(mode==='resume')return s.resume(id,'owner');if(mode==='reclaim')s.abandon(id);return s.claim(id,'second','owner',6,null,'dot','second');};
     try {
-      s.submit(payload(id),{mode:'t3',threadId:'fixture'},'env','owner');const first=s.claim(id,'first','owner',6,null,'dot','first');
+      s.submit(payload(id),{mode:'t3',threadId:'fixture-thread'},'env','owner');const first=s.claim(id,'first','owner',6,null,'dot','first');
       s.progress(id,first.claim_id,'QUESTION: old epoch','owner');const held=s.claimWaiterDelivery(id,0);assert(held);
       now+=1000;assert.throws(rotate,/uncertain_delivery/);
       s.recoverSends();assert.equal(s.db.prepare('SELECT state FROM notifications WHERE id=?').get(held.id).state,'waiting');
@@ -31,7 +31,7 @@ if(process.argv[2]==='reserve') {
   }
   const root=fs.mkdtempSync(path.join(os.homedir(),'.tmp','waiter-death-')),db=path.join(root,'db'),id='req_dead_waiter';let s,child;
   try {
-    s=new Store(db);s.submit(payload(id),{mode:'t3',threadId:'fixture'},'env','owner');s.claim(id,'first','owner',6);s.db.close();s=null;
+    s=new Store(db);s.submit(payload(id),{mode:'t3',threadId:'fixture-thread'},'env','owner');s.claim(id,'first','owner',6);s.db.close();s=null;
     child=fork(new URL(import.meta.url),['reserve',db,id],{stdio:['ignore','ignore','inherit','ipc']});
     const [held]=await once(child,'message',{signal:AbortSignal.timeout(10000)});
     s=new Store(db);s.recoverSends();assert.equal(s.db.prepare('SELECT state FROM notifications WHERE id=?').get(held.id).state,'waiting');
