@@ -26,11 +26,11 @@ A new kind modelled on `prepared-go-modules.mjs`, publishing through the same pi
 - One PR, one builder (Sonnet, medium), about one day. A spike of 1-2 h comes first (below).
 - Disk: about 1 GB per distinct lock (trial tree 961 MB, 55,766 entries). The disk is 92% full, 114 GB free; the store holds 3.2 GB for 7 npm entries and has no pruning. pdpp's lock changed once in the last 7 days. A keep-newest-N prune is a separate row; I would add it with this build.
 
-## Coverage (last 7 days, 71 pdpp dot patches that have a patch file)
+## Coverage (last 7 days, 71 pdpp worker patches that have a patch file)
 - display, list-envelope, reference-contract, pdpp-brand-react, operator-ui: 35/71 = 49%.
 - Plus reference-operations-sandbox: 48/71 = 68%.
 - apps/site would reach 87%, but its tests need a generate step (`@/generated` is missing after install), so it is out of scope.
-That clears the Lead's rule (a default only if the test covers code patches touch; the npm candidates covered 0%).
+That clears the maintainer's rule (a default only if the test covers code patches touch; the npm candidates covered 0%).
 
 ## Expect it to work because:
 1. The hard parts already work on main: read-only tree mounts, workspace trees, the pinned-base rule, in-child preparation, freeze and validate. pnpm only replaces the installer.
@@ -42,7 +42,7 @@ Cheapest settler (step 0, about 1-2 h, before the build): hand-assemble the tria
 
 Other risks: copy import time (not measured, est. 10-20 s extra per prepare); native postinstalls (better-sqlite3, onnxruntime-node, protobufjs) are skipped, so a package whose tests load them fails. None of the six packages above needs one. A rebuild step for an owner-approved list is v2.
 
-## Open decision for the Lead
+## Open decision for the maintainer
 One default check for pdpp that runs the six packages in sequence (simple; each ran 1-9 s, the whole run is not yet timed), or per-path checks (needs checks.json support I have not confirmed). I recommend the single sequential check.
 
 ## Spike and build results (11-26)
