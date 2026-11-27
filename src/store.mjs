@@ -205,6 +205,10 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(value.worker_claim_hint===null||typeof workerClaimHint!=='object'||Array.isArray(workerClaimHint)||
     Object.entries(workerClaimHint).some(([worker,n])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(n)||n<1||n>10))
     throw new Error('invalid worker_claim_hint');
+  const workerMaxClaims=value.worker_max_claims??{};
+  if(value.worker_max_claims===null||typeof workerMaxClaims!=='object'||Array.isArray(workerMaxClaims)||
+    Object.entries(workerMaxClaims).some(([worker,n])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(n)||n<1||n>10))
+    throw new Error('invalid worker_max_claims');
   const workerClaimMinGapMs=value.worker_claim_min_gap_ms??{};
   if(value.worker_claim_min_gap_ms===null||typeof workerClaimMinGapMs!=='object'||Array.isArray(workerClaimMinGapMs)||
     Object.entries(workerClaimMinGapMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<1000||ms>600000))
@@ -240,7 +244,7 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(!Number.isInteger(maxResponseBytesPerHour)||maxResponseBytesPerHour<100000||maxResponseBytesPerHour>1000000000) throw new Error('invalid max_response_bytes_per_hour');
   const maxResponseBytesPer24h=value.max_response_bytes_per_24h??defaultRedeliveryLimits.maxResponseBytesPer24h;
   if(!Number.isInteger(maxResponseBytesPer24h)||maxResponseBytesPer24h<1000000||maxResponseBytesPer24h>10000000000) throw new Error('invalid max_response_bytes_per_24h');
-  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,workerPostStartHoldMs,workerClaimHint,workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
+  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,workerPostStartHoldMs,workerClaimHint,...(Object.keys(workerMaxClaims).length?{workerMaxClaims}:{}),workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
 }
 
 // Gates that cap one rolling hour. They hold background work before agent-requested work (see rollingUsage).
@@ -2719,6 +2723,9 @@ export class Store {
     // Every new epoch of an existing claim (takeover, claim after abandon) waits for reconcile.
     if(old) this.assertNoUncertainDelivery(id);
     const active=this.activeClaims(subject,worker,id);
+    const max=this.workerMaxClaims(worker);
+    if(max!==null&&this.liveWorkerClaims(worker,id)>=max)
+      throw new Error(JSON.stringify({error:'capacity_full',message:`Worker ${worker} already holds its ${max} live claims`,worker}));
     if(active.length>=capacity) throw new Error('capacity_full');
     this.assertClaimGap(id,subject,worker,active);
     this.recordPrPreflight(id,'claim',JSON.parse(a.payload),preflight,!!old);
@@ -2805,7 +2812,8 @@ export class Store {
   // Result hints for list_pending and claim. Free lanes are bounded by both the lane capacity and the claim cap, so the
   // count never invites a claim that capacity_full would refuse.
   laneState(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity) {
-    return {free_lanes:this.freeLanes(subject,worker,laneCapacity,claimCapacity),queued:this.listPending(worker).filter(x=>x.kind==='assignment'&&!x.blocked).length};
+    const max=this.workerMaxClaims(worker);
+    return {...(max===null?{}:{worker_max_claims:max}),free_lanes:this.freeLanes(subject,worker,laneCapacity,claimCapacity),queued:this.listPending(worker).filter(x=>x.kind==='assignment'&&!x.blocked).length};
   }
   // A claimed assignment left its lane: the next reannounceQueued tick may wake the worker at once instead of waiting out rewakeMs.
   laneFreed() { this.dispatchWake=true; }
@@ -2829,7 +2837,19 @@ export class Store {
     const lanes=free<lanesFree?`${lanesFree} ${lanesFree===1?'lane':'lanes'} free, ${next.length} suggested`:`${free} ${free===1?'lane':'lanes'} free`;
     return {next_queued:next,next_action:`${all.length} queued and ${lanes}: claim ${next.map(x=>x.request_id).join(', ')} now (oldest first)`};
   }
-  freeLanes(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity) { return Math.max(0,Math.min(laneCapacity,claimCapacity)-this.activeClaims(subject,worker).length); }
+  workerMaxClaims(worker,limits=this.limits) {
+    const caps=limits.workerMaxClaims??{};
+    return Object.hasOwn(caps,worker)?caps[worker]:null;
+  }
+  liveWorkerClaims(worker,exceptId=null) {
+    return this.db.prepare("SELECT c.* FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND c.state='active' AND c.worker=? AND c.request_id IS NOT ?").all(worker,exceptId)
+      .filter(claim=>!this.leaseExpired(claim)).length;
+  }
+  freeLanes(subject,worker='dot',laneCapacity=this.limits.laneCapacity??6,claimCapacity=this.capacity) {
+    const legacy=Math.min(laneCapacity,claimCapacity)-this.activeClaims(subject,worker).length;
+    const max=this.workerMaxClaims(worker);
+    return Math.max(0,max===null?legacy:Math.min(legacy,max-this.liveWorkerClaims(worker)));
+  }
   quiesceCounts() {
     const live=this.db.prepare("SELECT c.* FROM claims c JOIN assignments a USING(request_id) WHERE a.status='claimed' AND c.state='active'").all();
     const hostChecks=this.db.prepare("SELECT count(*) AS n FROM check_jobs WHERE status='running' OR stop_verified IS NOT 1").get().n;
@@ -3534,7 +3554,8 @@ export class Store {
       WHERE status='queued' AND cancelled_at IS NULL AND skipped_at IS NULL AND ${live(this.nowMs())} GROUP BY target_worker`).all().map(r=>[r.worker,r]));
     dispatch.by_worker=Object.fromEntries([...this.workers.workers.keys()].sort().map(worker=>{
       const {n=0,oldest=null}=queuedByWorker.get(worker)??{};
-      return [worker,dispatchState(by_worker[worker].capacity.free_lanes,n,oldest)];
+      const evidence=by_worker[worker].capacity;
+      return [worker,{...dispatchState(evidence.free_lanes,n,oldest),...(evidence.worker_max_claims===undefined?{}:{worker_max_claims:evidence.worker_max_claims})}];
     }));
     const released=this.db.prepare("SELECT id,id notice_id,request_id,message_id,subscription_id,attempt_id,attempt_started_at,terminal_at,terminal_reason FROM notifications WHERE state='uncertain_terminal' ORDER BY terminal_at DESC LIMIT 20").all();
     return {held_wakes:this.db.prepare("SELECT count(*) n FROM notifications WHERE held_kind IS NOT NULL AND state IN ('pending','quiet')").get().n,dispatch,liveness_scope:legacyScope,counts,counts_scope:'global',by_worker,priority_counts,priority_counts_scope:'global',background_max_in_flight:backgroundMaxInFlight,skipped_by_worker:(skipped=>({count:skipped.length,request_ids:skipped.slice(0,20).map(x=>x.request_id)}))(this.skippedByDot()),claim_denied:{count:denied.length,request_ids:denied.map(d=>d.request_id).slice(0,20),capacity_hold_until:this.capacityHoldUntil()},subscriptions_active:active.length,last_verified:sub?.verified_at||null,oldest_pending:oldest,last_claim:lastClaim,last_claim_at:lastClaim,subscription,queued_without_active_subscription:dotQueuedWithoutSubscription,oldest_queue_age_ms:oldest?this.nowMs()-Date.parse(oldest):null,uncertain_deliveries:uncertain,uncertain_terminal_deliveries:released,queued_expired:queuedExpired,queued_expired_requeued:queuedExpiredRequeued,paused:!!pause.paused_at,pause_reason:pause.reason,...(({items,...rest})=>rest)(this.liveness(limits,capacity)),worker_break:this.breakState(),throttle,budget,...statusEvidence(this)};
@@ -3542,7 +3563,9 @@ export class Store {
   workerCapacityEvidence(worker,subscriptions,limits,capacity) {
     const byPrincipal=[...new Map(subscriptions.map(sub=>[sub.principal,sub])).values()];
     const scope=this.workers.laneScope==='worker'?'worker':'principal';
-    const unknown=reason=>({state:'unknown',scope,source:null,free_lanes:null,unknown_reason:reason});
+    const max=this.workerMaxClaims(worker,limits);
+    const workerCap=max===null?{}:{worker_max_claims:max,worker_free_claims:Math.max(0,max-this.liveWorkerClaims(worker))};
+    const unknown=reason=>({...workerCap,state:'unknown',scope,source:null,free_lanes:null,unknown_reason:reason});
     if(!byPrincipal.length) return unknown('no_active_subscription');
     const subjectKeys=this.db.prepare("SELECT DISTINCT c.lane_key FROM claims c JOIN assignments a USING(request_id) WHERE c.worker=? AND c.state='active' AND c.lane_scope='subject' AND a.status='claimed'").all(worker).map(row=>row.lane_key);
     const principals=[...new Set([...byPrincipal.map(sub=>sub.principal),...subjectKeys])];
@@ -3555,6 +3578,6 @@ export class Store {
     const sub=byPrincipal[0];
     const lanes=this.subscriptionFreeLanes(sub,limits.laneCapacity??6,capacity);
     const laneEvidence=this.db.prepare("SELECT DISTINCT c.lane_scope,c.lane_key FROM claims c JOIN assignments a USING(request_id) WHERE c.worker=? AND c.state='active' AND a.status='claimed' ORDER BY c.lane_scope,c.lane_key").all(worker).map(row=>({lane_scope:row.lane_scope,lane_key:row.lane_key}));
-    return {state:'known',scope,source:'subscription_policy',free_lanes:lanes,lane_capacity:Math.min(limits.laneCapacity??6,capacity),principal:scope==='principal'?sub.principal:undefined,lane_evidence:laneEvidence};
+    return {...workerCap,state:'known',scope,source:'subscription_policy',free_lanes:lanes,lane_capacity:Math.min(limits.laneCapacity??6,capacity,max??Infinity),principal:scope==='principal'?sub.principal:undefined,lane_evidence:laneEvidence};
   }
 }

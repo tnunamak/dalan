@@ -999,7 +999,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       catch(e) { if(e instanceof RegistryError) throw new Error(e.message.startsWith(e.code)?e.message:`${e.code}: ${e.message}`); throw e; }
     }
     case 'list_pending': {
-      const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
+      const {free_lanes,worker_max_claims}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
       const assignments=store.listPending(worker);
       store.recordListed(assignments,free_lanes,worker);
       phaseTrace.listed(assignments.map(x=>x.request_id));
@@ -1010,7 +1010,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       const claims_accepted=!quiescing&&!store.paused();
       const next=claims_accepted?store.nextQueued(free_lanes,null,worker):{};
       const claimsNote=claims_accepted?'':quiescing?restartQuiesceText:'Claims are paused (temporary): do not claim now; call list_pending again later and claim once claims_accepted is true.';
-      return {assignments,policy_work:policyPage(worker),attention:store.attention(subject,worker),free_lanes,claims_accepted,...(claims_accepted?next:{next_action:claimsNote}),guidance};
+      return {assignments,policy_work:policyPage(worker),attention:store.attention(subject,worker),free_lanes,...(worker_max_claims===undefined?{}:{worker_max_claims}),claims_accepted,...(claims_accepted?next:{next_action:claimsNote}),guidance};
     }
     case 'claim': {
       const requestId=id(a.request_id),claimant=str(a.claimant,'claimant',128),ctx=commandContext('claim',{claimant,acquisition_id:a.acquisition_id??null,lease_ms:a.lease_ms??null}),row=store.get(requestId),held=row.claim?.state==='active'?row.claim:null,retry=holdsLiveGrant(worker,requestId,claimant,subject,a.acquisition_id);
