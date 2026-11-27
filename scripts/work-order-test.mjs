@@ -200,17 +200,18 @@ try {
       nowTrack+=2000;
       record.sweepExpired();
       const cancelled=add('cancelled'); record.cancel(cancelled,'owner stopped');
+      const stale=add('stale'); record.lifecycle(stale,'check_failed','system','earlier epoch',{claim_id:'claim-from-earlier-epoch'}); finish(stale);
       finish(add('plain'));
       finish(add('another_kind','build'));
       add('still_queued');
       const got=record.trackRecord('dot','review');
-      assert.deepEqual(got,{worker:'dot',kind:'review',window_days:7,n:9,outcomes:{
+      assert.deepEqual(got,{worker:'dot',kind:'review',window_days:7,n:10,outcomes:{
         landed:2,check_passed:1,checks_failed:1,refused_by_provider:1,
-        unable_to_run:1,owner_cancelled:1,finished_unchecked:2,
+        unable_to_run:1,owner_cancelled:1,finished_unchecked:3,
       }});
       assert.deepEqual(record.admissionAnswer('dot','review','normal').track_record,got);
     } finally { record.db.close(); }
-    log('worker track record: distinct terminal outcomes; accepted alone is not landed');
+    log('worker track record: distinct terminal outcomes; accepted alone is not landed; an earlier claim\'s check does not count');
   }
 
   // Construct an honest v44 fixture by removing only the additive v45 column, then upgrade twice.

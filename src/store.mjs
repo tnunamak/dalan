@@ -1269,11 +1269,13 @@ export class Store {
     const rows=this.db.prepare(`SELECT a.request_id,a.status,r.outcome,
       EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='integrated') integrated,
       EXISTS(SELECT 1 FROM decisions d WHERE d.request_id=a.request_id AND d.decision='applied' AND d.actor='owner') applied,
-      EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_passed') check_passed,
-      EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_failed') check_failed
-      FROM assignments a LEFT JOIN reports r USING(request_id)
+      EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_passed' AND (e.claim_id IS NULL OR e.claim_id=c.claim_id)) check_passed,
+      EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_failed' AND (e.claim_id IS NULL OR e.claim_id=c.claim_id)) check_failed
+      FROM assignments a LEFT JOIN reports r USING(request_id) LEFT JOIN claims c USING(request_id)
       WHERE a.created_at>=? AND a.target_worker=? AND ${queueKindSql}=? AND a.status IN ('finished','cancelled')`).all(since,worker,kind);
     const outcomes={landed:0,check_passed:0,checks_failed:0,refused_by_provider:0,unable_to_run:0,owner_cancelled:0,finished_unchecked:0};
+    // Check events from an earlier claim of a re-queued job describe a run that did not produce the result, so only the
+    // final claim's events (or owner-side events with no claim) count.
     for(const row of rows) {
       // A plain acceptance is a disposition on a report, not evidence that anything landed.
       if(row.integrated||row.applied) outcomes.landed++;
