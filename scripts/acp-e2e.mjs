@@ -239,6 +239,13 @@ else console.log(JSON.stringify({ok:true,data:{}}));
 
   // A loaded session can replay its completed result using the exact continuation prompt.
   c.kill('SIGKILL'); await c.exited;
+  // The same continuation with its whitespace reflowed still replays and adds no work.
+  const reflowed = adapter(); await reflowed.init();
+  assert.ok(!(await reflowed.loadSession(s4b, noGit)).error);
+  assert.equal((await reflowed.prompt(s4b, 'Continue  where you\nleft off.')).result.stopReason, 'end_turn');
+  assert.equal(reflowed.text('agent_message_chunk'), 'RESULT OF 4b');
+  assert.equal(rows(`${root4b}%`).length, 1, 'reflowed continuation never adds work');
+  reflowed.kill('SIGKILL'); await reflowed.exited;
   const settled = adapter(); await settled.init();
   assert.ok(!(await settled.loadSession(s4b, noGit)).error);
   assert.equal((await settled.prompt(s4b, 'Continue where you left off.')).result.stopReason, 'end_turn');
