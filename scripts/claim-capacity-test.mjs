@@ -121,6 +121,60 @@ try {
   }
   pass('named caps span principals, release at finish, and limit bridge handoff picks without changing another worker');
 
+  // Isolated policy: count worker lanes, not principals or the candidate itself.
+  {
+    let cap=1, occupied=0;
+    const fixture={
+      db:{isTransaction:true},
+      workerMaxClaims(worker) { assert.equal(worker,'fixture'); return cap; },
+      liveWorkerClaims(worker,except) {
+        assert.equal(worker,'fixture');
+        assert.equal(except,'fixture-job');
+        return occupied;
+      },
+    };
+    const enforce=()=>Store.prototype.assertWorkerClaimSlot.call(fixture,'fixture','fixture-job');
+    assert.doesNotThrow(enforce);
+    occupied=1;
+    assert.throws(enforce,error=>JSON.parse(error.message).error==='capacity_full');
+    cap=null;
+    assert.doesNotThrow(enforce);
+  }
+
+  // Exercise the named cap through actual grant transitions and a fake clock.
+  {
+    const full=err=>{ try { const r=JSON.parse(err.message); return r.error==='capacity_full'&&r.worker==='dot'; } catch { return false; } };
+    const grant=(s,id,subject,run)=>s.claim(id,subject,subject,CAP,null,'dot',run);
+    for(const mode of ['resume','regrant']) {
+      const s=open('named-'+mode);
+      try {
+        s.limits={...s.limits,workerMaxClaims:{dot:1}};
+        s.resumeIdleOption=MIN;
+        submit(s,'expired_a','occupying_b');
+        const a=grant(s,'expired_a','subject_a','original-a');
+        const retry=grant(s,'expired_a','subject_a','original-a');
+        assert.equal(retry.duplicate,true);
+        assert.equal(retry.claim_id,a.claim_id);
+        assert.equal(retry.epoch,a.epoch);
+        assert.equal(s.liveWorkerClaims('dot'),1);
+        now+=LEASE+1;
+        const b=grant(s,'occupying_b','subject_b','original-b');
+        const current=()=>s.db.prepare('SELECT claim_id,epoch,state FROM claims WHERE request_id=?').get('expired_a');
+        const before=current();
+        const reactivate=mode==='resume'?()=>s.resume('expired_a','subject_a'):
+          ()=>grant(s,'expired_a','subject_a','new-a');
+        assert.throws(reactivate,full,mode+' cannot overfill the named worker cap');
+        assert.deepEqual(current(),before,mode+' refusal must not mutate the old grant');
+        s.finish('occupying_b',b.claim_id,'completed','done','done','subject_b');
+        const renewed=reactivate();
+        assert.equal(renewed.epoch,a.epoch+1);
+        if(mode==='regrant') assert.equal(renewed.resumed,true,'exercise rotateIdleClaim, not plain reclaim');
+        assert.notEqual(renewed.claim_id,a.claim_id);
+        assert.equal(s.liveWorkerClaims('dot'),1);
+      } finally { s.db.close(); }
+    }
+  }
+
   console.log('PASS claim capacity test');
 } catch(error) { console.error(`FAIL ${error.stack||error}`); process.exitCode=1; }
 finally { rmSync(dir,{recursive:true,force:true}); }
