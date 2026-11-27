@@ -1354,7 +1354,7 @@ const adminServer=http.createServer(async(req,res)=>{
       const disclosure=isNew?store.destinationSnapshot(target??'dot',jobExecution,payload):existingRequest.destination_approval?.snapshot??null;
       if(dryRun) {
         log({kind:'submit_dry_run',request_id:submitted.request_id,task_kind:meta.task_kind??null,source:meta.source??null,verdict:order?.verdict??'admissible',reason_codes:(order?.reasons??[]).map(r=>r.code),attempt_latency_ms:Date.now()-requestStartedAt});
-        return json(res,200,{dry_run:true,request_id:submitted.request_id,stored:false,admission:admission(),...(disclosure?{destination_disclosure:disclosure}:{}),...(order??{verdict:'admissible',reasons:[],duplicate:true}),...(order?.warnings?.length?{submission_warnings:order.warnings}:{})});
+        return json(res,200,{dry_run:true,request_id:submitted.request_id,stored:false,...(payload?{admission:admission()}:{}),...(disclosure?{destination_disclosure:disclosure}:{}),...(order??{verdict:'admissible',reasons:[],duplicate:true}),...(order?.warnings?.length?{submission_warnings:order.warnings}:{})});
       }
       // Defer refuses only for a requester that opts in; both the CLI and HTTP API queue by default.
       if(order?.verdict==='defer'&&body.refuse_defer===true&&body.queue_anyway!==true) {
