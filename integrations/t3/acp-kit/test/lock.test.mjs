@@ -583,3 +583,26 @@ test('reusing an existing fixture directory preserves its POSIX mode', { skip: p
   finally { lock.release(); }
   assert.equal(fs.statSync(parent).mode & 0o777, 0o750);
 });
+
+test('a malformed saved session reports recovery guidance and leaves bytes alone', {skip: process.platform === 'win32'}, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-session-malformed-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.json');
+  const partial = '{"display":"fixture"';
+  fs.writeFileSync(file, partial, {mode: 0o600});
+  assert.throws(() => readJsonPrivate(file), {
+    code: 'invalid_session_state',
+    message: 'Saved session is unreadable; start a new session or restore the saved state.',
+  });
+  assert.equal(fs.readFileSync(file, 'utf8'), partial);
+});
+
+test('a saved session with broad access reports the mode and does not return its contents', {skip: process.platform === 'win32'}, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-session-permissions-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.json');
+  fs.writeFileSync(file, '{"display":"fixture"}', {mode: 0o600});
+  fs.chmodSync(file, 0o644);
+  assert.throws(() => readJsonPrivate(file), {code: 'state_permissions', message: /must be mode 0600 \(found 644\)/});
+  assert.equal(fs.statSync(file).mode & 0o777, 0o644);
+});
