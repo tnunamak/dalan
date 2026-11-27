@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { applyPatch, baseProblem, detectPresentPatches, listPatchFiles, patchMatchesWorktree, readMaterializeGrant } from '../src/patch-apply.mjs';
+import { applyPatch, baseProblem, decodePatchPathOutput, detectPresentPatches, listPatchFiles, patchMatchesWorktree, readMaterializeGrant } from '../src/patch-apply.mjs';
 import { startAdapter } from './acp-client.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'apply-'));
@@ -22,6 +22,12 @@ const main = repo('main'); write(main, 'a.txt', 'one\ntwo\n'); const BASE = comm
 write(main, 'a.txt', 'uno\ntwo\n'); write(main, 'new.txt', 'hello\n'); git(main, 'add', '-A');
 const PATCH = Buffer.from(git(main, 'diff', '--cached', '--binary') + '\n'); git(main, 'reset', '-q', '--hard');
 assert.match(PATCH.toString(), /diff --git a\/a.txt b\/a.txt/);
+
+// Decode the inspection frame in isolation; no malformed input is applied to a repository.
+const utf8InspectionFrame = '1\t0\tcafé name.txt\0';
+assert.equal(decodePatchPathOutput(Buffer.from(utf8InspectionFrame)), utf8InspectionFrame);
+assert.equal(decodePatchPathOutput(Buffer.from('valid replacement character: \uFFFD')), 'valid replacement character: \uFFFD');
+assert.throws(() => decodePatchPathOutput(Buffer.from([0xc3])), /patch path inspection is not valid UTF-8/);
 
 // A benign rename must record both sides so rollback can restore the old file.
 const renameRepo = repo('rename-snapshot');
