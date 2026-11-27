@@ -121,6 +121,26 @@ try {
   }
   pass('named caps span principals, release at finish, and limit bridge handoff picks without changing another worker');
 
+  // Isolated policy: count worker lanes, not principals or the candidate itself.
+  {
+    let cap=1, occupied=0;
+    const fixture={
+      db:{isTransaction:true},
+      workerMaxClaims(worker) { assert.equal(worker,'fixture'); return cap; },
+      liveWorkerClaims(worker,except) {
+        assert.equal(worker,'fixture');
+        assert.equal(except,'fixture-job');
+        return occupied;
+      },
+    };
+    const enforce=()=>Store.prototype.assertWorkerClaimSlot.call(fixture,'fixture','fixture-job');
+    assert.doesNotThrow(enforce);
+    occupied=1;
+    assert.throws(enforce,error=>JSON.parse(error.message).error==='capacity_full');
+    cap=null;
+    assert.doesNotThrow(enforce);
+  }
+
   console.log('PASS claim capacity test');
 } catch(error) { console.error(`FAIL ${error.stack||error}`); process.exitCode=1; }
 finally { rmSync(dir,{recursive:true,force:true}); }
