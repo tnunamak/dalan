@@ -589,6 +589,19 @@ cases.set(26, async () => fixture(async f => {
   assert.match(first,/3 jobs ahead/);
   assert.match(first,/not enough history/);
 }));
+// A request id the bridge holds for another owner is a bridge response, not an admission refusal.
+cases.set(27, async () => fixture(async f => {
+  const rid='review_other_owner';
+  f.hook(async ({url,rid:found,res,json}) => {
+    if(found!==rid||url.pathname!=='/get') return false;
+    json(res,{error:'invalid owner capability'},400); return true;
+  });
+  const a=await f.adapter(), sid=(await a.newSession(f.cwd)).sessionId;
+  const result=await bounded(a.prompt(sid,`[dot-decision:${rid}]\nsomeone else's id`));
+  assert.match(result.error?.message ?? '',/exists under another owner/);
+  assert.equal(result.error?.data?.failure_type,'adapter_error',JSON.stringify(result.error));
+  assert.equal(result.error?.data?.failure_type_source,'dot_acp_bridge_response');
+}));
 const only = process.argv[2] ? Number(process.argv[2]) : null;
 for (const [finding, test] of cases) {
   if (only && finding !== only) continue;
