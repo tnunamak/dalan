@@ -50,6 +50,87 @@ try {
   const missingLog=spawnSync(process.execPath,['scripts/admission-measure.mjs','--db',path.join(home,'facts.db'),'--log',path.join(home,'absent.jsonl'),'--since','2026-10-23T00:00:00Z','--until','2026-10-25T00:00:00Z'],{encoding:'utf8'});
   assert.equal(missingLog.status,0,missingLog.stderr);
   const missingReport=JSON.parse(missingLog.stdout);assert.equal(missingReport.source.request_log_state,'missing');assert.equal(missingReport.report.refusals,null,'a missing log does not prove zero refusals');
+  const {spawn}=await import('node:child_process'),{request}=await import('node:http'),{once}=await import('node:events');
+  const childHome=path.join(home,'admission-http');
+  fs.mkdirSync(path.join(childHome,'.config','dalan'),{recursive:true,mode:0o700});
+  fs.writeFileSync(path.join(childHome,'.config','dalan','workers.json'),JSON.stringify({workers:{local:{connections:[{issuer:'https://fixture.invalid',subject:'local',client_id:'fixture'}],repos:['tnunamak/dalan']}}}),{mode:0o600});
+  const child=spawn(process.execPath,['--input-type=module','-e',"import {main} from './src/server.mjs'; await main({loopbackOnly:true});"],{
+    env:{...process.env,HOME:childHome,DALAN_PORT:'0',DALAN_BIND_HOST:'127.0.0.1',DALAN_LOOPBACK_PROBE_MS:'0',DALAN_DEV_ALLOW_UNAUTHENTICATED:'1',DALAN_TRUST_PROXY:''},
+    stdio:['ignore','pipe','pipe'],
+  });
+  const closed=once(child,'close');
+  let output='', diagnostics='';
+  child.stderr.on('data',chunk=>{diagnostics=(diagnostics+chunk).slice(-2000);});
+  try {
+    const socketPath=await new Promise((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(new Error('fixture admin socket did not start: '+diagnostics)),10000);
+      child.once('error',error=>{clearTimeout(timeout);reject(error);});
+      child.once('close',code=>{clearTimeout(timeout);reject(new Error('fixture server exited '+code+': '+diagnostics));});
+      child.stdout.on('data',chunk=>{
+        output=(output+chunk).slice(-4000);
+        const line=/^admin socket (.+)\r?$/m.exec(output);
+        if(line){clearTimeout(timeout);resolve(line[1]);}
+      });
+    });
+    const requestAssignment=(raw,route='/submit-preview')=>new Promise((resolve,reject)=>{
+      const body=typeof raw==='string'?raw:JSON.stringify(raw);
+      const req=request({socketPath,path:route,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(body)}},res=>{
+        const parts=[];res.on('data',chunk=>parts.push(chunk));res.on('error',reject);
+        res.on('end',()=>{try{resolve({status:res.statusCode,value:JSON.parse(Buffer.concat(parts).toString())});}catch(error){reject(error);}});
+      });
+      req.on('error',reject);req.setTimeout(5000,()=>req.destroy(new Error('fixture request timed out')));req.end(body);
+    });
+    const preview=raw=>requestAssignment(raw);
+    const fixture={owner_token:'fixture-owner',delivery:'none',assignment:{schema_version:1,request_id:'preview-fixture',brief:'Check fixture',inputs:[],execution_scope:'read-only',expected_output:'review report'}};
+    const bad=await preview({...fixture,assignment:{...fixture.assignment,request_id:'preview-head-mismatch',execution_scope:'implementation',
+      inputs:[{github_repo:'tnunamak/dalan',base_sha:'a'.repeat(40),head_sha:'b'.repeat(40)}]}});
+    assert.equal(bad.status,200);
+    assert.equal(bad.value.verdict,'reject');assert.equal(bad.value.stored,false);
+    assert.ok(bad.value.reasons.some(reason=>reason.code==='head_sha_unsupported'),JSON.stringify(bad.value.reasons));
+    assert.ok(bad.value.admission&&typeof bad.value.admission==='object','early refusal includes advisory admission');
+    const malformed=await preview('{');
+    assert.equal(malformed.status,400);assert.equal('admission' in malformed.value,false);
+    const good=await preview(fixture);
+    assert.equal(good.status,200);assert.equal(good.value.verdict,'admissible');
+    assert.ok(good.value.admission);assert.equal(good.value.stored,false);
+    const protectedRepo={...fixture,worker:'local',assignment:{...fixture.assignment,
+      request_id:'preview-private-repo',inputs:[{github_repo:'example-owner/absent',base_sha:'a'.repeat(40)}]}};
+    const blocked=await preview(protectedRepo);
+    assert.equal(blocked.status,200);
+    assert.notEqual(blocked.value.verdict,'admissible');
+    assert.equal(blocked.value.stored,false);
+    assert.ok(blocked.value.reasons.length>0);
+    assert.equal('admission' in blocked.value,false,'repo authorization precedes advisory access');
+
+    const realRefusal=await requestAssignment(protectedRepo,'/submit');
+    assert.ok(realRefusal.status>=400);
+    assert.equal('admission' in realRefusal.value,false,'real refusal never returns advisory data');
+
+    const withId=request_id=>({...fixture,worker:'local',assignment:{...fixture.assignment,request_id}});
+    const missing=await preview({...withId('preview-missing-supersedes'),
+      supersedes:{target_id:'missing-fixture-row',target_token:fixture.owner_token}});
+    assert.equal(missing.status,200);
+    assert.notEqual(missing.value.verdict,'admissible');
+    assert.equal(missing.value.stored,false);
+    assert.match(JSON.stringify(missing.value.reasons),/supersed|not found/i);
+
+    for(const id of ['preview-replacement-target','preview-unrelated-job']){
+      const seeded=await requestAssignment(withId(id),'/submit');
+      assert.equal(seeded.status,200,JSON.stringify(seeded.value));
+      assert.equal(seeded.value.status,'queued');
+    }
+    const proposed=withId('preview-replacement');
+    const ordinary=await preview(proposed);
+    const replacement=await preview({...proposed,
+      supersedes:{target_id:'preview-replacement-target',target_token:fixture.owner_token}});
+    assert.equal(replacement.value.stored,false);
+    assert.equal(replacement.value.admission.ahead.count,ordinary.value.admission.ahead.count-1);
+    const unchanged=await preview(proposed);
+    assert.equal(unchanged.value.admission.ahead.count,ordinary.value.admission.ahead.count,'neither preview stores or replaces a job');
+  } finally {
+    child.kill();
+    await closed;
+  }
   console.log('PASS measurement: retry proxy, explicit intent cohort, missingness, policy denials, defer/unknown, byte overflow, response latency, old log guesses');
   console.log('PASS terminal facts: expiry separate from owner cancel; worker report remains report-only');
 } finally {fs.rmSync(home,{recursive:true,force:true});}
