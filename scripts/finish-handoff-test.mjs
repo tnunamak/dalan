@@ -92,6 +92,9 @@ try {
     assert.ok(Date.now() - started < 1000, 'no wait when a job is queued');
     assert.equal(done.next_job?.request_id, 'req_handoff_q1', JSON.stringify(done));
     assert.ok(done.next_job.claim_id, 'next_job is a real claim result');
+    assert.equal(done.next_job.already_claimed, true, 'machine-readable claim status');
+    assert.match(done.guidance, /Do not call claim again/);
+    assert.match(done.next_job.lease_expires_at, /^\d{4}-\d\d-\d\dT/);
     assert.equal(done.next_job.assignment.request_id, 'req_handoff_q1');
     assert.equal(done.next_queued, undefined, 'a claimed job is no longer advertised as queued');
     const got = await b.ok('get', { request_id: 'req_handoff_q1' });
@@ -264,7 +267,10 @@ try {
     const f2 = await s.claimNew('req_short_second');
     const h2 = await s.finish(f2);
     assert.equal(h2.next_job.request_id, 'req_short_started');
-    await s.ok('get', { request_id: 'req_short_started' });
+    const idleRemaining = leaseLeft(h2.next_job);
+    assert.ok(idleRemaining > 0 && idleRemaining <= 2000, `the offered lease reflects the 2s setting: ${idleRemaining}`);
+    // Use progress as the *first* holder call. A get here could itself extend the lease and mask a regression.
+    await s.ok('progress', {request_id: h2.next_job.request_id, claim_id: h2.next_job.claim_id, note: 'Started handed work'});
     await sleep(4500);
     assert.equal((await s.ok('get', { request_id: 'req_short_stranded' })).status, 'queued', 'the untouched handoff went back to the queue');
     assert.equal((await s.ok('get', { request_id: 'req_short_started' })).status, 'claimed', 'the started handoff stays claimed');
