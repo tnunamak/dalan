@@ -1043,7 +1043,13 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       if(!strictJob) throw new Error('renew_claim requires a protocol job');
       return store.renewClaim(id(a.request_id),id(a.claim_id,'claim_id'),a.lease_ms,commandContext('renew',{leaseMs:a.lease_ms}),subject,worker,connectionId);
     }
-    case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject)),guidance:store.guidanceFor(worker)}; }
+    case 'get': {
+      const requestId=id(a.request_id);
+      if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)};
+      store.markNotesSeenByHolder(requestId,subject,worker,connectionId);
+      const row=store.get(requestId);
+      return {...publicWorkerGet(withAvailableChecks(row,true,worker,subject)),...store.workerGetHeartbeat(row,worker,subject),guidance:store.guidanceFor(worker)};
+    }
     case 'ack_message': {const message=store.ackMessage(id(a.message_id,'message_id'),worker);log({kind:'message_acknowledged',message_id:message.message_id});return {kind:'message',message};}
     case 'progress': {
       const requestId=id(a.request_id),note=str(a.note,'note',4096),claimId=id(a.claim_id,'claim_id');
