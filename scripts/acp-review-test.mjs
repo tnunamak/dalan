@@ -532,6 +532,45 @@ cases.set(23, async () => fixture(async f => {
   f.finish(rid, 'DECLINED RESULT');
   assert.equal((await bounded(p)).result.stopReason, 'end_turn');
 }));
+async function terminalReadFixture(f, persistent) {
+  const rid=persistent?'review_terminal_read_outage':'review_terminal_read_once';
+  let submitted=0,waits=0,rewaits=0,failedReads=0;
+  f.hook(async ({url,rid:found,res,json}) => {
+    if(found!==rid) return false;
+    if(url.pathname==='/submit') submitted++;
+    if(url.pathname==='/wait') { waits++; if(failedReads) rewaits++; }
+    // The read that follows the terminal /wait fails: once, or every time.
+    if(url.pathname==='/get'&&f.rows.get(rid)?.status==='finished'&&(persistent||failedReads===0)) {
+      failedReads++;
+      json(res,{error:'temporary fixture read fault'},503);
+      return true;
+    }
+    return false;
+  });
+  const a=await f.adapter({DOT_ACP_OUTAGE_MS:persistent?'100':'3000'});
+  const sid=(await a.newSession(f.cwd)).sessionId;
+  const p=a.prompt(sid,'[dot-decision:'+rid+']\nkeep the same child active');
+  await waitFor(()=>f.rows.has(rid),'one assignment submitted');
+  // Finish only once the child is in its wait loop, so the result arrives through /wait and its follow-up read.
+  await waitFor(()=>waits>0,'child waiting');
+  f.finish(rid,'TERMINAL READ RESULT');
+  const result=await bounded(p);
+  assert.equal(submitted,1,'the same child retries reads, not submit');
+  assert.ok(rewaits>=1,'the terminal wait was re-read after the failed read');
+  if(persistent) {
+    assert.ok(failedReads>=2);
+    assert.equal(result.error?.code,-32000);
+    assert.match(result.error.message,/worker bridge unreachable/);
+    assert.equal((await f.state(sid))?.pending.rid,rid);
+  } else {
+    assert.equal(failedReads,1);
+    assert.equal(result.result?.stopReason,'end_turn');
+    assert.match(a.text('agent_message_chunk'),/TERMINAL READ RESULT/);
+    assert.equal(result.error,undefined);
+  }
+}
+cases.set(24,async()=>fixture(f=>terminalReadFixture(f,false)));
+cases.set(25,async()=>fixture(f=>terminalReadFixture(f,true)));
 const only = process.argv[2] ? Number(process.argv[2]) : null;
 for (const [finding, test] of cases) {
   if (only && finding !== only) continue;
