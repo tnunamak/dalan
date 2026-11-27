@@ -6,6 +6,26 @@ import path from 'node:path';
 import { Store, loadRedeliveryLimits } from './store.mjs';
 import { HOST_BUDGET_CEILINGS, parseHostBudget, resolveHostStopEvidence } from './host-budget.mjs';
 
+test('trial manifest stores the exact route identity without public origin or transient port', async () => {
+  const { exposureRecord, validateExposure } = await import('../scripts/live-trial/exposure.mjs');
+  const handle = {kind:'session', id:'isolated-fixture', generation:2};
+  const record = exposureRecord({home:'/tmp/trial-fixture',
+    view:{handle, origin:'https://fixture.example.test', local_port:8787, deadline_at:'2026-11-27T00:00:00Z'}});
+  assert.deepEqual(record, {kind:'gozar-session', gozar_home:'/tmp/trial-fixture', handle});
+  assert.equal(validateExposure(record, 8787), record);
+});
+
+test('legacy trial manifest refuses mismatched port and incomplete route identity', async () => {
+  const { validateExposure } = await import('../scripts/live-trial/exposure.mjs');
+  const old = {kind:'gozar-session', gozar_home:'/tmp/trial-fixture',
+    handle:{kind:'session', id:'isolated-fixture', generation:2},
+    origin:'https://fixture.example.test', local_port:8787, deadline_at:'2026-11-27T00:00:00Z'};
+  assert.equal(validateExposure(old, 8787), old);
+  assert.throws(() => validateExposure(old, 8788), /ports do not match/);
+  assert.throws(() => validateExposure({...old, handle:{...old.handle, generation:0}}, 8787), /route handle is missing or invalid/);
+  assert.throws(() => validateExposure({...old, origin:'http://fixture.example.test'}, 8787), /origin is invalid/);
+});
+
 test('CLI guidance uses the stable command for the executable on PATH, but npx in npm exec', async t => {
   const { cliCommand } = await import('./cli-name.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-cli-name-'));
