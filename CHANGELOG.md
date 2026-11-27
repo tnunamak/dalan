@@ -4,6 +4,8 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **`dalan forecast` and `submit --dry-run` show the real reason for a refused job.** A dry run that was refused or needed clarification used to fail inside the admission forecast and report a generic `refused` reason. A refused dry run now carries its own reasons and no forecast.
+- **The first help screen is short again.** `forecast`, `correct` and `materialize` are listed under `dalan help --all`. `materialize` help now describes publishing as well as `--dry-run`.
 - **A job whose T3 delivery has no valid thread id is refused at submit, so its result is never delivered nowhere.** A delivery object with an empty, missing, non-string or invalid `threadId` now fails with `invalid_delivery: t3 delivery needs a valid thread id` before anything is stored. Stored legacy values keep routing as before.
 - **`dalan materialize ID` pushes a finished patch inside the owner's grant to `dalan/<request_id>` and opens a draft PR.** The patch is applied in a temporary worktree at the job's base, committed with the owner's own git identity, pushed only to that new branch and opened as a draft against the default branch. A repo outside the grant gets no push; `per_pr` needs `--approve`; an existing different branch is refused. Dalan never merges.
 - **A Gozar route operation that the SDK refuses before it reserves anything can be retried after a restart.** When a replayed operation without a route handle is refused with a pre-allocation code (for example an expired consent), Dalan records it as `prepared` again instead of leaving it stuck at `dispatching`. An operation that holds a handle stays protected.
