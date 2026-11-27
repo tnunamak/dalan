@@ -5,7 +5,7 @@
 import { Readable, Writable } from 'node:stream';
 import fs from 'node:fs';
 import path from 'node:path';
-import { answerThroughJournal } from '../src/answer-journal.mjs';
+import { answerThroughJournal, journalPath, readJournal } from '../src/answer-journal.mjs';
 import { randomUUID } from 'node:crypto';
 import * as acp from '@agentclientprotocol/sdk';
 import { sessionPath, readJsonPrivate, writeJsonPrivate } from '../integrations/t3/acp-kit/src/session-store.mjs';
@@ -274,7 +274,16 @@ async function waitLoop(s, ctl, say, client) {
       continue;
     }
     if (r.status === 'question' || r.status === 'blocker') {
-      await handleQuestions(s, ctl, say, client, r);
+      // A question never ends the child turn: the job is still open, so report the failure once and try again next round.
+      try { await handleQuestions(s, ctl, say, client, r); }
+      catch (error) {
+        if (error instanceof acp.RequestError) throw error;
+        const message = String(error?.message ?? error);
+        if (ctl.lastQuestionError !== message) {
+          ctl.lastQuestionError = message;
+          await say('agent_message_chunk', `Work ${ctl.pending.rid}: a worker question could not be handled: ${message} (child turn held; trying again).\n\n`);
+        }
+      }
       await sleep(Math.min(1000, HEARTBEAT_MS), signal);
       continue;
     }
@@ -308,11 +317,19 @@ async function relayProgress(s, ctl, say) {
   publishPending(s, ctl);
 }
 async function handleQuestions(s, ctl, say, client, notice) {
-  const rid = ctl.pending.rid;
-  const {questions} = await call(`/questions?id=${encodeURIComponent(rid)}`, rid);
-  const row = await readRowOrThrow(rid);
-  for (const q of questions) {
-    if (q.answered_at || q.answer != null || row.claim && (q.epoch !== row.claim.epoch || q.claim_id !== row.claim.claim_id)) continue;
+  const rid = ctl.pending.rid, receiptsDir = path.join(P.stateDir,'answers');
+  const listQuestions = async () => (await call(`/questions?id=${encodeURIComponent(rid)}`, rid)).questions ?? [];
+  // Read the question again before each step: the parent may take minutes, and meanwhile the job can finish, be claimed
+  // again, or get the answer elsewhere. Only an open question of an open job under the current claim is live.
+  const live = async questionId => {
+    const q = (await listQuestions()).find(item => item.question_id === questionId), row = await readRowOrThrow(rid);
+    if (!q || ['finished','cancelled'].includes(row.status) || q.answered_at || q.answer != null) return null;
+    return row.claim && (q.epoch !== row.claim.epoch || q.claim_id !== row.claim.claim_id) ? null : q;
+  };
+  const questions = await listQuestions();
+  for (const listed of questions) {
+    const q = await live(listed.question_id);
+    if (!q) continue;
     const purpose = q.purpose ?? 'clarification';
     const expectedRespondent = purpose === 'clarification' ? 'parent_agent' : 'human_owner';
     const identity = {work_id:rid, question_id:q.question_id, purpose, expected_respondent:expectedRespondent};
@@ -323,15 +340,28 @@ async function handleQuestions(s, ctl, say, client, notice) {
       }
       continue;
     }
-    if (ctl.askedQuestions?.has(q.question_id)) continue;
-    (ctl.askedQuestions ??= new Set()).add(q.question_id);
-    const response = await client.request(acp.methods.client.elicitation.create, {
-      sessionId:s.id, mode:'form', message:`${JSON.stringify(identity)}\n${q.text}`,
-      requestedSchema:{type:'object', properties:{answer:{type:'string', title:q.question_id, description:q.text}}, required:['answer']},
-    });
-    if (ctl.cancelled) return;
-    if (response.action !== 'accept') continue;
-    await answerThroughJournal({receiptsDir:path.join(P.stateDir,'answers'), job:rid, questionId:q.question_id, text:response.content?.answer,
+    // An answer saved before a restart is sent again as saved; the parent is not asked a second time.
+    const saved = readJournal(journalPath(receiptsDir, rid, q.question_id), rid, q.question_id);
+    let text = saved && saved.state !== 'committed' ? saved.text : null;
+    if (text === null) {
+      if (saved || ctl.askedQuestions?.has(q.question_id)) continue;
+      (ctl.askedQuestions ??= new Set()).add(q.question_id);
+      const response = await client.request(acp.methods.client.elicitation.create, {
+        sessionId:s.id, mode:'form', message:`${JSON.stringify(identity)}\n${q.text}`,
+        requestedSchema:{type:'object', properties:{answer:{type:'string', title:q.question_id, description:q.text}}, required:['answer']},
+      });
+      if (ctl.cancelled) return;
+      if (response.action !== 'accept') {
+        await say('agent_message_chunk', `Work ${rid}: you declined to answer question ${q.question_id}. The question is still open and the job waits for an answer (child turn held).\n\n`);
+        continue;
+      }
+      if (!await live(q.question_id)) {
+        await say('agent_message_chunk', `Work ${rid}: question ${q.question_id} was answered or closed while you decided, so your answer was not sent.\n\n`);
+        continue;
+      }
+      text = response.content?.answer;
+    }
+    await answerThroughJournal({receiptsDir, job:rid, questionId:q.question_id, text,
       readRevision:async () => (await readRowOrThrow(rid)).protocol_revision ?? null,
       post:payload => call('/answer',rid,{method:'POST',payload}),
       readQuestion:async () => (await call(`/questions?id=${encodeURIComponent(rid)}`,rid)).questions.find(item => item.question_id === q.question_id)});

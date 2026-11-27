@@ -437,6 +437,101 @@ cases.set(18, async () => fixture(async f => {
   assert.match(a.rawText('agent_message_chunk'),/requester_interrupted: true; worker_state: still_running; work_id: review_cancel_outage/);
   assert.equal((await f.state(sid)).pending.rid,'review_cancel_outage');
 }));
+// Worker questions must never end the child turn, and an answer must reach only a live, unanswered question.
+const questionFixture = (f, rid, questions, { onAnswer } = {}) => {
+  const answers = [];
+  f.hook(async ({ url, res, json, body }) => {
+    const row = f.rows.get(rid);
+    if (url.pathname === '/questions') { json(res, { questions: questions() }); return true; }
+    if (url.pathname === '/answer') { answers.push(body); if (onAnswer) return onAnswer({ res, json, body }); json(res, { answered: true }); return true; }
+    if (url.pathname === '/wait' && row && row.status !== 'finished') { await sleep(20); json(res, { status: 'question' }); return true; }
+    return false;
+  });
+  return answers;
+};
+// Muse 1127 defect 2: the job finished while the parent deliberated; the late answer is not posted and the result arrives.
+cases.set(19, async () => fixture(async f => {
+  const rid = 'review_q_late';
+  const answers = questionFixture(f, rid, () => f.rows.get(rid)?.status === 'finished' ? [] : [{ question_id: 'late', text: 'Which?', purpose: 'clarification' }]);
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nAsk late`);
+  await waitFor(() => a.requests.length, 'elicitation');
+  f.finish(rid, 'LATE RESULT');
+  a.respond(a.requests[0].id, { action: 'accept', content: { answer: 'too late' } });
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+  assert.equal(answers.length, 0, 'no answer is posted to a finished job');
+  assert.match(a.rawText('agent_message_chunk'), /LATE RESULT/);
+}));
+// Muse 1127 defect 1: a refused answer (the bridge says the question is already answered) does not end the turn.
+cases.set(20, async () => fixture(async f => {
+  const rid = 'review_q_refused';
+  let refused = false;
+  questionFixture(f, rid, () => refused ? [] : [{ question_id: 'dup', text: 'Which?', purpose: 'clarification' }],
+    { onAnswer: ({ res, json }) => { refused = true; json(res, { error: 'question already has an answer', code: 'ALREADY_ANSWERED' }, 409); return true; } });
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  let settled = false;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nAsk refused`).then(r => { settled = true; return r; });
+  await waitFor(() => a.requests.length, 'elicitation');
+  a.respond(a.requests[0].id, { action: 'accept', content: { answer: 'mine' } });
+  await waitFor(() => refused, 'answer refused');
+  await sleep(200);
+  assert.equal(settled, false, 'the child turn stays held after a refused answer');
+  f.finish(rid, 'REFUSED RESULT');
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+  assert.match(a.rawText('agent_message_chunk'), /REFUSED RESULT/);
+  assert.doesNotMatch(a.rawText('agent_message_chunk'), /worker adapter error/);
+}));
+// Muse 1127 defect 3: a second question answered while the parent deliberates on the first is not asked.
+cases.set(21, async () => fixture(async f => {
+  const rid = 'review_q_two';
+  let firstAsked = false;
+  const answers = questionFixture(f, rid, () => [
+    { question_id: 'one', text: 'First?', purpose: 'clarification', ...(answers.length ? { answer: 'A', answered_at: 't' } : {}) },
+    { question_id: 'two', text: 'Second?', purpose: 'clarification', ...(firstAsked ? { answer: 'other', answered_at: 't' } : {}) },
+  ]);
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nAsk two`);
+  await waitFor(() => a.requests.length, 'first elicitation');
+  firstAsked = true;
+  a.respond(a.requests[0].id, { action: 'accept', content: { answer: 'A' } });
+  await waitFor(() => answers.length, 'first answer');
+  await sleep(300);
+  assert.equal(a.requests.length, 1, 'the already answered second question is not asked');
+  f.finish(rid, 'TWO RESULT');
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+}));
+// Muse 1127 defect 4: after a restart, a saved but unsent answer is re-sent from the journal, not asked again.
+cases.set(22, async () => fixture(async f => {
+  const rid = 'review_q_saved';
+  const dir = join(f.home, 'state', 'answers', `${rid}.answers`);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'kept.json'), JSON.stringify({ v: 1, job: rid, question_id: 'kept', key: 'answer:kept', text: 'SAVED', expected_revision: null, state: 'prepared' }) + '\n', { mode: 0o600 });
+  let done = false;
+  const answers = questionFixture(f, rid, () => done ? [] : [{ question_id: 'kept', text: 'Kept?', purpose: 'clarification' }],
+    { onAnswer: ({ res, json }) => { done = true; json(res, { answered: true }); return true; } });
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nResume saved`);
+  await waitFor(() => answers.length, 'saved answer re-sent');
+  assert.equal(answers[0].text, 'SAVED');
+  assert.equal(a.requests.length, 0, 'the parent is not asked again');
+  f.finish(rid, 'SAVED RESULT');
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+}));
+// Muse 1127 defect 5: a declined question is reported to the parent; the job keeps waiting and the turn stays held.
+cases.set(23, async () => fixture(async f => {
+  const rid = 'review_q_nope';
+  questionFixture(f, rid, () => [{ question_id: 'nope', text: 'Which?', purpose: 'clarification' }]);
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  let settled = false;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nAsk declined`).then(r => { settled = true; return r; });
+  await waitFor(() => a.requests.length, 'elicitation');
+  a.respond(a.requests[0].id, { action: 'decline' });
+  await waitFor(() => /declined/.test(a.rawText('agent_message_chunk')), 'decline reported');
+  assert.match(a.rawText('agent_message_chunk'), /question nope.*still open|still open.*question nope/s);
+  assert.equal(settled, false);
+  f.finish(rid, 'DECLINED RESULT');
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+}));
 const only = process.argv[2] ? Number(process.argv[2]) : null;
 for (const [finding, test] of cases) {
   if (only && finding !== only) continue;
