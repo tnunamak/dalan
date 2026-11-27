@@ -2,6 +2,48 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { formatGetSummary, formatGetEndNote } from './get-summary.mjs';
 
+async function trialHomeCli(t) {
+  const { mkdir, mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const home = await mkdtemp(join(tmpdir(), 'dalan-bin-entry-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const trial = join(home, '.local', 'share', 'dalan-trial');
+  await mkdir(trial, { recursive: true });
+  await writeFile(join(trial, '.dalan-trial'), '');
+  const bin = fileURLToPath(new URL('../bin/dalan.mjs', import.meta.url));
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  return {version:pkg.version, run(...args) {
+    const result = spawnSync(process.execPath, [bin, ...args], {
+      env: { HOME:home, USERPROFILE:home, XDG_CONFIG_HOME:join(home,'.config') },
+      encoding:'utf8', timeout:5000,
+    });
+    assert.ifError(result.error);
+    return result;
+  }};
+}
+
+test('dalan version flags print the package version with no trial-home requirement', async t => {
+  const {run,version}=await trialHomeCli(t);
+  for (const flag of ['--version', '-v']) {
+    const result=run(flag);
+    assert.equal(result.status,0,result.stderr);
+    assert.equal(result.stdout,version+'\n');
+    assert.equal(result.stderr,'');
+  }
+});
+
+test('dalan help still opens with trial mode present and no bridge home selected', async t => {
+  const {run}=await trialHomeCli(t);
+  const result=run('--help');
+  assert.equal(result.status,0,result.stderr);
+  assert.match(result.stdout,/\bdalan\b/i);
+  assert.match(result.stdout,/\bsetup\b/i);
+  assert.equal(result.stderr,'');
+});
+
 const options = { id: 'job-original', cli: 'dalan', decideWords: 'accepted|rejected|applied' };
 async function reviewArgumentFailure(t, args) {
   const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
