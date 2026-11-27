@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { applyPatch, baseProblem, detectPresentPatches, patchMatchesWorktree } from '../src/patch-apply.mjs';
+import { applyPatch, baseProblem, detectPresentPatches, listPatchFiles, patchMatchesWorktree, readMaterializeGrant } from '../src/patch-apply.mjs';
 import { startAdapter } from './acp-client.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'apply-'));
@@ -22,6 +22,33 @@ const main = repo('main'); write(main, 'a.txt', 'one\ntwo\n'); const BASE = comm
 write(main, 'a.txt', 'uno\ntwo\n'); write(main, 'new.txt', 'hello\n'); git(main, 'add', '-A');
 const PATCH = Buffer.from(git(main, 'diff', '--cached', '--binary') + '\n'); git(main, 'reset', '-q', '--hard');
 assert.match(PATCH.toString(), /diff --git a\/a.txt b\/a.txt/);
+
+// A benign rename must record both sides so rollback can restore the old file.
+const renameRepo = repo('rename-snapshot');
+write(renameRepo, 'before name.txt', 'fixture content\n');
+commit(renameRepo, 'original');
+git(renameRepo, 'mv', 'before name.txt', 'after name.txt');
+const renamePatch = Buffer.from(git(renameRepo, 'diff', '--cached', '-M') + '\n');
+assert.deepEqual(listPatchFiles(renameRepo, renamePatch).sort(), ['after name.txt', 'before name.txt']);
+
+// Simulate extra permission flags in stat metadata only; no special mode is set on disk.
+if (typeof process.getuid === 'function') {
+  const grant = path.join(renameRepo, 'fixture-grant.json');
+  fs.writeFileSync(grant, JSON.stringify({ grant: ['repo:fixture/repo'], mode: 'standing' }), { mode: 0o600 });
+  assert.equal(readMaterializeGrant(grant).mode, 'standing');
+  const stat = fs.fstatSync;
+  try {
+    for (const bit of [0o4000, 0o2000, 0o1000]) {
+      fs.fstatSync = fd => {
+        const info = stat(fd);
+        return { size: info.size, uid: info.uid, mode: info.mode | bit, isFile: () => info.isFile() };
+      };
+      assert.throws(() => readMaterializeGrant(grant), { local_code: 'materialize_grant_unsafe' });
+    }
+  } finally {
+    fs.fstatSync = stat;
+  }
+}
 
 // Root-relative patches must work even when the caller is inside the checkout.
 const nested = repo('nested'); write(nested, 'a.txt', 'one\ntwo\n'); const NBASE = commit(nested, 'base');
