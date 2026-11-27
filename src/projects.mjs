@@ -254,6 +254,31 @@ export function argvTestFiles(argv) {
   return [...new Set(found)];
 }
 
+export function namedCheckPath(command) {
+  if (typeof command !== 'string' || command.length > 512) return null;
+  const match = /^node ([A-Za-z0-9_.@/-]+\.(?:mjs|js|cjs))$/.exec(command);
+  if (!match || match[0] !== command) return null;
+  const target = match[1];
+  return !argvOk(['node', target]) || !relPath(target) || target.startsWith('-') ||
+    target.split('/').some(segment => !segment || segment === '.') ? null : target;
+}
+
+export const isNamedCheck = id => typeof id === 'string' && /^named\/[1-8]$/.test(id) && id.length === 7;
+export function assignmentNamedCheck(assignment, id, defaultSpec) {
+  if (!isNamedCheck(id) || !defaultSpec || assignment?.execution_scope !== 'implementation' ||
+      !Array.isArray(assignment.checks) || assignment.checks.length > 8) return null;
+  const target = namedCheckPath(assignment.checks[Number(id.at(-1)) - 1]);
+  if (!target) return null;
+  const { install_argv, timeout_ms, output_bytes, prerequisites, host_budget } = defaultSpec;
+  return normalizeCheck({
+    argv: ['node', target], timeout_ms, output_bytes,
+    ...(install_argv ? { install_argv } : {}),
+    ...(prerequisites ? { prerequisites } : {}),
+    ...(host_budget ? { host_budget } : {}),
+    test_paths: [target],
+  }, id);
+}
+
 export function normalizeCheck(check, id = 'default', derived = {}) {
   if (!argvOk(check.argv)) throw new Error(`invalid check ${id}`);
   if (check.install_argv && !argvOk(check.install_argv)) throw new Error(`invalid install ${id}`);

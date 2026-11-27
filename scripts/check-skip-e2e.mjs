@@ -31,7 +31,7 @@ if(process.argv.includes('--fixture-server')) {
   const {Workspace}=await import('../src/workspace.mjs');
   Workspace.prototype.runConfined=async function(requestId,dir,command,options) {
     assert(fs.realpathSync(dir).startsWith(fs.realpathSync(process.env.DOT_BRIDGE_WORKSPACE_ROOT)+path.sep));
-    assert.equal(command[0],'/runtime/node');
+    assert(command[0]==='/runtime/node'||(command[0]==='node'&&command[1]==='scripts/named-skip.mjs'));
     assert(['scripts/test-segments.mjs','scripts/named-skip.mjs','scripts/armored-skip.mjs'].includes(command[1]));
     assert.equal(command.length,2);
     const started=Date.now(),chunks=[];
@@ -61,7 +61,7 @@ if(process.argv.includes('--fixture-server')) {
   const checks={default:check('scripts/test-segments.mjs'),direct:check('scripts/named-skip.mjs'),armored:check('scripts/armored-skip.mjs')};
   fs.writeFileSync(path.join(repo,'.dot-bridge.json'),JSON.stringify({checks}));
   fs.writeFileSync(path.join(config,'checks.json'),JSON.stringify({'test/fixture':{checks}}),{mode:0o600});
-  fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:Object.keys(checks).map(check_id=>({repo:'test/fixture',check_id}))}),{mode:0o600});
+  fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:[...Object.keys(checks),'named'].map(check_id=>({repo:'test/fixture',check_id}))}),{mode:0o600});
   git('add','scripts','package.json','.dot-bridge.json');git('commit','-qm','synthetic exit-77 segments');
   const base=git('rev-parse','HEAD'),{privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
   const jwk={...publicKey.export({format:'jwk'}),kid:'fixture',use:'sig'};
@@ -90,12 +90,15 @@ if(process.argv.includes('--fixture-server')) {
       assert.equal(response.status,200);const result=(await response.json()).result;assert(!result.isError,result.content[0].text);return JSON.parse(result.content[0].text);
     };
     const request_id=`req_${randomUUID()}`,file=path.join(home,'assignment.json');
-    fs.writeFileSync(file,JSON.stringify({schema_version:1,request_id,brief:'Exercise synthetic skip coverage',inputs:[{github_repo:'test/fixture',base_sha:base}],scope_paths:['.'],expected_output:'report',execution_scope:'implementation'}));
+    fs.writeFileSync(file,JSON.stringify({schema_version:1,request_id,brief:'Exercise synthetic skip coverage',inputs:[{github_repo:'test/fixture',base_sha:base}],scope_paths:['.'],expected_output:'report',execution_scope:'implementation',checks:['node scripts/named-skip.mjs']}));
     const submitted=spawnSync(process.execPath,['bin/dot-worker.mjs','submit','--file',file,'--execution','host','--json'],{cwd:root,env,encoding:'utf8'});
     assert.equal(submitted.status,0,submitted.stderr);
     const claim=await call('claim',{request_id,claimant:'fixture'});
     db=new DatabaseSync(path.join(home,'.local/share/dot-bridge/bridge.db'),{readOnly:true});
-    for(const [check_id,segment,exit] of [['default','scripts/skip.mjs',0],['direct','scripts/named-skip.mjs',77],['armored','scripts/named-skip.mjs',0]]) {
+    const offered=await call('get',{request_id});
+    assert(offered.available_checks.includes('named/1'));
+    assert(offered.available_check_details['named/1'].includes('node scripts/named-skip.mjs'));
+    for(const [check_id,segment,exit] of [['default','scripts/skip.mjs',0],['direct','scripts/named-skip.mjs',77],['armored','scripts/named-skip.mjs',0],['named/1','scripts/named-skip.mjs',77]]) {
       const receipt=await call('run_check',{request_id,claim_id:claim.claim_id,check_id});
       assert.equal(receipt.status,'skipped',JSON.stringify(receipt));assert.equal(receipt.exit_code,exit);
       if(check_id==='default') assert.match(receipt.output_preview,/=== SEGMENT 1\/1: SKIP ===/);
@@ -106,15 +109,28 @@ if(process.argv.includes('--fixture-server')) {
       assert(shown.check_summary.includes(segment));
       const stored=db.prepare('SELECT j.status,r.evidence FROM check_jobs j JOIN check_runs r USING(id) WHERE j.id=?').get(receipt.id);
       assert.equal(stored.status,'skipped');assert.equal(JSON.parse(stored.evidence).skipped_segments,1);
+      if(check_id==='named/1') {
+        const evidence=JSON.parse(stored.evidence);
+        assert.equal(evidence.definition.source,'requester_declared');
+        assert.deepEqual(evidence.argv,['node','scripts/named-skip.mjs']);
+        assert.equal(evidence.exit_code,77);
+      }
       const events=db.prepare("SELECT type FROM lifecycle_events WHERE request_id=? AND reason LIKE ? AND type IN ('check_passed','check_failed','check_skipped')").all(request_id,`%check_run_id=${receipt.id}%`);
       assert.deepEqual(events.map(e=>e.type),['check_skipped']);
     }
     const launches=fs.readFileSync(executions,'utf8').trim().split('\n').map(JSON.parse);
-    assert.deepEqual(launches.map(r=>r.exit),[0,77,0]);
+    assert.deepEqual(launches.map(r=>r.exit),[0,77,0,77]);
+    fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:Object.keys(checks).map(check_id=>({repo:'test/fixture',check_id}))}),{mode:0o600});
+    const stillDeclared=await call('get',{request_id});
+    assert(stillDeclared.available_checks.includes('named/1'));
+    assert.match(stillDeclared.host_execution_unavailable_reason,/host_check_not_allowlisted/);
+    const refused=await call('run_check',{request_id,claim_id:claim.claim_id,check_id:'named/1'});
+    assert.match(JSON.stringify(refused),/host_check_not_allowlisted/);
+    assert.equal(fs.readFileSync(executions,'utf8').trim().split('\n').length,launches.length);
     const owner=spawnSync(process.execPath,['bin/dot-worker.mjs','get',request_id,'--json'],{cwd:root,env,encoding:'utf8'});
     assert.equal(owner.status,0,owner.stderr);
     const ownerChecks=JSON.parse(owner.stdout).checks;
-    for(const [check_id,segment] of [['default','scripts/skip.mjs'],['direct','scripts/named-skip.mjs'],['armored','scripts/named-skip.mjs']]) {
+    for(const [check_id,segment] of [['default','scripts/skip.mjs'],['direct','scripts/named-skip.mjs'],['armored','scripts/named-skip.mjs'],['named/1','scripts/named-skip.mjs']]) {
       const shown=ownerChecks.find(c=>c.check_id===check_id);
       assert.equal(shown.status,'skipped');assert.equal(shown.skipped_segments,1);
       assert.deepEqual(shown.skipped_segment_names,[segment]);

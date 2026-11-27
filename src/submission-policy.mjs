@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
-import { assignmentInput, prepareGithubRepo } from './projects.mjs';
+import { assignmentInput, namedCheckPath, prepareGithubRepo } from './projects.mjs';
 import { firstSegment, laterSegment, readablePath, hasRouterSyntax } from './path-syntax.mjs';
 
 const infrastructureError=message=>Object.assign(new Error(message),{code:'DOT_BRIDGE_INFRASTRUCTURE'});
@@ -315,6 +315,25 @@ export function isSensitiveRepoPath(file,policyPaths=[]) {
 export function sensitivePolicyPaths() {
   try { const policy=loadPolicy();return {paths:policy.sensitive_paths,sourceExemptions:policy.sandbox_source_exemptions,error:null}; } catch(error) { return {paths:[],sourceExemptions:[],error:error.message}; }
 }
+const namedCheckError=(message,index)=>Object.assign(new Error(`invalid_named_check: ${message}`),{code:'invalid_named_check',...(index===undefined?{}:{check_index:index})});
+export function submissionNamedCheckPaths(assignment, { review=false, policyPaths=[] }={}) {
+  if (assignment.checks===undefined) return [];
+  if (review || assignment.execution_scope!=='implementation') throw namedCheckError('checks require an implementation assignment');
+  if (!Array.isArray(assignment.checks) || assignment.checks.length>8) throw namedCheckError('use an array of at most eight node <path> commands');
+  return Array.from(assignment.checks,(command,index)=>{
+    const file=namedCheckPath(command), entry=index+1;
+    if (!file) throw namedCheckError(`entry ${entry}: use exactly node <repo-relative .js, .mjs or .cjs path>`,entry);
+    if (isSensitiveRepoPath(file,policyPaths)) throw namedCheckError(`entry ${entry}: choose a non-sensitive test path`,entry);
+    return file;
+  });
+}
+export function validateNamedCheckTargets(namedPaths, scan, outputSet) {
+  const regularFiles=new Set(scan.regularFiles??scan.files.filter(file=>!scan.symlinks?.includes(file)));
+  for (const [index,file] of namedPaths.entries()) {
+    if (!regularFiles.has(file) && !outputSet.has(file))
+      throw namedCheckError(`entry ${index+1}: pin a revision with the regular test file, or declare a new file in output_paths`,index+1);
+  }
+}
 export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanInput,warnings=null,excludeSensitive=false,review=false,worker}={}) {
   const warn=message=>{if(warnings&&!warnings.includes(message)) warnings.push(message);};
   let p;
@@ -374,6 +393,7 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
     }
   }
   const outputSet=new Set(outputs);
+  const namedPaths=submissionNamedCheckPaths(rendered,{review,policyPaths:p.sensitive_paths});
   // Unified-diff /dev/null markers are sentinels, not filesystem requests. An exact exclusion diagnostic grants no
   // read permission. Keep scanning its content for secrets above and checking scope/diff paths below; remove only
   // a well-formed, actually sensitive name from instruction references.
@@ -419,7 +439,8 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       const files=tree.map(entry=>entry.path),symlinks=tree.filter(entry=>entry.mode==='120000').map(entry=>entry.path);
       const diff=input.head_sha?git(mirror,['diff','--no-ext-diff','--no-textconv','--binary',input.base_sha,input.head_sha]):'';
       const diffFiles=input.head_sha?git(mirror,['diff','--no-ext-diff','--name-only','-z',input.base_sha,input.head_sha]).split('\0').filter(Boolean):[];
-      return {files,diff,diffFiles,symlinks};
+      const regularFiles=tree.filter(entry=>entry.mode==='100644'||entry.mode==='100755').map(entry=>entry.path);
+      return {files,diff,diffFiles,symlinks,regularFiles};
     })();
     if(!scan||!Array.isArray(scan.files)||!Array.isArray(scan.diffFiles)||typeof scan.diff!=='string') throw infrastructureError('submission scope scanner failed');
     // A free-form read-only or review assignment may grow its scope by the files its own brief names and its PR changes: the
@@ -431,6 +452,7 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
     const maxGrowth=200;
     const want=(file,mention=file)=>{ if(within(file,scope)) return; if(mention!==file) mentionedAs.set(file,mention); if(growable) { if(added.length>=maxGrowth) throw new Error(`scope growth limit: the brief names more than ${maxGrowth} files outside scope_paths; list them in scope_paths`); scope.push(file);added.push(file); } else fixable.push(file); };
     const treeFiles=new Set(scan.files),isTreeDir=file=>scan.files.some(f=>f.startsWith(`${file}/`));
+    validateNamedCheckTargets(namedPaths,scan,outputSet);
     const treePass=mentionedPaths(text,[...scope,...scan.files]);
     for(const file of treePass) {
       if(file===input.github_repo||outputSet.has(file)) continue;

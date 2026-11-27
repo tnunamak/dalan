@@ -40,6 +40,38 @@ try {
   for(const bad of [{prerequisites:'x'},{prerequisites:{binaries:['a/b']}},{prerequisites:{binaries:'sh'}},{prerequisites:{lockfile:'../x'}},{prerequisites:{runtime:'node'}},{readiness_argv:[]},{readiness_argv:'x'},{test_paths:[]},{test_paths:['/abs']},{test_paths:['a/../b']},{test_paths:['not/in/argv.test.mjs']}])
     assert.throws(()=>availableChecks('o/r',fixture({'.dot-bridge.json':{checks:{default:{argv:['true'],...bad}}}})),/invalid/,JSON.stringify(bad));
 
+  // Named checks use a closed argv; flags, shell forms and noncanonical paths are not commands.
+  const { namedCheckPath, assignmentNamedCheck } = await import('../src/projects.mjs');
+  assert.equal(namedCheckPath('node scripts/a-test.mjs'), 'scripts/a-test.mjs');
+  for (const bad of [
+    'node --test scripts/a-test.mjs', 'node x.js;true', 'node x.js && true', 'node *.mjs',
+    'node /a.mjs', 'node a/../b.mjs', 'node a.txt', 'node --version.js',
+    'node a//b.mjs', 'node ./a.mjs', 'node  a.mjs', 'node a.mjs\n',
+  ]) assert.equal(namedCheckPath(bad), null, bad);
+  const namedDefault = { install_argv: ['npm','ci'], timeout_ms: 12345, output_bytes: 4096, prerequisites: {binaries:['node']} };
+  const namedInput = { execution_scope: 'implementation', checks: ['node scripts/a-test.mjs'] };
+  const named = assignmentNamedCheck(namedInput, 'named/1', namedDefault);
+  assert.equal(named.id, 'named/1');
+  assert.deepEqual(named.argv, ['node','scripts/a-test.mjs']);
+  assert.deepEqual(named.test_paths, ['scripts/a-test.mjs']);
+  assert.deepEqual(named.install_argv, namedDefault.install_argv);
+  assert.equal(named.timeout_ms, namedDefault.timeout_ms);
+  assert.equal(assignmentNamedCheck(namedInput, 'named/2', namedDefault), null);
+  assert.equal(assignmentNamedCheck(namedInput, 'named/1', null), null);
+
+  const { submissionNamedCheckPaths, validateNamedCheckTargets } = await import('../src/submission-policy.mjs');
+  const { hostCheckAuthorization } = await import('../src/host-execution-policy.mjs');
+  assert.deepEqual(submissionNamedCheckPaths(namedInput), ['scripts/a-test.mjs']);
+  const failNamed = e => e.code==='invalid_named_check' && e.check_index===1;
+  assert.throws(()=>submissionNamedCheckPaths({...namedInput,checks:['node --test x.js']}),failNamed);
+  assert.throws(()=>submissionNamedCheckPaths(namedInput,{policyPaths:['scripts']}),failNamed);
+  assert.throws(()=>submissionNamedCheckPaths({...namedInput,checks:Array(9).fill('node x.js')}),{code:'invalid_named_check'});
+  assert.throws(()=>validateNamedCheckTargets(['scripts/a-test.mjs'],{files:[],regularFiles:[]},new Set()),failNamed);
+  assert.throws(()=>validateNamedCheckTargets(['scripts/a-test.mjs'],{files:['scripts/a-test.mjs'],regularFiles:[]},new Set()),failNamed);
+  assert.doesNotThrow(()=>validateNamedCheckTargets(['scripts/a-test.mjs'],{files:[],regularFiles:[]},new Set(['scripts/a-test.mjs'])));
+  assert.match(hostCheckAuthorization('dalan-named-check-fixture/nonexistent','named/1',null,namedInput).refusal,
+    /^host_check_not_allowlisted: allow \(repo, named\)/);
+
   // Regression-test rule: positives (refused).
   const impl=(expected_output,scope_paths)=>({execution_scope:'implementation',expected_output,scope_paths});
   for(const text of ['A patch with a regression test','Add regression tests.','patch + Regression-Test','Write a failing regression test first, then fix'])
