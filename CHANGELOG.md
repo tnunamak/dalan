@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **A patch that names a file path that is not valid UTF-8 is refused before anything changes.** Git's path output is now kept as raw bytes until it decodes and encodes back to the same bytes; a path that does not round-trip stops the apply before any snapshot or write, so a failed apply can no longer leave such a file unrestored. UTF-8 names, spaces and renames apply as before.
 - **A delivery adapter without its own route check needs a valid address.** The default routing check now uses the same address parser as admission, so a malformed stored row no longer loads such an adapter; `none` and stored `t3` rows route as before.
 - **The admission track record counts jobs that ended in the last 7 days.** It used to select by creation time, so a job queued just before the window and finished yesterday was left out. Jobs are now placed by their report, cancellation or terminal lifecycle time, with creation time only for old rows that have none.
 - **Check metadata reports each named check's own refusal.** Before, the first check's refusal was copied to every `named/N` entry, so one excluded path could make every check look blocked; the aggregate reason is now set only when no authorized check can run.

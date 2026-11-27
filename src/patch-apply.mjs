@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const git = (dir, args, input, env) => spawnSync((env ?? process.env).DALAN_GIT || 'git', ['-C', dir, ...args], { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env });
+const git = (dir, args, input, env, encoding = "utf8") => spawnSync((env ?? process.env).DALAN_GIT || 'git', ['-C', dir, ...args], { input, encoding, maxBuffer: 64 * 1024 * 1024, env });
 
 const materializeName = '[A-Za-z0-9][A-Za-z0-9_.-]*';
 const materializeRepo = new RegExp('^' + materializeName + '/' + materializeName + '$');
@@ -187,11 +187,18 @@ export function baseProblem(dir, baseSha, env) {
   return anc.status === 0 ? null : `could not compare base and HEAD: ${anc.stderr.trim()}`;
 }
 
+// Refuse ambiguous byte sequences while inspection is still read-only.
+export function decodePatchPathOutput(bytes) {
+  const decoded = bytes.toString('utf8');
+  if (!Buffer.from(decoded, 'utf8').equals(bytes)) throw new Error('not applied: patch path inspection is not valid UTF-8');
+  return decoded;
+}
+
 // The files a patch names, renames as old and new, read from the patch alone (no check against the tree).
 function patchPaths(dir, body, env, direction) {
-  const numstat = git(dir, ['apply', '--numstat', '-z', ...direction, '-'], body, env);
-  if (numstat.error || numstat.status !== 0) throw new Error(`git apply --numstat failed: ${(numstat.stderr || numstat.error?.message || '').trim().slice(0, 300)}`);
-  const records = numstat.stdout.split('\0');
+  const numstat = git(dir, ['apply', '--numstat', '-z', ...direction, '-'], body, env, 'buffer');
+  if (numstat.error || numstat.status !== 0) throw new Error(`git apply --numstat failed: ${(numstat.stderr?.toString('utf8') || numstat.error?.message || '').trim().slice(0, 300)}`);
+  const records = decodePatchPathOutput(numstat.stdout).split('\0');
   const files = [];
   for (let index = 0; index < records.length; index++) {
     const record = records[index];
