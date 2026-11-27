@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **Check metadata reports each named check's own refusal.** Before, the first check's refusal was copied to every `named/N` entry, so one excluded path could make every check look blocked; the aggregate reason is now set only when no authorized check can run.
 - **MCP owner verbs refuse a request id that starts with `-`.** Such an id could have been read by the CLI as an option such as `--approve`; it is now refused with a validation error before any CLI call.
 - **`worker_max_claims` also holds when an expired claim comes back.** Resuming or rotating an expired claim is now refused with `capacity_full` when the worker is already at its cap; an exact retry of a live claim is unchanged.
 - **A dry run refused before the work-order check still carries the admission answer.** `dalan forecast --json` and `submit --dry-run` used to drop `admission` when the refusal came early (for example `head_sha_unsupported`). The early reply now includes it when the target and task kind are known; a body that is not valid JSON still has none.
