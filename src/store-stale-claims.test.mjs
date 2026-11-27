@@ -337,18 +337,50 @@ test('lineBuffer retains the configured tail while waiting for a final newline',
   assert.deepEqual(lines, ['kept']);
 });
 
-async function runUpgradeDrainFixture(t, args, extraEnv = {}) {
+async function runUpgradeDrainFixture(t, args, extraEnv = {}, fakeCli) {
   const { spawnSync } = await import('node:child_process');
   const { fileURLToPath } = await import('node:url');
   const cli = fileURLToPath(new URL('../scripts/upgrade-drain.mjs', import.meta.url));
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-drain-args-'));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  if (fakeCli) {
+    fs.mkdirSync(path.join(cwd, 'bin'));
+    fs.writeFileSync(path.join(cwd, 'bin', 'dot-worker.mjs'), fakeCli);
+  }
   // A regression must never reach a real bin/dot-worker.mjs or use the host HOME.
   return spawnSync(process.execPath, [cli, ...args], {
     cwd,
     env: { HOME: cwd, USERPROFILE: cwd, SYSTEMROOT: process.env.SYSTEMROOT, ...extraEnv },
     encoding: 'utf8',
     timeout: 2000,
+  });
+}
+
+for (const alreadyPaused of [true, false]) {
+  test(`failed legacy drain only resumes a pause it acquired (pre-paused=${alreadyPaused})`, async t => {
+    const fakeCli = `
+      const command = process.argv[2];
+      if (command === 'status') console.log(JSON.stringify({paused:${alreadyPaused}}));
+      else if (command === 'pause') {
+        if (${alreadyPaused}) throw new Error('fixture must not replace an existing pause');
+        console.log(JSON.stringify({paused:true}));
+      } else if (command === 'claims') console.log('{}');
+      else if (command === 'resume') {
+        if (${alreadyPaused}) throw new Error('fixture must not release an existing pause');
+        console.log(JSON.stringify({paused:false}));
+      } else throw new Error('unexpected argument');
+    `;
+    const result = await runUpgradeDrainFixture(t, ['--pause'], {}, fakeCli);
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /without a claims array/);
+    if (alreadyPaused) {
+      assert.match(result.stdout, /already paused/);
+      assert.doesNotMatch(result.stderr, /drain aborted/);
+    } else {
+      assert.match(result.stdout, /Claims paused/);
+      assert.match(result.stderr, /claims resumed/);
+    }
   });
 }
 
