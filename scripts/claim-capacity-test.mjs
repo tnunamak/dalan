@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Per-claimant claim capacity: each subject counts only its own active claims; status keeps the global count.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from '../src/store.mjs';
+import { Store, loadRedeliveryLimits } from '../src/store.mjs';
 import { parseWorkers } from '../src/workers.mjs';
 
 const MIN=60000, LEASE=60*MIN, CAP=2, dir=mkdtempSync(join(tmpdir(),'dalan-bridge-claim-capacity-'));
@@ -85,6 +85,41 @@ try {
     s.db.close();
   }
   pass('finished subject lanes keep their attribution and do not override current worker lane hints');
+
+  {
+    const file=join(dir,'named-cap.json');
+    for(const invalid of [null,[],{dot:0},{dot:11},{dot:1.5},{dot:'1'},{'Bad Worker':1}]) {
+      writeFileSync(file,JSON.stringify({worker_max_claims:invalid}),{mode:0o600}); chmodSync(file,0o600);
+      assert.throws(()=>loadRedeliveryLimits(file),/invalid worker_max_claims/);
+    }
+    writeFileSync(file,JSON.stringify({worker_max_claims:{dot:1}}),{mode:0o600}); chmodSync(file,0o600);
+    const workerMaxClaims=loadRedeliveryLimits(file).workerMaxClaims;
+    assert.deepEqual(workerMaxClaims,{dot:1});
+    const s=open('named-cap');
+    s.limits={...s.limits,workerMaxClaims};
+    s.subscribe('sub_cap','http://127.0.0.1/hook','whsec_test',new Date(now+48*3600000).toISOString(),'subject_a');
+    submit(s,'nc_first','nc_second');
+    const capClaim=s.claim('nc_first','holder-a','subject_a',CAP,null,'dot','named-original');
+    assert.equal(s.claim('nc_first','holder-a','subject_a',CAP,null,'dot','named-original').claim_id,capClaim.claim_id);
+    assert.throws(()=>s.claim('nc_second','holder-b','subject_b',CAP),err=>{
+      const refusal=JSON.parse(err.message);
+      return refusal.error==='capacity_full'&&refusal.worker==='dot';
+    },'the named cap covers different principals using the same worker');
+    assert.equal(s.laneState('subject_b','dot',6,CAP).free_lanes,0);
+    assert.equal(s.laneState('subject_b','dot',6,CAP).worker_max_claims,1);
+    assert.equal(s.status().by_worker.dot.capacity.worker_max_claims,1);
+    assert.equal(s.status().by_worker.dot.capacity.free_lanes,0);
+    assert.deepEqual(s.nextQueued(s.laneState('subject_b','dot',6,CAP).free_lanes,null,'dot',{applyHint:false}),{});
+    s.finish('nc_first',capClaim.claim_id,'completed','done','done','subject_a');
+    const next=s.nextQueued(s.laneState('subject_b','dot',6,CAP).free_lanes,null,'dot',{applyHint:false}).next_queued;
+    assert.deepEqual(next.map(job=>job.request_id),['nc_second']);
+    s.claim(next[0].request_id,'holder-b','subject_b',CAP,null,'dot','handoff-fixture');
+    assert.equal(s.laneState('subject_b','dot',6,CAP).free_lanes,0);
+    assert.equal(s.laneState('subject_b','other',6,CAP).free_lanes,CAP);
+    assert.equal(s.laneState('subject_b','other',6,CAP).worker_max_claims,undefined);
+    s.db.close();
+  }
+  pass('named caps span principals, release at finish, and limit bridge handoff picks without changing another worker');
 
   console.log('PASS claim capacity test');
 } catch(error) { console.error(`FAIL ${error.stack||error}`); process.exitCode=1; }
