@@ -1261,7 +1261,33 @@ export class Store {
       this.activeSubscriptions().some(sub=>sub.worker===worker)?'live':'no_live_subscription';
     // 'now' requires a reserved worker lane. Admission is advisory and reserves nothing.
     return {start:'queued',ahead:{count,oldest_age_ms:oldest===null?null:Math.max(0,now-Date.parse(oldest))},
-      latency:this.admissionEvidence(worker,kind),worker_state,...(worker_state==='break'?{until:workerBreak.until}:{}),at};
+      latency:this.admissionEvidence(worker,kind),track_record:this.trackRecord(worker,kind),worker_state,...(worker_state==='break'?{until:workerBreak.until}:{}),at};
+  }
+  trackRecord(worker,kind,days=7) {
+    kind=canonicalKindLabel(kind);
+    const since=iso(this.nowMs()-days*86400000);
+    const rows=this.db.prepare(`SELECT a.request_id,a.status,r.outcome,
+      EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='integrated') integrated,
+      EXISTS(SELECT 1 FROM decisions d WHERE d.request_id=a.request_id AND d.decision='applied' AND d.actor='owner') applied,
+      EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_passed') check_passed,
+      EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_failed') check_failed
+      FROM assignments a LEFT JOIN reports r USING(request_id)
+      WHERE a.created_at>=? AND a.target_worker=? AND ${queueKindSql}=? AND a.status IN ('finished','cancelled')`).all(since,worker,kind);
+    const outcomes={landed:0,check_passed:0,checks_failed:0,refused_by_provider:0,unable_to_run:0,owner_cancelled:0,finished_unchecked:0};
+    for(const row of rows) {
+      // A plain acceptance is a disposition on a report, not evidence that anything landed.
+      if(row.integrated||row.applied) outcomes.landed++;
+      else if(row.check_passed) outcomes.check_passed++;
+      else if(row.check_failed) outcomes.checks_failed++;
+      else if(row.status==='finished'&&row.outcome==='completed') outcomes.finished_unchecked++;
+      else {
+        const {failure_type}=this.failureFields(row.request_id);
+        if(failure_type==='guardian_denied'||failure_type==='usage_break') outcomes.refused_by_provider++;
+        else if(failure_type==='owner_cancelled') outcomes.owner_cancelled++;
+        else outcomes.unable_to_run++;
+      }
+    }
+    return {worker,kind,window_days:days,n:rows.length,outcomes};
   }
   queueWaitsMs(worker,kind,days=7) { return this.queueWaitEvidence(worker,kind,days).waits_ms; }
   defaultValidUntil(worker,kind,days=7) {
@@ -2083,16 +2109,17 @@ export class Store {
   // worker did not take the job when it was pushed to it. A finish does not push that row again while that is its latest abandon; the worker claims it from its own list, and a later claim that ended another way clears it.
   handoffLapsed(id,worker) { const last=this.db.prepare("SELECT actor,reason FROM lifecycle_events WHERE request_id=? AND worker=? AND type='abandoned' ORDER BY id DESC LIMIT 1").get(id,worker); return last?.actor==='system'&&last.reason?.startsWith('lease_expired: 1 call, last claim at ')===true; }
   failureFields(id) {
-    const a=this.db.prepare('SELECT status,cancelled_reason FROM assignments WHERE request_id=?').get(id);
+    const a=this.db.prepare(`SELECT a.status,a.cancelled_reason,r.outcome,r.summary,r.result,
+      EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_failed') check_failed,
+      CASE WHEN a.status='cancelled' THEN (SELECT e.actor FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='cancelled' ORDER BY e.id DESC LIMIT 1) END cancel_actor,
+      (a.status='cancelled' AND EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='abandoned' AND e.actor='system' AND e.reason LIKE 'lease_expired%')) lease_expired
+      FROM assignments a LEFT JOIN reports r USING(request_id) WHERE a.request_id=?`).get(id);
     if(!a) {const policy=this.pullQueue.inbox(id);return policy?{failure_type:policy.failure_type,failure_type_source:policy.failure_type_source}:{failure_type:'unknown',failure_type_source:'unknown'};}
-    const report=this.db.prepare('SELECT outcome,summary,result FROM reports WHERE request_id=?').get(id);
-    const failedReport=!!report&&report.outcome!=='completed';
-    const checkFailedObserved=!!this.db.prepare("SELECT 1 FROM lifecycle_events WHERE request_id=? AND type='check_failed' LIMIT 1").get(id);
+    const failedReport=a.outcome!==null&&a.outcome!=='completed';
+    const checkFailedObserved=!!a.check_failed;
     if(a.status!=='cancelled'&&!failedReport) return {failure_type:null,failure_type_source:null,check_failed_observed:checkFailedObserved};
-    const cancelActor=a.status==='cancelled'?this.db.prepare("SELECT actor FROM lifecycle_events WHERE request_id=? AND type='cancelled' ORDER BY id DESC LIMIT 1").get(id)?.actor:null;
-    const observed=observeTransition({status:a.status,reason:a.cancelled_reason,cancelActor,
-      leaseExpired:a.status==='cancelled'&&!!this.db.prepare("SELECT 1 FROM lifecycle_events WHERE request_id=? AND type='abandoned' AND actor='system' AND reason LIKE 'lease_expired%' LIMIT 1").get(id)});
-    const inferred=report?inferWorkerReport(report):null;
+    const observed=observeTransition({status:a.status,reason:a.cancelled_reason,cancelActor:a.cancel_actor,leaseExpired:!!a.lease_expired});
+    const inferred=a.outcome===null?null:inferWorkerReport(a);
     const result=observed??inferred;
     return result?{failure_type:result.type,failure_type_source:result.source,check_failed_observed:checkFailedObserved}:{failure_type:'unknown',failure_type_source:'unknown',check_failed_observed:checkFailedObserved};
   }

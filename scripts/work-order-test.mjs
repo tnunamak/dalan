@@ -170,6 +170,49 @@ try {
     log('admission answer: live rows ahead, priority, pause and thin history');
   }
 
+  {
+    let nowTrack=Date.parse('2026-01-12T00:00:00Z');
+    const record=new Store(path.join(home,'track-record.db'),{now:()=>nowTrack,capacity:20});
+    function add(label,kind='review',extra={}) {
+      const id='track_'+label, row=assignment({request_id:id,...extra});
+      record.submit(row,{mode:'none'},'',id,false,null,'normal',{task_kind:kind},row);
+      return id;
+    }
+    function finish(id,outcome='completed',message='done') {
+      const g=record.claim(id,'fixture','local-principal');
+      assert.ok(g.claim_id);
+      record.finish(id,g.claim_id,outcome,message,message);
+    }
+    try {
+      const integrated=add('integrated'); finish(integrated);
+      record.lifecycle(integrated,'integrated','owner','fixture applied');
+      const applied=add('applied'); finish(applied);
+      record.decide(applied,'applied');
+      const accepted=add('accepted'); finish(accepted);
+      record.decide(accepted,'accepted','findings useful but not applied');
+      const passed=add('passed'); finish(passed);
+      record.lifecycle(passed,'check_failed','system','fixture');
+      record.lifecycle(passed,'check_passed','system','fixture');
+      const failed=add('failed'); finish(failed);
+      record.lifecycle(failed,'check_failed','system','fixture');
+      const refused=add('refused'); finish(refused,'blocked','Guardian denied this operation');
+      add('expired','review',{valid_until:iso(nowTrack+1000)});
+      nowTrack+=2000;
+      record.sweepExpired();
+      const cancelled=add('cancelled'); record.cancel(cancelled,'owner stopped');
+      finish(add('plain'));
+      finish(add('another_kind','build'));
+      add('still_queued');
+      const got=record.trackRecord('dot','review');
+      assert.deepEqual(got,{worker:'dot',kind:'review',window_days:7,n:9,outcomes:{
+        landed:2,check_passed:1,checks_failed:1,refused_by_provider:1,
+        unable_to_run:1,owner_cancelled:1,finished_unchecked:2,
+      }});
+      assert.deepEqual(record.admissionAnswer('dot','review','normal').track_record,got);
+    } finally { record.db.close(); }
+    log('worker track record: distinct terminal outcomes; accepted alone is not landed');
+  }
+
   // Construct an honest v44 fixture by removing only the additive v45 column, then upgrade twice.
   dropEmptyPost54FixtureState(store.db);
   store.db.exec('DROP INDEX IF EXISTS assignments_worker_status; ALTER TABLE assignments DROP COLUMN valid_until_source; PRAGMA user_version=44;'); store.db.close();
