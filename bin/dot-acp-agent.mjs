@@ -434,7 +434,8 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
       s.builds = saved?.builds ?? s.builds ?? [];
       s.completed = saved?.completed ?? s.completed ?? [];
       const text = promptText(params.prompt);
-      const replay = s.completed.findLast(item => text.includes(item.work_id)) ?? (s.loaded && text.trim() === CONTINUE_PROMPT ? s.completed.at(-1) : null);
+      // Only the host's explicit post-load continuation replays a terminal result.
+      const replay = s.loaded && text.trim() === CONTINUE_PROMPT ? s.completed.at(-1) : null;
       s.loaded = false;
       if (!ctl.pending && replay) {
         if (ctl.hostTaskId && !replay.later_host_task_ids.includes(ctl.hostTaskId)) replay.later_host_task_ids.push(ctl.hostTaskId);
