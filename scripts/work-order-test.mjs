@@ -220,6 +220,34 @@ try {
         unable_to_run:1,owner_cancelled:2,finished_unchecked:4,
       }});
       assert.deepEqual(record.admissionAnswer('dot','review','normal').track_record,got);
+
+
+      // Seed the durable legacy shapes before any terminal events exist.
+      // The event journal is append-only; never erase a real completion to fake one.
+      const legacyStatus=(id,status)=>record.db.prepare(
+        'UPDATE assignments SET status=?, cancelled_at=NULL WHERE request_id=?'
+      ).run(status,id);
+      const legacyFinish=id=>legacyStatus(id,'finished');
+      const legacyCancel=id=>legacyStatus(id,'cancelled');
+      const measure=()=>record.trackRecord('dot','review');
+      const present=n=>assert.equal(measure().n,got.n+n);
+      const latest=nowTrack, cutoff=latest-7*day;
+      nowTrack=cutoff-2;
+      const completed=add('fixture_legacy_completed');legacyFinish(completed);
+      const wrongEvent=add('fixture_legacy_wrong_event');legacyCancel(wrongEvent);
+      const durable=add('fixture_durable_outcome');finish(durable);
+      const older=add('fixture_legacy_older');legacyFinish(older);
+      record.lifecycle(completed,'completed','system','older outcome');
+      nowTrack=cutoff;
+      const exact=add('fixture_legacy_exact_boundary');legacyFinish(exact);
+      nowTrack=latest;
+      present(1); // exact boundary uses assignment time; one just outside does not
+      record.lifecycle(wrongEvent,'completed','system','unrelated event for cancelled fixture');
+      record.lifecycle(durable,'completed','system','later lifecycle than durable report');
+      present(1); // an unrelated or lower-precedence timestamp cannot admit an outcome
+      record.lifecycle(completed,'completed','system','most recent outcome');
+      record.lifecycle(wrongEvent,'cancelled','system','matching cancellation event');
+      present(3); // two more outcomes enter regardless of legacy classification
     } finally { record.db.close(); }
     log('worker track record: distinct terminal outcomes; accepted alone is not landed; an earlier claim\'s check does not count');
   }
