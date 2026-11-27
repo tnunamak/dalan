@@ -161,10 +161,19 @@ try {
   // The CLI verbs: `dalan forecast` is a dry-run submit and queues nothing; `dalan correct` refuses a flag in the request id slot.
   const cli = (args, input) => new Promise(resolve => { const child = execFile(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args], { env, cwd: repo }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr })); if (input !== undefined) child.stdin.end(input); });
   const cliId = `req_${randomUUID()}`;
-  const cliForecast = await cli(['forecast', '--stdin', '--execution', 'none'], JSON.stringify({ ...assignment, request_id: cliId }));
+  const cliForecast = await cli(['forecast', '--stdin', '--execution', 'none', '--json'], JSON.stringify({ ...assignment, request_id: cliId }));
   assert.equal(cliForecast.code, 0, cliForecast.stderr);
-  assert.match(cliForecast.stdout, /admission/);
+  const cliEnvelope=JSON.parse(cliForecast.stdout);
+  assert.equal(cliEnvelope.verdict,forecastAnswer.verdict);
+  assert.deepEqual(cliEnvelope.reasons,forecastAnswer.reasons);
+  assert.ok(cliEnvelope.admission,cliForecast.stdout);
   assert.equal((await call('dalan_result', { request_id: cliId })).isError, true, 'dalan forecast did not queue the request');
+  const noJob=await cli(['forecast']);
+  assert.equal(noJob.code,1,noJob.stderr+noJob.stdout);
+  for(const option of ['--file','--stdin','--brief']) assert.ok((noJob.stderr+noJob.stdout).includes(option),option);
+  const badId=await cli(['correct','bad id','--json']);
+  assert.equal(badId.code,2,badId.stderr+badId.stdout);
+  assert.match(JSON.parse(badId.stderr).error,/usage: dalan correct REQUEST_ID/);
   for (const bad of [['correct', '--revises', 'req_aaaaaaaa'], ['correct', '--dry-run'], ['correct']]) {
     const run = await cli(bad);
     assert.equal(run.code, 2, `${bad.join(' ')}: ${run.stderr}`);
@@ -230,6 +239,17 @@ try {
   assert.equal(textOf(revised).request_id, revisedId);
   assert.notEqual(revisedId, cancelId);
   assert.equal(JSON.parse(await dalan(['get', revisedId, '--json'])).revises?.request_id, cancelId);
+  const cliPrior=`req_${randomUUID()}`, cliReplacement=`req_${randomUUID()}`;
+  const created=await call('dalan_submit',{assignment:{...assignment,request_id:cliPrior},execution:'none'});
+  assert.notEqual(created.isError,true,JSON.stringify(created));
+  const corrected=await cli(['correct',cliPrior,'--stdin','--execution','none','--json'],
+    JSON.stringify({...assignment,request_id:cliReplacement}));
+  assert.equal(corrected.code,0,corrected.stderr+corrected.stdout);
+  assert.equal(JSON.parse(corrected.stdout).request_id,cliReplacement);
+  assert.equal(JSON.parse(await dalan(['get',cliReplacement,'--json'])).revises?.request_id,cliPrior);
+  const correctedResult=await call('dalan_result',{request_id:cliReplacement});
+  assert.notEqual(correctedResult.isError,true,JSON.stringify(correctedResult));
+  assert.equal(textOf(correctedResult).status,'queued');
   assert.equal(textOf(await call('dalan_result', { request_id: cancelId })).status, 'queued');
   const cancelled = await call('dalan_cancel', { request_id: cancelId, reason: 'fixture cleanup' });
   assert.notEqual(cancelled.isError, true, JSON.stringify(cancelled));
