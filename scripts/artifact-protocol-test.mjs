@@ -50,6 +50,11 @@ assert.throws(()=>download('A-incomplete-gzip',cleanGzip.subarray(0,-5)),error=>
 
 const cleanZip=Buffer.from('UEsDBBQAAAAAAAAAAAB6g8OTEQAAABEAAAAJAAAAZW50cnkudHh0b3JkaW5hcnkgbG9nIHRleHRQSwECFAAUAAAAAAAAAAAAeoPDkxEAAAARAAAACQAAAAAAAAAAAAAAAAAAAAAAZW50cnkudHh0UEsFBgAAAAABAAEANwAAADgAAAAAAA==','base64');
 assert.deepEqual(download('A-clean-zip',cleanZip),cleanZip);
+const ordinaryBinary=Buffer.from([0x66,0x69,0x78,0x1f,0x8b,0x50,0x4b,0x03,0x04,0x74,0x61,0x69,0x6c]);
+assert.deepEqual(download('A-incidental-archive-bytes',ordinaryBinary),ordinaryBinary);
+const emptyZip=Buffer.alloc(22);
+emptyZip.writeUInt32LE(0x06054b50,0);
+assert.deepEqual(download('A-empty-zip',emptyZip),emptyZip);
 const nested=gzipSync(cleanZip);
 assert.deepEqual(download('A-clean-nested',nested),nested);
 assert.throws(()=>download('A-unreadable-zip',cleanZip.subarray(0,-5)),/^Error: artifact_unscannable: invalid_archive$/);

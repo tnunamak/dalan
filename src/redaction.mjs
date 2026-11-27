@@ -634,7 +634,7 @@ function checkedInflate(input,budget,decode){
   }
 }
 
-function* zipArtifactMembers(bytes,budget){
+function zipDirectoryEnd(bytes){
   const u16=o=>bytes.readUInt16LE(o),u32=o=>bytes.readUInt32LE(o);
   let end=-1;
   for(let p=bytes.length-22;p>=Math.max(0,bytes.length-22-0xffff);p--){
@@ -643,18 +643,23 @@ function* zipArtifactMembers(bytes,budget){
       end=p;
     }
   }
+  return end;
+}
+
+function* zipArtifactMembers(bytes,budget,end){
   ensureArchive(end>=0);
-  const count=u16(end+10),start=u32(end+16);
+  const u16=o=>bytes.readUInt16LE(o),u32=o=>bytes.readUInt32LE(o);
+  const count=u16(end+10),start=end-u32(end+12),base=start-u32(end+16);
   ensureArchive(u16(end+4)===0&&u16(end+6)===0&&u16(end+8)===count,'unsupported_zip');
   ensureArchive(count<=budget.members,'member_limit');
   budget.members-=count;
-  ensureArchive(start<=end&&start+u32(end+12)===end);
+  ensureArchive(base>=0&&start>=base);
   let p=start;
   const entries=[];
   for(let i=0;i<count;i++){
     ensureArchive(p+46<=end&&u32(p)===0x02014b50);
     const flags=u16(p+8),method=u16(p+10),crc=u32(p+16),packed=u32(p+20),size=u32(p+24);
-    const nameLength=u16(p+28),offset=u32(p+42);
+    const nameLength=u16(p+28),offset=base+u32(p+42);
     const next=p+46+nameLength+u16(p+30)+u16(p+32);
     ensureArchive(nameLength>0&&next<=end&&offset+30<=start);
     ensureArchive(u16(p+34)===0&&(flags&~0x080e)===0&&(method===0||method===8),'unsupported_zip');
@@ -669,7 +674,8 @@ function* zipArtifactMembers(bytes,budget){
   }
   ensureArchive(p===end);
   entries.sort((a,b)=>a.offset-b.offset);
-  let previousEnd=0;
+  // A leading prefix is allowed, but no gaps or overlaps among local members.
+  let previousEnd=entries[0]?.offset??start;
   for(let i=0;i<entries.length;i++){
     const {flags,method,crc,packed,size,offset,data}=entries[i];
     const next=entries[i+1]?.offset??start;
@@ -704,12 +710,14 @@ function* zipArtifactMembers(bytes,budget){
 function scanArtifactBytes(bytes,budget,depth){
   const signature=bytes.length>=4?bytes.readUInt32LE(0):0;
   const gzip=bytes[0]===0x1f&&bytes[1]===0x8b;
-  const zip=[0x04034b50,0x06054b50,0x08074b50,0x02014b50].includes(signature);
+  const leadingZip=[0x04034b50,0x06054b50,0x08074b50,0x02014b50].includes(signature);
   const rawRule=artifactTextRule(bytes);
-  if(rawRule||(!gzip&&!zip))return rawRule;
+  if(rawRule)return rawRule;
+  const end=gzip?-1:zipDirectoryEnd(bytes);
+  if(!gzip&&!leadingZip&&end<0)return null;
   ensureArchive(depth<=1,'nesting_limit');
   if(gzip)return scanArtifactBytes(checkedInflate(bytes,budget,gunzipSync),budget,depth+1);
-  for(const member of zipArtifactMembers(bytes,budget)){
+  for(const member of zipArtifactMembers(bytes,budget,end)){
     const rule=scanArtifactBytes(member,budget,depth+1);
     if(rule)return rule;
   }
