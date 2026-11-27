@@ -29,6 +29,19 @@ test('a non-renewal decision at revision zero contains only the advance effect',
   });
 });
 
+test('a receipt revision represented as text is not treated like the numeric revision', () => {
+  const snapshot = Object.freeze({ revision: 4 });
+  assert.throws(() => decide(snapshot, { expectedRevision: '4', operation: 'record' }, {}), { code: 'revision_conflict' });
+  assert.deepEqual(snapshot, { revision: 4 });
+});
+
+test('an integral-looking lease string is refused rather than modifying the previous deadline', () => {
+  const snapshot = Object.freeze({ revision: 4, leaseUntil: 50 });
+  const command = { expectedRevision: 4, operation: 'renew', args: { leaseMs: '8' } };
+  assert.throws(() => decide(snapshot, command, { now: 10, maxLeaseMs: 8 }), { code: 'invalid_lease' });
+  assert.equal(snapshot.leaseUntil, 50);
+});
+
 test('canonical JSON sorts nested keys and preserves array order', () => {
   assert.equal(canonicalJson({ z: [3, 1, 2, { b: 2, a: 1 }], a: true }), '{"a":true,"z":[3,1,2,{"a":1,"b":2}]}');
   assert.throws(() => canonicalJson({ bad: Infinity }, 'bad_value'), { code: 'bad_value' });

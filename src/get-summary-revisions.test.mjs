@@ -307,6 +307,14 @@ async function deadmanHeartbeatRefusal(t, health) {
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), health);
 }
 
+test('dead-man heartbeat refuses a recent unhealthy result without publishing', async t => {
+  await deadmanHeartbeatRefusal(t, { healthy: false, observed_at: '2025-12-31T23:59:59Z' });
+});
+
+test('dead-man heartbeat refuses an unreadable observation date without publishing', async t => {
+  await deadmanHeartbeatRefusal(t, { healthy: true, observed_at: 'not-a-date' });
+});
+
 test('dead-man heartbeat refuses old positive health evidence without publishing', async t => {
   await deadmanHeartbeatRefusal(t, { healthy: true, observed_at: '2025-12-31T23:58:29Z' });
 });
