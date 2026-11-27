@@ -137,6 +137,31 @@ try {
     log('admission evidence: claim vs durable progress, sparse history, separately censored work');
   }
 
+  // A queue snapshot includes outstanding work without promising that a lane is reserved.
+  {
+    let at=Date.parse('2026-01-03T00:00:00Z');
+    const snapshot=new Store(path.join(home,'admission-answer.db'),{now:()=>at,capacity:20});
+    const add=(id,priority,extra={})=>{
+      const row=assignment({request_id:id,...extra});
+      snapshot.submit(row,{mode:'none'},'',id,false,null,priority,{task_kind:'review'},row);
+    };
+    try {
+      add('answer_older_bg','background'); at+=1000;
+      add('answer_normal','normal'); at+=1000;
+      add('answer_expired','normal',{valid_until:iso(at+100)}); at+=1000;
+      const normal=snapshot.admissionAnswer('dot','review','normal');
+      assert.equal(normal.start,'queued');
+      assert.deepEqual(normal.ahead,{count:1,oldest_age_ms:2000});
+      assert.equal(normal.worker_state,'no_live_subscription');
+      assert.deepEqual(normal.latency,snapshot.admissionEvidence('dot','review'));
+      assert.deepEqual(snapshot.admissionAnswer('dot','review','background').ahead,{count:2,oldest_age_ms:3000});
+      assert.deepEqual(snapshot.admissionAnswer('dot','review','normal',{excludeId:'answer_normal'}).ahead,{count:0,oldest_age_ms:null});
+      snapshot.setPause('fixture pause');
+      assert.equal(snapshot.admissionAnswer('dot','review','normal').worker_state,'paused');
+    } finally { snapshot.db.close(); }
+    log('admission answer: live rows ahead, priority, pause and thin history');
+  }
+
   // Construct an honest v44 fixture by removing only the additive v45 column, then upgrade twice.
   dropEmptyPost54FixtureState(store.db);
   store.db.exec('DROP INDEX IF EXISTS assignments_worker_status; ALTER TABLE assignments DROP COLUMN valid_until_source; PRAGMA user_version=44;'); store.db.close();

@@ -532,6 +532,24 @@ cases.set(23, async () => fixture(async f => {
   f.finish(rid, 'DECLINED RESULT');
   assert.equal((await bounded(p)).result.stopReason, 'end_turn');
 }));
+cases.set(24, async () => fixture(async f => {
+  const id='review_admission_summary';
+  f.hook(async ({url,res,rid,body,json}) => {
+    if(url.pathname!=='/submit') return false;
+    f.rows.set(rid,{assignment:body.assignment,status:'queued'});
+    json(res,{status:'queued',admission:{start:'queued',ahead:{count:3,oldest_age_ms:240000},
+      latency:{window_days:7,claimed:{n:40,p50_ms:80000,p90_ms:300000},started:{n:2,insufficient_history:true}},worker_state:'live'}});
+    return true;
+  });
+  const a=await f.adapter(),sid=(await a.newSession(f.cwd)).sessionId;
+  const prompt=a.prompt(sid,`[dot-decision:${id}]\nforecast the admission`);
+  await waitFor(()=>f.rows.has(id),'forecast work stored');
+  f.finish(id,'ADMISSION RESULT');
+  assert.equal((await bounded(prompt)).result.stopReason,'end_turn');
+  const first=a.rawText('agent_message_chunk').split('\n')[0];
+  assert.match(first,/3 jobs ahead/);
+  assert.match(first,/not enough history/);
+}));
 const only = process.argv[2] ? Number(process.argv[2]) : null;
 for (const [finding, test] of cases) {
   if (only && finding !== only) continue;
