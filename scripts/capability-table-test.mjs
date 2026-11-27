@@ -21,6 +21,19 @@ for (const state of Object.values(backend.capabilities)) assert(CAPABILITY_STATE
   const failing = { ...ok, probes: [{ id: '6.6', status: 'FAIL' }], summary: { pass: 0, fail: 1, unsupported: 0 } };
   assert.throws(() => gate({ status: 0, report: failing, backend }), /1 failed probe\(s\): 6\.6/, 'a failed probe with matching capabilities');
   assert.throws(() => gate({ status: 0, report: { ...ok, capabilities: { ...backend.capabilities, private_loopback: 'unsupported' } }, backend }), /declared table differs/);
+  const lan = { ...ok, capabilities: {...ok.capabilities,lan_denied:'unknown'},
+    capability_probes:{lan_denied:['5.5','5.6','5.7']}, probes:[
+      {id:'5.5',status:'PASS',evidence:'fixture denial observed'},
+      {id:'5.6',status:'UNSUPPORTED',evidence:'fixture has no target'},
+      {id:'5.7',status:'UNSUPPORTED',evidence:'fixture not measured'},
+    ] };
+  assert.throws(()=>gate({status:0,report:lan,backend}), error=>{
+    assert.match(error.message,/lan_denied: declared verified, measured unknown/);
+    assert.match(error.message,/5\.5 PASS: fixture denial observed/);
+    assert.match(error.message,/5\.6 UNSUPPORTED: fixture has no target/);
+    assert.match(error.message,/5\.7 UNSUPPORTED: fixture not measured/);
+    return true;
+  });
 }
 
 await import('./require-host-sandbox.mjs');
