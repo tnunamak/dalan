@@ -40,5 +40,24 @@ try {
   const live=make('cancelled-live-lease');store.cancel('cancelled-live-lease');
   assert.equal(refusal(()=>store.finish('cancelled-live-lease',live.claim_id,'completed','audit','audit','subject')).error,'assignment_cancelled');
   assert.equal(store.db.prepare("SELECT count(*) n FROM late_evidence WHERE request_id='cancelled-live-lease'").get().n,1,'inside-lease cancellation audit is preserved');
+  assert.equal(Object.hasOwn(a,'progress_due_at'),false,'unconfigured claim keeps its original shape');
+  assert.doesNotMatch(a.guidance,/short note at least every/);
+  const configured=new Store(path.join(dir,'heartbeat.db'),{now:()=>now,limits:{leaseMs:480000,workerHeartbeatMs:{dot:120000}}});
+  try {
+    configured.submit({schema_version:1,request_id:'heartbeat',brief:'guidance',inputs:[],expected_output:'one',execution_scope:'read-only'},{mode:'none'},null,'owner');
+    const first=configured.claim('heartbeat','worker','subject',10);
+    assert.equal(first.progress_due_at,new Date(now+120000).toISOString());
+    assert.match(first.guidance,/short note at least every 120 seconds/);
+    assert.equal(configured.status().by_worker.dot.heartbeat_ms,120000);
+    assert.deepEqual(configured.workerHeartbeatFields('other'),{});
+    assert.doesNotMatch(configured.guidanceFor('other'),/short note at least every/);
+    const initialLease=configured.get('heartbeat').claim.lease_expires_at;
+    now+=5000;
+    assert.equal(configured.workerGetHeartbeat(configured.get('heartbeat'),'dot','subject').progress_due_at,new Date(now+120000).toISOString());
+    assert.deepEqual(configured.workerGetHeartbeat(configured.get('heartbeat'),'dot','other-subject'),{});
+    assert.equal(configured.get('heartbeat').claim.lease_expires_at,initialLease,'advisory get does not renew a claim');
+    const progressed=configured.progress('heartbeat',first.claim_id,'still working','subject');
+    assert.equal(progressed.progress_due_at,new Date(now+120000).toISOString());
+  } finally {configured.db.close();}
   console.log('PASS actionable expired question, cancelled-after-expiry reason and unchanged late-output fences');
 } finally {store.db.close();fs.rmSync(dir,{recursive:true,force:true});}
