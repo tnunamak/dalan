@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { crc32, deflateRawSync, gzipSync } from 'node:zlib';
 import { migrateArtifactJournal, createArtifactJournal, artifactBytesDigest } from '../src/artifact-journal.mjs';
 
 import { createArtifactDownloadGuard } from '../src/protocol-artifact-commands.mjs';
@@ -38,6 +39,43 @@ const newlyKnown=Buffer.from('fixture-value-added-after-initial-scan');
 assert.deepEqual(download('A-epoch',newlyKnown),newlyKnown);
 registerSecret(newlyKnown.toString('utf8'));
 assert.throws(()=>download('A-epoch',newlyKnown),/artifact_secret_content: registered_credential/);
+
+const cleanGzip=gzipSync(Buffer.from('ordinary log text'));
+assert.deepEqual(download('A-clean-gzip',cleanGzip),cleanGzip);
+assert.throws(()=>download('A-incomplete-gzip',cleanGzip.subarray(0,-5)),error=>{
+  assert.equal(error.code,'artifact_secret_content');
+  assert.match(error.message,/^artifact_unscannable: [a-z_]+$/);
+  return true;
+});
+
+const cleanZip=Buffer.from('UEsDBBQAAAAAAAAAAAB6g8OTEQAAABEAAAAJAAAAZW50cnkudHh0b3JkaW5hcnkgbG9nIHRleHRQSwECFAAUAAAAAAAAAAAAeoPDkxEAAAARAAAACQAAAAAAAAAAAAAAAAAAAAAAZW50cnkudHh0UEsFBgAAAAABAAEANwAAADgAAAAAAA==','base64');
+assert.deepEqual(download('A-clean-zip',cleanZip),cleanZip);
+const nested=gzipSync(cleanZip);
+assert.deepEqual(download('A-clean-nested',nested),nested);
+assert.throws(()=>download('A-unreadable-zip',cleanZip.subarray(0,-5)),/^Error: artifact_unscannable: invalid_archive$/);
+assert.throws(()=>download('A-too-many-layers',gzipSync(nested)),/^Error: artifact_unscannable: nesting_limit$/);
+
+// A secret inside an archive is found, whether the archive is gzip, a stored zip member or a deflated zip member.
+const zipOf=(name,data,method)=>{
+  const body=method===8?deflateRawSync(data):data, nameBytes=Buffer.from(name), crc=crc32(data);
+  const local=Buffer.alloc(30); local.writeUInt32LE(0x04034b50,0); local.writeUInt16LE(20,4); local.writeUInt16LE(method,8);
+  local.writeUInt32LE(crc,14); local.writeUInt32LE(body.length,18); local.writeUInt32LE(data.length,22); local.writeUInt16LE(nameBytes.length,26);
+  const central=Buffer.alloc(46); central.writeUInt32LE(0x02014b50,0); central.writeUInt16LE(20,4); central.writeUInt16LE(20,6); central.writeUInt16LE(method,10);
+  central.writeUInt32LE(crc,16); central.writeUInt32LE(body.length,20); central.writeUInt32LE(data.length,24); central.writeUInt16LE(nameBytes.length,28);
+  const localPart=Buffer.concat([local,nameBytes,body]), centralPart=Buffer.concat([central,nameBytes]);
+  const end=Buffer.alloc(22); end.writeUInt32LE(0x06054b50,0); end.writeUInt16LE(1,8); end.writeUInt16LE(1,10);
+  end.writeUInt32LE(centralPart.length,12); end.writeUInt32LE(localPart.length,16);
+  return Buffer.concat([localPart,centralPart,end]);
+};
+const armored=fixtures[0][0];
+assert.deepEqual(download('A-built-clean-zip',zipOf('notes.txt',Buffer.from('ordinary log text'),8),0),zipOf('notes.txt',Buffer.from('ordinary log text'),8),'the test zip builder makes a zip the scanner accepts');
+for(const [label,bytes] of [['gzip',gzipSync(armored)],['stored-zip',zipOf('key.txt',armored,0)],['deflated-zip',zipOf('key.txt',armored,8)],['zip-in-gzip',gzipSync(zipOf('key.txt',armored,8))]]){
+  assert.throws(()=>download(`A-secret-${label}`,bytes),error=>{
+    assert.equal(error.code,'artifact_secret_content',label);
+    assert.equal(error.message,'artifact_secret_content: private_key_armor',label);
+    return true;
+  });
+}
 
 const dir=mkdtempSync(join(tmpdir(),'artifact-journal-'));
 let db;
