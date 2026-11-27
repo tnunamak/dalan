@@ -83,12 +83,9 @@ function inputs(source) {
   const manifests = new Set(workspaces.map(name => `${name}/package.json`));
   const tarballs = [...files.keys()].filter(name => !manifests.has(name));
   if (tarballs.length) identity.local_files = Object.fromEntries(tarballs.map(name => [name, hash(files.get(name))]));
-  // The slot under the lock is the runtime alone for a repository without workspaces or local files (layout unchanged, so existing entries
-  // stay valid). With them, the full identity selects the slot: two checkouts with one lock and different workspace manifests or
-  // tarballs each keep their own entry instead of fighting over one.
-  const key = identity.workspaces || identity.local_files
-    ? hash(JSON.stringify({ runtime: identity.runtime, manifest_sha256: identity.manifest_sha256, workspaces: identity.workspaces ?? {}, local_files: identity.local_files ?? {} }))
-    : hash(JSON.stringify(identity.runtime));
+  // Each full dependency identity has its own slot under the lock, so checkouts sharing one lock can keep different
+  // manifests and local files without fighting over an entry. Legacy runtime-only slots are prepared again once.
+  const key = hash(JSON.stringify({ runtime: identity.runtime, manifest_sha256: identity.manifest_sha256, workspaces: identity.workspaces ?? {}, local_files: identity.local_files ?? {} }));
   return { root, lock, manifest, files, workspaces, identity, key };
 }
 // Remove every write bit under a prepared tree so the sandbox's read-only mount and the owner agree on what the bytes are.
@@ -158,22 +155,34 @@ export function repairScratchMountpoints(trees) { for (const tree of trees) { tr
 export const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 function lookup(input, base) {
   const entry = entryPath(base, input);
+  let cause = 'unsafe store directory';
   try {
     checkParents(base); checkDirectory(base, true); checkDirectory(path.dirname(entry), true); checkDirectory(entry, true);
+    cause = 'bad metadata';
     const metaPath = path.join(entry, 'metadata.json'), st = fs.lstatSync(metaPath);
-    if (!st.isFile() || st.uid !== process.getuid() || (st.mode & 0o222)) throw new Error('bad metadata');
+    if (!st.isFile() || st.uid !== process.getuid() || (st.mode & 0o222)) throw new Error();
     const metadata = JSON.parse(readRegular(metaPath));
-    if (JSON.stringify(metadata.identity) !== JSON.stringify(input.identity)) throw new Error('identity mismatch');
+    if (!metadata?.identity || typeof metadata.identity !== 'object' || Array.isArray(metadata.identity) ||
+        (metadata.trees != null && (!Array.isArray(metadata.trees) || metadata.trees.some(name => typeof name !== 'string')))) throw new Error();
+    if (JSON.stringify(metadata.identity) !== JSON.stringify(input.identity)) {
+      cause = 'identity mismatch';
+      throw new Error();
+    }
     const places = [{ dir: '', treePath: path.join(entry, 'node_modules') }, ...(metadata.trees ?? []).map(name => ({ dir: name, treePath: path.join(entry, 'workspaces', name, 'node_modules') }))];
     // Only workspaces the identity names may have a tree; a recorded tree for any other path is refused.
-    if (places.slice(1).some(place => !input.workspaces.includes(place.dir))) throw new Error('unexpected workspace tree');
+    if (places.slice(1).some(place => !input.workspaces.includes(place.dir))) {
+      cause = 'unexpected workspace tree';
+      throw new Error();
+    }
     const workspaces = input.workspaces.map(name => path.posix.normalize(name));
+    cause = 'invalid dependency tree';
     for (const place of places) validateTree(place.treePath, { dir: place.dir, workspaces });
     repairScratchMountpoints(places.map(place => place.treePath));
     markUsed(entry);
     return { treePath: places[0].treePath, workspaceTrees: places.slice(1).map(({ dir, treePath }) => ({ path: dir, treePath })), ...input.identity };
-  } catch (e) {
-    throw failure('dependencies_unprepared', `missing or invalid preparation; owner recovery: ${recovery(input.root)} --replace-invalid`);
+  } catch (error) {
+    if (error?.code === 'ENOENT' && (cause === 'unsafe store directory' || cause === 'bad metadata')) cause = 'missing';
+    throw failure('dependencies_unprepared', `invalid preparation (${cause}); owner recovery: ${recovery(input.root)} --replace-invalid`);
   }
 }
 // The `npm` file beside Node is not always JavaScript: mise installs a Bash wrapper there, and
