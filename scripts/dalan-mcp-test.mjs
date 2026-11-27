@@ -91,7 +91,7 @@ try {
 
   // tools/list: exact names, schemas and annotations.
   const tools = (await rpc('tools/list', {})).result.tools;
-  assert.deepEqual(tools.map(t => t.name).sort(), ['dalan_accept', 'dalan_answer', 'dalan_cancel', 'dalan_correct', 'dalan_questions', 'dalan_result', 'dalan_status', 'dalan_submit', 'dalan_wait']);
+  assert.deepEqual(tools.map(t => t.name).sort(), ['dalan_accept', 'dalan_answer', 'dalan_cancel', 'dalan_correct', 'dalan_forecast', 'dalan_questions', 'dalan_result', 'dalan_status', 'dalan_submit', 'dalan_wait']);
   const byName = Object.fromEntries(tools.map(t => [t.name, t]));
   for (const tool of tools) {
     assert.equal(tool.inputSchema.type, 'object', tool.name);
@@ -100,6 +100,8 @@ try {
   }
   for (const name of ['dalan_status', 'dalan_result', 'dalan_wait', 'dalan_questions']) assert.equal(byName[name].annotations.readOnlyHint, true, name);
   assert.equal(byName.dalan_submit.annotations.readOnlyHint, false);
+  assert.equal(byName.dalan_forecast.annotations.readOnlyHint, true);
+  assert.equal(byName.dalan_forecast.annotations.idempotentHint, true);
   assert.equal(byName.dalan_submit.annotations.destructiveHint, false);
   assert.deepEqual(byName.dalan_wait.inputSchema.required, ['request_id']);
   assert.equal(byName.dalan_wait.inputSchema.properties.timeout_seconds.maximum, 300);
@@ -141,6 +143,34 @@ try {
   // submit -> worker finishes -> wait -> result
   const requestId = `req_${randomUUID()}`;
   const assignment = { schema_version: 1, request_id: requestId, brief: 'Report the exact phrase: mcp roundtrip report.', inputs: [], expected_output: 'Text report.', execution_scope: 'read-only' };
+  const forecast = await call('dalan_forecast', { assignment, execution: 'none' });
+  assert.notEqual(forecast.isError, true, JSON.stringify(forecast));
+  const forecastAnswer = textOf(forecast);
+  assert.equal(forecastAnswer.verdict,'admissible');
+  assert.ok(forecastAnswer.admission);
+  assert.ok(Object.keys(forecastAnswer).every(key=>['verdict','reasons','admission','track_record'].includes(key)));
+  assert.equal((await call('dalan_result', { request_id: requestId })).isError, true, 'forecast did not queue the request');
+  const invalid = { ...assignment, brief: '' };
+  const badForecast = await call('dalan_forecast', { assignment: invalid, execution: 'none' });
+  const dryRun = await call('dalan_submit', { assignment: invalid, execution: 'none', dry_run: true });
+  assert.equal(badForecast.isError, true);
+  assert.equal(dryRun.isError, true);
+  assert.equal(textOf(badForecast).verdict, textOf(dryRun).verdict);
+  assert.deepEqual(textOf(badForecast).reasons, textOf(dryRun).reasons);
+
+  // The CLI verbs: `dalan forecast` is a dry-run submit and queues nothing; `dalan correct` refuses a flag in the request id slot.
+  const cli = (args, input) => new Promise(resolve => { const child = execFile(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args], { env, cwd: repo }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr })); if (input !== undefined) child.stdin.end(input); });
+  const cliId = `req_${randomUUID()}`;
+  const cliForecast = await cli(['forecast', '--stdin', '--execution', 'none'], JSON.stringify({ ...assignment, request_id: cliId }));
+  assert.equal(cliForecast.code, 0, cliForecast.stderr);
+  assert.match(cliForecast.stdout, /admission/);
+  assert.equal((await call('dalan_result', { request_id: cliId })).isError, true, 'dalan forecast did not queue the request');
+  for (const bad of [['correct', '--revises', 'req_aaaaaaaa'], ['correct', '--dry-run'], ['correct']]) {
+    const run = await cli(bad);
+    assert.equal(run.code, 2, `${bad.join(' ')}: ${run.stderr}`);
+    assert.match(run.stderr, /usage: dalan correct REQUEST_ID/);
+  }
+
   const submitted = await call('dalan_submit', { assignment, execution: 'none' });
   assert.notEqual(submitted.isError, true, JSON.stringify(submitted));
   assert.ok(JSON.stringify(textOf(submitted)).includes(requestId), 'submit returns the request id');

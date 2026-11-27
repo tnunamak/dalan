@@ -32,6 +32,10 @@ export const TOOLS = [
       queue_anyway: { type: 'boolean', description: 'Queue even when the bridge would defer or warn.' },
       refuse_defer: { type: 'boolean', description: 'Fail instead of deferring.' } } },
     annotations: { title: 'Submit a job', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+  { name: 'dalan_forecast', title: 'Forecast a job',
+    description: 'Check a bounded job and estimate its admission without submitting it or reserving capacity. Returns the same verdict as a submit dry run, plus available queue and worker estimates.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['assignment'], properties: submitProperties },
+    annotations: { title: 'Forecast a job', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
   { name: 'dalan_cancel', title: 'Cancel a job',
     description: 'Stop a queued job or ask the worker on a claimed job to stop. The reply states the job’s state.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['request_id'], properties: {
@@ -139,16 +143,21 @@ const asResult = ({ isError, value, message }) => {
   return { content: [{ type: 'text', text }], ...(structured && typeof structured === 'object' ? { structuredContent: structured } : {}), ...(isError ? { isError: true } : {}) };
 };
 
-async function submit(args, extraFlags = []) {
-  const flags = [...extraFlags];
+const forecastAnswer = value => Object.fromEntries(['verdict', 'reasons', 'admission', 'track_record']
+  .filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
+
+async function submit(args, extraFlags = [], {forecast = false} = {}) {
+  const flags = [...extraFlags, ...(forecast ? ['--dry-run'] : [])];
   if (args.worker) flags.push('--worker', args.worker);
   if (args.execution) flags.push('--execution', args.execution);
-  for (const [key, flag] of [['dry_run', '--dry-run'], ['queue_anyway', '--queue-anyway'], ['refuse_defer', '--refuse-defer']]) if (args[key]) flags.push(flag);
+  for (const [key, flag] of [['dry_run', '--dry-run'], ['queue_anyway', '--queue-anyway'], ['refuse_defer', '--refuse-defer']]) if (!forecast && args[key]) flags.push(flag);
   const run = await runCli(['submit', '--stdin', ...flags], { input: JSON.stringify(args.assignment) });
   const value = parseJson(run.stdout);
   // A dry run exits non-zero for clarify, reject and defer but still prints the verdict on stdout.
-  if (value !== undefined) return asResult({ value, isError: run.code !== 0 && (value.verdict ? value.verdict !== 'admissible' : true) });
-  return asResult(cliError(run, 'submit'));
+  if (value !== undefined) return asResult({ value: forecast ? forecastAnswer(value) : value, isError: run.code !== 0 && (value.verdict ? value.verdict !== 'admissible' : true) });
+  const error = cliError(run, forecast ? 'forecast' : 'submit');
+  if (forecast && error.value !== undefined && error.value.verdict) error.value = forecastAnswer(error.value);
+  return asResult(error);
 }
 
 async function ownerTransition(command, id, flag, text) {
@@ -160,6 +169,7 @@ async function ownerTransition(command, id, flag, text) {
 
 const handlers = {
   dalan_submit: args => submit(args),
+  dalan_forecast: args => submit(args, [], {forecast: true}),
   dalan_correct: args => submit(args, ['--revises', args.revises]),
   dalan_cancel: args => ownerTransition('cancel', args.request_id, '--reason', args.reason),
   dalan_accept: args => ownerTransition(args.verdict, args.request_id, '--note', args.note),
