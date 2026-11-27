@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { applyPatch, baseProblem, decodePatchPathOutput, detectPresentPatches, listPatchFiles, patchMatchesWorktree, readMaterializeGrant } from '../src/patch-apply.mjs';
+import { applyPatch, baseProblem, decodePatchPathOutput, detectPresentPatches, listPatchFiles, patchMatchesWorktree, readMaterializeGrant, worktreeRoot } from '../src/patch-apply.mjs';
 import { startAdapter } from './acp-client.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'apply-'));
@@ -28,6 +28,12 @@ const utf8InspectionFrame = '1\t0\tcafé name.txt\0';
 assert.equal(decodePatchPathOutput(Buffer.from(utf8InspectionFrame)), utf8InspectionFrame);
 assert.equal(decodePatchPathOutput(Buffer.from('valid replacement character: \uFFFD')), 'valid replacement character: \uFFFD');
 assert.throws(() => decodePatchPathOutput(Buffer.from([0xc3])), /patch path inspection is not valid UTF-8/);
+
+// Check the worktree-root inspector with synthetic output, without applying a patch.
+const rootInspector = path.join(base, 'root-inspector');
+fs.writeFileSync(rootInspector, "#!/bin/sh\nprintf '\\303\\n'\n", { mode: 0o700 });
+assert.throws(() => worktreeRoot(main, { ...process.env, DALAN_GIT: rootInspector }),
+  /patch path inspection is not valid UTF-8/, 'non-UTF-8 worktree path is refused');
 
 // End to end: a tracked file whose name holds raw byte 0xE9 (not UTF-8). The patch is refused before any change.
 const latin = repo('latin1-name');

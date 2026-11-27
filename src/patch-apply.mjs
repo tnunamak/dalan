@@ -127,8 +127,8 @@ export async function materializePatch({dir, temp, body, sha256, baseSha, repo, 
 
 // git apply from a subdirectory can silently skip root-relative paths.
 export function worktreeRoot(dir, env) {
-  const root = git(dir, ['rev-parse', '--show-toplevel'], undefined, env);
-  return root.status === 0 ? root.stdout.replace(/\r?\n$/, '') : null;
+  const root = git(dir, ['rev-parse', '--show-toplevel'], undefined, env, 'buffer');
+  return root.status === 0 ? decodePatchPathOutput(root.stdout).replace(/\r?\n$/, '') : null;
 }
 
 // What the patch can touch, read before it runs: each named file's bytes, mode or link target, or its absence, and the
