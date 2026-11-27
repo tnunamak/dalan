@@ -387,6 +387,27 @@ test('try refuses malformed scope entries instead of coercing them for display',
   }
 });
 
+test('lineBuffer emits each complete line once when several arrive in one chunk', async () => {
+  const { lineBuffer } = await import('./try-exposure.mjs');
+  const lines = [];
+  const push = lineBuffer(line => lines.push(line));
+  push('first\n\nsecond\r\n');
+  push.end();
+  push.end();
+  assert.deepEqual(lines, ['first', '', 'second']);
+});
+
+test('lineBuffer keeps a partial line separate from completed lines in the same chunk', async () => {
+  const { lineBuffer } = await import('./try-exposure.mjs');
+  const lines = [];
+  const push = lineBuffer(line => lines.push(line));
+  push('complete\npar');
+  assert.deepEqual(lines, ['complete']);
+  push('tial');
+  push.end();
+  assert.deepEqual(lines, ['complete', 'partial']);
+});
+
 test('lineBuffer retains the configured tail while waiting for a final newline', async () => {
   const { lineBuffer } = await import('./try-exposure.mjs');
   const lines = [];
