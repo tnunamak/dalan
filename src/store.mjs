@@ -1247,6 +1247,19 @@ export class Store {
     };
     return {worker,kind,window_days:days,min_samples:QUEUE_WINDOW.minSamples,claimed:summary(claimed),started:summary(started),censored};
   }
+  admissionAnswer(worker,kind,priority,{excludeId=null,createdBefore=null}={}) {
+    const now=this.nowMs(), at=iso(now);
+    const {count,oldest}=this.db.prepare(`SELECT count(*) count,min(created_at) oldest FROM assignments
+      WHERE status='queued' AND target_worker=? AND request_id IS NOT ? AND ${live(now)}
+      AND ((priority=? AND created_at<?) OR (?='background' AND priority='normal'))`)
+      .get(worker,excludeId,priority,createdBefore??at,priority);
+    const workerBreak=worker==='dot'?this.holdingBreak():null;
+    const worker_state=this.paused()?'paused':workerBreak?'break':
+      this.activeSubscriptions().some(sub=>sub.worker===worker)?'live':'no_live_subscription';
+    // 'now' requires a reserved worker lane. Admission is advisory and reserves nothing.
+    return {start:'queued',ahead:{count,oldest_age_ms:oldest===null?null:Math.max(0,now-Date.parse(oldest))},
+      latency:this.admissionEvidence(worker,kind),worker_state,...(worker_state==='break'?{until:workerBreak.until}:{}),at};
+  }
   queueWaitsMs(worker,kind,days=7) { return this.queueWaitEvidence(worker,kind,days).waits_ms; }
   defaultValidUntil(worker,kind,days=7) {
     const evidence=this.queueWaitEvidence(worker,kind,days), waits=evidence.waits_ms;

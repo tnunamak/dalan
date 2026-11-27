@@ -215,7 +215,14 @@ async function runTurn(s, ctl, text, say, client) {
     ctl.pending.later_host_task_ids ??= [];
     if (ctl.hostTaskId && ctl.hostTaskId !== ctl.pending.original_host_task_id && !ctl.pending.later_host_task_ids.includes(ctl.hostTaskId)) ctl.pending.later_host_task_ids.push(ctl.hostTaskId);
     publishPending(s, ctl);
-    await say('agent_message_chunk', `Work ${ctl.pending.rid}${attached ? ': re-attached' : ''}. Admission: ${JSON.stringify(ctl.pending.admission ?? {status:attached ? 'attached' : 'queued'})}\n\n`);
+    const admission=ctl.pending.admission;
+    const duration=ms=>ms<1000?`${ms} ms`:ms<60000?`${Math.round(ms/1000)} s`:`${Math.round(ms/60000)} min`;
+    const distribution=(label,value,days='')=>value.insufficient_history?`${label}: not enough history (n ${value.n}${days})`:
+      `${label} p50 ${duration(value.p50_ms)}, p90 ${duration(value.p90_ms)} (n ${value.n}${days})`;
+    const line=admission?.start==='queued'&&admission.ahead&&admission.latency?.claimed&&admission.latency?.started
+      ? `queued; ${admission.ahead.count} ${admission.ahead.count===1?'job':'jobs'} ahead${admission.ahead.oldest_age_ms===null?'':` (oldest ${duration(admission.ahead.oldest_age_ms)})`}; ${distribution('claimed',admission.latency.claimed,`, ${admission.latency.window_days} days`)}; ${distribution('observed start',admission.latency.started)}; worker ${admission.worker_state.replaceAll('_',' ')}.`
+      : JSON.stringify(admission ?? {status:attached?'attached':'queued'});
+    await say('agent_message_chunk', `Work ${ctl.pending.rid}${attached ? ': re-attached' : ''}. Admission: ${line}\n\n`);
     for (const [type, message] of ctl.observations.splice(0)) await say(type, message);
     // A cancel that arrived while acquire was submitting found nothing to cancel; cancel the job it created now.
     if (ctl.cancelled) { ctl.cancelDone = Promise.resolve(ctl.cancelDone).then(() => cancelPending(s, ctl)); return { cancelled: true }; }

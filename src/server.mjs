@@ -1343,10 +1343,16 @@ const adminServer=http.createServer(async(req,res)=>{
       // An awaited repository/destination lookup may outlive a host policy edit.
       assertRepoAllowed(storedTarget??target??'dot',existingRequest?.assignment??payload);
       if(dryRun) store.checkRetry(submitted,delivery,environmentId,owner,body.review===true,body.background===true?'background':'normal',meta,submitted,target,explicitExecution,requiredCapabilities,commandKey,supersedes,destinationRevision,revises);
+      const admission=()=>{
+        const priority=body.background===true?'background':'normal';
+        const kind=meta.task_kind??(body.review===true?'review':payload.execution_scope??'unknown');
+        return store.admissionAnswer(storedTarget??target??'dot',kind,priority,
+          {excludeId:payload.request_id,createdBefore:existingRequest?.created_at??null});
+      };
       const disclosure=isNew?store.destinationSnapshot(target??'dot',jobExecution,payload):existingRequest.destination_approval?.snapshot??null;
       if(dryRun) {
         log({kind:'submit_dry_run',request_id:submitted.request_id,task_kind:meta.task_kind??null,source:meta.source??null,verdict:order?.verdict??'admissible',reason_codes:(order?.reasons??[]).map(r=>r.code),attempt_latency_ms:Date.now()-requestStartedAt});
-        return json(res,200,{dry_run:true,request_id:submitted.request_id,stored:false,...(disclosure?{destination_disclosure:disclosure}:{}),...(order??{verdict:'admissible',reasons:[],duplicate:true}),...(order?.warnings?.length?{submission_warnings:order.warnings}:{})});
+        return json(res,200,{dry_run:true,request_id:submitted.request_id,stored:false,admission:admission(),...(disclosure?{destination_disclosure:disclosure}:{}),...(order??{verdict:'admissible',reasons:[],duplicate:true}),...(order?.warnings?.length?{submission_warnings:order.warnings}:{})});
       }
       // Defer refuses only for a requester that opts in; both the CLI and HTTP API queue by default.
       if(order?.verdict==='defer'&&body.refuse_defer===true&&body.queue_anyway!==true) {
@@ -1367,7 +1373,7 @@ const adminServer=http.createServer(async(req,res)=>{
       // A retry validates nothing, so the narrowing it reports comes from the stored assignment.
       const stored=result.duplicate?JSON.parse(store.db.prepare('SELECT payload FROM assignments WHERE request_id=?').get(payload.request_id).payload):payload;
       if(stored.scope_excluded?.length&&!result.duplicate) log({kind:'scope_excluded',request_id:payload.request_id,excluded:stored.scope_excluded});
-      return json(res,200,{...result,execution:store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(payload.request_id).execution,...(stored.scope_excluded?.length?{scope_excluded:stored.scope_excluded,scope_paths:stored.scope_paths}:{}),...(readiness?{check_readiness:readiness}:{}),...(submissionWarnings.length?{submission_warnings:submissionWarnings}:{})});
+      return json(res,200,{...result,admission:admission(),execution:store.db.prepare('SELECT execution FROM assignments WHERE request_id=?').get(payload.request_id).execution,...(stored.scope_excluded?.length?{scope_excluded:stored.scope_excluded,scope_paths:stored.scope_paths}:{}),...(readiness?{check_readiness:readiness}:{}),...(submissionWarnings.length?{submission_warnings:submissionWarnings}:{})});
     }
     if(url.pathname==='/admission'&&req.method==='GET') { const requestId=id(url.searchParams.get('id'));const row=store.db.prepare('SELECT cancelled_reason FROM assignments WHERE request_id=?').get(requestId)??store.pullQueue.row(requestId); return json(res,200,{exists:!!row,...(row?.cancelled_reason==='expired'?{cancelled_reason:'expired'}:{})}); }
     if(url.pathname==='/get') {
