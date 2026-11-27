@@ -9,6 +9,35 @@ import { readJsonPrivate, writeJsonPrivate } from '../src/session-store.mjs';
 
 import { CANCEL_BUDGET_MS, REFUSE_CODE, cancelBudgetMs, createRefuse } from '../src/errors.mjs';
 
+test('a blocked directory leaves a session save error visible and preserves the blocking file', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-parent-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const parent = path.join(dir, 'blocked');
+  fs.writeFileSync(parent, 'keep this file');
+  assert.throws(() => writeJsonPrivate(path.join(parent, 'session.json'), { stage: 'new' }));
+  assert.equal(fs.readFileSync(parent, 'utf8'), 'keep this file');
+  assert.deepEqual(fs.readdirSync(dir), ['blocked']);
+});
+
+test('a read failure after stat is forwarded, without mislabeling it corrupt or missing', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-read-error-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  writeJsonPrivate(file, { stage: 'committed' });
+  const failure = Object.assign(new Error('fixture read failed'), { code: 'EIO' });
+  const read = fs.readFileSync;
+  const mocked = t.mock.method(fs, 'readFileSync', (target, ...args) => {
+    if (target === file) throw failure;
+    return read(target, ...args);
+  });
+  try {
+    assert.throws(() => readJsonPrivate(file), error => error === failure);
+  } finally {
+    mocked.mock.restore();
+  }
+  assert.deepEqual(readJsonPrivate(file), { stage: 'committed' });
+});
+
 test('bad cancel budgets fall back to the bounded default', () => {
   for (const value of [undefined, '', 'not numeric', 0, -1, Infinity, NaN]) {
     assert.equal(cancelBudgetMs(value), CANCEL_BUDGET_MS);
