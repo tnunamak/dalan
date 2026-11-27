@@ -150,6 +150,8 @@ try {
     pass('a denied stop records the requested scope and an unknown outcome, never success');
   }
 
+  // Schema 72 rebuilt lifecycle_events with the control types; an older file must reopen from the version before that step.
+  const beforeControlStep = 71;
   // ---- 4. migration: a database from before this step keeps its events and gains the new types
   {
     const path = join(dir, 'upgrade.db');
@@ -174,7 +176,7 @@ try {
       CREATE TRIGGER lifecycle_events_no_delete BEFORE DELETE ON lifecycle_events WHEN NOT EXISTS (SELECT 1 FROM lifecycle_retention WHERE id=1 AND cutoff IS NOT NULL AND old.at<cutoff) BEGIN SELECT RAISE(ABORT, 'lifecycle events are append-only'); END;`);
     const insert = raw.prepare("INSERT INTO lifecycle_events(request_id,type,at,actor,source,reason,worker) VALUES('req_old',?,?,?,?,?,?)");
     for (const e of before) insert.run(e.type, e.at, e.actor, e.source, e.reason, e.worker);
-    raw.exec(`PRAGMA user_version=${version - 1}`);
+    raw.exec(`PRAGMA user_version=${beforeControlStep}`);
     assert.throws(() => raw.exec("INSERT INTO lifecycle_events(request_id,type,at,actor,source) VALUES('x','wake_held','t','a','live')"), /CHECK constraint failed/, 'the old table rejects the new type');
     raw.close();
 
@@ -208,7 +210,7 @@ try {
         CREATE TRIGGER lifecycle_events_no_update BEFORE UPDATE ON lifecycle_events BEGIN SELECT RAISE(ABORT,'lifecycle events are append-only'); END;
         CREATE TRIGGER lifecycle_events_no_delete BEFORE DELETE ON lifecycle_events WHEN NOT EXISTS (SELECT 1 FROM lifecycle_retention WHERE id=1 AND cutoff IS NOT NULL AND old.at<cutoff) BEGIN SELECT RAISE(ABORT, 'lifecycle events are append-only'); END;`);
       for (let i = 0; i < rows; i++) raw.prepare("INSERT INTO lifecycle_events(request_id,type,at,actor,source) VALUES('req_edge','queued',?, 'owner','live')").run(`2026-01-0${i + 1}T00:00:00.000Z`);
-      raw.exec(`PRAGMA user_version=${version - 1}`);
+      raw.exec(`PRAGMA user_version=${beforeControlStep}`);
       return { path, raw, version };
     };
     const noControl = lifecycleTypes.filter(t => !controlTypes.includes(t) && t !== 'wake_held');

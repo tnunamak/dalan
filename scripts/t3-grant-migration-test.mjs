@@ -28,7 +28,7 @@ try {
   store.db.close();
   store=new Store(file);
   const after=snapshot(store.db);
-  assert.equal(after.version,72,'schema 68 must advance through the current migrations to 72');
+  assert.equal(after.version,73,'schema 68 must advance through the current migrations to 73');
   const grant=after.tables.tool_grants[0];
   assert.equal(grant.scope,null);
   assert.deepEqual(after.tables.tool_grants.map(({scope,...row})=>row),before.tables.tool_grants);
@@ -38,6 +38,6 @@ try {
   assert.equal(store.db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
   store.db.close();
   store=new Store(file);
-  assert.deepEqual(snapshot(store.db),after,'reopening schema 72 must change nothing');
-  console.log(`MIGRATION: 68 -> ${after.version}; scope added; ${after.tables.tool_grants.length} existing grant preserved; reopen 72 unchanged`);
+  assert.deepEqual(snapshot(store.db),after,'reopening schema 73 must change nothing');
+  console.log(`MIGRATION: 68 -> ${after.version}; scope added; ${after.tables.tool_grants.length} existing grant preserved; reopen 73 unchanged`);
 } finally {store?.db.close();fs.rmSync(home,{recursive:true,force:true});}

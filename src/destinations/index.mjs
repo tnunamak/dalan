@@ -18,20 +18,23 @@ const split=value=>{
   return colon<0?[value,undefined]:[value.slice(0,colon),value.slice(colon+1)];
 };
 
-export function registerDestination(name,{parse,load,...builtIn}={}) {
-  if(typeof name!=='string'||!/^[a-z][a-z0-9-]*$/.test(name)||typeof parse!=='function'||typeof load!=='function')
+export function registerDestination(name,{parse,load,version='1',...builtIn}={}) {
+  if(typeof name!=='string'||!/^[a-z][a-z0-9-]*$/.test(name)||typeof parse!=='function'||typeof load!=='function'||typeof version!=='string'||!/^\S{1,64}$/.test(version))
     throw new TypeError('invalid destination registration');
   if(destinations.has(name)) throw new Error(`destination already registered: ${name}`);
-  destinations.set(name,{parse,load,...builtIn});
+  destinations.set(name,{parse,load,version,...builtIn});
 }
 
+export const destinationVersion=name=>destinations.get(name)?.version;
+
 registerDestination('none',{
-  form:'none', bare:true,
+  version:'1',form:'none', bare:true,
   routes:(value,address)=>address===undefined,
   parse:address=>address===undefined?{mode:'none',threadId:null}:null,
   load:createNoneDestination,
 });
 registerDestination('t3',{
+  version:'1',
   form:'t3:<thread-id>',
   // Persisted rows predate strict admission parsing and can carry an opaque short ID.
   routes:(value,address)=>typeof value==='string'?(address===undefined||/^.+$/.test(address)):validT3ThreadId(value?.threadId),
