@@ -34,7 +34,7 @@ registerDestination('none',{
 registerDestination('t3',{
   form:'t3:<thread-id>',
   // Persisted rows predate strict admission parsing and can carry an opaque short ID.
-  routes:(value,address)=>typeof value==='string'?(address===undefined||/^.+$/.test(address)):typeof value?.threadId==='string',
+  routes:(value,address)=>typeof value==='string'?(address===undefined||/^.+$/.test(address)):validT3ThreadId(value?.threadId),
   parse:address=>validT3ThreadId(address)?{mode:'t3',threadId:address}:null,
   load:deps=>deps.loadT3?deps.loadT3():import('./t3.mjs').then(({createT3Destination})=>createT3Destination(deps)),
 });
