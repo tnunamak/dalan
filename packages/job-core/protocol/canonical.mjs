@@ -6,7 +6,11 @@ export function canonicalValue(value, errorCode = 'invalid_json') {
     if (item === null || typeof item === 'boolean' || typeof item === 'string') return item;
     if (typeof item === 'number' && Number.isFinite(item)) return item;
     const array = Array.isArray(item);
-    if (!array && (!item || Object.getPrototypeOf(item) !== Object.prototype)) throw invalid();
+    if (!array) {
+      if (!item || typeof item !== 'object') throw invalid();
+      const prototype = Object.getPrototypeOf(item);
+      if (prototype !== Object.prototype && prototype !== null) throw invalid();
+    }
     if (active.has(item)) throw invalid();
     active.add(item);
     try {

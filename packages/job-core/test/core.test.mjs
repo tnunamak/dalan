@@ -320,6 +320,13 @@ test('the last incrementable revision can still produce an ordinary finish effec
   });
 });
 
+test('canonical JSON accepts plain protocol dictionaries with no inherited properties', () => {
+  const byName = Object.create(null);
+  byName.zulu = { count: 2 };
+  byName.alpha = null;
+  assert.equal(canonicalJson({ byName }), '{"byName":{"alpha":null,"zulu":{"count":2}}}');
+});
+
 test('canonical JSON rejects a Map instead of dropping its entries', () => {
   assert.throws(() => canonicalJson({rows: new Map([['fixture', 1]])}, 'invalid_report'), {code: 'invalid_report'});
 });
