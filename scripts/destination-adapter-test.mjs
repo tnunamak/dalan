@@ -8,7 +8,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createT3Destination, quietReason } from '../src/destinations/t3.mjs';
 import { createNoneDestination } from '../src/destinations/none.mjs';
-import { createDestinations, destinationName, registerDestination } from '../src/destinations/index.mjs';
+import { createDestinations, destinationName, registerDestination, validT3ThreadId } from '../src/destinations/index.mjs';
 import { parseDelivery } from '../src/delivery.mjs';
 import { Store } from '../src/store.mjs';
 import { sendArgs, marker, inspectThread, deliverT3, reconcileMarker, readArgs, classifyThread, generationDrift } from '../src/t3.mjs';
@@ -186,6 +186,54 @@ await row('assignment delivery tuple backfills legacy rows, survives reopen, and
     assert.deepEqual(deliveryTuple(store,'req_old_t3'),wantTuple('t3','legacy:thread'));
     assert.deepEqual(deliveryTuple(store,'req_tuple_peer'),wantTuple('peer','abc','2'));
   }finally{
+    if(store?.db.isOpen)store.db.close();
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+await row('legacy delivery tuple migration does not change retry identity or route unknown rows',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-legacy-delivery-')),file=path.join(root,'fixture.db');
+  let store;
+  try {
+    store=new Store(file);
+    const retryPayload={request_id:'req_before_delivery_upgrade'};
+    const parsed=parseDelivery('t3:fixture:legacy');
+    store.submit(retryPayload,parsed,'fixture-env','fixture-owner');
+    const retryBefore=store.db.prepare('SELECT * FROM assignments WHERE request_id=?').get(retryPayload.request_id);
+    const legacy=store.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,delivery) VALUES(?,?,?,?,?,?,?,?)');
+    const sample=[
+      ['width7','a'.repeat(7)],['width8','a'.repeat(8)],['width1024','a'.repeat(1024)],
+      ['width1025','a'.repeat(1025)],['punctuation','w0._:%-id'],['invalid','not valid'],
+    ];
+    for(const [id,address] of sample)legacy.run('req_legacy_'+id,'{}','fixture','','','queued',new Date().toISOString(),'t3:'+address);
+    for(const [id,mode] of [['empty',''],['adapter','unknown:fixture'],['empty_t3','t3:']])
+      legacy.run('req_legacy_'+id,'{}','fixture','','','queued',new Date().toISOString(),mode);
+    for(const field of ['delivery_adapter','delivery_address','delivery_adapter_version'])
+      store.db.exec('ALTER TABLE assignments DROP COLUMN '+field);
+    store.db.exec('PRAGMA user_version=72');store.db.close();
+
+    store=new Store(file);
+    assert.equal(store.submit(retryPayload,parsed,'fixture-env','fixture-owner').duplicate,true);
+    assert.throws(()=>store.submit(retryPayload,parseDelivery('t3:fixture:other'),'fixture-env','fixture-owner'),/conflict/i);
+    const upgraded=store.db.prepare('SELECT * FROM assignments WHERE request_id=?').get(retryPayload.request_id);
+    for(const key of Object.keys(retryBefore).filter(key=>!key.startsWith('delivery_')))
+      assert.equal(upgraded[key],retryBefore[key],key+' is unchanged by a repeated submit');
+
+    const unknown={delivery_adapter:null,delivery_address:null,delivery_adapter_version:null};
+    for(const [id,address] of sample)
+      assert.deepEqual(deliveryTuple(store,'req_legacy_'+id),validT3ThreadId(address)?wantTuple('t3',address):unknown);
+    const t3={fixture:true},routes=createDestinations({loadT3:()=>t3});
+    assert.equal(await routes.for(store.get('req_legacy_width7').delivery_mode),t3);
+    for(const id of ['empty','adapter','empty_t3']){
+      const requestId='req_legacy_'+id;
+      assert.deepEqual(deliveryTuple(store,requestId),unknown);
+      const saved=store.db.prepare('SELECT delivery FROM assignments WHERE request_id=?').get(requestId).delivery;
+      await assert.rejects(routes.for(saved),{code:'INVALID_DELIVERY_MODE'});
+    }
+    const before=sample.map(([id])=>deliveryTuple(store,'req_legacy_'+id));
+    store.db.close();store=new Store(file);
+    assert.deepEqual(sample.map(([id])=>deliveryTuple(store,'req_legacy_'+id)),before);
+  } finally {
     if(store?.db.isOpen)store.db.close();
     fs.rmSync(root,{recursive:true,force:true});
   }
