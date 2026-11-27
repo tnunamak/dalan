@@ -44,6 +44,11 @@ function paths(value,label) {
   if(!Array.isArray(value)||!value.length||value.some(p=>typeof p!=='string'||!p||p.includes('\0')||p.includes('\\')||p.startsWith('/')||p.split('/').some(x=>x==='..')||/[\x00-\x1f\x7f*?]/.test(p)||(hasRouterSyntax(p)&&!readablePath(p.replace(/^\.\//,'').replace(/\/$/,''))))) throw new Error(`invalid ${label}; explicit repository-relative paths required`);
   return value.map(p=>p.replace(/^\.\//,'').replace(/\/$/,''));
 }
+// For scope derived from a Git file list: never coerce an unrepresentable file into a different spelling.
+export function isLiteralScopePath(value) {
+  try { return value !== '.' && paths([value], 'scope_paths')[0] === value; }
+  catch { return false; }
+}
 // output_paths: NEW files the job may create (see docs/usage.md "Creating new files"). Shape only; existence and sensitivity are
 // checked against the pinned tree in validateSubmission. Entries must already be in canonical form, so the assignment hash the
 // submitter sent is the one that is stored.

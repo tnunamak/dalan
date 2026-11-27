@@ -85,6 +85,20 @@ plan = m.planReview(pr, { files: [...files, '.env.production', 'config/auth-toke
 assert.ok(!plan.skip, plan.skip);
 assert.deepEqual(plan.assignment.scope_paths, files);
 assert.deepEqual(plan.excluded.sort(), ['.env.production', 'config/auth-token.json', 'deploy/server.key']);
+// Unrepresentable paths are excluded before shared policy lint. Do not request
+// a full PR diff that also contains skipped paths.
+const odd = ['docs/meeting (copy).md', 'docs/name?.md', 'docs/notes; handoff.md'];
+const supported = m.planReview(pr, { files: [...files, ...odd], mergeBase: BASE }, cfg, now);
+assert.ok(supported.assignment, supported.skip);
+assert.equal(supported.diff, false);
+assert.ok(supported.excluded.includes(odd[0]) && supported.excluded.includes(odd[1]));
+assert.ok(!supported.excluded.includes(odd[2]), 'semicolon alone is ordinary repository path syntax');
+assert.ok(supported.assignment.scope_paths.includes(odd[2]));
+const unstructured = m.planReview(pr, { files, mergeBase: BASE }, cfg, now, () => {
+  throw new Error('sensitive scope path: '+files[0]+'; unstructured fixture');
+});
+assert.match(unstructured.skip,/^lint:/,'display text without a typed path stays a refusal');
+
 // A sensitive path inside a router group is excluded by its exact name (the policy attaches it as sensitive_path).
 plan = m.planReview(pr, { files: [...files, 'app/(auth)/token.json'], mergeBase: BASE }, cfg, now);
 assert.ok(!plan.skip, plan.skip);
