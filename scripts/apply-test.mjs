@@ -180,6 +180,74 @@ try {
   assert.deepEqual(JSON.parse(prompted.stdout).decision, {
     push:false, draft_pr:false, needs_approval:true, branch:'dalan/'+RID, reason:'per_pr_approval_required',
   });
+  // The hook points only at a local bare fixture. No GitHub API or push is used.
+  const bare = path.join(base, 'materialize-remote.git');
+  git(base,'init','--quiet','--bare',bare);
+  const checkout = clone('materialize-checkout');
+  git(checkout,'config','user.email','materialize@example.test');
+  git(checkout,'config','user.name','Materialize Fixture');
+  const remote = 'https://github.com/example-owner/example-repo.git';
+  git(checkout,'remote','set-url','origin',remote);
+  const gitBin = path.join(base,'materialize-git'), ghBin = path.join(base,'materialize-gh');
+  const trace = path.join(base,'materialize-gh.log'), fail = path.join(base,'fail-materialize-push');
+  const executable = (to, contents) => fs.writeFileSync(to, '#!'+process.execPath+'\n'+contents, {mode:0o700});
+  executable(gitBin,`
+    const fs=require('node:fs'), {spawnSync}=require('node:child_process');
+    const args=process.argv.slice(2);
+    if(args.includes('push') && fs.existsSync(${JSON.stringify(fail)})) process.exit(17);
+    const child=spawnSync('git',args.map(a=>a===${JSON.stringify(remote)}?${JSON.stringify(bare)}:a),{stdio:'inherit'});
+    process.exit(child.status ?? 1);
+  `);
+  executable(ghBin,`
+    const fs=require('node:fs');
+    const args=process.argv.slice(2);
+    if(args[0]==='repo' && args[1]==='view') console.log('main');
+    else if(args[0]==='pr' && args[1]==='create') {
+      fs.appendFileSync(${JSON.stringify(trace)},JSON.stringify(args)+'\\n');
+      console.log('https://github.com/example-owner/example-repo/pull/1');
+    } else process.exit(1);
+  `);
+  const materialize = (...flags) => new Promise(resolve => {
+    const child=spawn(process.execPath,[new URL('../bin/dot-worker.mjs',import.meta.url).pathname,'materialize',RID,'--dir',checkout,'--json',...flags],{
+      env:{...process.env,HOME:home,DALAN_GIT:gitBin,DALAN_GH:ghBin},stdio:['ignore','pipe','pipe']
+    });
+    let stdout='',stderr='';
+    child.stdout.on('data',b=>stdout+=b);
+    child.stderr.on('data',b=>stderr+=b);
+    child.on('close',code=>resolve({code,stdout,stderr}));
+  });
+  const branch='refs/heads/dalan/'+RID;
+  const worktrees=git(checkout,'worktree','list','--porcelain');
+  const empty=()=>assert.equal(git(bare,'for-each-ref','--format=%(refname)','refs/heads'),'');
+  const denied=await materialize();
+  assert.equal(denied.code,0,denied.stderr);
+  assert.equal(JSON.parse(denied.stdout).decision.needs_approval,true);
+  empty();
+  grantFile(JSON.stringify({grant:['repo:example-owner/other-repo'],mode:'standing'}));
+  assert.equal((await materialize('--approve')).code,0);
+  empty();
+  grantFile(JSON.stringify({grant:['repo:example-owner/example-repo'],mode:'per_pr'}));
+  fs.writeFileSync(fail,'');
+  assert.notEqual((await materialize('--approve')).code,0);
+  empty();
+  assert.equal(git(checkout,'worktree','list','--porcelain'),worktrees);
+  fs.unlinkSync(fail);
+  const published=await materialize('--approve');
+  assert.equal(published.code,0,published.stderr);
+  assert.equal(JSON.parse(published.stdout).branch,'dalan/'+RID);
+  assert.match(JSON.parse(published.stdout).pr_url,/\/pull\/1$/);
+  assert.equal(git(bare,'cat-file','-t',branch+':new.txt'),'blob');
+  assert.equal(git(bare,'show','-s','--format=%ae',branch),'materialize@example.test');
+  const args=JSON.parse(fs.readFileSync(trace,'utf8').trim());
+  assert.ok(args.includes('--draft'));
+  assert.equal(args[args.indexOf('--base')+1],'main');
+  assert.equal(args[args.indexOf('--head')+1],'dalan/'+RID);
+  assert.equal(git(checkout,'worktree','list','--porcelain'),worktrees);
+  git(checkout,'push','--force',bare,'HEAD:'+branch);
+  assert.notEqual((await materialize('--approve')).code,0);
+  assert.equal(git(bare,'rev-parse',branch),CLI_BASE);
+  assert.equal(git(checkout,'worktree','list','--porcelain'),worktrees);
+
   grantFile('{invalid');
   assert.notEqual((await preview()).code, 0);
   grantFile(JSON.stringify({grant:['org:example-owner'],mode:'standing'}), 0o644);

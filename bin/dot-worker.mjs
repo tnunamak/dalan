@@ -36,7 +36,7 @@ import { workerPrompt } from '../src/worker-prompt.mjs';
 import { stoppedTrialFix } from '../src/try-command.mjs';
 import { formatGetSummary, formatGetEndNote, formatWaitLine } from '../src/get-summary.mjs';
 import { cliCommand } from '../src/cli-name.mjs';
-import { applyPatch, listPatchFiles, materializeDecision, readMaterializeGrant, patchMatchesWorktree, worktreeRoot } from '../src/patch-apply.mjs';
+import { applyPatch, listPatchFiles, materializeDecision, materializePatch, readMaterializeGrant, patchMatchesWorktree, worktreeRoot } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, ensureWorkerRelationship, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError, adminSocketPath } from '../src/admin-socket.mjs';
@@ -644,11 +644,16 @@ async function main() {
       break;
     }
     case 'materialize': {
-      const id=args[0], flags=args.slice(1);
-      if(!/^[-\w]{8,128}$/.test(id??'') || !flags.includes('--dry-run') ||
-          flags.some(flag=>!['--dry-run','--json'].includes(flag)) || new Set(flags).size!==flags.length) {
-        throw new Error('usage: dalan materialize ID --dry-run [--json]');
+      const id=args[0], flags=args.slice(1), parsed=new Map();
+      const usage='usage: dalan materialize ID [--dir PATH] [--approve] [--dry-run] [--json]';
+      for(let i=0;i<flags.length;i++) {
+        const flag=flags[i];
+        if(!['--dir','--approve','--dry-run','--json'].includes(flag) || parsed.has(flag)) throw new Error(usage);
+        const value=flag==='--dir' ? flags[++i] : true;
+        if(!value || (flag==='--dir' && value.startsWith('--'))) throw new Error(usage);
+        parsed.set(flag,value);
       }
+      if(!/^[-\w]{8,128}$/.test(id??'') || parsed.has('--dry-run') && parsed.has('--approve')) throw new Error(usage);
       const grant=readMaterializeGrant(defaultPath(home,'.config/dot-bridge/materialize.json'));
       const headers={'x-owner-capability':receipt(id).token};
       const got=await request('/get?id='+encodeURIComponent(id)+'&peek=1','GET',null,headers);
@@ -664,10 +669,28 @@ async function main() {
       try {
         const downloaded=await download(art.artifact_id,file,headers);
         if(downloaded.sha256!==art.sha256||downloaded.bytes!==art.size) throw new Error('materialize patch does not match the report');
-        const files=listPatchFiles(temp,fs.readFileSync(file));
+        const body=fs.readFileSync(file);
+        const files=listPatchFiles(temp,body);
+        const dryRun=parsed.has('--dry-run');
         result={request_id:id,repo,base_sha,files,decision};
+        if(!dryRun && (decision.push || decision.needs_approval && parsed.has('--approve'))) {
+          const title=String(got.assignment?.title ?? 'Dalan patch '+id).split(/\r?\n/,1)[0].trim().slice(0,240) || 'Dalan patch '+id;
+          const summary=String(got.report?.summary ?? 'Patch for Dalan assignment '+id+'.').slice(0,30000);
+          Object.assign(result,await materializePatch({dir:path.resolve(parsed.get('--dir')||process.cwd()),temp,body,
+            sha256:art.sha256,baseSha:base_sha,repo,branch:decision.branch,title,summary,recheck:async()=>{
+              const current=await request('/get?id='+encodeURIComponent(id)+'&peek=1','GET',null,headers);
+              if(current.status!=='finished'||current.revised_by||current.report?.workspace_evidence?.patch_artifact?.sha256!==art.sha256) {
+                throw new Error('materialize result changed before publication; nothing pushed');
+              }
+              const currentDecision=materializeDecision(readMaterializeGrant(defaultPath(home,'.config/dot-bridge/materialize.json')),repo,id);
+              if(!currentDecision.push && !(currentDecision.needs_approval && parsed.has('--approve'))) {
+                throw new Error('materialize grant changed before publication; nothing pushed');
+              }
+            }}));
+        }
         if(!json) {
-          result=[repo+' at '+base_sha, 'Dry run only: '+decision.reason+'; branch '+decision.branch, ...files.map(file=>'  '+file)].join('\n');
+          const message=result.pr_url ? 'Draft pull request: '+result.pr_url : (dryRun?'Dry run only: ':'Not published: ')+decision.reason+'; branch '+decision.branch;
+          result=[repo+' at '+base_sha, message, ...files.map(file=>'  '+file)].join('\n');
           plainOutput=true;
         }
       } finally { fs.rmSync(temp,{recursive:true,force:true}); }
