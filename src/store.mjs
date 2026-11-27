@@ -1288,7 +1288,12 @@ export class Store {
       EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_passed' AND (e.claim_id IS NULL OR e.claim_id=c.claim_id)) check_passed,
       EXISTS(SELECT 1 FROM lifecycle_events e WHERE e.request_id=a.request_id AND e.type='check_failed' AND (e.claim_id IS NULL OR e.claim_id=c.claim_id)) check_failed
       FROM assignments a LEFT JOIN reports r USING(request_id) LEFT JOIN claims c USING(request_id)
-      WHERE a.created_at>=? AND a.target_worker=? AND ${queueKindSql}=? AND a.status IN ('finished','cancelled')`).all(since,worker,kind);
+      WHERE COALESCE(
+        CASE a.status WHEN 'cancelled' THEN a.cancelled_at ELSE r.created_at END,
+        (SELECT MAX(e.at) FROM lifecycle_events e WHERE e.request_id=a.request_id
+          AND e.type=CASE a.status WHEN 'cancelled' THEN 'cancelled' ELSE 'completed' END),
+        a.created_at
+      )>=? AND a.target_worker=? AND ${queueKindSql}=? AND a.status IN ('finished','cancelled')`).all(since,worker,kind);
     const outcomes={landed:0,check_passed:0,checks_failed:0,refused_by_provider:0,unable_to_run:0,owner_cancelled:0,finished_unchecked:0};
     // Check events from an earlier claim of a re-queued job describe a run that did not produce the result, so only the
     // final claim's events (or owner-side events with no claim) count.
