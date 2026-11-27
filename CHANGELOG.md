@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **A finish_handoff reply says the next job is already claimed, and when that claim lapses.** Each handed-off grant carries `already_claimed: true` and its `lease_expires_at`. The reply tells the worker not to call `claim` again and to send `progress` first, which keeps the claim.
 - **A failed patch apply restores both ends of a rename, and a materialize grant file with setuid, setgid or sticky bits is refused.** The file list behind the snapshot now includes a rename's old path as well as its new one. The grant check now requires a mode of exactly 0600, including the special bits.
 - **`dalan forecast` and `submit --dry-run` show the real reason for a refused job.** A dry run that was refused or needed clarification used to fail inside the admission forecast and report a generic `refused` reason. A refused dry run now carries its own reasons and no forecast.
 - **The first help screen is short again.** `forecast`, `correct` and `materialize` are listed under `dalan help --all`. `materialize` help now describes publishing as well as `--dry-run`.
