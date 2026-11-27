@@ -139,7 +139,8 @@ const deferredSubmit = error => {
   try { const value=JSON.parse(error); return value?.verdict==='defer'||/^deferred:/i.test(value?.error ?? ''); }
   catch { return false; }
 };
-const sensitiveRefusal = /^(?:sensitive scope path|hard sensitive path exclusion): (.+?)(?: \(.*)?$/;
+// The path ends at the rule note (`; soft sensitive name: …`) or a parenthesized note.
+const sensitiveRefusal = /^(?:sensitive scope path|hard sensitive path exclusion): (.+?)(?:; .*| \(.*)?$/;
 
 // The assignment, built to pass the bridge's submit lint. The same `validateSubmission` the bridge runs checks it here,
 // against the PR's own file list instead of a clone. A changed file the lint calls sensitive leaves the scope, and the PR is

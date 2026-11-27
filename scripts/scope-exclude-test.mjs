@@ -189,7 +189,7 @@ try {
   fs.mkdirSync(join(home,'.config/dalan'),{recursive:true});
   fs.writeFileSync(join(home,'.config/dalan/workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{connections:[{issuer:'https://fixture.invalid',subject:'fixture',client_id:'fixture'}],repos:['test/fixture']}}}),{mode:0o600});
   fs.mkdirSync(join(home, 'bin'), { recursive: true }); fs.writeFileSync(join(home, 'bin/gh'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-  for (const [name, text] of [['web/app.js', 'a'], ['web/auth_helper.json', 'b'], ['web/ok/x.js', 'c'], ['docs/guide.md', 'd']]) { fs.mkdirSync(join(fixture, name, '..'), { recursive: true }); fs.writeFileSync(join(fixture, name), text); }
+  for (const [name, text] of [['web/app.js', 'a'], ['web/credentials.json', 'b'], ['web/ok/x.js', 'c'], ['docs/guide.md', 'd']]) { fs.mkdirSync(join(fixture, name, '..'), { recursive: true }); fs.writeFileSync(join(fixture, name), text); }
   git(['init', fixture]); git(['-C', fixture, 'config', 'user.name', 'F']); git(['-C', fixture, 'config', 'user.email', 'f@example.test']); git(['-C', fixture, 'add', '.']); git(['-C', fixture, 'commit', '-m', 'fixture']);
   const base = git(['-C', fixture, 'rev-parse', 'HEAD']);
   let ready = false, stderr = '';
@@ -206,12 +206,12 @@ try {
   assert(ready, stderr);
   const id = `req_${randomUUID()}`, body = JSON.stringify({ schema_version: 1, request_id: id, brief: 'Read the web app and summarize it.', expected_output: 'A summary', execution_scope: 'read-only', inputs: [{ github_repo: 'test/fixture', base_sha: base }], scope_paths: ['web'] });
   const plain = await cli(['submit', '--stdin', '--json'], body);
-  assert.equal(plain.code, 2); assert.equal(JSON.parse(plain.err).verdict,'reject'); assert.match(plain.out + plain.err, /sensitive scope path: web\/auth_helper\.json/, 'without the flag the submit is a typed rejection');
+  assert.equal(plain.code, 2); assert.equal(JSON.parse(plain.err).verdict,'reject'); assert.match(plain.out + plain.err, /hard sensitive path exclusion: web\/credentials\.json/, 'without the flag the submit is a typed rejection');
   // a refused submit leaves no local receipt, and the bridge logs the refusal with its reason
   const receiptFor = rid => join(root, 'receipts', createHash('sha256').update(rid).digest('hex') + '.json');
   assert.ok(!fs.existsSync(receiptFor(id)), 'a refused submit kept its local receipt');
   const logLines = () => fs.readFileSync(join(home, '.local/state/dalan/requests.jsonl'), 'utf8').split('\n').filter(l => l.includes('"submit_rejected"')).map(l => JSON.parse(l));
-  assert.ok(logLines().some(l => l.request_id === id && /sensitive scope path: web\/auth_helper\.json/.test(l.reason) && l.status === 400), 'refusal not logged: ' + JSON.stringify(logLines()));
+  assert.ok(logLines().some(l => l.request_id === id && /hard sensitive path exclusion: web\/credentials\.json/.test(l.reason) && l.status === 400), 'refusal not logged: ' + JSON.stringify(logLines()));
   // a corrected retry under the same request ID is accepted even when an old receipt survives (written by an older CLI)
   { const rid = `req_${randomUUID()}`, bad = { ...JSON.parse(body), request_id: rid, brief: 'Read the web app and docs/missing-dir/x.md.' };
     fs.mkdirSync(join(root, 'receipts'), { recursive: true });
@@ -222,29 +222,29 @@ try {
     const changed = await cli(['submit', '--stdin', '--json'], JSON.stringify({ ...bad, brief: 'Something else.', scope_paths: ['web/app.js'] }));
     assert.equal(changed.code, 1); assert.match(changed.out + changed.err, /request_id conflict with local receipt/); }
   { const r = await cli(['rejections', '--json']); assert.equal(r.code, 0, r.err); const j = JSON.parse(r.out);
-    assert.ok(j.refused >= 1 && j.accepted >= 1 && j.classes.some(c => c.reason === 'sensitive scope path'), 'rejections summary: ' + r.out); }
+    assert.ok(j.refused >= 1 && j.accepted >= 1 && j.classes.some(c => c.reason === 'hard sensitive path exclusion'), 'rejections summary: ' + r.out); }
   const first = await cli(['submit', '--stdin', '--json', '--exclude-sensitive'], body);
   assert.equal(first.code, 0, first.err); const result = JSON.parse(first.out);
   assert.deepEqual(result.scope_paths, ['web/app.js', 'web/ok']);
-  assert.deepEqual(result.scope_excluded.map(d => d.path), ['web/auth_helper.json']);
-  assert.match(result.scope_excluded[0].reason, /soft sensitive name/);
+  assert.deepEqual(result.scope_excluded.map(d => d.path), ['web/credentials.json']);
+  assert.match(result.scope_excluded[0].reason, /hard sensitive path/);
   assert.ok(result.submission_warnings.some(w => /1 sensitive file\(s\) dropped/.test(w)));
   // the reason is recorded with the assignment the worker receives
   const stored = JSON.parse(await new Promise((done, fail) => { const q = http.request({ socketPath: join(root, 'admin.sock'), path: `/get?id=${id}`, headers: { 'x-owner-capability': JSON.parse(fs.readFileSync(receiptFor(id), 'utf8')).token } }, res => { let t = ''; res.on('data', b => t += b); res.on('end', () => done(t)); }); q.on('error', fail); q.end(); }));
   assert.deepEqual(stored.assignment.scope_paths, ['web/app.js', 'web/ok']);
-  assert.deepEqual(stored.assignment.scope_excluded.map(d => d.path), ['web/auth_helper.json']);
+  assert.deepEqual(stored.assignment.scope_excluded.map(d => d.path), ['web/credentials.json']);
   assert.match(stored.assignment.brief, /Bridge scope note: 1 sensitive file/);
   // a retry of the same request is a duplicate, not a conflict
   const retry = await cli(['submit', '--stdin', '--json', '--exclude-sensitive'], body);
   assert.equal(retry.code, 0, retry.err); assert.equal(JSON.parse(retry.out).duplicate, true);
-  assert.deepEqual(JSON.parse(retry.out).scope_excluded.map(d => d.path), ['web/auth_helper.json'], 'a retry repeats what was dropped');
+  assert.deepEqual(JSON.parse(retry.out).scope_excluded.map(d => d.path), ['web/credentials.json'], 'a retry repeats what was dropped');
   const forged = await cli(['submit', '--stdin', '--json', '--exclude-sensitive'], JSON.stringify({ ...JSON.parse(body), request_id: `req_${randomUUID()}`, scope_paths: ['web/app.js'], scope_excluded: [{ path: 'web/x', reason: 'made up' }] }));
   assert.equal(forged.code, 2); assert.match(forged.out + forged.err, /declares scope_excluded/);
   const retryPlain = await cli(['submit', '--stdin', '--json'], body);
   assert.equal(retryPlain.code, 0, retryPlain.err); assert.equal(JSON.parse(retryPlain.out).duplicate, true, 'the flag is not part of the request identity');
   // an explicit sensitive scope entry still fails even with the flag
-  const named = await cli(['submit', '--stdin', '--json', '--exclude-sensitive'], JSON.stringify({ ...JSON.parse(body), request_id: `req_${randomUUID()}`, scope_paths: ['web/auth_helper.json'] }));
-  assert.equal(named.code, 2); assert.match(named.out + named.err, /sensitive scope path/);
+  const named = await cli(['submit', '--stdin', '--json', '--exclude-sensitive'], JSON.stringify({ ...JSON.parse(body), request_id: `req_${randomUUID()}`, scope_paths: ['web/credentials.json'] }));
+  assert.equal(named.code, 2); assert.match(named.out + named.err, /hard sensitive path exclusion/);
   // Scope changes are never silent: an implementation brief naming repository files outside scope_paths, or a scope path the tree lacks,
   // is refused with the exact fix and nothing stored; --allow-scope-prune (old spelling --fix-scope) applies the suggestion once.
   { const impl = (extra = {}) => ({ schema_version: 1, request_id: `req_${randomUUID()}`, brief: 'Edit docs/guide.md; also read web/app.js and web/ok/x.js.', expected_output: 'A patch', execution_scope: 'implementation', inputs: [{ github_repo: 'test/fixture', base_sha: base }], scope_paths: ['docs/guide.md'], ...extra });
