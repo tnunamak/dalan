@@ -294,3 +294,24 @@ test('dead-man heartbeat refuses old positive health evidence without publishing
 test('dead-man heartbeat refuses health evidence beyond the future-skew allowance', async t => {
   await deadmanHeartbeatRefusal(t, { healthy: true, observed_at: '2026-01-01T00:00:31Z' });
 });
+
+test('alert reports usage when its title or message is empty without reaching the publisher', async t => {
+  const { copyFile, writeFile, mkdir, mkdtemp, rm } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'dalan-alert-usage-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'bin'));
+  await mkdir(join(root, 'src'));
+  const cli = join(root, 'bin/dot-alert.mjs');
+  await copyFile(new URL('../bin/dot-alert.mjs', import.meta.url), cli);
+  await writeFile(join(root, 'src/alerts.mjs'), 'export const publishAlert = () => { throw Error("unexpected publisher call"); };');
+  for (const args of [['', 'synthetic message'], ['synthetic title', '']]) {
+    const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd: root, timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 2, result.stderr);
+    assert.equal(result.stderr.trim(), 'usage: dalan-alert TITLE MESSAGE');
+    assert.equal(result.stdout, '');
+  }
+});
