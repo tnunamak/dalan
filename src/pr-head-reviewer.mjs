@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn } from 'node:child_process';
-import { validateSubmission } from './submission-policy.mjs';
+import { isLiteralScopePath, validateSubmission } from './submission-policy.mjs';
 import { legacyReportThreadKey } from './legacy-names.mjs';
 
 const home = os.homedir();
@@ -139,18 +139,17 @@ const deferredSubmit = error => {
   try { const value=JSON.parse(error); return value?.verdict==='defer'||/^deferred:/i.test(value?.error ?? ''); }
   catch { return false; }
 };
-// The path ends at the rule note (`; soft sensitive name: …`) or a parenthesized note.
-const sensitiveRefusal = /^(?:sensitive scope path|hard sensitive path exclusion): (.+?)(?:; .*| \(.*)?$/;
-
 // The assignment, built to pass the bridge's submit lint. The same `validateSubmission` the bridge runs checks it here,
 // against the PR's own file list instead of a clone. A changed file the lint calls sensitive leaves the scope, and the PR is
 // then reviewed at its head without the diff (the bridge refuses any diff that touches a sensitive name).
 // Returns {assignment, scope, excluded, diff, warnings} or {skip: reason}.
 export function planReview(pr, { files, mergeBase }, cfg, now, validate = validateSubmission) {
-  let live = [...new Set(files)], diff = Boolean(mergeBase);
-  const excluded = [];
+  const candidates = [...new Set(files)];
+  const excluded = candidates.filter(file => !isLiteralScopePath(file));
+  let live = candidates.filter(file => isLiteralScopePath(file));
+  let diff = Boolean(mergeBase) && excluded.length === 0;
   for (let attempt = 0; attempt <= files.length + 1; attempt++) {
-    if (!live.length) return { skip: files.length ? 'every changed file is excluded as sensitive' : 'the PR changes no files' };
+    if (!live.length) return { skip: files.length ? 'every changed file is excluded as sensitive or unsupported' : 'the PR changes no files' };
     const scope = collapseScope(live, { maxPaths: cfg.max_scope_paths, maxBytes: cfg.max_scope_bytes });
     const input = diff ? { github_repo: pr.repo, base_sha: mergeBase, head_sha: pr.head } : { github_repo: pr.repo, base_sha: pr.head };
     const assignment = {
@@ -169,8 +168,7 @@ export function planReview(pr, { files, mergeBase }, cfg, now, validate = valida
       validate(assignment, { scanInput: () => ({ files: live, diffFiles: diff ? live : [], diff: '', symlinks: [] }), warnings, excludeSensitive: true });
       return { assignment, scope, excluded, diff, warnings };
     } catch (error) {
-      // Prefer the exact path the policy attaches; parse the message only for an error without it.
-      const file = error?.sensitive_path ?? sensitiveRefusal.exec(error.message)?.[1];
+      const file = error?.sensitive_path;
       if (!file || !live.includes(file)) return { skip: `lint: ${error.message}` };
       excluded.push(file);
       live = live.filter(f => f !== file);
