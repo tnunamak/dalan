@@ -195,6 +195,10 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(value.worker_claim_lease_ms===null||typeof workerClaimLeaseMs!=='object'||Array.isArray(workerClaimLeaseMs)||
     Object.entries(workerClaimLeaseMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<60000||ms>604800000))
     throw new Error('invalid worker_claim_lease_ms');
+  const workerHeartbeatMs=value.worker_heartbeat_ms??{};
+  if(value.worker_heartbeat_ms===null||typeof workerHeartbeatMs!=='object'||Array.isArray(workerHeartbeatMs)||
+    Object.entries(workerHeartbeatMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<60000||ms>604800000))
+    throw new Error('invalid worker_heartbeat_ms');
   // After a bridge start the sweep holds a claim idle since before the start for its whole lease. This map shortens that hold for a worker.
   const workerPostStartHoldMs=value.worker_post_start_hold_ms??{};
   if(value.worker_post_start_hold_ms===null||typeof workerPostStartHoldMs!=='object'||Array.isArray(workerPostStartHoldMs)||
@@ -244,7 +248,7 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(!Number.isInteger(maxResponseBytesPerHour)||maxResponseBytesPerHour<100000||maxResponseBytesPerHour>1000000000) throw new Error('invalid max_response_bytes_per_hour');
   const maxResponseBytesPer24h=value.max_response_bytes_per_24h??defaultRedeliveryLimits.maxResponseBytesPer24h;
   if(!Number.isInteger(maxResponseBytesPer24h)||maxResponseBytesPer24h<1000000||maxResponseBytesPer24h>10000000000) throw new Error('invalid max_response_bytes_per_24h');
-  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,workerPostStartHoldMs,workerClaimHint,...(Object.keys(workerMaxClaims).length?{workerMaxClaims}:{}),workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
+  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,...(Object.keys(workerHeartbeatMs).length?{workerHeartbeatMs}:{}),workerPostStartHoldMs,workerClaimHint,...(Object.keys(workerMaxClaims).length?{workerMaxClaims}:{}),workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
 }
 
 // Gates that cap one rolling hour. They hold background work before agent-requested work (see rollingUsage).
@@ -2541,9 +2545,24 @@ export class Store {
     const gaps=this.limits.workerClaimMinGapMs??{};
     return Object.hasOwn(gaps,worker)?gaps[worker]:0;
   }
+  workerHeartbeatMs(worker) {
+    const intervals=this.limits.workerHeartbeatMs??{};
+    return Object.hasOwn(intervals,worker)?intervals[worker]:null;
+  }
+  // The due time is reply guidance only; it never renews or fences a grant.
+  workerHeartbeatFields(worker) {
+    const ms=this.workerHeartbeatMs(worker);
+    return ms===null?{}:{progress_due_at:iso(this.nowMs()+ms)};
+  }
+  workerGetHeartbeat(row,worker,subject) {
+    const c=row.claim;
+    return row.status==='claimed'&&!row.cancellation_requested&&c?.state==='active'&&c.worker===worker&&c.subject===subject&&!this.leaseExpired(c)?this.workerHeartbeatFields(worker):{};
+  }
   guidanceFor(worker) {
     const base=this.workers.workers.get(worker)?.guidance==='resume'?`${workerGuidance} ${resumeNudge(this.resumeIdleMs()||defaultResumeIdleMs)}`:workerGuidance;
-    return this.workerClaimGapMs(worker)?`${base} Work this claim and report it before you claim another.`:base;
+    const gap=this.workerClaimGapMs(worker)?`${base} Work this claim and report it before you claim another.`:base;
+    const heartbeat=this.workerHeartbeatMs(worker);
+    return heartbeat===null?gap:`${gap} Call progress with a short note at least every ${heartbeat/1000} seconds while you work, even when nothing changed.`;
   }
   assertClaimGap(id,subject,worker,active) {
     const gap=this.workerClaimGapMs(worker);
@@ -2685,9 +2704,10 @@ export class Store {
   }
   claim(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,ctx=null,connectionId=null) {
     const requestedLeaseMs=arguments[7]??null;
-    return nonterminalOutcome(id,this.destinationOutcome(this.transaction(()=>this.isProtocolJob(id)
+    const claim=this.destinationOutcome(this.transaction(()=>this.isProtocolJob(id)
       ?this.protocolClaimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,ctx?{...ctx,requestedLeaseMs}:ctx,connectionId)
-      :this.claimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,connectionId))));
+      :this.claimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,connectionId)));
+    return nonterminalOutcome(id,{...claim,...this.workerHeartbeatFields(worker)});
   }
   claimInTransaction(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,connectionId=null) {
     if(!this.db.isTransaction)protocolError('transaction_required');
@@ -2940,7 +2960,7 @@ export class Store {
       return {...receipt.value,revision:receipt.revision};
     });
     // Decorate after replay validation too, including receipts stored before this field existed.
-    return question?result:nonterminalOutcome(id,result);
+    return question?result:nonterminalOutcome(id,{...result,...this.workerHeartbeatFields(worker)});
   }
   progressInTransaction(id,claimId,note,subject='local-principal',blocker=false,worker='dot',question=null) {
     if(!this.db.isTransaction) throw new Error('progress requires a caller-owned transaction');
@@ -3548,7 +3568,7 @@ export class Store {
       const workerCounts=this.db.prepare(`SELECT status,count(*) count FROM assignments WHERE target_worker=? AND (status<>'queued' OR ${live(this.nowMs())}) GROUP BY status`).all(worker).filter(row=>row.count>0);
       const liveQueued=this.queuedRows().filter(row=>row.target_worker===worker);
       const queuedNormal=liveQueued.filter(row=>row.priority==='normal').length;
-      return [worker,{scope:'worker',counts:workerCounts,queued_expired:expired,queued_expired_requeued:requeued,active_claims:liveness.claimed_outer_count,queued_live:liveQueued.length,queued_normal:queuedNormal,subscriptions_active:workerSubscriptions.length,capacity:this.workerCapacityEvidence(worker,workerSubscriptions,limits,capacity),last_call_at:liveness.last_worker_call_at,last_list_pending_at:liveness.last_list_pending_at,stale_claims:liveness.stale_claims,queue_classes:liveness.queue_classes,unclaimed_after_reannounce:liveness.unclaimed_after_reannounce,oldest_claim_age_ms:liveness.oldest_claim_age_ms,oldest_claim_progress_age_ms:liveness.oldest_claim_progress_age_ms,oldest_unclaimed_event_2xx_age_ms:liveness.oldest_unclaimed_event_2xx_age_ms,silence_ms:liveness.worker_silence_ms}];
+      return [worker,{scope:'worker',...(Object.hasOwn(limits.workerHeartbeatMs??{},worker)?{heartbeat_ms:limits.workerHeartbeatMs[worker]}:{}),counts:workerCounts,queued_expired:expired,queued_expired_requeued:requeued,active_claims:liveness.claimed_outer_count,queued_live:liveQueued.length,queued_normal:queuedNormal,subscriptions_active:workerSubscriptions.length,capacity:this.workerCapacityEvidence(worker,workerSubscriptions,limits,capacity),last_call_at:liveness.last_worker_call_at,last_list_pending_at:liveness.last_list_pending_at,stale_claims:liveness.stale_claims,queue_classes:liveness.queue_classes,unclaimed_after_reannounce:liveness.unclaimed_after_reannounce,oldest_claim_age_ms:liveness.oldest_claim_age_ms,oldest_claim_progress_age_ms:liveness.oldest_claim_progress_age_ms,oldest_unclaimed_event_2xx_age_ms:liveness.oldest_unclaimed_event_2xx_age_ms,silence_ms:liveness.worker_silence_ms}];
     }));
     const queuedByWorker=new Map(this.db.prepare(`SELECT target_worker worker,count(*) n,min(created_at) oldest FROM assignments
       WHERE status='queued' AND cancelled_at IS NULL AND skipped_at IS NULL AND ${live(this.nowMs())} GROUP BY target_worker`).all().map(r=>[r.worker,r]));
