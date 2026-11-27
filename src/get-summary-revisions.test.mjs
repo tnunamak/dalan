@@ -35,6 +35,14 @@ test('reviewer refuses an invalid --max before loading configuration', async t =
   }
 });
 
+test('reviewer refuses absent flag values before loading configuration', async t => {
+  for (const flag of ['--config', '--state-dir', '--only']) {
+    for (const args of [[flag], [flag, '--dry-run']]) {
+      assert.equal(await reviewArgumentFailure(t, args), `dalan-pr-reviewer: ${flag} requires a value`);
+    }
+  }
+});
+
 test('reviewer refuses the capacity override outside dry-run before loading configuration', async t => {
   assert.equal(await reviewArgumentFailure(t, ['--ignore-capacity']), 'dalan-pr-reviewer: --ignore-capacity requires --dry-run');
 });
