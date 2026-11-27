@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **A secret inside a gzip or zip artifact is found before download.** The artifact scan now opens gzip and zip (stored or deflated members, one nested layer) within fixed size, ratio and member limits. An archive it cannot read fully (truncated, encrypted, another compression method, over a limit or nested deeper) is refused as `artifact_unscannable: <reason>`, because an unscanned archive could carry a secret.
 - **Delivery modes are registered by adapters, so a host other than T3 can add one without core changes.** The core routes a job's delivery by the adapter name before the first `:`. `none` and `t3:<thread>` parse, store and route exactly as before, and an unknown adapter is refused with a message that lists the registered names.
 - **`status` reports the dispatch state of every worker, not only the legacy one.** `dispatch.by_worker` gives each configured worker its state (`paused`, `unknown`, `full`, `dispatch_gap` or `supply_gap`), free lanes, live queued jobs it has not skipped, and the oldest one's age. The top-level dispatch fields are unchanged.
 - **`dalan-pr-reviewer` refuses a repeated value flag.** `--max 10 --max 0` used to run with the first value (up to ten submissions); it now stops with `duplicate argument --max`. The same applies to `--only`, `--config` and `--state-dir`. Repeated boolean flags are still accepted.
