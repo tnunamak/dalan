@@ -19,6 +19,8 @@ export function unwrapUserRequest(prompt) {
   const open = '<user_request>\n';
   if (!rest.startsWith(open)) return stripTrailingT3Blocks(rest);
   const body = rest.slice(open.length);
+  // The opening newline also separates the tags when the request is empty.
+  if (body.startsWith(CLOSE) && TRAILING_T3_BLOCKS.test(body.slice(CLOSE.length))) return '';
   for (let at = body.lastIndexOf(CLOSE); at > 0; at = body.lastIndexOf(CLOSE, at - 1)) {
     if (body[at - 1] === '\n' && TRAILING_T3_BLOCKS.test(body.slice(at + CLOSE.length))) return body.slice(0, at - 1);
   }

@@ -9,6 +9,15 @@ import { readJsonPrivate, writeJsonPrivate } from '../src/session-store.mjs';
 
 import { CANCEL_BUDGET_MS, REFUSE_CODE, cancelBudgetMs, createRefuse } from '../src/errors.mjs';
 
+test('an empty wrapped request does not turn the closing tag into a prompt', async () => {
+  const { promptText } = await import('../src/t3-envelope.mjs');
+  const head = '<t3_code_instructions>\n## T3 Code interaction mode: default\nFixture instructions.\n</t3_code_instructions>\n\n';
+  const tail = '\n\n<runtime_info>Fixture metadata</runtime_info>';
+  const textOf = body => promptText([{ type: 'text', text: head + body + tail }]);
+  assert.equal(textOf('<user_request>\n</user_request>'), '');
+  assert.equal(textOf('<user_request>\nKeep this text\n</user_request>'), 'Keep this text');
+});
+
 test('a blocked directory leaves a session save error visible and preserves the blocking file', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-parent-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -36,6 +45,49 @@ test('a read failure after stat is forwarded, without mislabeling it corrupt or 
     mocked.mock.restore();
   }
   assert.deepEqual(readJsonPrivate(file), { stage: 'committed' });
+});
+
+test('a session stat failure is not reported as a missing state file', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-stat-error-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  const failure = Object.assign(new Error('fixture metadata unavailable'), { code: 'EIO' });
+  const stat = fs.statSync;
+  const mocked = t.mock.method(fs, 'statSync', (target, ...args) => {
+    if (target === file) throw failure;
+    return stat(target, ...args);
+  });
+  try {
+    assert.throws(() => readJsonPrivate(file), error => error === failure);
+  } finally {
+    mocked.mock.restore();
+  }
+  assert.equal(readJsonPrivate(file), null);
+});
+
+test('a temporary cleanup failure cannot hide the original session promotion error', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-cleanup-error-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  writeJsonPrivate(file, { stage: 'committed' });
+  const temp = file + '.' + process.pid + '.tmp';
+  const failure = Object.assign(new Error('fixture cannot commit'), { code: 'EIO' });
+  const rename = fs.renameSync, rm = fs.rmSync;
+  const promotion = t.mock.method(fs, 'renameSync', (source, target, ...args) => {
+    if (source === temp && target === file) throw failure;
+    return rename(source, target, ...args);
+  });
+  const cleanup = t.mock.method(fs, 'rmSync', (target, ...args) => {
+    if (target === temp) throw new Error('fixture cannot remove temporary file');
+    return rm(target, ...args);
+  });
+  try {
+    assert.throws(() => writeJsonPrivate(file, { stage: 'uncommitted' }), error => error === failure);
+    assert.deepEqual(readJsonPrivate(file), { stage: 'committed' });
+  } finally {
+    cleanup.mock.restore();
+    promotion.mock.restore();
+  }
 });
 
 test('bad cancel budgets fall back to the bounded default', () => {
