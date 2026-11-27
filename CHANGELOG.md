@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **An artifact that contains a secret is never downloaded.** Before the first byte is returned on any route, the bridge scans the whole artifact with the existing secret rules. A hit refuses every chunk with `artifact_secret_content: <rule name>`, never the matched text, and the request log records only ids and the rule. Clean artifacts download as before.
 - **A requester can ask how soon a job would start without queuing it.** `dalan forecast` (CLI) and `dalan_forecast` (MCP, read-only) run the same checks as a dry-run submit and return the verdict, any reasons and the admission answer. `dalan correct ID` is the same as `dalan submit --revises ID`.
 - **`status` no longer reports a dispatch gap for jobs the worker chose to skip.** The dispatch count and oldest age now count only live, uncancelled jobs the worker has not passed over.
 - **A T3 child task no longer reports "queue full" when the target worker has room.** The ACP preflight now counts the jobs of the worker the job will go to (the reported default, or the only configured worker), not the whole bridge.
