@@ -16,6 +16,8 @@ import {
   paths, adminRequest, transient, sha256, parsePrompt, attemptId, ownerToken, readOrCreateSecret, bridgeRefusal,
   prepareAssignment, sizeRefusal, withoutNote, Refusal, verdictRefusal, CONTINUE_PROMPT, promptText, isBuild, buildResultText, decideHint, runBuildProseCheck, adminArtifact,
 } from '../src/acp-bridge.mjs';
+// T3's continuation prompt, compared with whitespace runs folded so a reflowed copy still counts.
+const isContinuation = text => text.trim().replace(/\s+/g, ' ') === CONTINUE_PROMPT;
 
 const num = (name, fallback) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : fallback; };
 const HEARTBEAT_MS = num('DOT_ACP_HEARTBEAT_MS', 30_000);
@@ -201,7 +203,7 @@ async function runTurn(s, ctl, text, say, client) {
     if (ctl.pending) {
       // Attached already (a steer, or T3's continuation prompt after a restart): do not submit; report what was not sent.
       const steerText = text.trim();
-      if (steerText && steerText !== CONTINUE_PROMPT && sha256(incoming.brief) !== ctl.pending.briefHash && !ctl.pending.notes.includes(steerText.slice(0, 200))) ctl.pending.notes.push(steerText.slice(0, 200));
+      if (steerText && !isContinuation(steerText) && sha256(incoming.brief) !== ctl.pending.briefHash && !ctl.pending.notes.includes(steerText.slice(0, 200))) ctl.pending.notes.push(steerText.slice(0, 200));
     } else {
       ctl.pending = await acquire(s, parsed);
       ctl.pending.notes = notes;
@@ -434,7 +436,8 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
       s.builds = saved?.builds ?? s.builds ?? [];
       s.completed = saved?.completed ?? s.completed ?? [];
       const text = promptText(params.prompt);
-      const replay = s.completed.findLast(item => text.includes(item.work_id)) ?? (s.loaded && text.trim() === CONTINUE_PROMPT ? s.completed.at(-1) : null);
+      // Only the host's explicit post-load continuation replays a terminal result.
+      const replay = s.loaded && isContinuation(text) ? s.completed.at(-1) : null;
       s.loaded = false;
       if (!ctl.pending && replay) {
         if (ctl.hostTaskId && !replay.later_host_task_ids.includes(ctl.hostTaskId)) replay.later_host_task_ids.push(ctl.hostTaskId);

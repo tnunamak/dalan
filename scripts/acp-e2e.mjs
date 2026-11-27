@@ -236,13 +236,42 @@ else console.log(JSON.stringify({ok:true,data:{}}));
   await finish(root4b, c4b, 'RESULT OF 4b');
   assert.equal((await p4c).result.stopReason, 'end_turn'); assert.equal(c.text('agent_message_chunk'), 'RESULT OF 4b');
   assert.equal(rows(`${root4b}%`).length, 1);
+
+  // A loaded session can replay its completed result using the exact continuation prompt.
+  c.kill('SIGKILL'); await c.exited;
+  // The same continuation with its whitespace reflowed still replays and adds no work.
+  const reflowed = adapter(); await reflowed.init();
+  assert.ok(!(await reflowed.loadSession(s4b, noGit)).error);
+  assert.equal((await reflowed.prompt(s4b, 'Continue  where you\nleft off.')).result.stopReason, 'end_turn');
+  assert.equal(reflowed.text('agent_message_chunk'), 'RESULT OF 4b');
+  assert.equal(rows(`${root4b}%`).length, 1, 'reflowed continuation never adds work');
+  reflowed.kill('SIGKILL'); await reflowed.exited;
+  const settled = adapter(); await settled.init();
+  assert.ok(!(await settled.loadSession(s4b, noGit)).error);
+  assert.equal((await settled.prompt(s4b, 'Continue where you left off.')).result.stopReason, 'end_turn');
+  assert.equal(settled.text('agent_message_chunk'), 'RESULT OF 4b');
+  assert.equal(rows(`${root4b}%`).length, 1, 'terminal continuation never adds work');
+
+  // The old ID inside a normal follow-up is context, not a request to replay.
+  const followBrief = `Review the next step after ${root4b}.`;
+  const followId = parsePrompt(followBrief).requestRoot;
+  const follow = settled.prompt(s4b, followBrief);
+  await Promise.race([
+    waitFor(() => status(followId) === 'queued', 'new follow-up queued'),
+    follow.then(() => assert.fail('ordinary follow-up ended before new work was queued')),
+  ]);
+  assert.equal(JSON.parse(rows(followId)[0].payload).brief, followBrief);
+  await finish(followId, await claim(followId), 'NEW FOLLOW-UP RESULT');
+  assert.equal((await follow).result.stopReason, 'end_turn');
+  assert.match(settled.rawText('agent_message_chunk'), /NEW FOLLOW-UP RESULT/);
   function require_state(id) { return readFileSync(join(home, '.local/state/dot-bridge/acp', `${id}.json`)); }
   console.log('PASS kill mid-wait then restart: same brief re-attaches (new session and session/load), one assignment, one result');
 
   // ---- 5. same token, different brief: refused, never attached
   const root5 = 'dec_conflict_1';
-  const s5 = (await c.newSession(noGit)).sessionId;
-  c.prompt(s5, `[dot-decision:${root5}]\nbrief A`);
+  const c5 = adapter(); await c5.init();
+  const s5 = (await c5.newSession(noGit)).sessionId;
+  c5.prompt(s5, `[dot-decision:${root5}]\nbrief A`);
   await waitFor(() => status(root5) === 'queued', 'queued 5');
   const d = adapter(); await d.init();
   const r5 = await d.prompt((await d.newSession(noGit)).sessionId, `[dot-decision:${root5}]\nbrief B`);
