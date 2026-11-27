@@ -11,10 +11,13 @@ const args = process.argv.slice(2), has = f => args.includes(f), opt = f => { co
 try {
   const known = new Set(['--dry-run', '--only', '--max', '--ignore-capacity', '--config', '--state-dir', '--help']);
   const values = new Set(['--only', '--max', '--config', '--state-dir']);
+  const seenValueFlags = new Set();
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
     if (!known.has(flag)) throw new Error(`unknown argument ${flag}`);
     if (!values.has(flag)) continue;
+    if (seenValueFlags.has(flag)) throw new Error(`duplicate argument ${flag}`);
+    seenValueFlags.add(flag);
     const value = args[++i];
     if (!value || value.startsWith('--')) {
       throw new Error(flag === '--max' ? '--max expects a non-negative integer' : `${flag} requires a value`);
