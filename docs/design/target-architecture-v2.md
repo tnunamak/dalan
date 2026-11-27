@@ -10,17 +10,28 @@ Dalan is the bridge only: relationships, work, authority, delivery and wake, wor
 
 ### 1.1 Parity table (caller's view)
 
-| Native subagent property | Dalan on main (d0dd670) | v2 |
-|---|---|---|
-| One call: task, model or target, isolation, background flag | T3: `delegate_task target:{providerInstanceId:"dot"}` already reaches Dalan through `bin/dot-acp-agent.mjs`, but almost nobody uses it. CLI: `dalan submit` with about 20 flags. MCP `dalan_submit`: 6 fields, no delivery, no kind. | Same native call per host (section 4). Every route takes the same work fields: task, priority class, requirements, repo and base. |
-| Immediate answer: is it running? | `queued` only. Queue-wait data exists (`store.mjs:1175`) but is used only for `valid_until`. | Admission forecast at submit: `starts_now`, or `waits ~N min (p50/p90, n)`, or for priority `critical`, `refused: no free lane`. Also the success rate for that work kind (section 6). |
-| Caller may end its turn; completion wakes it natively | T3 only, through a user-role chat message into the parent (`--deliver t3:`). Protected main threads suppress it. A `dalan wait` started in the background dies when the turn or T3 ends. | Completion arrives on the host's own subagent path: a T3 child task completion, a Claude Code task notice or inbox message, or a Codex turn. It never arrives as chat in a main thread (section 5). |
-| Worker asks a question; caller answers; work continues | Exists (`ask_question`, keyed answer journal #38, purpose #32). It reaches T3 as a chat message with a `dalan answer` command. | A question ends the child's turn the way a native subagent does. The caller answers by messaging the child. Dalan maps that message to the keyed answer (section 5.3). |
-| Caller corrects running work | No operation. `note` only. | An explicit `correct` operation. A capable runtime applies it in place; an immutable job gets successor work linked by `supersedes`. The caller makes the same call in both cases. |
-| Worker uses its full ability: shell, installs, internet, tests | Worker tools are `read_file`, `apply_patch` and allowlisted host `run_check`. No shell. About 75% of dot builds came back blocked. | The worker works on its own computer from the repo and base SHA, runs its own tests, and returns a branch or patch with evidence (section 7). |
-| Result is a branch or PR the caller can review | A patch in a bridge workspace. Fleet tooling (dot-land) turns it into a branch. | Dalan's result contract names a branch, a commit and a draft PR. Dalan materializes the branch with owner credentials when the worker cannot push (section 7.3). |
-| Cancel | `cancel` | Same, mapped to the host's own cancel (`task_cancel`, `TaskStop`, `interrupt_agent`). |
-| Survives the caller's turn ending and host restarts | Store and outbox survive. The T3 wake survives. The ACP turn does not survive a T3 restart. | The work survives in Dalan, and delivery reconciles after either side restarts (section 5.4). |
+Reference: a Claude Code `Agent` subagent or a Codex `spawn_agent` child. Gap kinds:
+- **V2**: v2 closes it.
+- **NATIVE**: it closes through a native protocol route once the host supports it. Until then a versioned adapter supplies it and is listed in section 9.
+- **SHARED**: a provider limit that native subagents also have in some form. Dalan does not work around it. It reports the limit as an honest status the caller can see, the way a subagent's rate-limit error is visible.
+
+| # | Property | Native subagent | Dalan worker on main (d0dd670) | Gap kind | v2 |
+|---|---|---|---|---|---|
+| 1 | How you call it | One tool call: prompt, model or target, isolation, background | T3: `delegate_task target:{providerInstanceId:"dot"}` already reaches Dalan through `bin/dot-acp-agent.mjs`; 3 of about 30,000 jobs in 7 days used it. CLI: `dalan submit` with about 20 flags. MCP `dalan_submit`: 6 fields, no delivery, no kind. | V2 | Each host's own subagent call (section 4). The same work fields on every route: task, priority class, requirements, repo, base. |
+| 2 | Answer at submit | Starts at once, or fails at once (rate limit) | `queued`. Queue-wait data exists (`store.mjs:1175`) but is used only for `valid_until`. | V2 | Forecast: `starts now`, or `waits ~N (p50/p90, n)`, or for `critical`, `refused: no free lane`. Also the per-kind track record (section 6). |
+| 3 | Wake on result | Native completion notice in a later turn; caller may end its turn | T3 only, as a user-role chat message into the parent; protected threads suppress it. A background `dalan wait` dies with the turn or with T3. | V2 (T3, Claude Code); NATIVE (Codex CLI) | The host's own child-completion path; never chat in a main thread (section 5). |
+| 4 | Wake on question | Claude Code: no questions from subagents (`AskUserQuestion` removed); permission prompts surface in the main session. T3: a child stops and the parent is woken. | `ask_question` exists with keyed answers (#38) and purpose (#32). The question reaches T3 as chat carrying a `dalan answer` command. | V2; NATIVE for structured questions (ACP v2, MCP Tasks `input_required`) | The question ends the child's turn; the caller answers by messaging the child; Dalan maps that to the keyed answer. |
+| 5 | Correct running work | `SendMessage` to the agent; T3 `t3_thread_send` steer | `note` only | V2 | An explicit `correct` operation: applied in place where the worker can take it, otherwise successor work linked by `supersedes`. The caller makes the same call either way. |
+| 6 | Cancel | `TaskStop`, `interrupt_agent`, `task_cancel` | `cancel`; the ACP facade maps T3 cancel to it | V2 (small) | The same, plus an honest result: `withdrawn`, or `worker still running, result will be discarded`. A hosted worker cannot always be stopped mid-step (C4 #40 already records this). |
+| 7 | Streaming progress | Claude Code shows the subagent's transcript; T3 shows the child thread live | `progress` events stored; the ACP facade sends heartbeats; little reaches the caller | V2 | Facade relays the worker's `progress` and `ack_message` events as child-thread agent messages (visible, never a wake). |
+| 8 | Tool and repo access | The caller's own tools, files and credentials (scoped by permission mode) | `read_file`, `apply_patch`, allowlisted `run_check`; files named like `auth` or `token` refuse the whole job | V2 for repo access; SHARED for the worker's own tool set | The worker uses its own computer and its own tools on the repo at `base` (section 7). Secrets never reach it; file names no longer refuse jobs. The worker's own tool policy is the provider's. |
+| 9 | Running code and tests | Shell in the caller's environment | No shell; about 75% of dot builds came back blocked | V2 where the worker has a computer; SHARED where the provider withholds a shell or network | The worker runs code on its own computer and reports `worker_reported` evidence; Dalan can add `bridge_observed` checks on the result branch. |
+| 10 | Result shape | Text plus files in the shared worktree or an isolated worktree branch | A patch in a bridge workspace; fleet tooling turns it into a branch | V2 | Branch, commit, draft PR, evidence. Dalan pushes the worker's patch with owner credentials when the worker cannot push (section 7.3). |
+| 11 | Recovery after a crash | Claude Code: an in-process subagent dies with the process; the transcript is resumable. T3: delegated tasks and completions persist. | Store and outbox persist; the ACP turn dies with T3 | V2 | Work persists in Dalan; delivery reconciles after either side restarts (section 5, rule 4). Better than an in-process subagent. |
+| 12 | Rate limits and breaks | The provider's error is visible to the caller at once | The worker goes quiet; jobs sit queued | SHARED | Status, not a workaround: `worker_state: break (until T)` in the forecast, and a child message when an accepted job is delayed by a break. |
+| 13 | Provider policy refusals (for example OpenAI Guardian) | The refusal text reaches the caller | Often a blocked result with little reason | SHARED | The worker's refusal is passed through verbatim as `outcome: refused_by_provider`. |
+| 14 | Session length | Context limits and compaction | Hosted sessions end after minutes (Muse about 7-10 min) | SHARED | Shown in the track record and forecast (`typical session ~N min`). Work is sized by the caller, as with a subagent. |
+| 15 | Output quality | Varies by model | Varies by worker | SHARED | Shown as the per-kind track record: accepted, checks passed, n. |
 
 ## 2. What stays, changes or goes from main
 
@@ -77,7 +88,7 @@ The rule: **the caller uses the subagent call its host already has.** Dalan supp
 
 | Host | Native wake Dalan can drive | Status |
 |---|---|---|
-| Claude Code session | Cross-session inbox socket (v2.1.224+): "When the receiving session is idle, Claude Code starts a new turn with the message." Gated by `crossSessionInbound`. A session that has exited restarts from its saved conversation when it gets a reply through agent view. | Frame format after the auth line is undocumented. Probe P3. Fallback: a background `dalan wait` (a native task notice while the session lives) plus a SessionStart hook that shows `dalan inbox`. |
+| Claude Code session | Cross-session inbox socket (v2.1.224+): "When the receiving session is idle, Claude Code starts a new turn with the message." Gated by `crossSessionInbound` (accept, hold, refuse); with no value, a non-child sender may face a 5-minute approval dialog. A session that has exited restarts from its saved conversation when it gets a reply through agent view. | The docs give only the auth line. The Claude Code binary carries the example `{"type":"user","message":{"role":"user","content":"..."}}` after auth; untested. No CLI command sends a message. Probe P3 (one local session). Fallback: a background `dalan wait` (a native task notice while the session lives) plus a SessionStart hook that shows `dalan inbox`. |
 | Claude Code, MCP channels | `notifications/claude/channel` from `dalan mcp` | Research preview; needs a development flag. Not the default. |
 | Codex app-server | `turn/start` or `thread/inject_items` on a loaded thread | Unloaded threads cannot be woken; work waits in `dalan inbox`. |
 | Codex CLI alone | None found | Poll, stated honestly. |
@@ -119,18 +130,18 @@ When the worker returns a patch, Dalan pushes it to `dalan/<work-id>` with owner
 
 Anything in the repos and data the relationship grants, including other people's data where the owner allows it. The one hard line: no secrets, tokens or keys. Whole-job refusals by path name go away. The hard secret-file list only removes those files from what Dalan ships.
 
-## 8. Measures (before and after)
+## 8. What Dalan reports
 
-The before values are taken on main before the v2 deploy; the after values are taken over the same window length after adoption.
+Dalan reports facts about its own work. Fleet-level measures (delegation share per orchestrator, filler use) belong to the tooling that sits on top. Dalan supplies the fields they need: a `requester` on every work item, and the route that carried it.
 
-| Measure | Definition | Source |
+| Report | Definition | Source |
 |---|---|---|
-| Delegation share | Per orchestrator: work delegated to Dalan divided by eligible delegations (Dalan plus native subagents of the kinds Dalan accepts) | Dalan relationships, plus host delegation logs |
+| Track record per kind and worker | Finished, blocked, refused by provider, checks passed, accepted, and n over the window | Lifecycle events and report outcomes (per-kind grouping is being added) |
+| Forecast accuracy | Forecast start time against actual claim time, p50 error | Forecast stored at admission (new) |
 | Starved minutes | Minutes with queued eligible work and a free, live lane | `lane_utilization.idle_while_queued` (exists) |
-| Result use | Finished work later accepted, applied or merged, divided by finished work | `acceptance` per kind (exists globally; add per kind) |
-| Could not check my work | Build results whose evidence has no passing test run of either label | Evidence labels (new) |
+| Could not check my work | Build results with no passing test run of either evidence label | Evidence labels (new) |
 | Time to start, time to result | p50 and p90 per class and kind | Lifecycle events (exist) |
-| Native-route share | Deliveries on a native wake path divided by all deliveries | Delivery table (new column) |
+| Route share | Work and deliveries per requester route (T3 child, MCP, CLI) and per wake path | `requester_route` and delivery adapter columns (new) |
 
 ## 9. Workaround ledger
 
