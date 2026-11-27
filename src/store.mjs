@@ -1062,8 +1062,9 @@ export class Store {
         const columns=new Set(this.db.prepare('PRAGMA table_info(assignments)').all().map(row=>row.name));
         for(const name of ['delivery_adapter','delivery_address','delivery_adapter_version'])
           if(!columns.has(name))this.db.exec('ALTER TABLE assignments ADD COLUMN '+name+' TEXT');
-        // Older custom/invalid rows have no historical version evidence. Keep their tuple unknown.
-        this.db.exec("UPDATE assignments SET delivery_adapter=CASE WHEN delivery='none' THEN 'none' ELSE 't3' END, delivery_address=CASE WHEN delivery='none' THEN NULL ELSE substr(delivery,4) END, delivery_adapter_version='1' WHERE delivery_adapter IS NULL AND (delivery='none' OR substr(delivery,1,3)='t3:'); PRAGMA user_version=73;");
+        // Older custom/invalid rows have no historical version evidence. Keep their tuple unknown. A t3: row is filled only
+        // when its address is a valid T3 thread id (destinations/index.mjs validT3ThreadId), so the tuple never names a bad thread.
+        this.db.exec("UPDATE assignments SET delivery_adapter=CASE WHEN delivery='none' THEN 'none' ELSE 't3' END, delivery_address=CASE WHEN delivery='none' THEN NULL ELSE substr(delivery,4) END, delivery_adapter_version='1' WHERE delivery_adapter IS NULL AND (delivery='none' OR (substr(delivery,1,3)='t3:' AND length(substr(delivery,4)) BETWEEN 8 AND 1024 AND substr(delivery,4) NOT GLOB '*[^A-Za-z0-9._:%-]*')); PRAGMA user_version=73;");
       }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
