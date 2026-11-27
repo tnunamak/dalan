@@ -20,4 +20,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # Generic rules only: the private deny list never enters this public repository or its CI.
       - run: node scripts/public-scan.mjs
+      - run: node --test scripts/public-scan-test.mjs

@@ -17,6 +17,9 @@ test('the hosted public scan runs on pull requests and pushes to main', () => {
   assert.match(workflow, /^  pull_request:\s*$/m);
   assert.match(workflow, /^  push:\n    branches: \[main\]\s*$/m);
   assert.match(workflow, /^\s+- run: node scripts\/public-scan\.mjs\s*$/m);
+  assert.match(workflow, /^\s+- run: node --test scripts\/public-scan-test\.mjs\s*$/m);
+  assert.match(workflow, /^permissions:\n  contents: read\s*$/m);
+  assert.match(workflow, /^\s+persist-credentials: false\s*$/m);
   assert.doesNotMatch(workflow, /^  workflow_dispatch:/m);
 });
 // Synthetic private names: a test must not publish the real deny list.
