@@ -490,8 +490,9 @@ test('I5: real MCP denials are bounded and rate-limited per principal before arg
         const bytes = []; response.on('data', b => bytes.push(b)); response.on('end', () => resolve({ status: response.statusCode, bytes: Buffer.concat(bytes) }));
       }); request.on('error', reject);
     });
-    assert.equal(ownerPatch.status, 200); assert(ownerPatch.bytes.includes(token));
-    assert.equal(createHash('sha256').update(ownerPatch.bytes).digest('hex'), finishedJob.artifact.sha256);
+    // Every artifact route scans before the first byte (design L5c), the owner's admin socket included: a patch that carries a token is refused by rule name.
+    assert.equal(ownerPatch.status, 422); assert(!ownerPatch.bytes.includes(token));
+    assert.equal(JSON.parse(ownerPatch.bytes.toString('utf8')).code, 'artifact_secret_content');
     const insufficient = await call('trusted-subject', 'dot-bridge.read', 'notify_owner', { text: token });
     assert.match(insufficient.content[0].text, /insufficient_scope/);
     const invalid = await call('trusted-subject', 'dot-bridge.read', 't3_thread_read', args);
