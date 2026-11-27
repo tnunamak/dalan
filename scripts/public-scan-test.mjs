@@ -11,6 +11,14 @@ import test from 'node:test';
 import { GENERIC_RULES, loadRules, parseDenylist, scanText, scanUnits } from './public-scan.mjs';
 
 const script = fileURLToPath(new URL('./public-scan.mjs', import.meta.url));
+
+test('the hosted public scan runs on pull requests and pushes to main', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/public-scan.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /^  pull_request:\s*$/m);
+  assert.match(workflow, /^  push:\n    branches: \[main\]\s*$/m);
+  assert.match(workflow, /^\s+- run: node scripts\/public-scan\.mjs\s*$/m);
+  assert.doesNotMatch(workflow, /^  workflow_dispatch:/m);
+});
 // Synthetic private names: a test must not publish the real deny list.
 const DENYLIST = '# synthetic\n\nowner-host /private-host\\.example/gi\nprivate-tool /secret_tool_name/gi\n';
 
