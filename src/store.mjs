@@ -1438,7 +1438,9 @@ export class Store {
     }
     if(maxQueued!==null) {
       if(!Number.isSafeInteger(maxQueued)||maxQueued<1) throw new Error('invalid max_queued');
-      const queued=this.db.prepare(`SELECT count(*) n FROM assignments WHERE status='queued' AND target_worker=? AND request_id IS NOT ? AND ${live(this.nowMs())}`).get(targetWorker??'dot',supersededId).n;
+      // The cap counts queued work of the submission's own priority: claims serve normal before background, so background
+      // filler never stands ahead of a normal job and must not refuse one.
+      const queued=this.db.prepare(`SELECT count(*) n FROM assignments WHERE status='queued' AND target_worker=? AND priority=? AND request_id IS NOT ? AND ${live(this.nowMs())}`).get(targetWorker??'dot',priority,supersededId).n;
       if(queued>=maxQueued) throw new Error(`worker queue is full (${queued} queued, in-flight cap ${maxQueued})`);
     }
     if(priority==='background'&&this.db.prepare(`SELECT count(*) n FROM assignments WHERE priority='background' AND target_worker=? AND request_id IS NOT ? AND (status='claimed' OR status='queued' AND ${live(this.nowMs())})`).get(targetWorker??'dot',supersededId).n>=this.backgroundMaxInFlight) throw new Error('background_capacity_full');
