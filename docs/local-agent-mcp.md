@@ -7,6 +7,7 @@
 | Tool | Does | Read-only |
 | --- | --- | --- |
 | `dalan_submit` | Queues an assignment, like `dalan submit`. Returns the `request_id` and the bridge verdict. A `clarify` or `reject` verdict comes back as an error result with its reasons. Optional: `worker`, `execution`, `dry_run`, `queue_anyway`, `refuse_defer`. | no |
+| `dalan_forecast` | Returns admission verdict, reasons, and available queue or worker estimates without queuing or reserving a job. Pass `assignment`, with optional `worker` and `execution`. CLI equivalent: `dalan forecast`. | yes |
 | `dalan_correct` | Queues a new job that corrects an earlier job you submitted, like `dalan submit --revises`. Pass `revises` (the earlier request_id) and `assignment`. The earlier job is not cancelled, but its result can no longer be accepted. | no |
 | `dalan_cancel` | Cancels a queued job, or asks the worker on a claimed job to stop, like `dalan cancel`. Optional `reason`. | no |
 | `dalan_accept` | Records your verdict on a finished job, like `dalan accept` or `dalan reject`. Pass `request_id` and `verdict` (`accept` or `reject`); optional `note`. | no |
