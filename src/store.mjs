@@ -2872,9 +2872,15 @@ export class Store {
   // The sweep (sweepStaleLeases) or a takeover is what moves the claim to abandoned; until then the row stays active but cannot act.
   // A claim_id that an earlier epoch of this assignment held (rotation, takeover, reclaim) is superseded, not unknown. Only its own worker and subject learn that.
   refuseClaim(id,claimId,subject,worker) {
-    const cur=this.mayAct(worker,id)?this.db.prepare("SELECT claim_id,epoch,subject,worker FROM claims WHERE request_id=? AND state='active'").get(id):null;
+    const cur=this.mayAct(worker,id)?this.db.prepare("SELECT * FROM claims WHERE request_id=? AND state='active'").get(id):null;
     if(cur&&cur.claim_id!==claimId&&cur.subject===subject&&cur.worker===worker&&this.db.prepare("SELECT 1 FROM lifecycle_events WHERE request_id=? AND claim_id=? AND type='claimed'").get(id,claimId))
       return new Error(JSON.stringify({error:'claim_superseded',message:`invalid claim: claim ${claimId} for ${id} was superseded by epoch ${cur.epoch}; stop using this claim. This affects only ${id}.`,request_id:id}));
+    if(cur&&cur.claim_id!==claimId&&cur.subject===subject&&cur.worker===worker&&!this.leaseExpired(cur)&&
+        this.db.prepare("SELECT 1 FROM lifecycle_events WHERE request_id<>? AND claim_id=? AND type='claimed' AND worker=? AND actor=?")
+          .get(id,claimId,worker,`worker:${subject}`))
+      return new Error(JSON.stringify({error:'claim_mismatch',
+        message:`the supplied claim belongs to another job; call get for ${id} and check it against this run's grant.`,
+        request_id:id}));
     return new Error('invalid claim');
   }
   // Commit-time authority only: never re-admit the grant against destination/repository policy.
