@@ -309,7 +309,7 @@ if(sub==='inspect'||sub==='read') {
     assert(reopened.get(first).parent_generation === 'opaque, not json', 'the Store changed or parsed the opaque generation');
     assert(reopened.db.prepare('PRAGMA user_version').get().user_version === 73, 'schema version is not 73');
   } finally { reopened.db.close(); }
-  log('migration 68: both nullable columns added in one step from schema 67, old rows read NULL, then the typed-control step runs and the version is 72');
+  log('migration 68: both nullable columns added in one step from schema 67, old rows read NULL, then the later steps run and the version is 73');
   console.log('t3-wake-fence e2e passed');
 } catch (error) { console.error(`FAIL ${error.stack || error}`); process.exitCode = 1; }
 finally {
