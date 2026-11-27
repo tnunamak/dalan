@@ -114,6 +114,27 @@ test('trial self-check reports the failed result without echoing the attempted U
   assert.doesNotMatch(result.stdout + result.stderr, /fixture-marker|fixture connection failed/);
 });
 
+test('CLI help preserves structured unknown-command guidance for script callers', async () => {
+  const { resolveHelp } = await import('./cli-help.mjs');
+  const result = resolveHelp(['stauts', '--json']);
+  assert.equal(result.stream, 'stderr');
+  assert.equal(result.code, 1);
+  const parsed = JSON.parse(result.text);
+  assert.equal(parsed.kind, 'local');
+  assert.match(parsed.error, /unknown command "stauts".*did you mean "status"/);
+});
+
+test('CLI help does not intercept the text argument of note, answer, or tell', async () => {
+  const { resolveHelp } = await import('./cli-help.mjs');
+  for (const command of ['note', 'answer', 'tell']) {
+    assert.equal(resolveHelp([command, '--help']), null);
+    const explicit = resolveHelp(['help', command]);
+    assert.equal(explicit.stream, 'stdout');
+    assert.equal(explicit.code, 0);
+    assert.match(explicit.text, new RegExp('Usage: dalan ' + command));
+  }
+});
+
 const minute=60000;
 function fixture(t) {
   let now=Date.parse('2026-11-13T12:00:00Z');
