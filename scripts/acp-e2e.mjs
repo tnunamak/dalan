@@ -262,8 +262,9 @@ else console.log(JSON.stringify({ok:true,data:{}}));
 
   // ---- 5. same token, different brief: refused, never attached
   const root5 = 'dec_conflict_1';
-  const s5 = (await c.newSession(noGit)).sessionId;
-  c.prompt(s5, `[dot-decision:${root5}]\nbrief A`);
+  const c5 = adapter(); await c5.init();
+  const s5 = (await c5.newSession(noGit)).sessionId;
+  c5.prompt(s5, `[dot-decision:${root5}]\nbrief A`);
   await waitFor(() => status(root5) === 'queued', 'queued 5');
   const d = adapter(); await d.init();
   const r5 = await d.prompt((await d.newSession(noGit)).sessionId, `[dot-decision:${root5}]\nbrief B`);
