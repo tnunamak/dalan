@@ -74,7 +74,7 @@ const zipOf=(name,data,method)=>{
 };
 const armored=fixtures[0][0];
 assert.deepEqual(download('A-built-clean-zip',zipOf('notes.txt',Buffer.from('ordinary log text'),8),0),zipOf('notes.txt',Buffer.from('ordinary log text'),8),'the test zip builder makes a zip the scanner accepts');
-for(const [label,bytes] of [['gzip',gzipSync(armored)],['stored-zip',zipOf('key.txt',armored,0)],['deflated-zip',zipOf('key.txt',armored,8)],['zip-in-gzip',gzipSync(zipOf('key.txt',armored,8))]]){
+for(const [label,bytes] of [['gzip',gzipSync(armored)],['stored-zip',zipOf('key.txt',armored,0)],['deflated-zip',zipOf('key.txt',armored,8)],['zip-in-gzip',gzipSync(zipOf('key.txt',armored,8))],['prefixed-zip',Buffer.concat([Buffer.from('#!stub\n'),zipOf('key.txt',armored,8)])],['4k-stub-zip',Buffer.concat([Buffer.alloc(4096,0x41),zipOf('key.txt',armored,0)])]]){
   assert.throws(()=>download(`A-secret-${label}`,bytes),error=>{
     assert.equal(error.code,'artifact_secret_content',label);
     assert.equal(error.message,'artifact_secret_content: private_key_armor',label);
