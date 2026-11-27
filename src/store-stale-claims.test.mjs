@@ -394,3 +394,14 @@ test('upgrade-drain rejects a subminimum timeout before pausing or quiescing', a
     assert.equal(result.stdout, '');
   }
 });
+
+test('host budget rejects non-object values and arrays with an explicit required-fields diagnostic', () => {
+  for (const malformed of [null, 'fixture', Object.values(HOST_BUDGET_CEILINGS)]) {
+    assert.throws(() => parseHostBudget(malformed), /host_budget requires cpu_ms, wall_ms/);
+  }
+});
+
+test('host budget rejects omitted values disguised by an extra counted key', () => {
+  const { wall_ms: _missing, ...budget } = HOST_BUDGET_CEILINGS;
+  assert.throws(() => parseHostBudget({...budget, unrelated: 1000}), /invalid host_budget.wall_ms/);
+});
