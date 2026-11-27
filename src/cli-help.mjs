@@ -42,6 +42,7 @@ export const COMMANDS = [
   { name: 'connect', group: 'start', summary: 'Pair a worker client with the bridge', usage: 'dalan connect <subcommand> [options]',
     detail: ['Subcommands:', '  start --worker NAME [--minutes N]   open a pairing window for a worker', '  pending [--json]                    show connection attempts waiting for approval',
       '  approve CODE --worker NAME          approve only the attempt with this code', '      [--confirm-redirect URI]        required for a native client: the redirect you expect', '      [--replace]                     replace an existing connection for the worker',
+      '  complete URL --worker NAME [--replace] [--json]', '                                      approve and finish a local loopback sign-in without a browser;', '                                      URL is the authorization URL the local client printed',
       '  list [--json]                       show connected workers', '  revoke NAME                         disconnect a worker', '  stop                                close the pairing window', '  reset                               clear pairing state',
       '  add-client --redirect-uri URI [--name NAME] [--json]   register an OAuth client', '  clients [--json]                    list OAuth clients', '  remove-client CLIENT_ID [--json]    remove an OAuth client',
       '  allow-callback PATTERN              allow another OAuth callback pattern', '  signal-token [--worker NAME] [--rotate] [--json]       show or rotate a worker signal token', '',

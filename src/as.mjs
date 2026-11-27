@@ -3,7 +3,7 @@ const GRANT_TYPES = ['authorization_code', 'refresh_token', 'client_credentials'
 const TOKEN_PARAMS = ['grant_type', 'code', 'redirect_uri', 'client_id', 'client_secret', 'code_verifier', 'refresh_token', 'scope', 'resource', 'client_assertion', 'client_assertion_type'];
 import { Provider, errors } from 'oidc-provider';
 import { ACCEPTED_SCOPES, ADVERTISED_SCOPES, canonicalScopes } from './scopes.mjs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { acquireAsOwner, asFiles, LIFETIMES, PAIRING_MINUTES, loadAsConfig, loadKeys, isLoopbackCallback, matchesCallback, parseAsConfig, parseCallbackPattern, parseNativeLoopback, saveAsCallbacks, untrusted } from './as-files.mjs';
 import { AsStore, LIMITS, normalizeCode, showCode } from './as-store.mjs';
@@ -411,11 +411,13 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
   // The owner CLI never prints the bridge path secret (approve output checks this), so show the resource's origin and shape only.
   const shownResource = resource => `${new URL(resource).origin}/<secret>/mcp`;
   const shownIssuer = `${publicUrl.origin}/<secret>/oauth`; // the issuer carries the secret path prefix too
+  const fingerprint = value => createHash('sha256').update(value).digest('base64url');
   const pendingView = pairing => {
     const shown = describeClient({ name: pairing.client_name, clientId: pairing.client_id, redirectUri: pairing.redirect_uri, worker: pairing.worker, issuer: shownIssuer, resource: '', scopes: [] });
     return {
       code: showCode(pairing.code), worker: pairing.worker, client_id: pairing.client_id, client_name: untrusted(pairing.client_name), client_name_untrusted: true,
       native: isLoopbackCallback(new URL(pairing.redirect_uri)),
+      interaction_fingerprint: fingerprint(pairing.uid),
       redirect_uri: pairing.redirect_uri, redirect_host: shown.redirect_host, redirect_origin: shown.redirect_origin, redirect_punycode: shown.redirect_punycode, known_client: shown.known_client,
       resource: shownResource(pairing.resource), scopes: pairing.scopes.split(' '), age_seconds: Math.max(0, Math.round((now() - pairing.created_at) / 1000)),
       expires_in_seconds: Math.max(0, Math.round((pairing.expires_at - now()) / 1000)),
@@ -463,7 +465,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     stop() { return { closed: store.closeWindow() }; },
     pending() {
       const window = store.window();
-      return { window: window ? { worker: window.worker, expires_at: new Date(window.expires_at).toISOString() } : null, pending: window ? supersede(store.pendingPairings().filter(p => p.worker === window.worker).map(pendingView)) : [] };
+      return { authorization_endpoint_fingerprint: fingerprint(issuer + '/auth'), window: window ? { worker: window.worker, expires_at: new Date(window.expires_at).toISOString() } : null, pending: window ? supersede(store.pendingPairings().filter(p => p.worker === window.worker).map(pendingView)) : [] };
     },
     async approve({ code, worker, replace = false, confirm_redirect: confirmRedirect }) {
       if (typeof code !== 'string' || normalizeCode(code).length !== 8) throw new Error('invalid pairing code');

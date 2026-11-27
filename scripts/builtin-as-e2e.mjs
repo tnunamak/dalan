@@ -317,6 +317,65 @@ try {
     main.cli(['connect', 'revoke', 'lark', '--json']);
   });
 
+  await check('P1c', 'the owner completes one local-client connection without returning its authorization data', async () => {
+    const callbacks = [];
+    const receiver = http.createServer((req, res) => {
+      callbacks.push({ url: req.url, cookie: req.headers.cookie });
+      res.end('ok');
+    });
+    await new Promise(resolve => receiver.listen(0, '127.0.0.1', resolve));
+    try {
+      const redirect = 'http://127.0.0.1:' + receiver.address().port + '/callback';
+      main.start_window('dot');
+      const local = new Vendor(main, redirect);
+      assert.equal((await local.register()).status, 201);
+      const proof = pkce();
+      const url = local.authUrl({ challenge: proof.challenge });
+      const complete = (target, ...flags) => main.cliAsync(['connect', 'complete', target, '--worker', 'dot', ...flags, '--json']);
+      main.stop_window();
+      const closed = await complete(url);
+      assert.notEqual(closed.code, 0);
+      assert.match(closed.stdout + closed.stderr, /pairing window/i);
+      main.start_window('dot');
+      const foreign = new URL(url);
+      foreign.host = new URL(sinkUrl).host;
+      const n = sinkHits.length;
+      const unrelated = await complete(foreign.href);
+      assert.notEqual(unrelated.code, 0);
+      assert.match(unrelated.stdout + unrelated.stderr, /authorization endpoint/i);
+      assert.equal(sinkHits.length, n);
+      const web = await complete(vendor.authUrl({ challenge: pkce().challenge }));
+      assert.notEqual(web.code, 0);
+      assert.match(web.stdout + web.stderr, /loopback/i);
+      assert.equal(callbacks.length, 0);
+
+      const done = await complete(url);
+      assert.equal(done.code, 0, 'owner complete should exit successfully');
+      const publicResult = JSON.parse(done.stdout);
+      assert.deepEqual(Object.keys(publicResult).sort(), ['connection_id']);
+      assert.equal(typeof publicResult.connection_id, 'string');
+      assert.equal(callbacks.length, 1);
+      assert.equal(callbacks[0].cookie, undefined);
+      const actual = new URL(callbacks[0].url, redirect);
+      assert.equal(actual.pathname, '/callback');
+      const code = actual.searchParams.get('code');
+      assert.ok(code);
+      assert.doesNotMatch(done.stdout + done.stderr, /(?:code=|cookie|token|redirect_uri)/i);
+      assert.ok(!((done.stdout + done.stderr).includes(code)));
+      assert.ok(!((done.stdout + done.stderr).includes(main.secret)));
+      const tokens = await local.exchange(code, proof.verifier);
+      assert.equal(tokens.status, 200);
+      assert.equal((await main.rpc(tokens.body.access_token, 'tools/list')).status, 200);
+      const replay = await complete(url);
+      assert.notEqual(replay.code, 0);
+      assert.equal(callbacks.length, 1);
+    } finally {
+      main.cli(['connect', 'revoke', 'dot', '--json']);
+      main.start_window('lark');
+      await new Promise(resolve => receiver.close(resolve));
+    }
+  });
+
   // ---- 1. PKCE ----------------------------------------------------------------------------------------------------------------
   await check('1a', 'authorization without PKCE is refused and creates nothing', async () => {
     main.start_window('lark');
