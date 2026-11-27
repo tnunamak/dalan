@@ -22,6 +22,14 @@ import { r4ThreadStates, r4Inspect } from './fixtures/t3-r4-thread-states.mjs';
     return {mode:'peer',address};
   },load:()=>{ loads++; return {name:'peer',send:async item=>{ seen.push(item.id); return {state:'delivered'}; }}; }});
   const routes=createDestinations({});
+  // A parser-only adapter must validate persisted strings and normalized objects before loading.
+  for (const invalid of ['peer', 'peer:', 'peer:unknown', {mode:'peer'}, {mode:'peer',address:'unknown'}]) {
+    assert.throws(()=>destinationName(invalid),{code:'INVALID_DELIVERY_MODE'});
+    await assert.rejects(routes.for(invalid),{code:'INVALID_DELIVERY_MODE'});
+  }
+  assert.equal(destinationName(undefined),'none');
+  assert.equal(destinationName('none'),'none');
+  assert.equal(destinationName('t3:short'),'t3','legacy persisted routing remains explicit');
   const parsed=parseDelivery('peer:abc');
   assert.deepEqual(parsed,{mode:'peer',address:'abc'});
   assert.equal(destinationName(parsed),'peer');
@@ -37,6 +45,37 @@ import { r4ThreadStates, r4Inspect } from './fixtures/t3-r4-thread-states.mjs';
   assert.throws(()=>parseDelivery('foo:x'),/none.*t3.*peer/);
   assert.throws(()=>parseDelivery('peer:bad'),/invalid delivery/);
   assert.throws(()=>registerDestination('peer',{parse:()=>{},load:()=>{}}),/already registered/);
+}
+
+{
+  let loads=0, parses=0;
+  const load=()=>{loads++;return {name:'fixture'};};
+  registerDestination('fixture-parser',{parse(address) {
+    parses++;
+    if(address==='throws') throw Error('synthetic parser refusal');
+    if(address==='none') return null;
+    if(address==='different') return {mode:'none'};
+    return {mode:'fixture-parser',address};
+  },load});
+  const routes=createDestinations({});
+  for(const address of ['throws','none','different']) {
+    for(const delivery of ['fixture-parser:'+address,{mode:'fixture-parser',address}]) {
+      assert.throws(()=>destinationName(delivery),{code:'INVALID_DELIVERY_MODE'});
+      await assert.rejects(routes.for(delivery),{code:'INVALID_DELIVERY_MODE'});
+    }
+  }
+  const before=parses;
+  const wrongType={mode:'fixture-parser',address:42};
+  assert.throws(()=>destinationName(wrongType),{code:'INVALID_DELIVERY_MODE'});
+  await assert.rejects(routes.for(wrongType),{code:'INVALID_DELIVERY_MODE'});
+  assert.equal(parses,before,'non-string addresses must not reach a permissive parser');
+  assert.equal(loads,0,'refused records must not instantiate the adapter');
+  registerDestination('fixture-bare',{bare:true,
+    parse:address=>address===undefined?{mode:'fixture-bare'}:null,load});
+  assert.equal(destinationName('fixture-bare'),'fixture-bare');
+  assert.equal(destinationName({mode:'fixture-bare'}),'fixture-bare');
+  assert.equal(await routes.for('fixture-bare'),await routes.for({mode:'fixture-bare'}));
+  assert.equal(loads,1,'both valid encodings share one adapter');
 }
 
 {
