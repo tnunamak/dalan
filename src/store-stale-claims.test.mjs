@@ -38,6 +38,31 @@ test('suite self-test accepts a Node executable path containing spaces and an ap
   assert.match(result.stdout, /PASS segment runner continues after failures/);
 });
 
+for (const [name, segments, testScript, diagnostic] of [
+  ['blank segment', ['  '], 'node scripts/test-segments.mjs', /test segments must contain non-empty command strings/],
+  ['wrong npm test entrypoint', ['fixture-command-must-not-run'], 'node alternate-test-runner.mjs', /npm test must use the sequential runner/],
+]) {
+  test('segment runner rejects ' + name + ' before starting any segment', async t => {
+    const { spawnSync } = await import('node:child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-segment-invalid-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const scripts = path.join(dir, 'scripts');
+    fs.mkdirSync(scripts);
+    const runner = path.join(scripts, 'test-segments.mjs');
+    fs.copyFileSync(new URL('../scripts/test-segments.mjs', import.meta.url), runner);
+    fs.writeFileSync(path.join(scripts, 'test-segments.json'), JSON.stringify(segments));
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: testScript } }));
+    const result = spawnSync(process.execPath, [runner], {
+      cwd: dir, env: { HOME: dir, USERPROFILE: dir, TMPDIR: dir, TEMP: dir, PATH: process.env.PATH },
+      encoding: 'utf8', timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, diagnostic);
+    assert.doesNotMatch(result.stdout, /=== SEGMENT/);
+  });
+}
+
 test('CLI guidance falls back to the checkout when a different dalan is first on PATH', async t => {
   const { cliCommand } = await import('./cli-name.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-cli-fallback-'));
