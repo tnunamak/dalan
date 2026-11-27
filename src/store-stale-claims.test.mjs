@@ -59,6 +59,9 @@ test('suite self-test accepts a Node executable path containing spaces and an ap
 });
 
 for (const [name, segments, testScript, diagnostic] of [
+  ['missing segment manifest', undefined, 'node scripts/test-segments.mjs', /ENOENT.*test-segments\.json/],
+  ['malformed segment manifest', '{', 'node scripts/test-segments.mjs', /SyntaxError:/],
+  ['empty segment list', [], 'node scripts/test-segments.mjs', /test segment list must be a non-empty array/],
   ['blank segment', ['  '], 'node scripts/test-segments.mjs', /test segments must contain non-empty command strings/],
   ['wrong npm test entrypoint', ['fixture-command-must-not-run'], 'node alternate-test-runner.mjs', /npm test must use the sequential runner/],
 ]) {
@@ -70,7 +73,9 @@ for (const [name, segments, testScript, diagnostic] of [
     fs.mkdirSync(scripts);
     const runner = path.join(scripts, 'test-segments.mjs');
     fs.copyFileSync(new URL('../scripts/test-segments.mjs', import.meta.url), runner);
-    fs.writeFileSync(path.join(scripts, 'test-segments.json'), JSON.stringify(segments));
+    if (segments !== undefined) {
+      fs.writeFileSync(path.join(scripts, 'test-segments.json'), typeof segments === 'string' ? segments : JSON.stringify(segments));
+    }
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: testScript } }));
     const result = spawnSync(process.execPath, [runner], {
       cwd: dir, env: { HOME: dir, USERPROFILE: dir, TMPDIR: dir, TEMP: dir, PATH: process.env.PATH },
