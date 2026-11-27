@@ -127,12 +127,18 @@ export function verdictRefusal(order) {
 }
 
 // The router's checks repeated as a backstop: the worker must be able to take work now.
-export function bridgeRefusal(status, inFlightCap, worker) {
+export function bridgeRefusal(status, inFlightCap, worker, priority) {
   if (status.paused) return `worker paused${status.pause_reason ? `: ${status.pause_reason}` : ''}`;
   // Only evidence holds work: an owner-confirmed break. An inferred break is silence; estimated limits are metrics.
   if (status.worker_break?.active && status.worker_break.source === 'owner') return `worker_break active since ${status.worker_break.since}`;
-  const target = worker ? status.by_worker?.[worker] : undefined;
-  const queued = target?.queued_normal ?? target?.queued_live ?? status.counts?.find(c => c.status === 'queued')?.count ?? 0;
+  const workers = status.by_worker;
+  const names = Object.keys(workers ?? {});
+  // Omitted targets resolve to the single configured worker or the legacy default worker.
+  // In a named multi-worker profile, submit still owns target validation.
+  const target = workers?.[worker ?? status.default_worker ?? (names.length === 1 ? names[0] : 'dot')];
+  const queued = priority === 'background' ? target?.queued_background : !workers
+    ? status.counts?.find(c => c.status === 'queued')?.count
+    : target?.queued_normal ?? (priority === undefined && worker ? target?.queued_live : undefined);
   if (queued >= inFlightCap) return `worker queue is full (${queued} queued, in-flight cap ${inFlightCap})`;
   return null;
 }
