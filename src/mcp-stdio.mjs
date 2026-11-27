@@ -16,18 +16,39 @@ const WAIT_DEFAULT = 120, WAIT_MAX = 300;
 const CLI = path.join(import.meta.dirname, '../bin/dalan.mjs');
 const requestId = { type: 'string', pattern: '^[-\\w]{8,128}$', description: 'The request_id of a submitted job.' };
 
+const submitProperties = {
+  assignment: { type: 'object', description: 'The assignment: request_id (8-128 letters, digits, _ or -), brief, inputs (array; [] for none), expected_output, and the other fields `dalan submit` accepts.',
+    required: ['request_id'], properties: { request_id: requestId, brief: { type: 'string' }, inputs: { type: 'array' } } },
+  worker: { type: 'string', description: 'Name of the worker to queue for. Optional with a one-worker profile.' },
+  execution: { type: 'string', enum: ['none', 'worker', 'host'], description: 'Execution capability for the job.' }
+};
+
 export const TOOLS = [
   { name: 'dalan_submit', title: 'Submit a job',
     description: 'Queue a bounded job for a Dalan worker (same checks as `dalan submit`). Returns the request_id and the bridge verdict. A clarify or reject verdict comes back as an error result with the reasons; fix the assignment and submit again. Resubmitting the same assignment is safe.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['assignment'], properties: {
-      assignment: { type: 'object', description: 'The assignment: request_id (8-128 letters, digits, _ or -), brief, inputs (array; [] for none), expected_output, and the other fields `dalan submit` accepts.',
-        required: ['request_id'], properties: { request_id: requestId, brief: { type: 'string' }, inputs: { type: 'array' } } },
-      worker: { type: 'string', description: 'Name of the worker to queue for. Optional with a one-worker profile.' },
-      execution: { type: 'string', enum: ['none', 'worker', 'host'], description: 'Execution capability for the job.' },
+      ...submitProperties,
       dry_run: { type: 'boolean', description: 'Check the assignment and store nothing.' },
       queue_anyway: { type: 'boolean', description: 'Queue even when the bridge would defer or warn.' },
       refuse_defer: { type: 'boolean', description: 'Fail instead of deferring.' } } },
     annotations: { title: 'Submit a job', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+  { name: 'dalan_cancel', title: 'Cancel a job',
+    description: 'Stop a queued job or ask the worker on a claimed job to stop. The reply states the job’s state.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['request_id'], properties: {
+      request_id: requestId,
+      reason: { type: 'string', description: 'Optional reason for cancelling the job.' } } },
+    annotations: { title: 'Cancel a job', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } },
+  { name: 'dalan_accept', title: 'Accept or reject a job result',
+    description: 'Record an accept or reject verdict for a job result as its requester, using the existing CLI checks.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['request_id', 'verdict'], properties: {
+      request_id: requestId, verdict: { type: 'string', enum: ['accept', 'reject'] },
+      note: { type: 'string', description: 'Optional note explaining the verdict.' } } },
+    annotations: { title: 'Accept or reject a job result', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
+  { name: 'dalan_correct', title: 'Correct an earlier job',
+    description: 'Submit a new job to correct an earlier job you submitted. This cancels nothing; the earlier job’s result can no longer be accepted. Returns the new request_id and verdict.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['revises', 'assignment'], properties: {
+      revises: requestId, ...submitProperties } },
+    annotations: { title: 'Correct an earlier job', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
   { name: 'dalan_wait', title: 'Wait for a job',
     description: `Wait for a job to reach a stop (finished, blocker, question, cancelled, worker_break). Returns after at most timeout_seconds (default ${WAIT_DEFAULT}, maximum ${WAIT_MAX}) with the current state; status "timeout" means it is still running, so call again. If dalan_wait reports a waiting question: call dalan_questions, then dalan_answer, then dalan_wait again.`,
     inputSchema: { type: 'object', additionalProperties: false, required: ['request_id'], properties: {
@@ -118,18 +139,30 @@ const asResult = ({ isError, value, message }) => {
   return { content: [{ type: 'text', text }], ...(structured && typeof structured === 'object' ? { structuredContent: structured } : {}), ...(isError ? { isError: true } : {}) };
 };
 
+async function submit(args, extraFlags = []) {
+  const flags = [...extraFlags];
+  if (args.worker) flags.push('--worker', args.worker);
+  if (args.execution) flags.push('--execution', args.execution);
+  for (const [key, flag] of [['dry_run', '--dry-run'], ['queue_anyway', '--queue-anyway'], ['refuse_defer', '--refuse-defer']]) if (args[key]) flags.push(flag);
+  const run = await runCli(['submit', '--stdin', ...flags], { input: JSON.stringify(args.assignment) });
+  const value = parseJson(run.stdout);
+  // A dry run exits non-zero for clarify, reject and defer but still prints the verdict on stdout.
+  if (value !== undefined) return asResult({ value, isError: run.code !== 0 && (value.verdict ? value.verdict !== 'admissible' : true) });
+  return asResult(cliError(run, 'submit'));
+}
+
+async function ownerTransition(command, id, flag, text) {
+  if (text?.startsWith('-') || text?.includes('\u0000')) throw fail(flag.slice(2) + ' text must not start with a dash or contain NUL');
+  const run = await runCli([command, id, ...(text === undefined ? [] : [flag, text])]);
+  const value = run.code === 0 ? parseJson(run.stdout) : undefined;
+  return value !== undefined ? asResult({ value }) : asResult(cliError(run, command));
+}
+
 const handlers = {
-  async dalan_submit(args) {
-    const flags = [];
-    if (args.worker) flags.push('--worker', args.worker);
-    if (args.execution) flags.push('--execution', args.execution);
-    for (const [key, flag] of [['dry_run', '--dry-run'], ['queue_anyway', '--queue-anyway'], ['refuse_defer', '--refuse-defer']]) if (args[key]) flags.push(flag);
-    const run = await runCli(['submit', '--stdin', ...flags], { input: JSON.stringify(args.assignment) });
-    const value = parseJson(run.stdout);
-    // A dry run exits non-zero for clarify, reject and defer but still prints the verdict on stdout.
-    if (value !== undefined) return asResult({ value, isError: run.code !== 0 && (value.verdict ? value.verdict !== 'admissible' : true) });
-    return asResult(cliError(run, 'submit'));
-  },
+  dalan_submit: args => submit(args),
+  dalan_correct: args => submit(args, ['--revises', args.revises]),
+  dalan_cancel: args => ownerTransition('cancel', args.request_id, '--reason', args.reason),
+  dalan_accept: args => ownerTransition(args.verdict, args.request_id, '--note', args.note),
   async dalan_wait(args) {
     const seconds = Math.min(args.timeout_seconds ?? WAIT_DEFAULT, WAIT_MAX);
     const run = await runCli(['wait', args.request_id, '--timeout', String(Math.max(1, seconds))], { timeoutMs: (seconds + 30) * 1000 });

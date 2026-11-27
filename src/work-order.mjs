@@ -206,7 +206,8 @@ export async function compileWorkOrder(request, deps) {
     if (state.worker_break) reasons.push({ verdict: 'defer', code: 'usage_break', field: 'worker', message: `the worker is on a usage break since ${state.worker_break.since}`, fix: 'the work will queue and start after the usage break; use --refuse-defer to leave it unsubmitted', retry: true });
     const threshold = request.deferQueued ?? deps.deferQueued ?? null;
     if (threshold !== null && state.queued >= threshold) reasons.push({ verdict: 'defer', code: 'queue_depth', field: 'worker', message: `${state.queued} items are queued for the worker (defer threshold ${threshold})`, fix: 'the work will queue; use --refuse-defer to leave it unsubmitted', retry: true });
-    if (request.maxQueued != null && state.queued >= request.maxQueued && !reasons.some(r => r.code === 'queue_depth')) reasons.push({ verdict: 'defer', code: 'queue_full', field: 'max_queued', message: `worker queue is full (${state.queued} queued, in-flight cap ${request.maxQueued})`, fix: 'wait for queued work to drain, or use --refuse-defer to leave it unsubmitted', retry: true });
+    const capQueued = state.queued_same_priority ?? state.queued; // max_queued counts the submission's own priority, as atomic admission does
+    if (request.maxQueued != null && capQueued >= request.maxQueued && !reasons.some(r => r.code === 'queue_depth')) reasons.push({ verdict: 'defer', code: 'queue_full', field: 'max_queued', message: `worker queue is full (${capQueued} queued, in-flight cap ${request.maxQueued})`, fix: 'wait for queued work to drain, or use --refuse-defer to leave it unsubmitted', retry: true });
   }
   // A malformed field cannot be counted or admitted: a typed rejection, not a crash or a success-shaped count.
   for (const field of new Set([...malformedFields(payload), ...malformedFields(expanded)])) {

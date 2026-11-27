@@ -1198,6 +1198,71 @@ export class Store {
     observed.sort((a,b)=>a-b);
     return {waits_ms:observed,expired_lower_bounds:expiredLowerBounds,samples:observed.length,window_days:days,worker,kind};
   }
+  // Use persisted worker progress for the start proxy. A reclaim resets the
+  // first workspace call on the single current claim row, so mixing that time
+  // in would make a job's measured first start change as it is reclaimed. Notes the bridge writes itself (the resume note)
+  // start with `[bridge] ` and are not a start. A finished job with no worker note did start, at an unobserved time.
+  admissionEvidence(worker,kind,days=7) {
+    kind=canonicalKindLabel(kind);
+    const since=iso(this.nowMs()-days*86400000);
+    const rows=this.db.prepare(`WITH selected AS MATERIALIZED (
+        SELECT a.request_id,a.target_worker,a.created_at,a.status,a.cancelled_reason
+        FROM assignments a WHERE a.created_at>=? AND a.target_worker=? AND ${queueKindSql}=?
+      ), lifecycle AS (
+        SELECT a.request_id,
+          min(CASE WHEN e.type='claimed' AND e.worker=a.target_worker THEN e.at END) claimed,
+          max(CASE WHEN e.type='cancelled' AND e.actor='system' AND e.reason='expired' THEN 1 ELSE 0 END) system_expiry
+        FROM selected a LEFT JOIN lifecycle_events e INDEXED BY lifecycle_events_request ON e.request_id=a.request_id
+        GROUP BY a.request_id
+      ) SELECT a.created_at,a.status,a.cancelled_reason,l.claimed,l.system_expiry,
+        c.lease_deadline_at,c.lease_deadline_monotonic_ms,c.lease_boot_id,c.request_id has_claim,
+        (SELECT p.created_at FROM progress p INDEXED BY progress_request WHERE p.request_id=a.request_id
+          AND (p.worker IS NULL OR p.worker=a.target_worker)
+          AND p.note NOT LIKE '[bridge] %'
+          ORDER BY p.id LIMIT 1) started
+      FROM selected a JOIN lifecycle l ON l.request_id=a.request_id
+      LEFT JOIN claims c ON c.request_id=a.request_id`).all(since,worker,kind);
+    const claimed=[], started=[], censored={expired_unclaimed:0,cancelled_unclaimed:0,claimed_not_started:0,finished_unobserved_start:0};
+    for (const row of rows) {
+      if (!row.claimed) {
+        if (row.status==='cancelled') {
+          if (row.cancelled_reason==='expired' && row.system_expiry) censored.expired_unclaimed++;
+          else censored.cancelled_unclaimed++;
+        }
+        continue;
+      }
+      const created=Date.parse(row.created_at), claimMs=Date.parse(row.claimed)-created;
+      if (!Number.isFinite(claimMs) || claimMs<0) continue;
+      claimed.push(claimMs);
+      const startMs=Date.parse(row.started)-created;
+      if (Number.isFinite(startMs) && startMs>=claimMs) started.push(startMs);
+      else if (row.status==='finished') censored.finished_unobserved_start++;
+      else if (row.status==='cancelled' || (row.has_claim && this.leaseExpired(row))) censored.claimed_not_started++;
+    }
+    const summary=times=>{
+      const n=times.length, insufficient_history=n<QUEUE_WINDOW.minSamples;
+      if (insufficient_history) return {n,p50_ms:null,p90_ms:null,insufficient_history};
+      times.sort((a,b)=>a-b);
+      return {n,p50_ms:times[Math.ceil(n*0.5)-1],p90_ms:times[Math.ceil(n*0.9)-1],insufficient_history};
+    };
+    return {worker,kind,window_days:days,min_samples:QUEUE_WINDOW.minSamples,claimed:summary(claimed),started:summary(started),censored};
+  }
+  // Jobs a claim serves before this one, in the worker list's order (LIST_ORDER): every normal job before a background one;
+  // within a class, jobs the worker has not passed over, oldest first. A new job is not skipped, so skipped peers of its class
+  // are behind it. Equal timestamps have no defined order in the list, so they count as ahead.
+  admissionAnswer(worker,kind,priority,{excludeIds=[],createdBefore=null}={}) {
+    const now=this.nowMs(), at=iso(now), [first=null,second=null]=excludeIds;
+    const {count,oldest}=this.db.prepare(`SELECT count(*) count,min(created_at) oldest FROM assignments
+      WHERE status='queued' AND target_worker=? AND request_id IS NOT ? AND request_id IS NOT ? AND ${live(now)}
+      AND ((priority=? AND skipped_at IS NULL AND created_at<=?) OR (?='background' AND priority='normal'))`)
+      .get(worker,first,second,priority,createdBefore??at,priority);
+    const workerBreak=worker==='dot'?this.holdingBreak():null;
+    const worker_state=this.paused()?'paused':workerBreak?'break':
+      this.activeSubscriptions().some(sub=>sub.worker===worker)?'live':'no_live_subscription';
+    // 'now' requires a reserved worker lane. Admission is advisory and reserves nothing.
+    return {start:'queued',ahead:{count,oldest_age_ms:oldest===null?null:Math.max(0,now-Date.parse(oldest))},
+      latency:this.admissionEvidence(worker,kind),worker_state,...(worker_state==='break'?{until:workerBreak.until}:{}),at};
+  }
   queueWaitsMs(worker,kind,days=7) { return this.queueWaitEvidence(worker,kind,days).waits_ms; }
   defaultValidUntil(worker,kind,days=7) {
     const evidence=this.queueWaitEvidence(worker,kind,days), waits=evidence.waits_ms;
@@ -1438,7 +1503,9 @@ export class Store {
     }
     if(maxQueued!==null) {
       if(!Number.isSafeInteger(maxQueued)||maxQueued<1) throw new Error('invalid max_queued');
-      const queued=this.db.prepare(`SELECT count(*) n FROM assignments WHERE status='queued' AND target_worker=? AND request_id IS NOT ? AND ${live(this.nowMs())}`).get(targetWorker??'dot',supersededId).n;
+      // The cap counts queued work of the submission's own priority: claims serve normal before background, so background
+      // filler never stands ahead of a normal job and must not refuse one.
+      const queued=this.db.prepare(`SELECT count(*) n FROM assignments WHERE status='queued' AND target_worker=? AND priority=? AND request_id IS NOT ? AND ${live(this.nowMs())}`).get(targetWorker??'dot',priority,supersededId).n;
       if(queued>=maxQueued) throw new Error(`worker queue is full (${queued} queued, in-flight cap ${maxQueued})`);
     }
     if(priority==='background'&&this.db.prepare(`SELECT count(*) n FROM assignments WHERE priority='background' AND target_worker=? AND request_id IS NOT ? AND (status='claimed' OR status='queued' AND ${live(this.nowMs())})`).get(targetWorker??'dot',supersededId).n>=this.backgroundMaxInFlight) throw new Error('background_capacity_full');
@@ -3415,8 +3482,9 @@ export class Store {
       const liveness=this.liveness(limits,capacity,worker),expired=this.queuedExpired(worker);
       const requeued=this.queuedExpiredRequeued(worker);
       const workerCounts=this.db.prepare(`SELECT status,count(*) count FROM assignments WHERE target_worker=? AND (status<>'queued' OR ${live(this.nowMs())}) GROUP BY status`).all(worker).filter(row=>row.count>0);
-      const liveQueued=this.queuedRows().filter(row=>row.target_worker===worker).length;
-      return [worker,{scope:'worker',counts:workerCounts,queued_expired:expired,queued_expired_requeued:requeued,active_claims:liveness.claimed_outer_count,queued_live:liveQueued,subscriptions_active:workerSubscriptions.length,capacity:this.workerCapacityEvidence(worker,workerSubscriptions,limits,capacity),last_call_at:liveness.last_worker_call_at,last_list_pending_at:liveness.last_list_pending_at,stale_claims:liveness.stale_claims,queue_classes:liveness.queue_classes,unclaimed_after_reannounce:liveness.unclaimed_after_reannounce,oldest_claim_age_ms:liveness.oldest_claim_age_ms,oldest_claim_progress_age_ms:liveness.oldest_claim_progress_age_ms,oldest_unclaimed_event_2xx_age_ms:liveness.oldest_unclaimed_event_2xx_age_ms,silence_ms:liveness.worker_silence_ms}];
+      const liveQueued=this.queuedRows().filter(row=>row.target_worker===worker);
+      const queuedNormal=liveQueued.filter(row=>row.priority==='normal').length;
+      return [worker,{scope:'worker',counts:workerCounts,queued_expired:expired,queued_expired_requeued:requeued,active_claims:liveness.claimed_outer_count,queued_live:liveQueued.length,queued_normal:queuedNormal,subscriptions_active:workerSubscriptions.length,capacity:this.workerCapacityEvidence(worker,workerSubscriptions,limits,capacity),last_call_at:liveness.last_worker_call_at,last_list_pending_at:liveness.last_list_pending_at,stale_claims:liveness.stale_claims,queue_classes:liveness.queue_classes,unclaimed_after_reannounce:liveness.unclaimed_after_reannounce,oldest_claim_age_ms:liveness.oldest_claim_age_ms,oldest_claim_progress_age_ms:liveness.oldest_claim_progress_age_ms,oldest_unclaimed_event_2xx_age_ms:liveness.oldest_unclaimed_event_2xx_age_ms,silence_ms:liveness.worker_silence_ms}];
     }));
     const released=this.db.prepare("SELECT id,id notice_id,request_id,message_id,subscription_id,attempt_id,attempt_started_at,terminal_at,terminal_reason FROM notifications WHERE state='uncertain_terminal' ORDER BY terminal_at DESC LIMIT 20").all();
     return {held_wakes:this.db.prepare("SELECT count(*) n FROM notifications WHERE held_kind IS NOT NULL AND state IN ('pending','quiet')").get().n,dispatch,liveness_scope:legacyScope,counts,counts_scope:'global',by_worker,priority_counts,priority_counts_scope:'global',background_max_in_flight:backgroundMaxInFlight,skipped_by_worker:(skipped=>({count:skipped.length,request_ids:skipped.slice(0,20).map(x=>x.request_id)}))(this.skippedByDot()),claim_denied:{count:denied.length,request_ids:denied.map(d=>d.request_id).slice(0,20),capacity_hold_until:this.capacityHoldUntil()},subscriptions_active:active.length,last_verified:sub?.verified_at||null,oldest_pending:oldest,last_claim:lastClaim,last_claim_at:lastClaim,subscription,queued_without_active_subscription:dotQueuedWithoutSubscription,oldest_queue_age_ms:oldest?this.nowMs()-Date.parse(oldest):null,uncertain_deliveries:uncertain,uncertain_terminal_deliveries:released,queued_expired:queuedExpired,queued_expired_requeued:queuedExpiredRequeued,paused:!!pause.paused_at,pause_reason:pause.reason,...(({items,...rest})=>rest)(this.liveness(limits,capacity)),worker_break:this.breakState(),throttle,budget,...statusEvidence(this)};

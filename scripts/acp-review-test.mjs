@@ -43,7 +43,7 @@ async function fixture(test) {
       if (url.pathname === '/status') return json(res, { counts: [], throttle: {} });
       if (url.pathname === '/submit-preview') return json(res, { dry_run: true, stored: false, verdict: 'admissible', reasons: [] });
       if (url.pathname === '/submit') { rows.set(rid, { assignment: body.assignment, status: 'queued' }); return json(res, { status: 'queued' }); }
-      if (url.pathname === '/cancel-if-queued') {
+      if (url.pathname === '/cancel') {
         if (row?.status === 'queued') row.status = 'cancelled';
         return json(res, { status: row?.status, cancelled: row?.status === 'cancelled' });
       }
@@ -136,7 +136,7 @@ cases.set(4, async () => {
     if (steer) {
       // A failed cancel leaves queued recovery state in the same process; expiry can precede the steer.
       f.hook(async ({ url, res, json }) => {
-        if (url.pathname !== '/cancel-if-queued') return false;
+        if (url.pathname !== '/cancel') return false;
         json(res, { error: 'temporary outage' }, 503); return true;
       });
       a.cancel(sid); assert.equal((await bounded(original)).result?.stopReason, 'cancelled');
@@ -185,7 +185,7 @@ cases.set(5, async () => fixture(async f => {
   b.kill('SIGKILL'); await b.exited; await pc;
   const c = await f.adapter(); await c.loadSession(sid, f.cwd);
   const pd = c.prompt(sid, 'Continue where you left off.');
-  await waitFor(() => c.text('agent_thought_chunk').includes('re-attached'), 'lock released after crash');
+  await waitFor(() => c.rawText('agent_message_chunk').includes('re-attached'), 'lock released after crash');
   f.finish('review_process_crash', 'CRASH RESULT');
   assert.equal((await bounded(pd)).result?.stopReason, 'end_turn');
   const earlySid = (await c.newSession(f.cwd)).sessionId;
@@ -220,6 +220,11 @@ cases.set(7, async () => fixture(async f => {
     assert.equal(results.filter(r => r.result?.status === 'queued').length, 10, 'exactly ten competing submissions admitted');
     assert.equal(results.filter(r => /queue is full/.test(r.error)).length, 10);
     assert.equal(store.db.prepare("SELECT count(*) n FROM assignments WHERE status='queued'").get().n, 10);
+    // The cap counts only the submission's own priority: ten queued normal jobs do not refuse a capped background job,
+    // and queued background jobs do not refuse a capped normal job.
+    const bgArgs = id => { const x = args(id); x[6] = 'background'; return x; };
+    assert.equal(store.submit(...bgArgs('review_cap_bg')).duplicate, false, 'normal rows do not fill a background cap');
+    assert.throws(() => store.submit(...args('review_cap_over')), /queue is full \(10 queued/, 'normal rows still fill a normal cap');
     const existing = store.db.prepare('SELECT request_id FROM assignments LIMIT 1').get().request_id;
     const attaches = await competingWrites(file, Array.from({ length: 4 }, () => ({ method: 'submit', args: args(existing) })), { busyTimeoutMs: 30000 });
     assert.ok(attaches.every(r => r.result?.duplicate), 'duplicates attach at capacity');
@@ -234,7 +239,7 @@ cases.set(7, async () => fixture(async f => {
   const a = await f.adapter({ DOT_ACP_INFLIGHT_CAP: '3' }), sid = (await a.newSession(f.cwd)).sessionId;
   const p = a.prompt(sid, '[dot-decision:review_cap_forward]\nforward the cap');
   await waitFor(() => f.rows.has('review_cap_forward'), 'adapter submission');
-  assert.equal(cap, 3, 'adapter forwards its cap to atomic admission');
+  assert.equal(cap, 3, 'adapter forwards its cap to atomic admission (which counts only same-priority work)');
   a.cancel(sid); await bounded(p);
 }));
 cases.set(8, async () => fixture(async f => {
@@ -281,7 +286,309 @@ cases.set(10, async () => {
   // reached estimates (and the legacy flags an older bridge sent) do not refuse
   assert.equal(bridge.bridgeRefusal({ counts: [], throttle: { over_estimate: ['tool_calls_per_24h'], normal_rewake_throttled: false, rewake_throttled: false, holding: { rewake: [], submit: [] } } }, 5), null, 'a reached estimate refused work');
   assert.match(bridge.bridgeRefusal({ counts: [{ status: 'queued', count: 5 }], worker_break: brk('inferred') }, 5), /queue is full/);
+  const counts = [{ status: 'queued', count: 17 }];
+  const scoped = (row) => ({ counts, by_worker: { dot: row } });
+  assert.equal(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 2 }), 10, 'dot'), null);
+  assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 10 }), 10, 'dot'), /queue is full \(10 queued/);
+  assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12 }), 10, 'dot'), /queue is full \(12 queued/);
+  assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 2 }), 10), /queue is full \(17 queued/);
+  assert.equal(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 0 }), 10, 'dot'), null);
 });
+// P5: ACP form elicitation mirrors T3's acp_titled_multiselect fixture at 3dbefda28.
+cases.set(11, async () => fixture(async f => {
+  let answer, answered = false;
+  f.hook(async ({url, res, json, body}) => {
+    if (url.pathname === '/questions') { json(res,{questions:answered?[]:[{question_id:'format',text:'Which format?',purpose:'clarification'}]}); return true; }
+    if (url.pathname === '/answer') {
+      answer = body; answered = true;
+      const journal = JSON.parse(await readFile(join(f.home,'state','answers','review_question.answers','format.json'),'utf8'));
+      assert.equal(journal.state,'prepared');
+      assert.equal(body.command_key,'answer:format');
+      json(res,{answered:true}); return true;
+    }
+    if (url.pathname === '/wait' && !answered) { await sleep(20); json(res,{status:'question'}); return true; }
+    return false;
+  });
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  let settled = false;
+  const p = a.prompt(sid,'[dot-decision:review_question]\npriority: background\nrequires: identified_questions, shell\nAnswer a question').then(r => {settled=true;return r;});
+  await waitFor(() => a.requests.length,'elicitation');
+  const req = a.requests[0];
+  assert.equal(req.method,'elicitation/create');
+  assert.equal(req.params.mode,'form');
+  assert.deepEqual(req.params.requestedSchema.required,['answer']);
+  assert.match(req.params.message,/"work_id":"review_question".*"question_id":"format".*"expected_respondent":"parent_agent"/);
+  assert.equal(settled,false);
+  assert.match(a.rawText('agent_message_chunk'),/^Work review_question\. Admission:/);
+  a.respond(req.id + 1000,{action:'accept',content:{answer:'wrong id'}});
+  await sleep(50); assert.equal(answer,undefined);
+  a.respond(req.id,{action:'accept',content:{answer:'JSON'}});
+  await waitFor(() => answered,'answer written');
+  await waitFor(async () => JSON.parse(await readFile(join(f.home,'state','answers','review_question.answers','format.json'),'utf8')).state === 'committed','receipt committed');
+  assert.equal(answer.text,'JSON'); assert.equal(settled,false);
+  f.finish('review_question','ANSWER RESULT');
+  assert.equal((await bounded(p)).result.stopReason,'end_turn');
+}));
+cases.set(12, async () => fixture(async f => {
+  let cancelBody;
+  f.hook(async ({url, body, res, json}) => {
+    if (url.pathname !== '/cancel') return false;
+    cancelBody=body; json(res,{status:'cancelled',compute_stopped:false}); return true;
+  });
+  const a=await f.adapter(),sid=(await a.newSession(f.cwd)).sessionId;
+  const p=a.prompt(sid,'[dot-decision:review_claimed]\nClaimed task');
+  await waitFor(() => f.rows.has('review_claimed'),'submitted');
+  f.rows.get('review_claimed').status='claimed';
+  a.cancel(sid);
+  assert.equal((await bounded(p)).result.stopReason,'cancelled');
+  assert.equal(cancelBody.id,'review_claimed');
+  assert.match(a.rawText('agent_message_chunk'),/requester_interrupted: true; worker_state: stop_requested; work_id: review_claimed/);
+}));
+cases.set(13, async () => fixture(async f => {
+  let polls=0;
+  f.hook(async ({url,res,json}) => {
+    if (url.pathname !== '/wait') return false;
+    await sleep(30);
+    json(res,++polls===1?{status:'worker_break',notice:'usage reset',until:'2099-01-01T00:00:00Z'}:{status:'timeout'}); return true;
+  });
+  const a=await f.adapter({DOT_ACP_OUTAGE_MS:'50'}),sid=(await a.newSession(f.cwd)).sessionId;
+  let settled=false;const p=a.prompt(sid,'[dot-decision:review_long_break]\nWait through break').then(r=>{settled=true;return r;});
+  await waitFor(()=>polls>6,'wait beyond old break limit');
+  assert.equal(settled,false);assert.match(a.rawText('agent_message_chunk'),/usage reset; expected end: 2099/);
+  f.hook(async()=>false);f.finish('review_long_break','AFTER BREAK');
+  assert.equal((await bounded(p)).result.stopReason,'end_turn');
+}));
+cases.set(14, async () => fixture(async f => {
+  let submits=0;
+  f.hook(async({url})=>{if(url.pathname==='/submit')submits++;return false;});
+  const a=await f.adapter(),sid=(await a.newSession(f.cwd)).sessionId;
+  a.prompt(sid,'[dot-decision:review_recovery]\nOriginal task');
+  await waitFor(async()=> (await f.state(sid))?.pending?.work_id,'identity persisted');
+  const original=(await f.state(sid)).pending.original_prompt_request_id;
+  a.kill('SIGKILL');await a.exited;
+  f.finish('review_recovery','STORED TERMINAL');
+  f.rows.get('review_recovery').delivery=[{id:'terminal-1',kind:'result'}];
+  const b=await f.adapter();await b.loadSession(sid,f.cwd);
+  assert.equal((await bounded(b.prompt(sid,bridge.CONTINUE_PROMPT))).result.stopReason,'end_turn');
+  const saved=(await f.state(sid)).completed[0];
+  assert.equal(saved.original_prompt_request_id,original);assert.equal(saved.terminal_event_id,'terminal-1');
+  assert.equal(saved.work_id,'review_recovery');
+  assert.equal(submits,1);
+  const c=await f.adapter();await c.loadSession(sid,f.cwd);
+  assert.equal((await bounded(c.prompt(sid,'Retrieve review_recovery'))).result.stopReason,'end_turn');
+  assert.equal(c.text('agent_message_chunk'),'STORED TERMINAL');assert.equal(submits,1);
+}));
+cases.set(15, async () => fixture(async f => {
+  let submitted;
+  f.hook(async({url,body,res,json})=>{
+    if(url.pathname==='/submit')submitted=body;
+    if(url.pathname==='/questions'){json(res,{questions:[{question_id:'consent',purpose:'human_decision',text:'Approve?'}]});return true;}
+    if(url.pathname==='/wait'){await sleep(20);json(res,{status:'question'});return true;}
+    return false;
+  });
+  const a=await f.adapter(),sid=(await a.newSession(f.cwd)).sessionId;
+  const p=a.prompt(sid,'[dot-decision:review_human]\npriority: background\nrequires: shell, internet\nTask');
+  await waitFor(()=>a.rawText('agent_message_chunk').includes('human owner'),'human message');
+  assert.equal(a.requests.length,0);assert.equal(submitted.delivery,'none');
+  assert.equal(submitted.background,true);assert.deepEqual(submitted.required_capabilities,['shell','internet']);
+  assert.throws(()=>parsePrompt('priority: critical\nTask'),/normal or background/);
+  a.cancel(sid);await bounded(p);
+}));
+cases.set(16, async () => fixture(async f => {
+  let polls=0;
+  f.hook(async({url,res,json})=>{
+    if(url.pathname !== '/wait')return false;
+    await sleep(20);
+    json(res,++polls===1?{status:'progress',note:'Working now'}:polls===2?{status:'ack_message',text:'Read your brief'}:{status:'timeout'});return true;
+  });
+  const a=await f.adapter(),sid=(await a.newSession(f.cwd)).sessionId;
+  let settled=false;const p=a.prompt(sid,'[dot-decision:review_progress]\nTask').then(r=>{settled=true;return r;});
+  await waitFor(()=>a.rawText('agent_message_chunk').includes('Read your brief'),'progress relay');
+  assert.match(a.rawText('agent_message_chunk'),/Working now/);assert.equal(settled,false);
+  f.rows.get('review_progress').progress=[{note:'Stored progress',created_at:'2026-01-01T00:00:00Z'}];
+  await waitFor(()=>a.rawText('agent_message_chunk').includes('Stored progress'),'stored progress relay');
+  await sleep(100);
+  assert.equal(a.rawText('agent_message_chunk').match(/Stored progress/g).length,1);
+  f.hook(async()=>false);f.finish('review_progress','DONE');await bounded(p);
+}));
+cases.set(17, async () => fixture(async f => {
+  const a=await f.adapter(),sid=(await a.newSession(f.cwd)).sessionId;
+  const p=a.send('session/prompt',{sessionId:sid,_meta:{delegatedTaskId:'original-host-task'},prompt:[{type:'text',text:'[dot-decision:review_host_ids]\nTask'}]});
+  await waitFor(async()=> (await f.state(sid))?.pending?.original_host_task_id,'host identity persisted');
+  f.finish('review_host_ids','TERMINAL');await bounded(p);
+  const b=await f.adapter();await b.loadSession(sid,f.cwd);
+  assert.equal((await bounded(b.prompt(sid,bridge.CONTINUE_PROMPT))).result.stopReason,'end_turn');
+  await bounded(b.send('session/prompt',{sessionId:sid,_meta:{delegatedTaskId:'later-host-task'},prompt:[{type:'text',text:'Read review_host_ids'}]}));
+  const saved=(await f.state(sid)).completed[0];
+  assert.equal(saved.original_host_task_id,'original-host-task');
+  assert.deepEqual(saved.later_host_task_ids,['later-host-task']);
+  assert.equal(f.rows.size,1);
+}));
+cases.set(18, async () => fixture(async f => {
+  f.hook(async({url,res,json})=>{
+    if(url.pathname!=='/cancel')return false;
+    json(res,{error:'temporary outage'},503);return true;
+  });
+  const a=await f.adapter(),sid=(await a.newSession(f.cwd)).sessionId;
+  const p=a.prompt(sid,'[dot-decision:review_cancel_outage]\nTask');
+  await waitFor(async()=> (await f.state(sid))?.pending?.rid,'work saved');
+  a.cancel(sid);
+  assert.equal((await bounded(p)).result.stopReason,'cancelled');
+  assert.match(a.rawText('agent_message_chunk'),/requester_interrupted: true; worker_state: still_running; work_id: review_cancel_outage/);
+  assert.equal((await f.state(sid)).pending.rid,'review_cancel_outage');
+}));
+// Worker questions must never end the child turn, and an answer must reach only a live, unanswered question.
+const questionFixture = (f, rid, questions, { onAnswer } = {}) => {
+  const answers = [];
+  f.hook(async ({ url, res, json, body }) => {
+    const row = f.rows.get(rid);
+    if (url.pathname === '/questions') { json(res, { questions: questions() }); return true; }
+    if (url.pathname === '/answer') { answers.push(body); if (onAnswer) return onAnswer({ res, json, body }); json(res, { answered: true }); return true; }
+    if (url.pathname === '/wait' && row && row.status !== 'finished') { await sleep(20); json(res, { status: 'question' }); return true; }
+    return false;
+  });
+  return answers;
+};
+// Muse 1127 defect 2: the job finished while the parent deliberated; the late answer is not posted and the result arrives.
+cases.set(19, async () => fixture(async f => {
+  const rid = 'review_q_late';
+  const answers = questionFixture(f, rid, () => f.rows.get(rid)?.status === 'finished' ? [] : [{ question_id: 'late', text: 'Which?', purpose: 'clarification' }]);
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nAsk late`);
+  await waitFor(() => a.requests.length, 'elicitation');
+  f.finish(rid, 'LATE RESULT');
+  a.respond(a.requests[0].id, { action: 'accept', content: { answer: 'too late' } });
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+  assert.equal(answers.length, 0, 'no answer is posted to a finished job');
+  assert.match(a.rawText('agent_message_chunk'), /LATE RESULT/);
+}));
+// Muse 1127 defect 1: a refused answer (the bridge says the question is already answered) does not end the turn.
+cases.set(20, async () => fixture(async f => {
+  const rid = 'review_q_refused';
+  let refused = false;
+  questionFixture(f, rid, () => refused ? [] : [{ question_id: 'dup', text: 'Which?', purpose: 'clarification' }],
+    { onAnswer: ({ res, json }) => { refused = true; json(res, { error: 'question already has an answer', code: 'ALREADY_ANSWERED' }, 409); return true; } });
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  let settled = false;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nAsk refused`).then(r => { settled = true; return r; });
+  await waitFor(() => a.requests.length, 'elicitation');
+  a.respond(a.requests[0].id, { action: 'accept', content: { answer: 'mine' } });
+  await waitFor(() => refused, 'answer refused');
+  await sleep(200);
+  assert.equal(settled, false, 'the child turn stays held after a refused answer');
+  f.finish(rid, 'REFUSED RESULT');
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+  assert.match(a.rawText('agent_message_chunk'), /REFUSED RESULT/);
+  assert.doesNotMatch(a.rawText('agent_message_chunk'), /worker adapter error/);
+}));
+// Muse 1127 defect 3: a second question answered while the parent deliberates on the first is not asked.
+cases.set(21, async () => fixture(async f => {
+  const rid = 'review_q_two';
+  let firstAsked = false;
+  const answers = questionFixture(f, rid, () => [
+    { question_id: 'one', text: 'First?', purpose: 'clarification', ...(answers.length ? { answer: 'A', answered_at: 't' } : {}) },
+    { question_id: 'two', text: 'Second?', purpose: 'clarification', ...(firstAsked ? { answer: 'other', answered_at: 't' } : {}) },
+  ]);
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nAsk two`);
+  await waitFor(() => a.requests.length, 'first elicitation');
+  firstAsked = true;
+  a.respond(a.requests[0].id, { action: 'accept', content: { answer: 'A' } });
+  await waitFor(() => answers.length, 'first answer');
+  await sleep(300);
+  assert.equal(a.requests.length, 1, 'the already answered second question is not asked');
+  f.finish(rid, 'TWO RESULT');
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+}));
+// Muse 1127 defect 4: after a restart, a saved but unsent answer is re-sent from the journal, not asked again.
+cases.set(22, async () => fixture(async f => {
+  const rid = 'review_q_saved';
+  const dir = join(f.home, 'state', 'answers', `${rid}.answers`);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'kept.json'), JSON.stringify({ v: 1, job: rid, question_id: 'kept', key: 'answer:kept', text: 'SAVED', expected_revision: null, state: 'prepared' }) + '\n', { mode: 0o600 });
+  let done = false;
+  const answers = questionFixture(f, rid, () => done ? [] : [{ question_id: 'kept', text: 'Kept?', purpose: 'clarification' }],
+    { onAnswer: ({ res, json }) => { done = true; json(res, { answered: true }); return true; } });
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nResume saved`);
+  await waitFor(() => answers.length, 'saved answer re-sent');
+  assert.equal(answers[0].text, 'SAVED');
+  assert.equal(a.requests.length, 0, 'the parent is not asked again');
+  f.finish(rid, 'SAVED RESULT');
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+}));
+// Muse 1127 defect 5: a declined question is reported to the parent; the job keeps waiting and the turn stays held.
+cases.set(23, async () => fixture(async f => {
+  const rid = 'review_q_nope';
+  questionFixture(f, rid, () => [{ question_id: 'nope', text: 'Which?', purpose: 'clarification' }]);
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  let settled = false;
+  const p = a.prompt(sid, `[dot-decision:${rid}]\nAsk declined`).then(r => { settled = true; return r; });
+  await waitFor(() => a.requests.length, 'elicitation');
+  a.respond(a.requests[0].id, { action: 'decline' });
+  await waitFor(() => /declined/.test(a.rawText('agent_message_chunk')), 'decline reported');
+  assert.match(a.rawText('agent_message_chunk'), /question nope.*still open|still open.*question nope/s);
+  assert.equal(settled, false);
+  f.finish(rid, 'DECLINED RESULT');
+  assert.equal((await bounded(p)).result.stopReason, 'end_turn');
+}));
+async function terminalReadFixture(f, persistent) {
+  const rid=persistent?'review_terminal_read_outage':'review_terminal_read_once';
+  let submitted=0,waits=0,rewaits=0,failedReads=0;
+  f.hook(async ({url,rid:found,res,json}) => {
+    if(found!==rid) return false;
+    if(url.pathname==='/submit') submitted++;
+    if(url.pathname==='/wait') { waits++; if(failedReads) rewaits++; }
+    // The read that follows the terminal /wait fails: once, or every time.
+    if(url.pathname==='/get'&&f.rows.get(rid)?.status==='finished'&&(persistent||failedReads===0)) {
+      failedReads++;
+      json(res,{error:'temporary fixture read fault'},503);
+      return true;
+    }
+    return false;
+  });
+  const a=await f.adapter({DOT_ACP_OUTAGE_MS:persistent?'100':'3000'});
+  const sid=(await a.newSession(f.cwd)).sessionId;
+  const p=a.prompt(sid,'[dot-decision:'+rid+']\nkeep the same child active');
+  await waitFor(()=>f.rows.has(rid),'one assignment submitted');
+  // Finish only once the child is in its wait loop, so the result arrives through /wait and its follow-up read.
+  await waitFor(()=>waits>0,'child waiting');
+  f.finish(rid,'TERMINAL READ RESULT');
+  const result=await bounded(p);
+  assert.equal(submitted,1,'the same child retries reads, not submit');
+  assert.ok(rewaits>=1,'the terminal wait was re-read after the failed read');
+  if(persistent) {
+    assert.ok(failedReads>=2);
+    assert.equal(result.error?.code,-32000);
+    assert.match(result.error.message,/worker bridge unreachable/);
+    assert.equal((await f.state(sid))?.pending.rid,rid);
+  } else {
+    assert.equal(failedReads,1);
+    assert.equal(result.result?.stopReason,'end_turn');
+    assert.match(a.text('agent_message_chunk'),/TERMINAL READ RESULT/);
+    assert.equal(result.error,undefined);
+  }
+}
+cases.set(24,async()=>fixture(f=>terminalReadFixture(f,false)));
+cases.set(25,async()=>fixture(f=>terminalReadFixture(f,true)));
+cases.set(26, async () => fixture(async f => {
+  const id='review_admission_summary';
+  f.hook(async ({url,res,rid,body,json}) => {
+    if(url.pathname!=='/submit') return false;
+    f.rows.set(rid,{assignment:body.assignment,status:'queued'});
+    json(res,{status:'queued',admission:{start:'queued',ahead:{count:3,oldest_age_ms:240000},
+      latency:{window_days:7,claimed:{n:40,p50_ms:80000,p90_ms:300000},started:{n:2,insufficient_history:true}},worker_state:'live'}});
+    return true;
+  });
+  const a=await f.adapter(),sid=(await a.newSession(f.cwd)).sessionId;
+  const prompt=a.prompt(sid,`[dot-decision:${id}]\nforecast the admission`);
+  await waitFor(()=>f.rows.has(id),'forecast work stored');
+  f.finish(id,'ADMISSION RESULT');
+  assert.equal((await bounded(prompt)).result.stopReason,'end_turn');
+  const first=a.rawText('agent_message_chunk').split('\n')[0];
+  assert.match(first,/3 jobs ahead/);
+  assert.match(first,/not enough history/);
+}));
 const only = process.argv[2] ? Number(process.argv[2]) : null;
 for (const [finding, test] of cases) {
   if (only && finding !== only) continue;

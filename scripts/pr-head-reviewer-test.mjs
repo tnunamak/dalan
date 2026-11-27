@@ -64,6 +64,11 @@ plan = m.planReview(pr, { files: [...files, '.env.production', 'config/auth-toke
 assert.ok(!plan.skip, plan.skip);
 assert.deepEqual(plan.assignment.scope_paths, files);
 assert.deepEqual(plan.excluded.sort(), ['.env.production', 'config/auth-token.json', 'deploy/server.key']);
+// A sensitive path inside a router group is excluded by its exact name (the policy attaches it as sensitive_path).
+plan = m.planReview(pr, { files: [...files, 'app/(auth)/token.json'], mergeBase: BASE }, cfg, now);
+assert.ok(!plan.skip, plan.skip);
+assert.deepEqual(plan.excluded, ['app/(auth)/token.json']);
+assert.deepEqual(plan.assignment.scope_paths, files);
 assert.ok(!plan.diff && plan.assignment.inputs[0].head_sha === undefined);
 // All changed files sensitive: nothing to review, no submission.
 assert.match(m.planReview(pr, { files: ['.env', 'keys/id_rsa'], mergeBase: BASE }, cfg, now).skip, /every changed file is excluded as sensitive/);

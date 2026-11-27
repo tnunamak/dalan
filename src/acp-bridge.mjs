@@ -95,7 +95,16 @@ export function adminArtifact(socket, artifactId, token, timeoutMs = 5000) {
 export function parsePrompt(prompt) {
   const { id: root, text, brief } = parseIdentity(prompt, { prefix: 'dot-decision', idPattern });
   // Without a token the identity is the text after the T3 preamble, so a resend with or without a role maps to one request.
-  return { brief, root, requestRoot: root ?? `acp-${sha256(text).slice(0, 24)}` };
+  const lines = brief.split('\n');
+  let priority = 'normal', requirements = [];
+  while (/^(?:priority|requires):/.test(lines[0] ?? '')) {
+    const line = lines.shift();
+    if (line.startsWith('priority:')) {
+      priority = line.slice(9).trim();
+      if (!['normal', 'background'].includes(priority)) throw new Refusal('priority must be normal or background');
+    } else requirements = line.slice(9).trim().split(/[,\s]+/).filter(Boolean);
+  }
+  return { brief: lines.join('\n').trim(), priority, requirements, root, requestRoot: root ?? `acp-${sha256(text).slice(0, 24)}` };
 }
 // Attempt 1 is the root itself. After a cancelled or expired row the next attempt is `<root>_r<n>` (the bridge accepts only
 // [-\w] in a request id, so the doc's `#` separator cannot be used).
@@ -118,11 +127,12 @@ export function verdictRefusal(order) {
 }
 
 // The router's checks repeated as a backstop: the worker must be able to take work now.
-export function bridgeRefusal(status, inFlightCap) {
+export function bridgeRefusal(status, inFlightCap, worker) {
   if (status.paused) return `worker paused${status.pause_reason ? `: ${status.pause_reason}` : ''}`;
   // Only evidence holds work: an owner-confirmed break. An inferred break is silence; estimated limits are metrics.
   if (status.worker_break?.active && status.worker_break.source === 'owner') return `worker_break active since ${status.worker_break.since}`;
-  const queued = status.counts?.find(c => c.status === 'queued')?.count ?? 0;
+  const target = worker ? status.by_worker?.[worker] : undefined;
+  const queued = target?.queued_normal ?? target?.queued_live ?? status.counts?.find(c => c.status === 'queued')?.count ?? 0;
   if (queued >= inFlightCap) return `worker queue is full (${queued} queued, in-flight cap ${inFlightCap})`;
   return null;
 }

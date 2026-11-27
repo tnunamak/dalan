@@ -91,7 +91,7 @@ try {
 
   // tools/list: exact names, schemas and annotations.
   const tools = (await rpc('tools/list', {})).result.tools;
-  assert.deepEqual(tools.map(t => t.name).sort(), ['dalan_answer', 'dalan_questions', 'dalan_result', 'dalan_status', 'dalan_submit', 'dalan_wait']);
+  assert.deepEqual(tools.map(t => t.name).sort(), ['dalan_accept', 'dalan_answer', 'dalan_cancel', 'dalan_correct', 'dalan_questions', 'dalan_result', 'dalan_status', 'dalan_submit', 'dalan_wait']);
   const byName = Object.fromEntries(tools.map(t => [t.name, t]));
   for (const tool of tools) {
     assert.equal(tool.inputSchema.type, 'object', tool.name);
@@ -109,6 +109,12 @@ try {
   assert.equal(byName.dalan_answer.annotations.readOnlyHint, false);
   assert.equal(byName.dalan_answer.annotations.idempotentHint, true);
   assert.match(byName.dalan_wait.description, /dalan_questions.*dalan_answer.*dalan_wait/);
+  for (const [name, destructiveHint] of [['dalan_cancel', true], ['dalan_accept', false], ['dalan_correct', false]]) {
+    const { annotations: { readOnlyHint, destructiveHint: destructive, idempotentHint, openWorldHint } } = byName[name];
+    assert.deepEqual({ readOnlyHint, destructive, idempotentHint, openWorldHint },
+      { readOnlyHint: false, destructive: destructiveHint, idempotentHint: true, openWorldHint: false }, name);
+  }
+  assert.deepEqual(byName.dalan_correct.inputSchema.properties.assignment, byName.dalan_submit.inputSchema.properties.assignment);
   // Validation errors must be local, before an unknown job can reach the CLI.
   for (const [args, message] of [
     [{ id: 'req_unknown_validation', question_id: 'q1', text: '' }, /must not be blank/],
@@ -182,6 +188,36 @@ try {
   assert.equal(textOf(result).status, 'finished');
   assert.equal(textOf(result).report.result, 'mcp roundtrip report');
   assert.deepEqual(result.structuredContent, textOf(result));
+  const accepted = await call('dalan_accept', { request_id: requestId, verdict: 'accept', note: 'fixture accepts' });
+  assert.notEqual(accepted.isError, true, JSON.stringify(accepted));
+
+  // Correction records lineage but does not cancel the predecessor; cancellation is separate.
+  const cancelId = `req_${randomUUID()}`;
+  const revisedId = `req_${randomUUID()}`;
+  assert.notEqual((await call('dalan_submit', { assignment: { ...assignment, request_id: cancelId }, execution: 'none' })).isError, true);
+  const revised = await call('dalan_correct', { revises: cancelId, assignment: { ...assignment, request_id: revisedId }, execution: 'none' });
+  assert.notEqual(revised.isError, true, JSON.stringify(revised));
+  assert.equal(textOf(revised).request_id, revisedId);
+  assert.notEqual(revisedId, cancelId);
+  assert.equal(JSON.parse(await dalan(['get', revisedId, '--json'])).revises?.request_id, cancelId);
+  assert.equal(textOf(await call('dalan_result', { request_id: cancelId })).status, 'queued');
+  const cancelled = await call('dalan_cancel', { request_id: cancelId, reason: 'fixture cleanup' });
+  assert.notEqual(cancelled.isError, true, JSON.stringify(cancelled));
+  const cancellation = textOf(cancelled);
+  assert.equal(cancellation.status, 'cancelled', JSON.stringify(cancellation));
+  assert.equal(textOf(await call('dalan_result', { request_id: cancelId })).status, 'cancelled');
+  assert.equal((await call('dalan_accept', { request_id: 'req_unknown_verdict', verdict: 'accept' })).isError, true);
+  for (const bad of ['-option', 'contains\u0000nul']) {
+    for (const [name, args] of [
+      ['dalan_cancel', { request_id: revisedId, reason: bad }],
+      ['dalan_accept', { request_id: revisedId, verdict: 'reject', note: bad }],
+    ]) {
+      const refused = await call(name, args);
+      assert.equal(refused.isError, true, name);
+      assert.match(refused.content[0].text, /dash or contain NUL/);
+    }
+  }
+  assert.equal(textOf(await call('dalan_result', { request_id: revisedId })).status, 'queued');
 
   // Redaction and the size cap apply to a finished report.
   const bigId = `req_${randomUUID()}`;
@@ -194,6 +230,8 @@ try {
   assert.ok(!big.content[0].text.includes('a1B2c3D4e5F6g7H8i9J0k1L2'), 'secrets are redacted');
   assert.ok(big.content[0].text.length <= 34_000, `capped: ${big.content[0].text.length}`);
   assert.match(big.content[0].text, /truncated/);
+  const rejected = await call('dalan_accept', { request_id: bigId, verdict: 'reject', note: 'fixture rejects' });
+  assert.notEqual(rejected.isError, true, JSON.stringify(rejected));
 
   // A refused submission is a tool result with isError, carrying the CLI's verdict.
   const refused = await call('dalan_submit', { assignment: { ...assignment, request_id: `req_${randomUUID()}`, brief: '' }, execution: 'none', dry_run: true });

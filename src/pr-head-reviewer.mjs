@@ -139,7 +139,8 @@ const deferredSubmit = error => {
   try { const value=JSON.parse(error); return value?.verdict==='defer'||/^deferred:/i.test(value?.error ?? ''); }
   catch { return false; }
 };
-const sensitiveRefusal = /^(?:sensitive scope path|hard sensitive path exclusion): (.+?)(?: \(.*)?$/;
+// The path ends at the rule note (`; soft sensitive name: …`) or a parenthesized note.
+const sensitiveRefusal = /^(?:sensitive scope path|hard sensitive path exclusion): (.+?)(?:; .*| \(.*)?$/;
 
 // The assignment, built to pass the bridge's submit lint. The same `validateSubmission` the bridge runs checks it here,
 // against the PR's own file list instead of a clone. A changed file the lint calls sensitive leaves the scope, and the PR is
@@ -168,10 +169,11 @@ export function planReview(pr, { files, mergeBase }, cfg, now, validate = valida
       validate(assignment, { scanInput: () => ({ files: live, diffFiles: diff ? live : [], diff: '', symlinks: [] }), warnings, excludeSensitive: true });
       return { assignment, scope, excluded, diff, warnings };
     } catch (error) {
-      const m = sensitiveRefusal.exec(error.message);
-      if (!m || !live.includes(m[1])) return { skip: `lint: ${error.message}` };
-      excluded.push(m[1]);
-      live = live.filter(f => f !== m[1]);
+      // Prefer the exact path the policy attaches; parse the message only for an error without it.
+      const file = error?.sensitive_path ?? sensitiveRefusal.exec(error.message)?.[1];
+      if (!file || !live.includes(file)) return { skip: `lint: ${error.message}` };
+      excluded.push(file);
+      live = live.filter(f => f !== file);
       diff = false;
     }
   }

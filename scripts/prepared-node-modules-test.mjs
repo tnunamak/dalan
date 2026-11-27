@@ -16,7 +16,7 @@ const write = (file, data) => fs.writeFileSync(path.join(src,file), JSON.stringi
 try {
   assert.equal(resolvePreparedNodeModules(src, options), null);
   write('package.json', manifest); write('package-lock.json', lock);
-  assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared'});
+  assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared', message:/\(missing\)/});
   const cliHome=path.join(root,'cli-home'); fs.mkdirSync(cliHome,{mode:0o700});
   const sharedParents=[path.join(cliHome,'.local'),path.join(cliHome,'.local','share')];
   fs.mkdirSync(sharedParents[1],{recursive:true});for(const dir of sharedParents)fs.chmodSync(dir,0o775);
@@ -30,20 +30,25 @@ try {
   assert.deepEqual(resolvePreparedNodeModules(src, options), result);
   assert.equal(result.runtime.node, process.version);
   write('package.json', {...manifest, description:'changed'});
-  assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared'});
+  assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared', message:/\(missing\)/});
+  const changedResult=prepareNodeModules(src, options);
+  assert.equal(changedResult.lock_sha256,result.lock_sha256);
+  assert.notEqual(changedResult.treePath,result.treePath);
+  assert.deepEqual(resolvePreparedNodeModules(src, options),changedResult);
   write('package.json', manifest);
+  assert.deepEqual(resolvePreparedNodeModules(src, options),result);
   write('package-lock.json', {...lock, version:'2.0.0'});
   assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared'});
   write('package-lock.json', lock);
   const meta = path.join(path.dirname(result.treePath),'metadata.json');
   fs.chmodSync(meta,0o600); const saved=fs.readFileSync(meta,'utf8');
   const changed=JSON.parse(saved); changed.identity.runtime.abi='wrong'; fs.writeFileSync(meta,JSON.stringify(changed)); fs.chmodSync(meta,0o400);
-  assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared'});
+  assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared', message:/\(identity mismatch\)/});
   fs.chmodSync(meta,0o600); fs.writeFileSync(meta,saved); fs.chmodSync(meta,0o400);
   fs.chmodSync(result.treePath,0o700); fs.symlinkSync('/etc/passwd',path.join(result.treePath,'escape')); fs.chmodSync(result.treePath,0o500);
   assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared'});
   fs.chmodSync(result.treePath,0o700); fs.unlinkSync(path.join(result.treePath,'escape')); fs.chmodSync(result.treePath,0o500);
-  fs.unlinkSync(meta); assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared'});
+  fs.unlinkSync(meta); assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared', message:/\(missing\)/});
   const retainedInode=fs.statSync(result.treePath).ino;
   assert.deepEqual(prepareNodeModules(src,{...options,replaceInvalid:true}),result);
   const replaced=fs.readdirSync(cache).filter(name=>name.startsWith('.replaced-'));

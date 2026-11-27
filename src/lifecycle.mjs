@@ -264,6 +264,18 @@ export function lifecycleMetrics(store,{since=null,laneCapacity=store.limits.lan
   const duration=value=>rolledUp?unknown('rolled up'):metric(value,'ms');
   const windowed=rows.filter(inWindow);
   const count=type=>windowed.filter(e=>e.type===type).length;
+  const kindTrack=new Map();
+  const track=kind=>kindTrack.get(kind)??kindTrack.set(kind,{
+    n:0,outcomes:{completed:0,blocked:0,failed:0},checks:{passed:0,failed:0,skipped:0},acceptance:{accepted:0,rejected:0,unknown:0}
+  }).get(kind);
+  for(const e of windowed) {
+    if(e.type==='completed') {
+      const row=track(e.kind), outcome=/^outcome=(completed|blocked|failed)(?:;|$)/.exec(e.reason??'')?.[1];
+      if(outcome) row.outcomes[outcome]++;
+    } else if(e.type==='check_passed'||e.type==='check_failed'||e.type==='check_skipped') {
+      track(e.kind).checks[e.type.slice('check_'.length)]++;
+    }
+  }
   const backfilled=windowed.some(e=>e.source==='backfill');
   // Throughput: completed (terminal worker report) events per UTC day and kind, plus daily roll-ups when the window reaches them.
   const perDay=new Map();
@@ -289,10 +301,15 @@ export function lifecycleMetrics(store,{since=null,laneCapacity=store.limits.lan
   const repeated=name=>coverage.keyed?{value:repeat[name].value,unit:'count',n:coverage.keyed,by_source:repeat[name].by_source}:unknown(noKey);
   // Owner acceptance of requests whose terminal report landed in the window. The latest verdict wins.
   const verdicts={accepted:0,rejected:0,consumed_only:0,unknown:0};
-  for(const [requestId,events] of timelines) {
-    if(!events.some(e=>e.type==='completed'&&inWindow(e))) continue;
+  for(const events of timelines.values()) {
+    const done=events.find(e=>e.type==='completed'&&inWindow(e));
+    if(!done) continue;
     const verdict=events.filter(e=>e.type==='accepted'||e.type==='consumed'&&/^rejected/.test(e.reason??'')).at(-1);
-    verdicts[verdict?verdict.type==='accepted'?'accepted':'rejected':events.some(e=>e.type==='consumed')?'consumed_only':'unknown']++;
+    const label=verdict?verdict.type==='accepted'?'accepted':'rejected':events.some(e=>e.type==='consumed')?'consumed_only':'unknown';
+    verdicts[label]++;
+    const row=track(done.kind);
+    row.n++;
+    if(label!=='consumed_only') row.acceptance[label]++;
   }
   const finished=Object.values(verdicts).reduce((a,b)=>a+b,0);
   const passed=count('check_passed'), failed=count('check_failed'), skipped=count('check_skipped');
@@ -334,6 +351,15 @@ export function lifecycleMetrics(store,{since=null,laneCapacity=store.limits.lan
     checks:{passed:metric(passed,'count'),failed:metric(failed,'count'),skipped:metric(skipped,'count'),pass_rate:ratio(passed,passed+failed+skipped,'ratio','no check passed, failed or skipped in the window'),started:metric(count('check_started'),'count')},
     acceptance:{finished:metric(finished,'count'),accepted:metric(verdicts.accepted,'count'),rejected:metric(verdicts.rejected,'count'),consumed_only:metric(verdicts.consumed_only,'count'),unknown:metric(verdicts.unknown,'count'),
       accept_rate:ratio(verdicts.accepted,verdicts.accepted+verdicts.rejected,'ratio','no owner accept or reject in the window'),integrated:metric(count('integrated'),'count')},
+    // Only unrolled events retain outcome and verdict detail. Consumed-only is still included in n.
+    by_kind:Object.fromEntries([...kindTrack].map(([kind,row])=>[kind,{
+      n:metric(row.n,'count'),
+      outcomes:Object.fromEntries(Object.entries(row.outcomes).map(([key,value])=>[key,metric(value,'count')])),
+      checks:{...Object.fromEntries(Object.entries(row.checks).map(([key,value])=>[key,metric(value,'count')])),
+        pass_rate:ratio(row.checks.passed,row.checks.passed+row.checks.failed+row.checks.skipped,'ratio','no check passed, failed or skipped in the window')},
+      acceptance:{...Object.fromEntries(Object.entries(row.acceptance).map(([key,value])=>[key,metric(value,'count')])),
+        accept_rate:ratio(row.acceptance.accepted,row.acceptance.accepted+row.acceptance.rejected,'ratio','no owner accept or reject in the window')},
+    }])),
     notes,
   };
 }

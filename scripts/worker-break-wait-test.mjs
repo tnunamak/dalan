@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The adapter's wait loop bounds a usage break (worker_break) by OUTAGE_MS and ends that bound when the worker is active again.
+// A worker usage break holds the child turn through the old OUTAGE_MS limit; requester cancel still interrupts it.
 // This evaluates the real waitLoop from bin/dot-acp-agent.mjs with a scripted `call`, a real AbortSignal and real timers.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -46,64 +46,24 @@ function scenario(steps, breakActive = false, confirmMs = 20) {
   return { completion: run({}, ctl, async (channel, text) => seen.push([channel, text])), seen, ctl };
 }
 
-// 1. A break that never ends is refused, even when the wait request is stalled (the real abort signal ends it).
-{
-  const t = Date.now();
-  const s = scenario(['worker_break', 'hang'], true);
-  await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' });
-  assert.ok(Date.now() - t < OUTAGE_MS * 4, 'stalled wait was not bounded by the break deadline');
+// Repeated breaks, quiet polls, and absent recovery evidence never fail the turn.
+for (const active of [true, false, 'absent', null]) {
+  const s = scenario(['worker_break', {status:'timeout',after:OUTAGE_MS+30}, 'worker_break', 'finished'],active);
+  assert.equal((await s.completion).text,'synthetic result');
+  assert.ok(s.seen.some(([channel,text])=>channel==='agent_message_chunk' && /usage break.*expected end/.test(text)));
 }
-// 2. Repeated breaks past the deadline are refused.
+// A terminal reply after the old deadline still finishes the original turn.
 {
-  const s = scenario([{ status: 'worker_break', after: 0 }, { status: 'worker_break', after: OUTAGE_MS + 20 }, 'finished']);
-  await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' });
+  const s=scenario(['worker_break',{status:'finished',after:OUTAGE_MS+30}],true);
+  assert.equal((await s.completion).text,'synthetic result');
 }
-// 3. Break, then the bridge reports no active break (the worker recovered) and healthy work runs past the original deadline:
-//    not refused.
+// A stalled wait stays held past the old break deadline, then requester cancel releases it.
 {
-  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, { status: 'timeout', after: 20 }, 'finished'], false);
-  assert.equal((await s.completion).text, 'synthetic result');
-}
-// 4. After recovery, a second break gets a fresh limit (is not refused at once by the first one's deadline).
-{
-  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, 'worker_break', 'finished'], false);
-  assert.equal((await s.completion).text, 'synthetic result');
-}
-// 4b. A break that is still active: a single notice and then quiet polls do not cancel the limit.
-for (const [label, active] of [['still active', true], ['older bridge without the field', 'absent'], ['bridge gave no answer', null]]) {
-  const s = scenario(['worker_break', { status: 'timeout', after: OUTAGE_MS + 30 }, 'finished'], active);
-  await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' }, `quiet poll ended the break limit: ${label}`);
-}
-{
-  const s = scenario(['worker_break', 'timeout', { status: 'timeout', after: OUTAGE_MS + 30 }, 'finished'], true);
-  await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' }, 'a quiet poll before the deadline ended the break limit');
-}
-// 4c. A terminal reply that arrives after the deadline still wins.
-{
-  const s = scenario(['worker_break', { status: 'finished', after: OUTAGE_MS + 30 }], true);
-  assert.equal((await s.completion).text, 'synthetic result');
-}
-// 4d. The wait is cut off at the limit, but the bridge confirms the break ended: the confirmation is not aborted by the expired
-//     break signal, and the turn goes on. If the break is still active, the turn is refused.
-{
-  const s = scenario(['worker_break', 'hang', 'finished'], false);
-  assert.equal((await s.completion).text, 'synthetic result');
-}
-{
-  const s = scenario(['worker_break', 'hang', 'finished'], true);
-  await assert.rejects(s.completion, { failure_type_source: 'dot_acp_worker_break' });
-}
-// 4e. Cancel while that confirmation is in flight returns cancelled, not a break refusal.
-{
-  const s = scenario(['worker_break', 'hang'], true, 300);
-  setTimeout(() => { s.ctl.cancelled = true; s.ctl.abort.abort(); }, OUTAGE_MS + 60);
-  assert.equal((await s.completion).cancelled, true);
-}
-// 5. Cancel during a break returns cancelled.
-{
-  const s = scenario(['worker_break', 'hang']);
-  setTimeout(() => { s.ctl.cancelled = true; s.ctl.abort.abort(); }, 40);
-  assert.equal((await s.completion).cancelled, true);
+  const s=scenario(['worker_break','hang'],true);
+  let settled=false;s.completion.then(()=>{settled=true;});
+  await sleep(OUTAGE_MS+60);assert.equal(settled,false);
+  s.ctl.cancelled=true;s.ctl.abort.abort();
+  assert.equal((await s.completion).cancelled,true);
 }
 clearInterval(keepAlive);
-console.log('worker-break-wait-test: PASS');
+console.log('worker-break-wait-test: PASS (6 held-break and cancel scenarios)');
