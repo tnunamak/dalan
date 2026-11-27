@@ -120,7 +120,7 @@ for (const [status, next, note] of [
     assert.doesNotMatch(summary, /Correction:/);
   });
 }
-async function successfulAlertCli(t, title, message) {
+async function alertCliResult(t, args, publisherFails = false) {
   const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
   const { spawnSync } = await import('node:child_process');
   const { tmpdir } = await import('node:os');
@@ -134,19 +134,39 @@ async function successfulAlertCli(t, title, message) {
   await writeFile(join(root, 'src', 'alerts.mjs'), `
     export async function publishAlert(title, message, log, options) {
       await new Promise(resolve => setTimeout(resolve, 10));
+      if (${publisherFails}) throw new Error('fixture publisher unavailable');
       log('fixture diagnostic');
       console.log(JSON.stringify({ title, message, options }));
     }
   `);
-  const result = spawnSync(process.execPath, [cli, title, message], {
+  const result = spawnSync(process.execPath, [cli, ...args], {
     env: { HOME: root, USERPROFILE: root }, encoding: 'utf8', timeout: 5000,
   });
   assert.ifError(result.error);
+  return result;
+}
+
+async function successfulAlertCli(t, title, message) {
+  const result = await alertCliResult(t, [title, message]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, '');
   const [delivery, ...rest] = result.stdout.trimEnd().split('\n');
   return { delivery: JSON.parse(delivery), rest };
 }
+
+test('alert CLI refuses a missing message without invoking the publisher', async t => {
+  const result = await alertCliResult(t, ['fixture title'], true);
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr.trim(), 'usage: dalan-alert TITLE MESSAGE');
+});
+
+test('alert CLI reports publisher failure without falsely acknowledging delivery', async t => {
+  const result = await alertCliResult(t, ['fixture title', 'fixture message'], true);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /fixture publisher unavailable/);
+});
 
 test('alert CLI sends one intact title and body to the required publisher', async t => {
   const title = 'Fixture subject: two words';
