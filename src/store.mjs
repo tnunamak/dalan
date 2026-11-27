@@ -1247,6 +1247,22 @@ export class Store {
     };
     return {worker,kind,window_days:days,min_samples:QUEUE_WINDOW.minSamples,claimed:summary(claimed),started:summary(started),censored};
   }
+  // Jobs a claim serves before this one, in the worker list's order (LIST_ORDER): every normal job before a background one;
+  // within a class, jobs the worker has not passed over, oldest first. A new job is not skipped, so skipped peers of its class
+  // are behind it. Equal timestamps have no defined order in the list, so they count as ahead.
+  admissionAnswer(worker,kind,priority,{excludeIds=[],createdBefore=null}={}) {
+    const now=this.nowMs(), at=iso(now), [first=null,second=null]=excludeIds;
+    const {count,oldest}=this.db.prepare(`SELECT count(*) count,min(created_at) oldest FROM assignments
+      WHERE status='queued' AND target_worker=? AND request_id IS NOT ? AND request_id IS NOT ? AND ${live(now)}
+      AND ((priority=? AND skipped_at IS NULL AND created_at<=?) OR (?='background' AND priority='normal'))`)
+      .get(worker,first,second,priority,createdBefore??at,priority);
+    const workerBreak=worker==='dot'?this.holdingBreak():null;
+    const worker_state=this.paused()?'paused':workerBreak?'break':
+      this.activeSubscriptions().some(sub=>sub.worker===worker)?'live':'no_live_subscription';
+    // 'now' requires a reserved worker lane. Admission is advisory and reserves nothing.
+    return {start:'queued',ahead:{count,oldest_age_ms:oldest===null?null:Math.max(0,now-Date.parse(oldest))},
+      latency:this.admissionEvidence(worker,kind),worker_state,...(worker_state==='break'?{until:workerBreak.until}:{}),at};
+  }
   queueWaitsMs(worker,kind,days=7) { return this.queueWaitEvidence(worker,kind,days).waits_ms; }
   defaultValidUntil(worker,kind,days=7) {
     const evidence=this.queueWaitEvidence(worker,kind,days), waits=evidence.waits_ms;
