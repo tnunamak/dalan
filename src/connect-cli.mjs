@@ -94,7 +94,8 @@ function isLocalRedirect(raw) {
 }
 
 function sameLocalCallback(given, expected, original, issuer) {
-  if (!given || !isLocalRedirect(given.href)
+  // The callback carries code/state/iss, so check the loopback form without its query; the rest must match the approved redirect.
+  if (!given || given.username || given.password || given.hash || !isLocalRedirect(given.origin + given.pathname)
       || given.origin !== expected.origin || given.pathname !== expected.pathname) return false;
   if (given.searchParams.getAll('code').length !== 1 || !given.searchParams.get('code')
       || given.searchParams.has('error') || given.searchParams.getAll('state').length > 1
