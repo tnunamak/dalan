@@ -220,6 +220,11 @@ cases.set(7, async () => fixture(async f => {
     assert.equal(results.filter(r => r.result?.status === 'queued').length, 10, 'exactly ten competing submissions admitted');
     assert.equal(results.filter(r => /queue is full/.test(r.error)).length, 10);
     assert.equal(store.db.prepare("SELECT count(*) n FROM assignments WHERE status='queued'").get().n, 10);
+    // The cap counts only the submission's own priority: ten queued normal jobs do not refuse a capped background job,
+    // and queued background jobs do not refuse a capped normal job.
+    const bgArgs = id => { const x = args(id); x[6] = 'background'; return x; };
+    assert.equal(store.submit(...bgArgs('review_cap_bg')).duplicate, false, 'normal rows do not fill a background cap');
+    assert.throws(() => store.submit(...args('review_cap_over')), /queue is full \(10 queued/, 'normal rows still fill a normal cap');
     const existing = store.db.prepare('SELECT request_id FROM assignments LIMIT 1').get().request_id;
     const attaches = await competingWrites(file, Array.from({ length: 4 }, () => ({ method: 'submit', args: args(existing) })), { busyTimeoutMs: 30000 });
     assert.ok(attaches.every(r => r.result?.duplicate), 'duplicates attach at capacity');
@@ -234,7 +239,7 @@ cases.set(7, async () => fixture(async f => {
   const a = await f.adapter({ DOT_ACP_INFLIGHT_CAP: '3' }), sid = (await a.newSession(f.cwd)).sessionId;
   const p = a.prompt(sid, '[dot-decision:review_cap_forward]\nforward the cap');
   await waitFor(() => f.rows.has('review_cap_forward'), 'adapter submission');
-  assert.equal(cap, undefined, 'adapter must not send an all-priority cap to atomic admission');
+  assert.equal(cap, 3, 'adapter forwards its cap to atomic admission (which counts only same-priority work)');
   a.cancel(sid); await bounded(p);
 }));
 cases.set(8, async () => fixture(async f => {

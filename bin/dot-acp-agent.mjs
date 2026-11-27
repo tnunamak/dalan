@@ -113,8 +113,7 @@ async function acquire(s, parsed) {
       const validUntil = new Date(Date.now() + VALID_MS).toISOString();
       const assignment = await prepareAssignment({ cwd: s.cwd, requestId: rid, brief: parsed.brief, validUntil });
       const body = { ...(parsed.priority === 'background' ? {background:true} : {}), required_capabilities: parsed.requirements ?? [], max_queued: IN_FLIGHT_CAP, delivery: 'none', ...(WORKER ? { worker: WORKER } : {}), assignment, owner_token: tokenFor(rid), meta: { source: 'agent', ...(assignment.execution_scope === 'implementation' ? { task_kind: 'build' } : {}) }, ...(assignment.inputs.length && assignment.execution_scope !== 'implementation' ? { exclude_sensitive: true } : {}) };
-      // The server's legacy max_queued counts all priorities; the scoped facade check above is the cap.
-      delete body.max_queued;
+      // max_queued makes admission atomic; the bridge counts only this worker's queued work of the same priority.
       prepared={body,validUntil}; preparedByAttempt.set(rid,prepared);
     }
     const {body,validUntil}=prepared;
