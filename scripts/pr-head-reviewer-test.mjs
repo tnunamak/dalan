@@ -9,6 +9,27 @@ import { DatabaseSync } from 'node:sqlite';
 const tmp = fs.mkdtempSync(path.join(process.env.HOME ?? os.tmpdir(), '.tmp-prh-test-'));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
 process.env.HOME = tmp; // no submission policy file: the lint uses its built-in rules only
+// Parse refusals before configuration or any review submission logic.
+{
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const cli = fileURLToPath(new URL('../bin/dot-pr-reviewer.mjs', import.meta.url));
+  const invoke = (...args) => spawnSync(process.execPath, [cli, ...args], {
+    cwd: tmp, env: { HOME: tmp, USERPROFILE: tmp, SYSTEMROOT: process.env.SYSTEMROOT },
+    encoding: 'utf8', timeout: 5000,
+  });
+  const rejected = invoke('--dry-run', '--max', '10', '--max', '0');
+  assert.ifError(rejected.error);
+  assert.equal(rejected.status, 1, rejected.stderr);
+  assert.equal(rejected.stderr.trim(), 'dalan-pr-reviewer: duplicate argument --max');
+  assert.equal(rejected.stdout, '');
+
+  const allowed = invoke('--dry-run', '--dry-run', '--help');
+  assert.ifError(allowed.error);
+  assert.equal(allowed.status, 0, allowed.stderr);
+  assert.match(allowed.stdout, /^usage: dalan-pr-reviewer/);
+}
+
 const { validateSubmission } = await import('../src/submission-policy.mjs');
 const m = await import('../src/pr-head-reviewer.mjs');
 const defaultCfg = { ...m.DEFAULTS, bridge_db: ':memory:', t3_db: ':memory:' };
