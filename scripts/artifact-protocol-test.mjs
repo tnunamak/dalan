@@ -5,6 +5,40 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { migrateArtifactJournal, createArtifactJournal, artifactBytesDigest } from '../src/artifact-journal.mjs';
 
+import { createArtifactDownloadGuard } from '../src/protocol-artifact-commands.mjs';
+import { artifactSecretRule, registerSecret } from '../src/redaction.mjs';
+
+const notes=[];
+let scans=0;
+const guard=createArtifactDownloadGuard({scan:bytes=>{ scans++; return artifactSecretRule(bytes); },log:row=>notes.push(row)});
+const download=(id,bytes,offset=0)=>{
+  guard({id,requestId:'fixture-request',sha256:artifactBytesDigest(bytes),bytes});
+  return bytes.subarray(offset);
+};
+const clean=Buffer.from([0,255,65,0,66]);
+assert.deepEqual(download('A-clean',clean),clean);
+assert.deepEqual(download('A-clean-alias',clean,2),clean.subarray(2));
+assert.equal(scans,1);
+const fixtures=[
+  [Buffer.from(['-----','BEGIN ','PRIVATE ','KEY','-----'].join('')+'\nsample'), 'private_key_armor'],
+  [Buffer.concat([Buffer.from([255,0]),Buffer.from(['Bear','er '].join('')+'q'.repeat(40))]), 'bearer_credential'],
+];
+for(const [bytes,rule] of fixtures){
+  for(const offset of [0,bytes.length-1]){
+    assert.throws(()=>download('A-refused',bytes,offset),error=>{
+      assert.equal(error.code,'artifact_secret_content');
+      assert.equal(error.message,`artifact_secret_content: ${rule}`);
+      return true;
+    });
+  }
+}
+assert.equal(scans,3,'one scan per distinct digest across repeated or sliced reads');
+assert.deepEqual(notes.map(note=>note.rule),['private_key_armor','private_key_armor','bearer_credential','bearer_credential']);
+const newlyKnown=Buffer.from('fixture-value-added-after-initial-scan');
+assert.deepEqual(download('A-epoch',newlyKnown),newlyKnown);
+registerSecret(newlyKnown.toString('utf8'));
+assert.throws(()=>download('A-epoch',newlyKnown),/artifact_secret_content: registered_credential/);
+
 const dir=mkdtempSync(join(tmpdir(),'artifact-journal-'));
 let db;
 try {

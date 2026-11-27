@@ -18,7 +18,7 @@ import os from 'node:os';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { loadWorkers, loadEffectiveOwnerWorkers, hasInstalledDatabase, legacyMarkerPath, seedWorkerRepos, resolveWorker, hasCapability, assertTarget, submitTarget, ensureWorkerRelationship } from './workers.mjs';
 import { Store, HANDOFF_ACQUISITION_PREFIX, QUESTION_PURPOSES, nonterminalOutcome, validateProtocol, loadRedeliveryLimits, resumeNudge } from './store.mjs';
-import {protocolArtifactChunk} from './protocol-artifact-commands.mjs';
+import {createArtifactDownloadGuard,protocolArtifactChunk} from './protocol-artifact-commands.mjs';
 import { sendWebhook, validSecret } from './webhooks.mjs';
 import { checkAlerts, publishAlert, redactNote } from './alerts.mjs';
 import { redactOutput, redactSinkText, redactLogEntry, registerSecret } from './redaction.mjs';
@@ -172,6 +172,7 @@ if(t3ToolsEnabled) await loadT3Audit();
 const absentId=`req_${randomUUID()}`;
 if(store.hasAssignment(absentId)) throw new Error('absent gate id collision');
 const log = createRequestLog(path.join(stateDir, 'requests.jsonl'));
+const guardArtifactDownload = createArtifactDownloadGuard({log});
 const phaseTrace = createPhaseTrace({ log });
 logShutdownSignals(log);
 // The owner-side tool registry. It has no MCP surface here: changing it never changes tools/list.
@@ -1393,7 +1394,21 @@ const adminServer=http.createServer(async(req,res)=>{
       try { return json(res,200,{...got,check_metadata:workspace.checkMetadataFor(got.assignment,got.target_worker)}); }
       catch(error) { return json(res,200,{...got,check_metadata:null,check_metadata_error:publicErrorText(error,'check metadata')}); }
     }
-    if(url.pathname==='/artifact') { const artifactId=id(url.searchParams.get('id'),'artifact_id');const row=store.db.prepare('SELECT request_id FROM artifacts WHERE id=? AND sealed=1').get(artifactId);if(!row) throw new Error('artifact not found');adminOwner(req,row.request_id);const bytes=(workspace||new Workspace(store,false)).artifact(artifactId,row.request_id);res.writeHead(200,{'content-type':'application/octet-stream','content-length':bytes.bytes.length,'x-artifact-sha256':bytes.row.sha256});res.end(bytes.bytes);return; }
+    if(url.pathname==='/artifact') {
+      const artifactId=id(url.searchParams.get('id'),'artifact_id');
+      const row=store.db.prepare('SELECT request_id FROM artifacts WHERE id=? AND sealed=1').get(artifactId);
+      if(!row) throw new Error('artifact not found');
+      adminOwner(req,row.request_id);
+      const artifact=(workspace||new Workspace(store,false)).artifact(artifactId,row.request_id);
+      try {
+        guardArtifactDownload({id:artifactId,requestId:row.request_id,sha256:artifact.row.sha256,bytes:artifact.bytes});
+      } catch(error) {
+        if(error.code==='artifact_secret_content') return json(res,422,{code:error.code,error:error.message});
+        throw error;
+      }
+      res.writeHead(200,{'content-type':'application/octet-stream','content-length':artifact.bytes.length,'x-artifact-sha256':artifact.row.sha256});
+      res.end(artifact.bytes);return;
+    }
     if(['/protocol/wait','/protocol/inbox','/protocol/ack'].includes(url.pathname)&&req.method==='POST') {
       if(catalogProfile!=='protocol-v0') throw new Error('protocol owner routes require DALAN_CATALOG_PROFILE=protocol-v0');
       const requestId=id(body.id),owner=req.headers['x-owner-capability'];
