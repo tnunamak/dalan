@@ -56,7 +56,7 @@ if (help) {
     process.argv.splice(2, 1, 'submit', '--dry-run');
   } else if (command === 'correct') {
     const id = process.argv[3];
-    if (!/^[-\w]{8,128}$/.test(id ?? '') || process.argv.slice(4).some(arg => arg === '--revises' || arg.startsWith('--revises='))) {
+    if (!/^\w[-\w]{7,127}$/.test(id ?? '') || process.argv.slice(4).some(arg => arg === '--revises' || arg.startsWith('--revises='))) {
       const error = 'usage: dalan correct REQUEST_ID (--file PATH | --stdin | --brief TEXT) [options]';
       process.stderr.write(process.argv.includes('--json') ? JSON.stringify({error,kind:'local'}) + '\n' : error + '\n');
       process.exit(2);

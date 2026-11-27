@@ -158,6 +158,19 @@ try {
   assert.equal(textOf(badForecast).verdict, textOf(dryRun).verdict);
   assert.deepEqual(textOf(badForecast).reasons, textOf(dryRun).reasons);
 
+  // The CLI verbs: `dalan forecast` is a dry-run submit and queues nothing; `dalan correct` refuses a flag in the request id slot.
+  const cli = (args, input) => new Promise(resolve => { const child = execFile(process.execPath, [path.join(repo, 'bin/dalan.mjs'), ...args], { env, cwd: repo }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr })); if (input !== undefined) child.stdin.end(input); });
+  const cliId = `req_${randomUUID()}`;
+  const cliForecast = await cli(['forecast', '--stdin', '--execution', 'none'], JSON.stringify({ ...assignment, request_id: cliId }));
+  assert.equal(cliForecast.code, 0, cliForecast.stderr);
+  assert.match(cliForecast.stdout, /admission/);
+  assert.equal((await call('dalan_result', { request_id: cliId })).isError, true, 'dalan forecast did not queue the request');
+  for (const bad of [['correct', '--revises', 'req_aaaaaaaa'], ['correct', '--dry-run'], ['correct']]) {
+    const run = await cli(bad);
+    assert.equal(run.code, 2, `${bad.join(' ')}: ${run.stderr}`);
+    assert.match(run.stderr, /usage: dalan correct REQUEST_ID/);
+  }
+
   const submitted = await call('dalan_submit', { assignment, execution: 'none' });
   assert.notEqual(submitted.isError, true, JSON.stringify(submitted));
   assert.ok(JSON.stringify(textOf(submitted)).includes(requestId), 'submit returns the request id');
