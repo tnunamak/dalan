@@ -247,6 +247,26 @@ test('host stop evidence stays unverified when remaining processes are reported 
     { ...base, remaining_pids: [] });
 });
 
+test('explicitly disabled host checks refuse before opening any workspace or notifying start', async () => {
+  const { runHostBudget } = await import('./host-budget.mjs');
+  let started = false;
+  await assert.rejects(runHostBudget({
+    enabled: false, dir: '/missing-fixture-workspace', budgets: HOST_BUDGET_CEILINGS,
+    phases: [{ name: 'check', argv: [process.execPath, '--version'] }],
+    onStarted: () => { started = true; },
+  }), /host_execution_disabled/);
+  assert.equal(started, false);
+});
+
+test('only a launch error with no PID or stop report is evidence the host never started', async () => {
+  const { provesHostNotStarted } = await import('./host-budget.mjs');
+  const spawnError = new Error('fixture launcher failed');
+  assert.equal(provesHostNotStarted({ spawnError }), true);
+  assert.equal(provesHostNotStarted({ spawnError, pid: 42 }), false);
+  assert.equal(provesHostNotStarted({ spawnError, stopped: { verified: false } }), false);
+  assert.equal(provesHostNotStarted({ pid: undefined }), false);
+});
+
 test('host budget rejects one over the process ceiling with a named limit', () => {
   const atLimit = { ...HOST_BUDGET_CEILINGS };
   assert.deepEqual(parseHostBudget(atLimit), atLimit);
