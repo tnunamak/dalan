@@ -77,8 +77,8 @@ const tokenFor = rid => ownerToken(secret ??= readOrCreateSecret(P.secretFile), 
 const call = (route, rid, opts = {}) => adminRequest(P.socket, route, { ...opts, token: rid ? tokenFor(rid) : undefined });
 
 // The stored row for this request id with our token: null when the bridge has no such row, a Refusal when it is not ours.
-async function readRow(rid) {
-  try { return await call(`/get?id=${encodeURIComponent(rid)}&peek=1`, rid); }
+async function readRow(rid, signal) {
+  try { return await call(`/get?id=${encodeURIComponent(rid)}&peek=1`, rid, { signal }); }
   catch (e) {
     if (e.message === 'message not found' || e.message === 'assignment not found') return null;
     if (e.message === 'invalid owner capability') throw new Refusal(`request ${rid} exists under another owner`);
@@ -251,13 +251,20 @@ async function waitLoop(s, ctl, say, client) {
   for (;;) {
     if (ctl.cancelled) return { cancelled: true };
     const signal = ctl.abort.signal;
-    let r;
+    let r, row, waiting = true;
     try {
       r = await call(`/wait?id=${encodeURIComponent(ctl.pending.rid)}&timeout=${slice}&peek=1`, ctl.pending.rid, { signal });
+      waiting = false;
+      if (ctl.cancelled) return { cancelled: true };
+      if (r.status !== 'progress' && r.status !== 'ack_message') {
+        row = await readRowOrThrow(ctl.pending.rid, signal);
+      }
+      // A successful /wait alone is not recovery if its follow-up read still fails.
       outageSince = null;
     } catch (e) {
       if (ctl.cancelled) return { cancelled: true };
-      if (e.http_status === 409) { await sleep(1000, signal); continue; } // our previous process's waiter has not detached yet
+      if (waiting && e.http_status === 409) { await sleep(1000, signal); continue; } // our previous process's waiter has not detached yet
+      if (e instanceof acp.RequestError || e instanceof Refusal) throw e;
       if (!transient(e)) throw refuse(`worker bridge error: ${e.message}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
       outageSince ??= Date.now();
       if (Date.now() - outageSince > OUTAGE_MS) throw refuse(`worker bridge unreachable for ${Math.round(OUTAGE_MS / 60000)} min: ${e.message}`,{failure_type:'transport_error',failure_type_source:'dot_acp_transport'});
@@ -267,7 +274,7 @@ async function waitLoop(s, ctl, say, client) {
     }
     if (ctl.cancelled) return { cancelled: true };
     if (r.status === 'progress' || r.status === 'ack_message') { await say('agent_message_chunk', `${r.note ?? r.message?.text ?? r.text ?? r.status}\n\n`); continue; }
-    await relayProgress(s, ctl, say);
+    await relayProgress(s, ctl, say, row);
     if (r.status === 'timeout') { await heartbeat(s, ctl, say, '', signal); continue; }
     if (r.status === 'worker_break') {
       await say('agent_message_chunk', `Work ${ctl.pending.rid}: worker usage break: ${r.notice ?? ''}; expected end: ${r.until ?? r.expected_end ?? 'unknown'}. The child turn remains held.\n\n`);
@@ -288,7 +295,8 @@ async function waitLoop(s, ctl, say, client) {
       continue;
     }
     if (r.status === 'finished') {
-      const row = await readRowOrThrow(ctl.pending.rid), text = await resultText(row);
+      const text = await resultText(row);
+      if (ctl.cancelled) return { cancelled: true };
       trackBuild(s, row);
       const terminal = row.delivery?.findLast(e => ['result','t3','wait'].includes(e.kind) && !e.terminal_reason?.includes('question'));
       ctl.pending.terminal_event_id = terminal?.id ?? row.report?.receipt_id ?? null;
@@ -298,7 +306,6 @@ async function waitLoop(s, ctl, say, client) {
     }
     if (r.status === 'cancelled') {
       if (ctl.cancelled) return { cancelled: true };
-      const row = await readRowOrThrow(ctl.pending.rid);
       if (row.cancelled_reason === 'expired') return { expired: true };
       const rid = ctl.pending.rid;
       ctl.pending = null;
@@ -309,8 +316,7 @@ async function waitLoop(s, ctl, say, client) {
   }
 }
 // Progress stays on this child transcript. The cursor survives adapter restarts.
-async function relayProgress(s, ctl, say) {
-  const row = await readRowOrThrow(ctl.pending.rid);
+async function relayProgress(s, ctl, say, row) {
   const progress = row.progress ?? [];
   for (const event of progress.slice(ctl.pending.progress_count ?? 0)) await say('agent_message_chunk', `${event.note}\n\n`);
   ctl.pending.progress_count = progress.length;
@@ -372,8 +378,8 @@ async function handleQuestions(s, ctl, say, client, notice) {
     await say('agent_message_chunk', `Work ${rid}: ${notice.blocker_text} (waiting; child turn held).\n\n`);
   }
 }
-async function readRowOrThrow(rid) {
-  const row = await readRow(rid);
+async function readRowOrThrow(rid, signal) {
+  const row = await readRow(rid, signal);
   if (!row) throw refuse(`assignment ${rid} disappeared from the bridge`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
   return row;
 }
