@@ -9,6 +9,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fixtureEnv } from '../src/test-support/fixture-env.mjs';
 import { parseWorkers } from '../src/workers.mjs';
+import { HANDOFF_ACQUISITION_PREFIX, Store } from '../src/store.mjs';
 
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 const root = process.env.DOT_BRIDGE_TEST_TMP || path.join(os.homedir(), '.tmp');
@@ -57,6 +58,26 @@ async function startBridge(label, workerExtra, limits, extraEnv = {}) {
   return { rpc, ok, submit, admin, operator, stop, claimNew, finish, queuedIds };
 }
 const pass = message => console.log(`PASS ${message}`);
+
+// Fake clock and synthetic assignment: exercise persisted idle-to-working
+// promotion without waiting for the HTTP fixture wall clock.
+for(const [configured,global,expected] of [[900000,1200000,900000],[undefined,1200000,600000],[1200000,750000,750000]]) {
+  let now=Date.parse('2026-11-27T00:00:00.000Z');
+  const store=new Store(':memory:',{now:()=>now,limits:{intervalMs:60000,maxCount:3,silenceMs:120000,
+    leaseMs:global,...(configured===undefined?{}:{workerClaimLeaseMs:{['dot']:configured}})}});
+  try {
+    const id='req_fixture_work_lease';
+    store.submit(assignment(id),{mode:'none'},null,'owner');
+    const claimed=store.claim(id,'fixture-holder','local-principal',2,null,'dot',HANDOFF_ACQUISITION_PREFIX+'fixture',10000);
+    const lease=()=>store.db.prepare('SELECT lease_ms,lease_deadline_at FROM claims WHERE request_id=?').get(id);
+    assert.equal(lease().lease_ms,10000);
+    now+=1000;
+    store.touchClaim(id,claimed.claim_id,'local-principal');
+    const actual=lease();
+    assert.equal(actual.lease_ms,expected);
+    assert.equal(Date.parse(actual.lease_deadline_at)-now,expected);
+  } finally { store.db.close(); }
+}
 
 // Config: finish_handoff is off unless set, and rejects anything that is not true, false or {wait_ms: 0..45000}.
 {

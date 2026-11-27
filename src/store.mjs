@@ -71,7 +71,7 @@ export function validateProtocol(value) {
 const questionError=(code,message)=>Object.assign(new Error(`${code}: ${message}`),{code});
 // A purpose other than clarification marks a question only a human may answer. SQLite cannot change a CHECK in place, so the schema 67 list below is the whole set.
 // A claim made by a finish handoff starts on a short idle lease: a job handed to a session that never touches it returns to the queue
-// after the worker's finish_handoff.idle_lease_ms (default 2 minutes). The holder's first call on it (any call, `get` included) moves it to HANDOFF_WORK_LEASE_MS, the lease
+// after the worker's finish_handoff.idle_lease_ms (default 2 minutes). The holder's first call on it (any call, `get` included) moves it to the worker's configured lease (or HANDOFF_WORK_LEASE_MS), the lease
 // it ran under before the idle phase existed. The claim's acquisition_id carries the prefix, so the Store needs no extra column.
 export const HANDOFF_ACQUISITION_PREFIX='handoff-', HANDOFF_WORK_LEASE_MS=600000;
 export const QUESTION_PURPOSES=['clarification','human_decision','authentication','tool_permission'];
@@ -2078,8 +2078,10 @@ export class Store {
   }
   // The working lease for a handoff claim that is still on its idle lease, else null (every other claim keeps its own lease_ms).
   handoffWorkLeaseMs(claim) {
-    if(!claim?.acquisition_id?.startsWith(HANDOFF_ACQUISITION_PREFIX)||!(claim.lease_ms<HANDOFF_WORK_LEASE_MS)) return null;
-    return Math.min(HANDOFF_WORK_LEASE_MS,this.limits.leaseMs);
+    if(!claim?.acquisition_id?.startsWith(HANDOFF_ACQUISITION_PREFIX)) return null;
+    const cap=this.workerClaimLeaseCap(claim.worker);
+    const working=Math.min(this.limits.leaseMs,Number.isFinite(cap)?cap:HANDOFF_WORK_LEASE_MS);
+    return claim.lease_ms<working?working:null;
   }
   // The active, unexpired claim this worker holds under claimId, or null. A missing or expired claim is left to the caller's own error.
   liveHeldClaim(id,claimId,subject,worker) {
