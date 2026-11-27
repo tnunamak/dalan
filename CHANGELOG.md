@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **`worker_max_claims` also holds when an expired claim comes back.** Resuming or rotating an expired claim is now refused with `capacity_full` when the worker is already at its cap; an exact retry of a live claim is unchanged.
 - **An agent can finish a local client's sign-in without opening a browser.** `dalan connect complete URL --worker NAME` takes the authorization URL a local client (for example `pi mcp login`) printed, checks that it is this bridge's endpoint with one loopback callback and an open pairing window for that worker, approves exactly that pairing with the local operator key and delivers the callback to the client's loopback listener. It prints only the connection id, never the code, cookie or token. A URL for another host, a non-loopback callback or a closed window is refused and nothing is sent.
 - **An owner can cap how many claims one worker holds (`worker_max_claims` in limits.json).** A worker in the map is refused a claim while it already holds that many live claims, across all its connections; `/status` and the lane counts report the cap. Workers not in the map behave as before.
 - **A zip with bytes in front of it is scanned before download.** The scan finds a zip by its end-of-central-directory record, as zip readers do, so a self-extracting or prefixed archive is decoded and checked. Archive magic bytes that occur by chance in an ordinary binary do not change how it is scanned.
