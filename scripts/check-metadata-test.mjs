@@ -93,6 +93,41 @@ try {
   assert.equal(owner.runnable, true);
   assert.equal(owner.reason, null);
 
+  const commonRefusal='fixture: host not ready';
+  let probes=0;
+  const blocked=summarizeCheckAvailability([],namedSpecs,commonRefusal,'missing fixture',()=>{
+    probes++;
+    throw Error('global host refusal must not probe named authorization');
+  });
+  assert.equal(probes,0);
+  assert.equal(blocked.runnable,false);
+  assert.equal(blocked.reason,commonRefusal);
+  for(const [id] of namedSpecs) assert.ok(blocked.namedDetails[id].endsWith('(not runnable: '+commonRefusal+')'),id);
+
+  const defaultMissing='named_check_default_missing: configure a default check before declaring checks';
+  const noChecks='host_check_not_allowlisted: no permitted owner-configured check is runnable';
+  for(const [reason,expected] of [[defaultMissing,defaultMissing],[null,noChecks]]) {
+    assert.deepEqual(summarizeCheckAvailability([],[],null,reason,()=>{throw Error('no named checks to probe');}),
+      {namedDetails:{},runnable:false,reason:expected});
+  }
+
+  // Exercise the public metadata method against a temporary checkout; this only
+  // describes checks and never launches them or installs fixture dependencies.
+  const { Workspace }=await import('../src/workspace.mjs');
+  const checkDir=fixture({'.dot-bridge.json':{checks:{default:{argv:['node','scripts/first-test.mjs']}}}});
+  const response=Workspace.prototype.availableChecksResponse.call({
+    dependenciesUnsupported:()=>null,
+    checkDetails:()=>({default:'fixture owner check'}),
+  },{execution_scope:'implementation',inputs:[{github_repo:'dalan-named-check-fixture/nonexistent'}],
+    scope_paths:['scripts/first-test.mjs','scripts/second-test.mjs'],
+    checks:['node scripts/first-test.mjs','node scripts/second-test.mjs']}, checkDir);
+  for(const [id,name] of [['named/1','first-test.mjs'],['named/2','second-test.mjs']]) {
+    assert.ok(response.available_checks.includes(id),id);
+    assert.ok(response.available_check_details[id].includes(name),id);
+  }
+  assert.equal(response.host_execution_available,false,'unregistered fixture repository cannot execute');
+  assert.equal(typeof response.host_execution_unavailable_reason,'string');
+
   // Regression-test rule: positives (refused).
   const impl=(expected_output,scope_paths)=>({execution_scope:'implementation',expected_output,scope_paths});
   for(const text of ['A patch with a regression test','Add regression tests.','patch + Regression-Test','Write a failing regression test first, then fix'])
