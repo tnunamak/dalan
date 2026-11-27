@@ -137,6 +137,29 @@ try {
     log('admission evidence: claim vs durable progress, sparse history, separately censored work');
   }
 
+  // Equal timestamps do not mean equal queue rank. A retry describes the existing row, not a new hypothetical one.
+  {
+    let at=Date.parse('2026-01-03T00:00:00Z');
+    const rank=new Store(path.join(home,'admission-list-order.db'),{now:()=>at,capacity:20});
+    const add=(request_id,priority='normal')=>{
+      const row=assignment({request_id});
+      rank.submit(row,{mode:'none'},'',request_id,false,null,priority,{task_kind:'review'},row);
+    };
+    try {
+      add('rank_older_skipped'); at+=1000;
+      add('rank_same_before'); add('rank_subject'); add('rank_same_after');
+      rank.db.prepare('UPDATE assignments SET skipped_at=? WHERE request_id=?').run(iso(at),'rank_older_skipped');
+      const order=rank.queuedRows().map(row=>row.request_id);
+      assert.deepEqual(order,['rank_same_before','rank_subject','rank_same_after','rank_older_skipped']);
+      for(const createdBefore of [null,iso(at)]) {
+        const result=rank.admissionAnswer('dot','review','normal',{excludeIds:['rank_subject'],createdBefore});
+        assert.deepEqual(result.ahead,{count:1,oldest_age_ms:0});
+      }
+      assert.equal(rank.admissionAnswer('dot','review','background').ahead.count,4);
+      assert.equal(rank.admissionAnswer('dot','review','normal',{excludeIds:['rank_older_skipped']}).ahead.count,3);
+    } finally {rank.db.close();}
+  }
+
   // A queue snapshot includes outstanding work without promising that a lane is reserved.
   {
     let at=Date.parse('2026-01-03T00:00:00Z');
