@@ -17,7 +17,7 @@ import { r4ThreadStates, r4Inspect } from './fixtures/t3-r4-thread-states.mjs';
 {
   const seen=[];
   let loads=0;
-  registerDestination('peer',{parse(address) {
+  registerDestination('peer',{version:'2',parse(address) {
     if(address!=='abc') throw Error('invalid peer address');
     return {mode:'peer',address};
   },load:()=>{ loads++; return {name:'peer',send:async item=>{ seen.push(item.id); return {state:'delivered'}; }}; }});
@@ -144,6 +144,50 @@ const expectMessage=(kind,row=baseRow())=>kind==='watch'?`${marker('evt_watch')}
   `${marker('evt_t3')} Request ${rid}: completed — ${'x'.repeat(500)}\nFetch full report: dalan get ${rid} --json`;
 const passed=[];
 const row=async(name,fn)=>{ await fn(); passed.push(name); };
+
+const deliveryTuple=(store,id)=>({...store.db.prepare(
+  'SELECT delivery_adapter,delivery_address,delivery_adapter_version FROM assignments WHERE request_id=?',
+).get(id)});
+const wantTuple=(adapter,address,version='1')=>({delivery_adapter:adapter,delivery_address:address,delivery_adapter_version:version});
+await row('assignment delivery tuple backfills legacy rows, survives reopen, and dual writes new versions',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-delivery-tuple-')),file=path.join(root,'fixture.db');
+  let store;
+  try{
+    store=new Store(file);
+    const old=store.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,delivery) VALUES(?,?,?,?,?,?,?,?)');
+    old.run('req_old_none','{}','hash','','','queued',new Date().toISOString(),'none');
+    old.run('req_old_t3','{}','hash','legacy:thread','','queued',new Date().toISOString(),'t3:legacy:thread');
+    for(const field of ['delivery_adapter','delivery_address','delivery_adapter_version']){
+      if(store.db.prepare('PRAGMA table_info(assignments)').all().some(column=>column.name===field))
+        store.db.exec('ALTER TABLE assignments DROP COLUMN '+field);
+    }
+    store.db.exec('PRAGMA user_version=72');
+    store.db.close();
+    store=new Store(file);
+    assert.deepEqual(deliveryTuple(store,'req_old_none'),wantTuple('none',null));
+    assert.deepEqual(deliveryTuple(store,'req_old_t3'),wantTuple('t3','legacy:thread'));
+    for(const [suffix,delivery,expected] of [
+      ['none','none',wantTuple('none',null)],
+      ['t3','t3:fixture:parent',wantTuple('t3','fixture:parent')],
+      ['peer','peer:abc',wantTuple('peer','abc','2')],
+    ]){
+      const request_id='req_tuple_'+suffix;
+      store.submit({request_id},parseDelivery(delivery),'fixture-env','fixture-owner');
+      assert.deepEqual(deliveryTuple(store,request_id),expected);
+      assert.equal(store.get(request_id).delivery_mode,delivery);
+      assert.equal(store.submit({request_id},parseDelivery(delivery),'fixture-env','fixture-owner').duplicate,true);
+    }
+    // A rewound marker must never retry ALTER on existing columns.
+    store.db.exec('PRAGMA user_version=72');
+    store.db.close();
+    store=new Store(file);
+    assert.deepEqual(deliveryTuple(store,'req_old_t3'),wantTuple('t3','legacy:thread'));
+    assert.deepEqual(deliveryTuple(store,'req_tuple_peer'),wantTuple('peer','abc','2'));
+  }finally{
+    if(store?.db.isOpen)store.db.close();
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
 
 // argv: exact t3code argv, blocker steers, others queue.
 for(const kind of ['t3','blocker','watch']) assert.deepEqual(createT3Destination({store:{}}).argv(items[kind],baseRow()),['threads','send','--thread',thread,'--stdin','--if-busy','steer']);
