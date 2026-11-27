@@ -38,6 +38,29 @@ test('a failed session promotion removes its temporary file and preserves the de
   assert.deepEqual(fs.readdirSync(dir), ['session.json']);
 });
 
+test('a partial session write removes its temporary file and preserves the destination', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-session-write-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const destination = path.join(dir, 'session.json');
+  writeJsonPrivate(destination, { marker: 'committed' });
+  const temporary = `${destination}.${process.pid}.tmp`;
+  const full = new Error('fixture ran out of space');
+  full.code = 'ENOSPC';
+  const write = fs.writeFileSync;
+  const mocked = t.mock.method(fs, 'writeFileSync', (file, contents, options) => {
+    if (file !== temporary) return write(file, contents, options);
+    write(file, '{', options);
+    throw full;
+  });
+  try {
+    assert.throws(() => writeJsonPrivate(destination, { marker: 'replacement' }), error => error === full);
+  } finally {
+    mocked.mock.restore();
+  }
+  assert.deepEqual(readJsonPrivate(destination), { marker: 'committed' });
+  assert.deepEqual(fs.readdirSync(dir), ['session.json']);
+});
+
 const tmp = () => fs.mkdtempSync(path.join(os.homedir(), '.tmp-acpkit-'));
 const worker = path.join(import.meta.dirname, 'lock-worker.mjs');
 const deadPid = async () => {
