@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,9 +27,13 @@ async function bounded(promise, ms = 5000) {
   finally { clearTimeout(timer); }
 }
 async function fixture(test) {
-  const home = await mkdtemp(join(tmpdir(), 'dalan-acp-review-'));
-  const socket = join(home, 'admin.sock'), stateDir = join(home, 'state'), cwd = join(home, 'plain');
-  await mkdir(cwd);
+  const tempBase = tmpdir();
+  const home = await mkdtemp(join(tempBase, 'dalan-acp-review-'));
+  const stateDir = join(home, 'state'), cwd = join(home, 'plain');
+  const socketName = 'admin.sock', socketPrefix = 'dacp-';
+  const proposed = join(tempBase, socketPrefix + 'XXXXXX', socketName);
+  const socketBase = Buffer.byteLength(proposed) <= 100 ? tempBase : '/tmp';
+  let socketDir;
   const rows = new Map(), adapters = [], sockets = new Set();
   let hook = async () => false;
   const json = (res, value, code = 200) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
@@ -53,20 +58,29 @@ async function fixture(test) {
     } catch (e) { if (!res.destroyed) json(res, { error: e.message }, 500); }
   });
   server.on('connection', s => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
-  await new Promise(r => server.listen(socket, r));
-  const adapter = async (extra = {}) => {
-    const a = startAdapter({ HOME: home, DOT_ACP_SOCKET: socket, DOT_ACP_SECRET_FILE: join(home, 'secret'), DOT_ACP_STATE_DIR: stateDir, DOT_ACP_HEARTBEAT_MS: '50', DOT_ACP_CANCEL_BUDGET_MS: '50', ...extra });
-    adapters.push(a); await a.init(); return a;
-  };
-  const state = async id => { try { return JSON.parse(await readFile(join(stateDir, `${id}.json`), 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
-  const finish = (rid, text) => { const row = rows.get(rid); row.status = 'finished'; row.report = { outcome: 'completed', result: text }; };
-  try { await test({ home, socket, cwd, rows, adapter, state, finish, hook: fn => { hook = fn; } }); }
-  finally {
+  try {
+    await mkdir(cwd);
+    socketDir = mkdtempSync(join(socketBase, socketPrefix));
+    chmodSync(socketDir, 0o700);
+    const socket = join(socketDir, socketName);
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socket, () => { server.off('error', reject); resolve(); });
+    });
+    const adapter = async (extra = {}) => {
+      const a = startAdapter({ HOME: home, DOT_ACP_SOCKET: socket, DOT_ACP_SECRET_FILE: join(home, 'secret'), DOT_ACP_STATE_DIR: stateDir, DOT_ACP_HEARTBEAT_MS: '50', DOT_ACP_CANCEL_BUDGET_MS: '50', ...extra });
+      adapters.push(a); await a.init(); return a;
+    };
+    const state = async id => { try { return JSON.parse(await readFile(join(stateDir, `${id}.json`), 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
+    const finish = (rid, text) => { const row = rows.get(rid); row.status = 'finished'; row.report = { outcome: 'completed', result: text }; };
+    await test({ home, socket, cwd, rows, adapter, state, finish, hook: fn => { hook = fn; } });
+  } finally {
     for (const a of adapters) a.kill('SIGKILL');
     await Promise.all(adapters.map(a => a.exited));
     for (const s of sockets) s.destroy();
-    await new Promise(r => server.close(r));
-    await rm(home, { recursive: true, force: true });
+    if (server.listening) await new Promise(r => server.close(r));
+    try { if (socketDir) await rm(socketDir, { recursive: true, force: true }); }
+    finally { await rm(home, { recursive: true, force: true }); }
   }
 }
 const cases = new Map();
@@ -608,6 +622,24 @@ cases.set(27, async () => fixture(async f => {
   assert.equal(result.error?.data?.failure_type,'adapter_error',JSON.stringify(result.error));
   assert.equal(result.error?.data?.failure_type_source,'dot_acp_bridge_response');
 }));
+cases.set(28, async () => {
+  const outer = await mkdtemp(join(tmpdir(), 'acp-long-tmp-'));
+  const previous = process.env.TMPDIR;
+  try {
+    const longBase = join(outer, 'x'.repeat(92));
+    await mkdir(longBase, { mode: 0o700 });
+    process.env.TMPDIR = longBase;
+    await fixture(async ({ home, socket }) => {
+      assert.ok(home.startsWith(longBase), 'fixture state still belongs to the requested temp directory');
+      assert.ok(Buffer.byteLength(socket) <= 100, 'Unix socket must stay below the path budget');
+      assert.deepEqual(await adminRequest(socket, '/status'), { counts: [], throttle: {} });
+    });
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+    await rm(outer, { recursive: true, force: true });
+  }
+});
 const only = process.argv[2] ? Number(process.argv[2]) : null;
 for (const [finding, test] of cases) {
   if (only && finding !== only) continue;

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { Store, expiredError } from '../src/store.mjs';
+import { parseWorkers } from '../src/workers.mjs';
 import { explainStatus } from '../src/status-evidence.mjs';
 import { validateSubmission } from '../src/submission-policy.mjs';
 
@@ -145,6 +146,37 @@ try {
     s.db.prepare('UPDATE assignments SET valid_until=? WHERE request_id=?').run(new Date(now-1).toISOString(),'skip-old');
     assert(s.status({limits,capacity:3}).by_worker.dot.queue_classes.expired===1,'skipped expired rows still count as expired');
     log('status excludes skipped rows from dispatch and liveness signals, but still reports expired rows');
+  }
+  // Independent worker policies: the legacy worker's full lanes do not hide another worker's dispatch gap.
+  {
+    const connection=worker=>({issuer:'https://issuer.example.test',subject:worker,client_id:`client-${worker}`});
+    const workers=parseWorkers({workers:{
+      dot:{connections:[connection('dot')]},
+      second:{connections:[connection('second')]},
+    }});
+    const s=new Store(join(home,'workers.db'),{now:()=>now,capacity:3,limits,workers});
+    for (const name of workers.workers.keys()) {
+      s.subscribe(`sub_${name}`, 'http://127.0.0.1/hook', key, new Date(now+HOUR).toISOString(),
+        `principal-${name}`, name, connection(name));
+    }
+    const legacyWorker=[...workers.workers.keys()].find(name=>name!=='second');
+    submit(s,'full-1','full-2','full-3');
+    for (const id of ['full-1','full-2','full-3']) s.claim(id,'test',`principal-${legacyWorker}`,3);
+    const submitSecond=id=>{const row=payload(id);s.submit(row,'t','e','owner',false,null,'normal',null,row,null,'second');now+=1000;};
+    submitSecond('skip-second');
+    now+=5*MIN;
+    const readyAt=now;
+    submitSecond('ready-second');
+    s.db.prepare("UPDATE assignments SET skipped_at=? WHERE request_id='skip-second'").run(s.stamp());
+    now+=2*MIN;
+    const {by_worker: workersDispatch,...legacy}=dispatch(s);
+    assert(JSON.stringify(legacy)===JSON.stringify({scope:'dot',state:'full',free_lanes:0,queued_live:0,oldest_unclaimed_age_ms:null}),
+      'unchanged legacy dispatch '+JSON.stringify(legacy));
+    assert(workersDispatch?.dot.state==='full'&&workersDispatch.dot.free_lanes===0,'dot must report full');
+    const second=workersDispatch?.second;
+    assert(second?.state==='dispatch_gap'&&second.free_lanes===3&&second.queued_live===1&&second.oldest_unclaimed_age_ms===now-readyAt,
+      'second worker independent dispatch '+JSON.stringify(second));
+    log('per-worker dispatch separates full, free and skipped work without changing legacy fields');
   }
   // submit lint: an unknown scope path comes with a suggestion that drops it
   {
