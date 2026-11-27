@@ -123,7 +123,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     loadExistingGrant: async ctx => {
       const grantId = ctx.oidc.result?.consent?.grantId;
       if (!grantId) return undefined;
-      const connection = store.connectionByGrant(grantId);
+      const connection = store.approvedConnectionByGrant(grantId);
       const client = ctx.oidc.client;
       if (!connection || connection.revoked_at !== null || connection.client_id !== client?.clientId) return undefined;
       const grant = await ctx.oidc.provider.Grant.find(grantId);
@@ -239,6 +239,14 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
       // Names and shapes only, never a value of a secret: what a client sent and what it was given back.
       // Names come from fixed lists: a caller chooses the text of grant_type and the names of its parameters, so neither is logged as sent.
       const sent = ctx.oidc?.body ?? {}, given = ctx.body && typeof ctx.body === 'object' ? ctx.body : {};
+       if (ctx.status === 200 && sent.grant_type === 'authorization_code' && typeof given.access_token === 'string') {
+         const issued = store.find('AccessToken', given.access_token);
+         if (!issued?.grantId || !store.activateIssuedConnection(issued.grantId, issued.clientId)) {
+           ctx.status = 400;
+           ctx.body = { error: 'invalid_grant', error_description: 'The approved connection is no longer current.' };
+           return;
+         }
+       }
       const names = Object.keys(sent), known = names.filter(k => TOKEN_PARAMS.includes(k)).sort();
       log({ kind: 'as_token_detail', status: ctx.status, grant_type: typeof sent.grant_type === 'string' ? (GRANT_TYPES.includes(sent.grant_type) ? sent.grant_type : 'other') : null, request_params: known, unknown_params: names.length - known.length, response_has: ['access_token', 'refresh_token', 'id_token', 'scope', 'expires_in', 'token_type'].filter(k => given[k] !== undefined).map(k => k.replace('_token', 'Tok')), token_type: given.token_type === 'Bearer' ? 'Bearer' : null, scope: typeof given.scope === 'string' ? given.scope.split(' ').filter(x => ACCEPTED_SCOPES.includes(x) || x === 'openid').join(' ') : null, expires_in: Number.isInteger(given.expires_in) ? given.expires_in : null, has_resource: Boolean(sent.resource) });
       return;
@@ -382,7 +390,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     page(res, 200, 'Connect to Dalan', `<p>Pairing code</p><p class="code">${html(code)}</p>${factList}<p>Run approval on the bridge computer:</p><pre>dalan connect approve ${html(code)} --worker ${html(pairing.worker)}</pre>${native ? '<p>Native client, identity not verified: host and name prove nothing. The owner must compare this code with the teammate\'s browser page over a trusted channel. The redirect confirmation is only a typo check, not proof of identity.</p>' : '<p>The client name and redirect above are set by the app and are not verified. The owner approves only the code that matches this page.</p>'}<p>This page waits. It checks again every few seconds.</p>`, { refresh: 3 });
   }
   async function complete(req, res, details, pairing, client) {
-    const connection = store.connectionByGrant(pairing.grant_id);
+    const connection = store.approvedConnectionByGrant(pairing.grant_id);
     if (!connection || connection.revoked_at !== null || connection.client_id !== pairing.client_id || connection.redirect_uri !== pairing.redirect_uri
       || connection.resource !== pairing.resource || connection.scopes !== pairing.scopes || !sameRequest(pairing, details.params, client)) {
       return page(res, 409, 'Approval no longer valid', '<p>The approved request changed or was revoked. Start again from the app.</p>');
@@ -485,7 +493,7 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
       const interaction = store.find('Interaction', pairing.uid);
       const client = await provider.Client.find(pairing.client_id);
       if (!interaction || !sameRequest(pairing, interaction.params ?? {}, client)) throw new Error('the pending request changed or expired; not approved');
-      if (store.activeConnection(worker) && !replace) throw new Error(`worker ${worker} already has an active connection. Approving with --replace ends it and gives the new client every queued and future job for worker ${worker}, including briefs approved before the switch. Approve only a code you started yourself`);
+      if (store.activeConnection(worker) && !replace) throw new Error(`worker ${worker} already has an active connection. With --replace, the new client receives every queued and future job for worker ${worker}, including briefs approved before the switch, once it receives its first token. Approve only a code you started yourself`);
       if (!store.reserve(pairing.code)) {
         if (store.pairingByCode(pairing.code)?.state === 'pending') throw new Error('pairing code was superseded by a newer attempt for this worker; approve the newest code (dalan connect pending)');
         throw new Error('pairing code is being approved or already used');
@@ -499,11 +507,10 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
         grant.addOIDCScope(wanted.join(' '));
         grant.addResourceScope(pairing.resource, wanted.filter(scope => scope !== 'openid').join(' '));
         grantId = await grant.save();
-        const { connection_id, replaced } = store.commitApproval({ code: pairing.code, worker, grantId, snapshot: pairing, replace });
-        if (replaced) store.revokeGrant(replaced.grant_id, 'replaced');
-        log({ kind: 'connection_approved', connection_id, worker, client_id: pairing.client_id, replaced: !!replaced });
+        const { connection_id, replaced, pending } = store.commitApproval({ code: pairing.code, worker, grantId, snapshot: pairing, replace });
+        log({ kind: 'connection_approved', connection_id, worker, client_id: pairing.client_id, replacement_pending: pending });
         const approval = approvalRecord({ worker, issuer: shownIssuer, resource: shownResource(pairing.resource), clientId: pairing.client_id, redirectUri: pairing.redirect_uri, scopes: pairing.scopes.split(' '), approvedAt: now(), connectionId: connection_id });
-        return { approved: true, connection_id, worker, grant_id: grantId, client_id: pairing.client_id, redirect_uri: pairing.redirect_uri, redirect_origin: approval.redirectOrigin, approval, scopes: pairing.scopes.split(' '), replaced: replaced?.connection_id ?? null };
+        return { approved: true, connection_id, worker, grant_id: grantId, client_id: pairing.client_id, redirect_uri: pairing.redirect_uri, redirect_origin: approval.redirectOrigin, approval, scopes: pairing.scopes.split(' '), replaced: replaced?.connection_id ?? null, pending };
       } catch (error) {
         store.failPairing(pairing.code);
         if (grantId) { try { store.revokeGrant(grantId, 'approval_failed'); } catch { /* the grant has no connection row; deleting its rows is enough */ } }
