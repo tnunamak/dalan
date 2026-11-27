@@ -306,6 +306,8 @@ function withOutputPaths(result) {
 // The scope deny rule as a yes/no on one repository path: hard names (keys, env files, credential stores), the soft credential/auth/
 // signing name lint, a router-group spelling of a hard name, and the owner's `sensitive_paths`. Submit uses these rules to refuse or drop
 // scope paths; the check sandbox uses them to mask the same files (src/workspace.mjs). Exceptions are per-submission and do not unmask.
+// A refusal caused by one sensitive path carries that path as `sensitive_path`, apart from its display text.
+const sensitivePathError=(message,file)=>Object.assign(new Error(message),{sensitive_path:file});
 export function isSensitiveRepoPath(file,policyPaths=[]) {
   return hardName(file)||(hasRouterSyntax(file)&&hardName(file.replace(/\[[^\]/]*\]\]?|\([^)/]*\)/g,'')))||softName(file)||policyPaths.some(x=>file===x||file.startsWith(`${x}/`));
 }
@@ -345,12 +347,19 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
   }
   const exception=sensitiveScopeOverride===null?null:p.exceptions.find(e=>e.id===sensitiveScopeOverride&&e.github_repo===input?.github_repo);
   if(sensitiveScopeOverride!==null&&!exception) throw new Error('unknown sensitive scope override');
-  // Why a path is sensitive, for the record kept when a directory scope drops it.
-  const sensitiveReason=file=>hardName(file)||(hasRouterSyntax(file)&&hardName(file.replace(/\[[^\]/]*\]\]?|\([^)/]*\)/g,'')))?'hard sensitive path (credential, key or signing material)':p.sensitive_paths.some(x=>file===x||file.startsWith(`${x}/`))?'listed in the submission policy sensitive_paths':'name matches the credential, auth or signing lint';
+  // Shared facts keep the directory exclusion policy and the explicit path refusal aligned.
+  const hardSensitive=file=>hardName(file)||(hasRouterSyntax(file)&&hardName(file.replace(/\[[^\]/]*\]\]?|\([^)/]*\)/g,'')));
+  const policyEntry=file=>p.sensitive_paths.find(x=>file===x||file.startsWith(`${x}/`));
+  const sensitiveReason=file=>hardSensitive(file)?'hard sensitive path (credential, key or signing material)':policyEntry(file)?'listed in the submission policy sensitive_paths':'name matches the credential, auth or signing lint';
+  const sensitiveRefusal=file=>{
+    const entry=policyEntry(file), base=file.split('/').at(-1);
+    const rule=entry?'owner sensitive_paths entry '+entry:'soft sensitive name: '+(/auth/i.test(base)?'auth':/secret/i.test(base)?'secret':/credential/i.test(base)?'credential':/(?:^|[_.-])sign(?:ing|ature)?(?=[_.-]|$)/i.test(base)?'signing':'credential-style token name');
+    return sensitivePathError(`sensitive scope path: ${file}; ${rule}; rename the file or redact it and give it a name that does not look like a secret, or leave it out of scope_paths`,file);
+  };
   function inspectPath(file) {
     // A router group cannot hide a sensitive name: `(x).env` is also checked as `.env`.
-    if(hardName(file)||(hasRouterSyntax(file)&&hardName(file.replace(/\[[^\]/]*\]\]?|\([^)/]*\)/g,'')))) throw new Error(`hard sensitive path exclusion: ${file}`);
-    if((softName(file)||p.sensitive_paths.some(s=>file===s||file.startsWith(`${s}/`)))&&(!exception||file!==exception.path)) throw new Error(`sensitive scope path: ${file}`);
+    if(hardSensitive(file)) throw sensitivePathError(`hard sensitive path exclusion: ${file}`,file);
+    if((softName(file)||policyEntry(file))&&(!exception||file!==exception.path)) throw sensitiveRefusal(file);
   }
   for(const file of scope) inspectPath(file);
   // output_paths: shape here, the pinned tree below. Review mode is read-only, so it takes no output file.
@@ -377,8 +386,8 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
   // A name in code is a reference, not a read. The worker reads only scope files, and every scope and diff file gets inspectPath.
   // A code token refuses only when it points at host secret material (for example, ~/.ssh/id_rsa) or a policy-listed path.
   const inspectCode=(file,raw=file)=>{
-    if(hostPath.test(raw)&&hardPath.test(file)) throw new Error(`hard sensitive path exclusion: ${raw}`);
-    if(p.sensitive_paths.some(x=>file===x||file.startsWith(`${x}/`))&&(!exception||file!==exception.path)) throw new Error(`sensitive scope path: ${file}`);
+    if(hostPath.test(raw)&&hardPath.test(file)) throw sensitivePathError(`hard sensitive path exclusion: ${raw}`,raw);
+    if(policyEntry(file)&&(!exception||file!==exception.path)) throw sensitiveRefusal(file);
   };
   const text=[codeInDiffFences(instructionBrief,inspectCode),rendered.expected_output,scopeText,rendered.objective||'',rendered.stop_rule||'',JSON.stringify((rendered.inputs||[]).map(({input_patch,...rest})=>rest))].join('\n\n');
   warnOutputDirectoryMentions(outputs,text,warn);
@@ -448,13 +457,13 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       // read. A file-shaped secret name (/home/u/credentials, .env, secrets.yaml) still refuses, and so do host paths, parent
       // traversal and an absolute spelling of a repository path (/README.md never inherits scope).
       // A router group cannot hide a sensitive name: web/(x).env is checked as web/.env.
-      if(fileShaped(file)&&(hardName(file)||(hasRouterSyntax(file)&&hardName(file.replace(/\[[^\]/]*\]\]?|\([^)/]*\)/g,''))))) throw new Error(`hard sensitive path exclusion: ${file}`);
+      if(fileShaped(file)&&(hardName(file)||(hasRouterSyntax(file)&&hardName(file.replace(/\[[^\]/]*\]\]?|\([^)/]*\)/g,''))))) throw sensitivePathError(`hard sensitive path exclusion: ${file}`,file);
       const rest=file.replace(/^\/+/,''),unrouted=file.replace(/\[[^\]/]*\]\]?|\([^)/]*\)/g,'');
       // A relative path the tree lacks is usually abbreviated (bin/x.ts for packages/p/bin/x.ts) or not a path (a branch name):
       // it resolves like a bare filename, by suffix, and otherwise warns. Invalid syntax, traversal and router segments the tree
       // lacks (x/$(id)/y.ts) refuse. Leading-slash routes (/v1, /me) pass; a file extension makes it a host file (/y.ts).
       // A bare host directory in prose ("use ~/.tmp, not /tmp") names no file: it warns.
-      if(/^~\/\.(?:docker|kube)\/?$/.test(file)) throw new Error(`hard sensitive path exclusion: ${file}`);
+      if(/^~\/\.(?:docker|kube)\/?$/.test(file)) throw sensitivePathError(`hard sensitive path exclusion: ${file}`,file);
       if(/^(?:\/(?:tmp|home|var|etc|usr|opt)|~|~\/\.?\w[\w-]*|\$HOME)\/?$/.test(file)) { warn(`the brief mentions host directory ${file}; the worker cannot read host paths`);continue; }
       if(hostPath.test(file)||hostPath.test(unrouted)) { undeclared.push(file);continue; }
       if(!file.startsWith('/')) {
@@ -518,11 +527,15 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       throw error;
     }
     // Repository-wide implementation scopes withhold unnamed sensitive files physically.
-    // Other scopes retain the explicit read-only exclusion option. Named paths and patch
-    // paths still refuse above and below; exclusions grant no access to those files.
+    // Read-only directory scopes are physically narrowed for soft names. Directory-scoped
+    // implementations retain refusal because their source tree is not stripped of exclusions.
+    // Named paths and patch paths still refuse above and below.
     for(const file of scan.files.filter(f=>within(f,scope)&&!scope.includes(f))) {
       if(repositoryImplementation&&isSensitiveRepoPath(file,p.sensitive_paths)) {
         dropped.push({path:file,reason:sensitiveReason(file)});continue;
+      }
+      if(rendered.execution_scope!=='implementation'&&softName(file)&&!hardSensitive(file)&&!policyEntry(file)&&file!==exception?.path) {
+        dropped.push({path:file,reason:'soft sensitive name (dropped, not refused)'});continue;
       }
       try { inspectPath(file); }
       catch(error) {
@@ -596,7 +609,7 @@ export function narrowScope(scope,files,bad) {
   };
   for(const entry of scope) visit(entry==='.'?'':entry);
   const narrowed=[...new Set(out)];
-  if(!narrowed.length) throw new Error(`sensitive scope path: ${bad[0]} (every file in the scope is sensitive)`);
+  if(!narrowed.length) throw sensitivePathError(`sensitive scope path: ${bad[0]} (every file in the scope is sensitive)`,bad[0]);
   if(narrowed.length>maxNarrowedEntries) throw new Error(`sensitive scope path: ${bad[0]} (too many files to exclude from ${scope.map(s=>`"${s}"`).join(', ')}: dropping ${bad.length} sensitive file(s) would need ${narrowed.length} scope entries, over the ${maxNarrowedEntries} limit; submit a narrower scope that avoids them)`);
   const unnameable=narrowed.find(entry=>{try{paths([entry],'scope_paths');return false;}catch{return true;}});
   if(unnameable!==undefined) throw new Error(`sensitive scope path: ${bad[0]} (cannot narrow the scope: ${unnameable} has a name that scope_paths cannot hold; exclude it or name the files you want)`);
