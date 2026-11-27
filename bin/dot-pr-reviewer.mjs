@@ -11,7 +11,15 @@ const args = process.argv.slice(2), has = f => args.includes(f), opt = f => { co
 try {
   const known = new Set(['--dry-run', '--only', '--max', '--ignore-capacity', '--config', '--state-dir', '--help']);
   const values = new Set(['--only', '--max', '--config', '--state-dir']);
-  for (let i = 0; i < args.length; i++) { if (!known.has(args[i])) throw new Error(`unknown argument ${args[i]}`); if (values.has(args[i])) i++; }
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    if (!known.has(flag)) throw new Error(`unknown argument ${flag}`);
+    if (!values.has(flag)) continue;
+    const value = args[++i];
+    if (!value || value.startsWith('--')) {
+      throw new Error(flag === '--max' ? '--max expects a non-negative integer' : `${flag} requires a value`);
+    }
+  }
   if (has('--help')) { console.log(usage); process.exit(0); }
   const dryRun = has('--dry-run');
   if (has('--ignore-capacity') && !dryRun) throw new Error('--ignore-capacity requires --dry-run');

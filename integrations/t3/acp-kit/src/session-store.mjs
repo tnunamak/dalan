@@ -23,8 +23,9 @@ export const sessionPath = (dir, id, suffix = '.json') => path.join(dir, `${asse
 export function writeJsonPrivate(file, value, { pretty = false } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value), { mode: 0o600 });
+  const json = pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value);
   try {
+    fs.writeFileSync(tmp, json, { mode: 0o600 });
     fs.renameSync(tmp, file);
   } catch (error) {
     // The destination is unchanged; do not strand this attempt's temp file.

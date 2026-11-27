@@ -38,6 +38,31 @@ test('suite self-test accepts a Node executable path containing spaces and an ap
   assert.match(result.stdout, /PASS segment runner continues after failures/);
 });
 
+for (const [name, segments, testScript, diagnostic] of [
+  ['blank segment', ['  '], 'node scripts/test-segments.mjs', /test segments must contain non-empty command strings/],
+  ['wrong npm test entrypoint', ['fixture-command-must-not-run'], 'node alternate-test-runner.mjs', /npm test must use the sequential runner/],
+]) {
+  test('segment runner rejects ' + name + ' before starting any segment', async t => {
+    const { spawnSync } = await import('node:child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-segment-invalid-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const scripts = path.join(dir, 'scripts');
+    fs.mkdirSync(scripts);
+    const runner = path.join(scripts, 'test-segments.mjs');
+    fs.copyFileSync(new URL('../scripts/test-segments.mjs', import.meta.url), runner);
+    fs.writeFileSync(path.join(scripts, 'test-segments.json'), JSON.stringify(segments));
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: testScript } }));
+    const result = spawnSync(process.execPath, [runner], {
+      cwd: dir, env: { HOME: dir, USERPROFILE: dir, TMPDIR: dir, TEMP: dir, PATH: process.env.PATH },
+      encoding: 'utf8', timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, diagnostic);
+    assert.doesNotMatch(result.stdout, /=== SEGMENT/);
+  });
+}
+
 test('CLI guidance falls back to the checkout when a different dalan is first on PATH', async t => {
   const { cliCommand } = await import('./cli-name.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-cli-fallback-'));
@@ -87,6 +112,27 @@ test('trial self-check reports the failed result without echoing the attempted U
   assert.equal(result.status, 1);
   assert.match(result.stdout, /RESULT FAIL/);
   assert.doesNotMatch(result.stdout + result.stderr, /fixture-marker|fixture connection failed/);
+});
+
+test('CLI help preserves structured unknown-command guidance for script callers', async () => {
+  const { resolveHelp } = await import('./cli-help.mjs');
+  const result = resolveHelp(['stauts', '--json']);
+  assert.equal(result.stream, 'stderr');
+  assert.equal(result.code, 1);
+  const parsed = JSON.parse(result.text);
+  assert.equal(parsed.kind, 'local');
+  assert.match(parsed.error, /unknown command "stauts".*did you mean "status"/);
+});
+
+test('CLI help does not intercept the text argument of note, answer, or tell', async () => {
+  const { resolveHelp } = await import('./cli-help.mjs');
+  for (const command of ['note', 'answer', 'tell']) {
+    assert.equal(resolveHelp([command, '--help']), null);
+    const explicit = resolveHelp(['help', command]);
+    assert.equal(explicit.stream, 'stdout');
+    assert.equal(explicit.code, 0);
+    assert.match(explicit.text, new RegExp('Usage: dalan ' + command));
+  }
 });
 
 const minute=60000;
@@ -201,6 +247,26 @@ test('host stop evidence stays unverified when remaining processes are reported 
     { ...base, remaining_pids: [] });
 });
 
+test('explicitly disabled host checks refuse before opening any workspace or notifying start', async () => {
+  const { runHostBudget } = await import('./host-budget.mjs');
+  let started = false;
+  await assert.rejects(runHostBudget({
+    enabled: false, dir: '/missing-fixture-workspace', budgets: HOST_BUDGET_CEILINGS,
+    phases: [{ name: 'check', argv: [process.execPath, '--version'] }],
+    onStarted: () => { started = true; },
+  }), /host_execution_disabled/);
+  assert.equal(started, false);
+});
+
+test('only a launch error with no PID or stop report is evidence the host never started', async () => {
+  const { provesHostNotStarted } = await import('./host-budget.mjs');
+  const spawnError = new Error('fixture launcher failed');
+  assert.equal(provesHostNotStarted({ spawnError }), true);
+  assert.equal(provesHostNotStarted({ spawnError, pid: 42 }), false);
+  assert.equal(provesHostNotStarted({ spawnError, stopped: { verified: false } }), false);
+  assert.equal(provesHostNotStarted({ pid: undefined }), false);
+});
+
 test('host budget rejects one over the process ceiling with a named limit', () => {
   const atLimit = { ...HOST_BUDGET_CEILINGS };
   assert.deepEqual(parseHostBudget(atLimit), atLimit);
@@ -312,18 +378,50 @@ test('lineBuffer retains the configured tail while waiting for a final newline',
   assert.deepEqual(lines, ['kept']);
 });
 
-async function runUpgradeDrainFixture(t, args, extraEnv = {}) {
+async function runUpgradeDrainFixture(t, args, extraEnv = {}, fakeCli) {
   const { spawnSync } = await import('node:child_process');
   const { fileURLToPath } = await import('node:url');
   const cli = fileURLToPath(new URL('../scripts/upgrade-drain.mjs', import.meta.url));
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-drain-args-'));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  if (fakeCli) {
+    fs.mkdirSync(path.join(cwd, 'bin'));
+    fs.writeFileSync(path.join(cwd, 'bin', 'dot-worker.mjs'), fakeCli);
+  }
   // A regression must never reach a real bin/dot-worker.mjs or use the host HOME.
   return spawnSync(process.execPath, [cli, ...args], {
     cwd,
     env: { HOME: cwd, USERPROFILE: cwd, SYSTEMROOT: process.env.SYSTEMROOT, ...extraEnv },
     encoding: 'utf8',
     timeout: 2000,
+  });
+}
+
+for (const alreadyPaused of [true, false]) {
+  test(`failed legacy drain only resumes a pause it acquired (pre-paused=${alreadyPaused})`, async t => {
+    const fakeCli = `
+      const command = process.argv[2];
+      if (command === 'status') console.log(JSON.stringify({paused:${alreadyPaused}}));
+      else if (command === 'pause') {
+        if (${alreadyPaused}) throw new Error('fixture must not replace an existing pause');
+        console.log(JSON.stringify({paused:true}));
+      } else if (command === 'claims') console.log('{}');
+      else if (command === 'resume') {
+        if (${alreadyPaused}) throw new Error('fixture must not release an existing pause');
+        console.log(JSON.stringify({paused:false}));
+      } else throw new Error('unexpected argument');
+    `;
+    const result = await runUpgradeDrainFixture(t, ['--pause'], {}, fakeCli);
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /without a claims array/);
+    if (alreadyPaused) {
+      assert.match(result.stdout, /already paused/);
+      assert.doesNotMatch(result.stderr, /drain aborted/);
+    } else {
+      assert.match(result.stdout, /Claims paused/);
+      assert.match(result.stderr, /claims resumed/);
+    }
   });
 }
 
@@ -336,4 +434,15 @@ test('upgrade-drain rejects a subminimum timeout before pausing or quiescing', a
     assert.match(result.stderr, args.length ? /quiesce off/ : /dalan resume/);
     assert.equal(result.stdout, '');
   }
+});
+
+test('host budget rejects non-object values and arrays with an explicit required-fields diagnostic', () => {
+  for (const malformed of [null, 'fixture', Object.values(HOST_BUDGET_CEILINGS)]) {
+    assert.throws(() => parseHostBudget(malformed), /host_budget requires cpu_ms, wall_ms/);
+  }
+});
+
+test('host budget rejects omitted values disguised by an extra counted key', () => {
+  const { wall_ms: _missing, ...budget } = HOST_BUDGET_CEILINGS;
+  assert.throws(() => parseHostBudget({...budget, unrelated: 1000}), /invalid host_budget.wall_ms/);
 });

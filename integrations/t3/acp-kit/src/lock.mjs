@@ -111,7 +111,14 @@ async function takeOver(file, seen, guardWaitMs) {
     }
     try {
       const now = inspect(file);
-      if (now && now.key === seen.key && now.stale) fs.rmSync(file, { force: true });
+      if (now && now.key === seen.key && now.stale) {
+        try { fs.rmSync(file, { force: true }); }
+        catch (error) {
+          // A directory is not a lock record; report a busy path without deleting it.
+          if (error.code === 'ERR_FS_EISDIR') return false;
+          throw error;
+        }
+      }
       return true; // the generation we saw is gone (by us, or already replaced); the caller retries creation
     } finally {
       fs.rmSync(guard, { force: true });

@@ -322,6 +322,21 @@ test('canonical JSON keeps punctuation in object field names without turning it 
   assert.deepEqual(JSON.parse(encoded), value);
 });
 
+test('matching claim coordinates with unusable stored deadlines fail with lease_expired', () => {
+  const command = { job: 'fixture-job', subject: 'fixture-subject', worker: 'dot', claim: 'fixture-claim', epoch: 1 };
+  const base = { ...command, active: true };
+  for (const leaseUntil of [undefined, null, '200', 200.5, Infinity]) {
+    assert.throws(() => assertClaimAuthority(command, { ...base, leaseUntil }, 100), { code: 'lease_expired' });
+  }
+  assert.doesNotThrow(() => assertClaimAuthority(command, { ...base, leaseUntil: 200 }, 100));
+});
+
+test('canonical JSON preserves a scalar protocol value without wrapping it', () => {
+  for (const [input, expected] of [[null, 'null'], [false, 'false'], [0, '0'], ['', '""']]) {
+    assert.equal(canonicalJson(input), expected);
+  }
+});
+
 test('renewal at the initial supplied clock advances a frozen revision without altering it', () => {
   const snapshot = Object.freeze({ revision: 0, leaseUntil: 50 });
   const command = Object.freeze({ expectedRevision: 0, operation: 'renew', args: Object.freeze({ leaseMs: 10 }) });
@@ -330,4 +345,21 @@ test('renewal at the initial supplied clock advances a frozen revision without a
     events: [], effects: [{ type: 'advance_revision', expectedRevision: 0 }], leaseUntil: 10,
   });
   assert.equal(snapshot.leaseUntil, 50);
+});
+
+test('renewal resolves a new deadline from the supplied clock, not the previous lease', () => {
+  const snapshot = { revision: 8, leaseUntil: 120 };
+  const command = { operation: 'renew', expectedRevision: 8, args: { leaseMs: 10 } };
+  const early = decide(snapshot, command, { now: 100, maxLeaseMs: 20 });
+  const late = decide(snapshot, command, { now: 105, maxLeaseMs: 20 });
+  assert.deepEqual([early.leaseUntil, late.leaseUntil], [110, 115]);
+  assert.deepEqual(late.effects, early.effects);
+  assert.equal(snapshot.leaseUntil, 120);
+});
+
+test('ordinary decision output omits leaseUntil when serialized rather than sending null', () => {
+  const effect = decide({ revision: 1 }, { operation: 'progress', expectedRevision: 1 });
+  const wire = JSON.parse(canonicalJson(effect));
+  assert.equal(Object.hasOwn(wire, 'leaseUntil'), false);
+  assert.deepEqual(wire.effects, [{ expectedRevision: 1, type: 'advance_revision' }]);
 });

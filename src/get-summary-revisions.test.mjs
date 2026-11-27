@@ -2,6 +2,48 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { formatGetSummary, formatGetEndNote } from './get-summary.mjs';
 
+async function trialHomeCli(t) {
+  const { mkdir, mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const home = await mkdtemp(join(tmpdir(), 'dalan-bin-entry-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const trial = join(home, '.local', 'share', 'dalan-trial');
+  await mkdir(trial, { recursive: true });
+  await writeFile(join(trial, '.dalan-trial'), '');
+  const bin = fileURLToPath(new URL('../bin/dalan.mjs', import.meta.url));
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  return {version:pkg.version, run(...args) {
+    const result = spawnSync(process.execPath, [bin, ...args], {
+      env: { HOME:home, USERPROFILE:home, XDG_CONFIG_HOME:join(home,'.config') },
+      encoding:'utf8', timeout:5000,
+    });
+    assert.ifError(result.error);
+    return result;
+  }};
+}
+
+test('dalan version flags print the package version with no trial-home requirement', async t => {
+  const {run,version}=await trialHomeCli(t);
+  for (const flag of ['--version', '-v']) {
+    const result=run(flag);
+    assert.equal(result.status,0,result.stderr);
+    assert.equal(result.stdout,version+'\n');
+    assert.equal(result.stderr,'');
+  }
+});
+
+test('dalan help still opens with trial mode present and no bridge home selected', async t => {
+  const {run}=await trialHomeCli(t);
+  const result=run('--help');
+  assert.equal(result.status,0,result.stderr);
+  assert.match(result.stdout,/\bdalan\b/i);
+  assert.match(result.stdout,/\bsetup\b/i);
+  assert.equal(result.stderr,'');
+});
+
 const options = { id: 'job-original', cli: 'dalan', decideWords: 'accepted|rejected|applied' };
 async function reviewArgumentFailure(t, args) {
   const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
@@ -32,6 +74,14 @@ async function reviewArgumentFailure(t, args) {
 test('reviewer refuses an invalid --max before loading configuration', async t => {
   for (const args of [['--max'], ['--max', '-1'], ['--max', '1.5']]) {
     assert.equal(await reviewArgumentFailure(t, args), 'dalan-pr-reviewer: --max expects a non-negative integer');
+  }
+});
+
+test('reviewer refuses absent flag values before loading configuration', async t => {
+  for (const flag of ['--config', '--state-dir', '--only']) {
+    for (const args of [[flag], [flag, '--dry-run']]) {
+      assert.equal(await reviewArgumentFailure(t, args), `dalan-pr-reviewer: ${flag} requires a value`);
+    }
   }
 });
 
@@ -70,7 +120,7 @@ for (const [status, next, note] of [
     assert.doesNotMatch(summary, /Correction:/);
   });
 }
-async function successfulAlertCli(t, title, message) {
+async function alertCliResult(t, args, publisherFails = false) {
   const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
   const { spawnSync } = await import('node:child_process');
   const { tmpdir } = await import('node:os');
@@ -84,19 +134,39 @@ async function successfulAlertCli(t, title, message) {
   await writeFile(join(root, 'src', 'alerts.mjs'), `
     export async function publishAlert(title, message, log, options) {
       await new Promise(resolve => setTimeout(resolve, 10));
+      if (${publisherFails}) throw new Error('fixture publisher unavailable');
       log('fixture diagnostic');
       console.log(JSON.stringify({ title, message, options }));
     }
   `);
-  const result = spawnSync(process.execPath, [cli, title, message], {
+  const result = spawnSync(process.execPath, [cli, ...args], {
     env: { HOME: root, USERPROFILE: root }, encoding: 'utf8', timeout: 5000,
   });
   assert.ifError(result.error);
+  return result;
+}
+
+async function successfulAlertCli(t, title, message) {
+  const result = await alertCliResult(t, [title, message]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, '');
   const [delivery, ...rest] = result.stdout.trimEnd().split('\n');
   return { delivery: JSON.parse(delivery), rest };
 }
+
+test('alert CLI refuses a missing message without invoking the publisher', async t => {
+  const result = await alertCliResult(t, ['fixture title'], true);
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr.trim(), 'usage: dalan-alert TITLE MESSAGE');
+});
+
+test('alert CLI reports publisher failure without falsely acknowledging delivery', async t => {
+  const result = await alertCliResult(t, ['fixture title', 'fixture message'], true);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /fixture publisher unavailable/);
+});
 
 test('alert CLI sends one intact title and body to the required publisher', async t => {
   const title = 'Fixture subject: two words';
@@ -243,4 +313,25 @@ test('dead-man heartbeat refuses old positive health evidence without publishing
 
 test('dead-man heartbeat refuses health evidence beyond the future-skew allowance', async t => {
   await deadmanHeartbeatRefusal(t, { healthy: true, observed_at: '2026-01-01T00:00:31Z' });
+});
+
+test('alert reports usage when its title or message is empty without reaching the publisher', async t => {
+  const { copyFile, writeFile, mkdir, mkdtemp, rm } = await import('node:fs/promises');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'dalan-alert-usage-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'bin'));
+  await mkdir(join(root, 'src'));
+  const cli = join(root, 'bin/dot-alert.mjs');
+  await copyFile(new URL('../bin/dot-alert.mjs', import.meta.url), cli);
+  await writeFile(join(root, 'src/alerts.mjs'), 'export const publishAlert = () => { throw Error("unexpected publisher call"); };');
+  for (const args of [['', 'synthetic message'], ['synthetic title', '']]) {
+    const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd: root, timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 2, result.stderr);
+    assert.equal(result.stderr.trim(), 'usage: dalan-alert TITLE MESSAGE');
+    assert.equal(result.stdout, '');
+  }
 });

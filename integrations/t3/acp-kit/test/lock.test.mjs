@@ -26,6 +26,25 @@ test('refusal preserves explicit diagnostic data without inventing data for an o
   assert.deepEqual(refuse('fixture rejected', false).args, [REFUSE_CODE, 'fixture rejected', false]);
 });
 
+test('an unreadable saved session returns a recovery message and keeps its bytes', {skip: process.platform === 'win32'}, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-session-read-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'fixture.json');
+  fs.writeFileSync(file, '{broken', {mode: 0o600});
+  assert.throws(() => readJsonPrivate(file), {
+    code: 'invalid_session_state',
+    message: 'Saved session is unreadable; start a new session or restore the saved state.',
+  });
+  assert.equal(fs.readFileSync(file, 'utf8'), '{broken');
+});
+
+test('sessionPath preserves a valid emitted UUID and an explicit sidecar suffix', async () => {
+  const { sessionPath } = await import('../src/session-store.mjs');
+  const id = '00000000-0000-4000-8000-000000000001';
+  assert.equal(sessionPath('fixture dir', id), path.join('fixture dir', id + '.json'));
+  assert.equal(sessionPath('fixture dir', id, '.lock'), path.join('fixture dir', id + '.lock'));
+});
+
 test('a failed session promotion removes its temporary file and preserves the destination', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-session-rename-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -35,6 +54,29 @@ test('a failed session promotion removes its temporary file and preserves the de
   fs.writeFileSync(existing, 'fixture already present');
   assert.throws(() => writeJsonPrivate(destination, { marker: 'fixture' }));
   assert.equal(fs.readFileSync(existing, 'utf8'), 'fixture already present');
+  assert.deepEqual(fs.readdirSync(dir), ['session.json']);
+});
+
+test('a partial session write removes its temporary file and preserves the destination', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-session-write-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const destination = path.join(dir, 'session.json');
+  writeJsonPrivate(destination, { marker: 'committed' });
+  const temporary = `${destination}.${process.pid}.tmp`;
+  const full = new Error('fixture ran out of space');
+  full.code = 'ENOSPC';
+  const write = fs.writeFileSync;
+  const mocked = t.mock.method(fs, 'writeFileSync', (file, contents, options) => {
+    if (file !== temporary) return write(file, contents, options);
+    write(file, '{', options);
+    throw full;
+  });
+  try {
+    assert.throws(() => writeJsonPrivate(destination, { marker: 'replacement' }), error => error === full);
+  } finally {
+    mocked.mock.restore();
+  }
+  assert.deepEqual(readJsonPrivate(destination), { marker: 'committed' });
   assert.deepEqual(fs.readdirSync(dir), ['session.json']);
 });
 
@@ -87,6 +129,29 @@ test('removing private JSON twice leaves the missing-state sentinel', async t =>
   assert.equal(readJsonPrivate(target), null);
 });
 
+test('corrupt saved session is distinct from a missing session and preserves the original bytes', {skip: process.platform === 'win32'}, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-corrupt-session-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  const incomplete = Buffer.from('{"stage":');
+  assert.equal(readJsonPrivate(file), null);
+  fs.writeFileSync(file, incomplete, { mode: 0o600 });
+  assert.throws(() => readJsonPrivate(file), {
+    code: 'invalid_session_state',
+    message: 'Saved session is unreadable; start a new session or restore the saved state.',
+  });
+  assert.deepEqual(fs.readFileSync(file), incomplete);
+});
+
+test('saved-session path uses a canonical version-four ID and its requested suffix', async () => {
+  const { sessionPath } = await import('../src/session-store.mjs');
+  const root = path.join(os.tmpdir(), 'acp-fixture-root');
+  const id = 'aabbccdd-0000-4000-8000-abcdef012345';
+  assert.equal(sessionPath(root, id, '.lock'), path.join(root, id + '.lock'));
+  assert.throws(() => sessionPath(root, id.replace('-4000-', '-1000-')), { code: 'invalid_session_id' });
+  assert.throws(() => sessionPath(root, id.toUpperCase()), { code: 'invalid_session_id' });
+});
+
 test('acquire writes the record; release removes only our own token', async () => {
   const dir = tmp(), file = path.join(dir, 's.lock');
   const a = await acquireLock(file);
@@ -99,6 +164,33 @@ test('acquire writes the record; release removes only our own token', async () =
   assert.ok(fs.existsSync(file), 'release must not remove a lock that holds another token');
   fs.rmSync(file);
   fs.rmSync(dir, { recursive: true });
+});
+
+test('private state reports unreadable JSON without echoing its contents or replacing the file', { skip: process.platform === 'win32' }, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-unreadable-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  const damaged = '{"fixturePrivateText":';
+  fs.writeFileSync(file, damaged, { mode: 0o600 });
+  assert.throws(() => readJsonPrivate(file), error => {
+    assert.equal(error.code, 'invalid_session_state');
+    assert.match(error.message, /start a new session or restore/);
+    assert.doesNotMatch(error.message, /fixturePrivateText/);
+    return true;
+  });
+  assert.equal(fs.readFileSync(file, 'utf8'), damaged);
+});
+
+test('valid saved state still refuses a nonprivate file and leaves it unchanged', { skip: process.platform === 'win32' }, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-unsafe-mode-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'session.json');
+  const saved = '{"fixture":true}';
+  fs.writeFileSync(file, saved);
+  fs.chmodSync(file, 0o644);
+  assert.throws(() => readJsonPrivate(file), { code: 'state_permissions' });
+  assert.equal(fs.statSync(file).mode & 0o777, 0o644);
+  assert.equal(fs.readFileSync(file, 'utf8'), saved);
 });
 
 test('release frees the lock for the next acquirer', async () => {
@@ -118,6 +210,21 @@ test('an ordinary file in place of the lock parent is left untouched', async t =
     error?.code === 'EEXIST' || error?.code === 'ENOTDIR');
   assert.equal(fs.readFileSync(obstacle, 'utf8'), 'synthetic fixture');
   assert.deepEqual(fs.readdirSync(dir), ['not-a-directory']);
+});
+
+test('a stale directory at the lock path remains intact and reports a busy session', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-lock-directory-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lock = path.join(dir, 's.lock');
+  fs.mkdirSync(lock);
+  const sentinel = path.join(lock, 'keep.txt');
+  fs.writeFileSync(sentinel, 'fixture');
+  fs.utimesSync(lock, new Date(0), new Date(0));
+
+  await assert.rejects(acquireLock(lock), error =>
+    error instanceof LockBusyError && error.code === 'session_busy' && error.pid === null);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'fixture');
+  assert.deepEqual(fs.readdirSync(dir), ['s.lock'], 'no takeover guard is left behind');
 });
 
 test('releasing twice leaves the temporary lock directory empty', async t => {
@@ -513,4 +620,27 @@ test('reusing an existing fixture directory preserves its POSIX mode', { skip: p
   try { assert.equal(fs.statSync(parent).mode & 0o777, 0o750); }
   finally { lock.release(); }
   assert.equal(fs.statSync(parent).mode & 0o777, 0o750);
+});
+
+test('a malformed saved session reports recovery guidance and leaves bytes alone', {skip: process.platform === 'win32'}, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-session-malformed-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.json');
+  const partial = '{"display":"fixture"';
+  fs.writeFileSync(file, partial, {mode: 0o600});
+  assert.throws(() => readJsonPrivate(file), {
+    code: 'invalid_session_state',
+    message: 'Saved session is unreadable; start a new session or restore the saved state.',
+  });
+  assert.equal(fs.readFileSync(file, 'utf8'), partial);
+});
+
+test('a saved session with broad access reports the mode and does not return its contents', {skip: process.platform === 'win32'}, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acpkit-session-permissions-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'session.json');
+  fs.writeFileSync(file, '{"display":"fixture"}', {mode: 0o600});
+  fs.chmodSync(file, 0o644);
+  assert.throws(() => readJsonPrivate(file), {code: 'state_permissions', message: /must be mode 0600 \(found 644\)/});
+  assert.equal(fs.statSync(file).mode & 0o777, 0o644);
 });
