@@ -207,6 +207,16 @@ try {
       record.finish(id,g.claim_id,outcome,message,message);
     }
     try {
+      const at=nowTrack, day=86400000;
+      nowTrack=at-8*day;
+      finish(add('old_outcome'));
+      const slow=add('old_queue_recent_finish');
+      const oldCancelled=add('old_queue_recent_cancel');
+      nowTrack=at-day;
+      finish(slow);
+      record.cancel(oldCancelled,'owner stopped');
+      add('recent_still_queued');
+      nowTrack=at;
       const integrated=add('integrated'); finish(integrated);
       record.lifecycle(integrated,'integrated','owner','fixture applied');
       const applied=add('applied'); finish(applied);
@@ -228,9 +238,9 @@ try {
       finish(add('another_kind','build'));
       add('still_queued');
       const got=record.trackRecord('dot','review');
-      assert.deepEqual(got,{worker:'dot',kind:'review',window_days:7,n:10,outcomes:{
+      assert.deepEqual(got,{worker:'dot',kind:'review',window_days:7,n:12,outcomes:{
         landed:2,check_passed:1,checks_failed:1,refused_by_provider:1,
-        unable_to_run:1,owner_cancelled:1,finished_unchecked:3,
+        unable_to_run:1,owner_cancelled:2,finished_unchecked:4,
       }});
       assert.deepEqual(record.admissionAnswer('dot','review','normal').track_record,got);
     } finally { record.db.close(); }
