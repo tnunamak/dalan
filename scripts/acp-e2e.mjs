@@ -32,9 +32,9 @@ try {
   assert.equal(githubRepoOf('https://github.com/acme/widget.git'), 'acme/widget');
   assert.equal(githubRepoOf('git@github.com:acme/widget.git'), 'acme/widget');
   assert.equal(githubRepoOf('/srv/git/widget.git'), null);
-  assert.deepEqual(parsePrompt('[dot-decision:dec_abc12345]\nreview this\n'), { brief: 'review this', root: 'dec_abc12345', requestRoot: 'dec_abc12345' });
+  assert.deepEqual(parsePrompt('[dot-decision:dec_abc12345]\nreview this\n'), { brief: 'review this', priority: 'normal', requirements: [], root: 'dec_abc12345', requestRoot: 'dec_abc12345' });
   assert.match(parsePrompt('no token').requestRoot, /^acp-[0-9a-f]{24}$/);
-  assert.deepEqual(parsePrompt('Act as the implementation sub-agent for this task.\n\n[dot-decision:dec_abc12345]\n[dot-build] a.py\nfix'), { brief: '[dot-build] a.py\nfix', root: 'dec_abc12345', requestRoot: 'dec_abc12345' }, 'T3 role preamble is stripped');
+  assert.deepEqual(parsePrompt('Act as the implementation sub-agent for this task.\n\n[dot-decision:dec_abc12345]\n[dot-build] a.py\nfix'), { brief: '[dot-build] a.py\nfix', priority: 'normal', requirements: [], root: 'dec_abc12345', requestRoot: 'dec_abc12345' }, 'T3 role preamble is stripped');
   assert.equal(parsePrompt('Act as the review sub-agent for this task.\n\nreview x').brief, 'review x');
   assert.equal(parsePrompt('Act as the review sub-agent for this task.\n\nreview x').requestRoot, parsePrompt('review x').requestRoot, 'role does not change identity');
   assert.equal(parsePrompt('Please act as the review sub-agent for this task.\n\nx').brief, 'Please act as the review sub-agent for this task.\n\nx', 'only the exact preamble');
@@ -155,8 +155,8 @@ else console.log(JSON.stringify({ok:true,data:{}}));
   await finish(root1, c1, 'THE RESULT OF 1');
   const r1 = await p1;
   assert.equal(r1.result.stopReason, 'end_turn'); assert.equal(a.text('agent_message_chunk'), 'THE RESULT OF 1');
-  assert.match(a.rawText('agent_message_chunk'), /^THE RESULT OF 1\n\ndecide: dalan decide dec_roundtrip_1 accepted\|applied\|useful_no_change\|useful_negative\|not_useful$/, 'a plain result ends with the decide line');
-  assert.ok(!existsSync(stateFile), 'the state file goes away when the result is delivered');
+  assert.match(a.rawText('agent_message_chunk'), /THE RESULT OF 1\n\ndecide: dalan decide dec_roundtrip_1 accepted\|applied\|useful_no_change\|useful_negative\|not_useful$/, 'a plain result ends with the decide line');
+  assert.equal(JSON.parse(readFileSync(stateFile,'utf8')).completed[0].work_id,root1,'terminal identity is retained');
   assert.deepEqual(lifecycle(root1), [], 'the adapter did not consume its delivered assignment');
   const acpOwner = ownerToken(readOrCreateSecret(secretFile), root1);
   const peek = await adminRequest(socket, `/get?id=${encodeURIComponent(root1)}&peek=1`, { token: acpOwner });
@@ -197,22 +197,16 @@ else console.log(JSON.stringify({ok:true,data:{}}));
   assert.equal(status(root2), 'cancelled');
   console.log('PASS cancel while queued cancels the assignment and ends the turn cancelled');
 
-  // ---- 3. cancel while claimed: the assignment keeps running; a later prompt gets the result; steer text is reported
+  // ---- 3. cancel while claimed revokes authority and reports compute separately
   const root3 = 'dec_cancelc_1', s3 = (await a.newSession(noGit)).sessionId;
   const p3 = a.prompt(s3, `[dot-decision:${root3}]\nlong job`);
   await waitFor(() => status(root3) === 'queued', 'queued 3');
-  const c3 = await claim(root3);
+  await claim(root3);
   a.cancel(s3);
   assert.equal((await p3).result.stopReason, 'cancelled');
-  assert.equal(status(root3), 'claimed', 'claimed work keeps running');
-  const before = a.text('agent_message_chunk').length;
-  const p3b = a.prompt(s3, 'actually, also look at Y'); // steer: re-attaches, does not submit
-  await waitFor(() => a.text('agent_thought_chunk').includes(`re-attached to ${root3}`), 're-attach');
-  assert.equal(rows('%').filter(r => r.request_id.startsWith('dec_cancelc')).length, 1);
-  await finish(root3, c3, 'RESULT OF 3');
-  assert.equal((await p3b).result.stopReason, 'end_turn');
-  assert.equal(a.text('agent_message_chunk').slice(before), 'RESULT OF 3\n\nnot sent to the worker: actually, also look at Y');
-  console.log('PASS cancel while claimed leaves the assignment running; a steer re-attaches and is reported as not sent');
+  assert.equal(status(root3), 'cancelled', 'claimed authority is revoked');
+  assert.match(a.rawText('agent_message_chunk'), /worker_state: stop_requested; work_id: dec_cancelc_1/);
+  console.log('PASS cancel while claimed revokes authority and reports stop_requested');
 
   // ---- 4. kill the adapter mid-wait; a new process and a new session with the same brief re-attach: one assignment, one result
   const root4 = 'dec_restart_1', brief4 = `[dot-decision:${root4}]\nsurvive a restart`;
@@ -224,7 +218,7 @@ else console.log(JSON.stringify({ok:true,data:{}}));
   const b = adapter(); await b.init();
   const sB = (await b.newSession(noGit)).sessionId; // a relaunched T3 child is a new session
   const p4 = b.prompt(sB, brief4);
-  await waitFor(() => b.text('agent_thought_chunk').includes(`re-attached`) || b.text('agent_thought_chunk').includes(`worker assignment ${root4}`), 'attach 4');
+  await waitFor(() => b.rawText('agent_message_chunk').includes(`re-attached`) || b.rawText('agent_message_chunk').includes(`Work ${root4}`), 'attach 4');
   await finish(root4, c4, 'RESULT OF 4');
   assert.equal((await p4).result.stopReason, 'end_turn'); assert.equal(b.text('agent_message_chunk'), 'RESULT OF 4');
   assert.equal(rows(`${root4}%`).length, 1, 'exactly one assignment');
@@ -238,7 +232,7 @@ else console.log(JSON.stringify({ok:true,data:{}}));
   const c = adapter(); await c.init();
   assert.ok(!(await c.loadSession(s4b, noGit)).error);
   const p4c = c.prompt(s4b, 'Continue where you left off.');
-  await waitFor(() => c.text('agent_thought_chunk').includes(`re-attached to ${root4b}`), 'load re-attach');
+  await waitFor(() => c.rawText('agent_message_chunk').includes(`Work ${root4b}: re-attached`), 'load re-attach');
   await finish(root4b, c4b, 'RESULT OF 4b');
   assert.equal((await p4c).result.stopReason, 'end_turn'); assert.equal(c.text('agent_message_chunk'), 'RESULT OF 4b');
   assert.equal(rows(`${root4b}%`).length, 1);
@@ -257,7 +251,7 @@ else console.log(JSON.stringify({ok:true,data:{}}));
   // same brief, a longer queue age than the stored valid_until, still attaches to the stored row (valid_until is read from the payload)
   const e = adapter({ DOT_ACP_VALID_MINUTES: '5' }); await e.init();
   const pe = e.prompt((await e.newSession(noGit)).sessionId, `[dot-decision:${root5}]\nbrief A`);
-  await waitFor(() => e.text('agent_thought_chunk').includes(`worker assignment ${root5}`), 'attach despite a different valid_until');
+  await waitFor(() => e.rawText('agent_message_chunk').includes(`Work ${root5}`), 'attach despite a different valid_until');
   assert.equal(rows(`${root5}%`).length, 1);
   const tok5 = ownerToken(readOrCreateSecret(secretFile), root5);
   await adminRequest(socket, '/cancel', { method: 'POST', payload: { id: root5 }, token: tok5 });
@@ -280,16 +274,17 @@ else console.log(JSON.stringify({ok:true,data:{}}));
   assert.equal((await pf).result.stopReason, 'end_turn'); assert.equal(f.text('agent_message_chunk'), 'RESULT OF 6');
   console.log('PASS cancelled and expired rows are never attached: a new `<root>_r<n>` assignment runs');
 
-  // ---- 7. blocker ends the turn with the question
+  // ---- 7. legacy text blocker keeps the child held until the actual result
   const root7 = 'dec_blocker_1', g = adapter(); await g.init();
   const pg = g.prompt((await g.newSession(noGit)).sessionId, `[dot-decision:${root7}]\nneeds an answer`);
   await waitFor(() => status(root7) === 'queued', 'queued 7');
   const c7 = await claim(root7);
   await rpc('progress', { request_id: root7, claim_id: c7, note: 'QUESTION: which format?', blocker: true });
-  const r7 = await pg;
-  assert.equal(r7.result.stopReason, 'end_turn'); assert.match(g.text('agent_message_chunk'), /\[worker question\] QUESTION: which format\?/);
-  await finish(root7, c7, 'BLOCKER TEST COMPLETE'); // release the fake worker's claim before later repository cases
-  console.log('PASS a QUESTION blocker ends the turn with the question as the result');
+  await waitFor(()=>g.rawText('agent_message_chunk').includes('child turn held'),'held blocker');
+  await finish(root7, c7, 'BLOCKER TEST COMPLETE');
+  assert.equal((await pg).result.stopReason,'end_turn');
+  assert.match(g.rawText('agent_message_chunk'),/BLOCKER TEST COMPLETE/);
+  console.log('PASS legacy QUESTION blocker holds the turn until result');
 
   // ---- 8. eligibility: pause and queue cap; repository context and text-only fallback
   const h = adapter({ DOT_ACP_INFLIGHT_CAP: '1' }); await h.init();

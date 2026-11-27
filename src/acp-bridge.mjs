@@ -95,7 +95,16 @@ export function adminArtifact(socket, artifactId, token, timeoutMs = 5000) {
 export function parsePrompt(prompt) {
   const { id: root, text, brief } = parseIdentity(prompt, { prefix: 'dot-decision', idPattern });
   // Without a token the identity is the text after the T3 preamble, so a resend with or without a role maps to one request.
-  return { brief, root, requestRoot: root ?? `acp-${sha256(text).slice(0, 24)}` };
+  const lines = brief.split('\n');
+  let priority = 'normal', requirements = [];
+  while (/^(?:priority|requires):/.test(lines[0] ?? '')) {
+    const line = lines.shift();
+    if (line.startsWith('priority:')) {
+      priority = line.slice(9).trim();
+      if (!['normal', 'background'].includes(priority)) throw new Refusal('priority must be normal or background');
+    } else requirements = line.slice(9).trim().split(/[,\s]+/).filter(Boolean);
+  }
+  return { brief: lines.join('\n').trim(), priority, requirements, root, requestRoot: root ?? `acp-${sha256(text).slice(0, 24)}` };
 }
 // Attempt 1 is the root itself. After a cancelled or expired row the next attempt is `<root>_r<n>` (the bridge accepts only
 // [-\w] in a request id, so the doc's `#` separator cannot be used).

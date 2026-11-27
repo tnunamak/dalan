@@ -4,6 +4,8 @@
 // Shared ACP support lives in integrations/t3/acp-kit/.
 import { Readable, Writable } from 'node:stream';
 import fs from 'node:fs';
+import path from 'node:path';
+import { answerThroughJournal, journalPath, readJournal } from '../src/answer-journal.mjs';
 import { randomUUID } from 'node:crypto';
 import * as acp from '@agentclientprotocol/sdk';
 import { sessionPath, readJsonPrivate, writeJsonPrivate } from '../integrations/t3/acp-kit/src/session-store.mjs';
@@ -20,7 +22,6 @@ const HEARTBEAT_MS = num('DOT_ACP_HEARTBEAT_MS', 30_000);
 const IN_FLIGHT_CAP = num('DOT_ACP_INFLIGHT_CAP', 10);
 const VALID_MS = num('DOT_ACP_VALID_MINUTES', 30) * 60_000;
 const OUTAGE_MS = num('DOT_ACP_OUTAGE_MS', 600_000);
-const RECOVERY_CHECK_MS = 5_000; // one bridge read to confirm a usage break ended
 const CANCEL_BUDGET_MS = cancelBudgetMs(process.env.DOT_ACP_CANCEL_BUDGET_MS); // T3 allows 10 s for the prompt to return after session/cancel
 // Submit does server-side work that reads never do (it reads the pinned repository to scan the scope, checks pull request
 // state and, for builds, runs the check-readiness probes), so it gets its own deadline; every other call keeps the 5 s
@@ -50,10 +51,10 @@ const sessionFile = id => {
   try { return sessionPath(P.stateDir, id); }
   catch (e) { if (e.code === 'invalid_session_id') throw acp.RequestError.invalidParams(null, 'invalid session id'); throw e; }
 };
-// Only a session that holds an assignment needs a file; probes and idle sessions leave nothing behind.
+// Keep active work and terminal receipts; probes and idle sessions leave nothing behind.
 function saveSession(s) {
-  if (!s.pending && !s.builds?.length) { fs.rmSync(sessionFile(s.id), { force: true }); return; }
-  writeJsonPrivate(sessionFile(s.id), { id: s.id, cwd: s.cwd, model: s.model, pending: s.pending, builds: s.builds ?? [] });
+  if (!s.pending && !s.completed?.length && !s.builds?.length) { fs.rmSync(sessionFile(s.id), { force: true }); return; }
+  writeJsonPrivate(sessionFile(s.id), { id: s.id, cwd: s.cwd, model: s.model, pending: s.pending, builds: s.builds ?? [], completed: s.completed ?? [] });
 }
 const readSession = id => readJsonPrivate(sessionFile(id));
 
@@ -102,7 +103,7 @@ async function acquire(s, parsed) {
       const storedHash = row.assignment.acp_brief_hash ?? sha256(withoutNote(row.assignment.brief ?? ''));
       if (storedHash !== briefHash) throw new Refusal(`token ${parsed.requestRoot} was already used with a different brief`);
       if (row.status === 'cancelled') continue;
-      return { root: parsed.requestRoot, rid, attempt, briefHash, validUntil: row.assignment.valid_until ?? null, notes: [], startedAt: Date.now() };
+      return { root: parsed.requestRoot, rid, attempt, briefHash, admission: {status:row.status, execution:row.execution}, validUntil: row.assignment.valid_until ?? null, notes: [], startedAt: Date.now() };
     }
     const status = await call('/status', null);
     const refusal = bridgeRefusal(status, IN_FLIGHT_CAP, WORKER);
@@ -111,7 +112,7 @@ async function acquire(s, parsed) {
     if(!prepared) {
       const validUntil = new Date(Date.now() + VALID_MS).toISOString();
       const assignment = await prepareAssignment({ cwd: s.cwd, requestId: rid, brief: parsed.brief, validUntil });
-      const body = { max_queued: IN_FLIGHT_CAP, delivery: 'none', ...(WORKER ? { worker: WORKER } : {}), assignment, owner_token: tokenFor(rid), meta: { source: 'agent', ...(assignment.execution_scope === 'implementation' ? { task_kind: 'build' } : {}) }, ...(assignment.inputs.length && assignment.execution_scope !== 'implementation' ? { exclude_sensitive: true } : {}) };
+      const body = { ...(parsed.priority === 'background' ? {background:true} : {}), required_capabilities: parsed.requirements ?? [], max_queued: IN_FLIGHT_CAP, delivery: 'none', ...(WORKER ? { worker: WORKER } : {}), assignment, owner_token: tokenFor(rid), meta: { source: 'agent', ...(assignment.execution_scope === 'implementation' ? { task_kind: 'build' } : {}) }, ...(assignment.inputs.length && assignment.execution_scope !== 'implementation' ? { exclude_sensitive: true } : {}) };
       // max_queued makes admission atomic; the bridge counts only this worker's queued work of the same priority.
       prepared={body,validUntil}; preparedByAttempt.set(rid,prepared);
     }
@@ -130,7 +131,8 @@ async function acquire(s, parsed) {
       if(transient(e)&&submitRetries++<SUBMIT_RETRIES) { attempt--; continue; }
       throw e;
     }
-    try { await call('/submit', null, { method: 'POST', payload: body, timeoutMs: SUBMIT_DEADLINE_MS }); }
+    // Admission belongs to the bridge; the richer forecast can replace this reply without changing ACP.
+    try { const admitted = await call('/submit', null, { method: 'POST', payload: body, timeoutMs: SUBMIT_DEADLINE_MS }); prepared.admission = admitted.admission ?? {status:admitted.status ?? 'queued', execution:admitted.execution, submission_warnings:admitted.submission_warnings}; }
     catch (e) {
       if (e.message === 'request_id conflict') { attempt--; continue; } // lost a race: re-read the row
       if(e.verdict) throw verdictRefusal(e);
@@ -141,7 +143,7 @@ async function acquire(s, parsed) {
       if (size) throw new Refusal(size);
       throw e;
     }
-    return { root: parsed.requestRoot, rid, attempt, briefHash, validUntil:prepared.validUntil, notes: [], startedAt: Date.now() };
+    return { root: parsed.requestRoot, rid, attempt, briefHash, admission: prepared.admission, validUntil:prepared.validUntil, notes: [], startedAt: Date.now() };
   }
   throw new Refusal(`no usable assignment after ${MAX_ATTEMPTS} attempts for ${parsed.requestRoot}`);
 }
@@ -185,29 +187,40 @@ function publishPending(s, ctl) {
   s.pending = ctl.pending;
   saveSession(s);
 }
-async function runTurn(s, ctl, text, say) {
+async function runTurn(s, ctl, text, say, client) {
   const incoming = parsePrompt(text);
   let parsed = incoming;
   const notes = ctl.pending?.notes ?? [];
   if (ctl.pending) {
     const row = await readRowOrThrow(ctl.pending.rid);
-    parsed = { brief: withoutNote(row.assignment.brief), requestRoot: ctl.pending.root };
+    parsed = { brief: withoutNote(row.assignment.brief), priority: ctl.pending.priority ?? 'normal', requirements: ctl.pending.requirements ?? [], requestRoot: ctl.pending.root };
   }
   for (let expiries = 0; ; expiries++) {
+    const attached = !!ctl.pending;
     if (ctl.pending) {
       // Attached already (a steer, or T3's continuation prompt after a restart): do not submit; report what was not sent.
       const steerText = text.trim();
       if (steerText && steerText !== CONTINUE_PROMPT && sha256(incoming.brief) !== ctl.pending.briefHash && !ctl.pending.notes.includes(steerText.slice(0, 200))) ctl.pending.notes.push(steerText.slice(0, 200));
-      await say('agent_thought_chunk', `re-attached to ${ctl.pending.rid}\n`);
     } else {
       ctl.pending = await acquire(s, parsed);
       ctl.pending.notes = notes;
-      await say('agent_thought_chunk', `worker assignment ${ctl.pending.rid}\n`);
     }
+    ctl.pending.priority ??= parsed.priority;
+    ctl.pending.requirements ??= parsed.requirements;
+    ctl.pending.work_id ??= ctl.pending.rid;
+    if (!Object.hasOwn(ctl.pending, 'original_host_task_id')) ctl.pending.original_host_task_id = ctl.hostTaskId;
+    ctl.pending.original_prompt_request_id ??= ctl.promptRequestId;
+    ctl.pending.later_prompt_request_ids ??= [];
+    if (ctl.promptRequestId !== ctl.pending.original_prompt_request_id && !ctl.pending.later_prompt_request_ids.includes(ctl.promptRequestId)) ctl.pending.later_prompt_request_ids.push(ctl.promptRequestId);
+    ctl.pending.later_host_task_ids ??= [];
+    if (ctl.hostTaskId && ctl.hostTaskId !== ctl.pending.original_host_task_id && !ctl.pending.later_host_task_ids.includes(ctl.hostTaskId)) ctl.pending.later_host_task_ids.push(ctl.hostTaskId);
     publishPending(s, ctl);
+    await say('agent_message_chunk', `Work ${ctl.pending.rid}${attached ? ': re-attached' : ''}. Admission: ${JSON.stringify(ctl.pending.admission ?? {status:attached ? 'attached' : 'queued'})}\n\n`);
+    for (const [type, message] of ctl.observations.splice(0)) await say(type, message);
     // A cancel that arrived while acquire was submitting found nothing to cancel; cancel the job it created now.
     if (ctl.cancelled) { ctl.cancelDone = Promise.resolve(ctl.cancelDone).then(() => cancelPending(s, ctl)); return { cancelled: true }; }
-    const outcome = await waitLoop(s, ctl, say);
+    if (ctl.pending.terminal) return {text:ctl.pending.terminal.text};
+    const outcome = await waitLoop(s, ctl, say, client);
     if (outcome.expired) {
       if (expiries + 1 >= MAX_EXPIRIES) throw refuse(`assignment ${ctl.pending.rid} expired ${MAX_EXPIRIES} times before the worker claimed it`,{failure_type:'expired',failure_type_source:'bridge_observed_transition'});
       await say('agent_thought_chunk', `${ctl.pending.rid} expired unclaimed; resubmitting\n`);
@@ -231,41 +244,19 @@ async function heartbeat(s, ctl, say, note = '', signal = ctl.abort.signal) {
   return reply;
 }
 
-// Block until the assignment ends. Returns {text}, {blocked,text}, {cancelled} or {expired}; throws on a hard failure.
-async function waitLoop(s, ctl, say) {
+// Block until the assignment ends. Returns {text}, {cancelled} or {expired}; throws on a hard failure.
+async function waitLoop(s, ctl, say, client) {
   const slice = Math.max(1, Math.ceil(HEARTBEAT_MS / 1000));
-  let outageSince = null, breakDeadline = null, breakSignal = null;
-  const breakExpired = () => breakDeadline !== null && (breakSignal.aborted || Date.now() >= breakDeadline);
-  const breakRefusal = () => refuse('worker usage break exceeded the turn wait limit',
-    {failure_type:'adapter_error',failure_type_source:'dot_acp_worker_break'});
-  // The bridge's own report that no break is active is the only recovery evidence. The check has its own short bound, so the
-  // expired break signal cannot abort it, and it still honors the requester's cancel.
-  const breakEnded = async () => {
-    const reply = await heartbeat(s, ctl, say, '', AbortSignal.any([ctl.abort.signal, AbortSignal.timeout(RECOVERY_CHECK_MS)]));
-    return reply?.refill?.break_active === false;
-  };
-  const endBreak = () => { breakDeadline = null; breakSignal = null; };
-  // True when the limit has passed and the bridge does not say the break ended.
-  const breakOver = async () => {
-    if (!breakExpired()) return false;
-    if (ctl.cancelled || !await breakEnded()) return true;
-    endBreak();
-    return false;
-  };
+  let outageSince = null;
   for (;;) {
     if (ctl.cancelled) return { cancelled: true };
-    if (await breakOver()) { if (ctl.cancelled) return { cancelled: true }; throw breakRefusal(); }
-    let signal = breakSignal ? AbortSignal.any([ctl.abort.signal, breakSignal]) : ctl.abort.signal;
+    const signal = ctl.abort.signal;
     let r;
     try {
       r = await call(`/wait?id=${encodeURIComponent(ctl.pending.rid)}&timeout=${slice}&peek=1`, ctl.pending.rid, { signal });
       outageSince = null;
     } catch (e) {
       if (ctl.cancelled) return { cancelled: true };
-      if (breakExpired()) { // the wait ended at the limit: confirm before refusing, then wait again if the break is over
-        if (await breakOver()) { if (ctl.cancelled) return { cancelled: true }; throw breakRefusal(); }
-        continue;
-      }
       if (e.http_status === 409) { await sleep(1000, signal); continue; } // our previous process's waiter has not detached yet
       if (!transient(e)) throw refuse(`worker bridge error: ${e.message}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
       outageSince ??= Date.now();
@@ -275,28 +266,34 @@ async function waitLoop(s, ctl, say) {
       continue;
     }
     if (ctl.cancelled) return { cancelled: true };
-    // A quiet poll (status timeout) is not recovery: the bridge sends one break notice and then plain timeouts.
-    if (r.status === 'timeout') {
-      if (breakDeadline === null) await heartbeat(s, ctl, say, '', signal);
-      else if (await breakEnded()) endBreak();
-      if (await breakOver()) { if (ctl.cancelled) return { cancelled: true }; throw breakRefusal(); }
-      continue;
-    }
-    // A terminal reply ends the wait whatever the break deadline says.
-    if (r.status !== 'worker_break') { breakDeadline = null; breakSignal = null; signal = ctl.abort.signal; }
-    if (breakExpired()) throw breakRefusal();
+    if (r.status === 'progress' || r.status === 'ack_message') { await say('agent_message_chunk', `${r.note ?? r.message?.text ?? r.text ?? r.status}\n\n`); continue; }
+    await relayProgress(s, ctl, say);
+    if (r.status === 'timeout') { await heartbeat(s, ctl, say, '', signal); continue; }
     if (r.status === 'worker_break') {
-      if (breakDeadline === null) {
-        breakDeadline = Date.now() + OUTAGE_MS;
-        breakSignal = AbortSignal.timeout(Math.min(2 ** 31 - 1, Math.ceil(OUTAGE_MS)));
-      }
-      await say('agent_thought_chunk', `worker usage break: ${r.notice ?? ''}\n`);
+      await say('agent_message_chunk', `Work ${ctl.pending.rid}: worker usage break: ${r.notice ?? ''}; expected end: ${r.until ?? r.expected_end ?? 'unknown'}. The child turn remains held.\n\n`);
       continue;
     }
-    if (r.status === 'blocker' || r.status === 'question') return { blocked: true, text: `[worker ${r.status}] ${r.blocker_text ?? ''}`.trim() };
+    if (r.status === 'question' || r.status === 'blocker') {
+      // A question never ends the child turn: the job is still open, so report the failure once and try again next round.
+      try { await handleQuestions(s, ctl, say, client, r); }
+      catch (error) {
+        if (error instanceof acp.RequestError) throw error;
+        const message = String(error?.message ?? error);
+        if (ctl.lastQuestionError !== message) {
+          ctl.lastQuestionError = message;
+          await say('agent_message_chunk', `Work ${ctl.pending.rid}: a worker question could not be handled: ${message} (child turn held; trying again).\n\n`);
+        }
+      }
+      await sleep(Math.min(1000, HEARTBEAT_MS), signal);
+      continue;
+    }
     if (r.status === 'finished') {
       const row = await readRowOrThrow(ctl.pending.rid), text = await resultText(row);
       trackBuild(s, row);
+      const terminal = row.delivery?.findLast(e => ['result','t3','wait'].includes(e.kind) && !e.terminal_reason?.includes('question'));
+      ctl.pending.terminal_event_id = terminal?.id ?? row.report?.receipt_id ?? null;
+      ctl.pending.terminal = { text, report_receipt_id: row.report?.receipt_id ?? null };
+      publishPending(s, ctl);
       return { text };
     }
     if (r.status === 'cancelled') {
@@ -309,6 +306,70 @@ async function waitLoop(s, ctl, say) {
       throw refuse(`assignment ${rid} was cancelled (not by this session)`,{failure_type:'owner_cancelled',failure_type_source:'bridge_observed_transition'});
     }
     throw refuse(`unexpected wait status ${r.status}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_adapter'});
+  }
+}
+// Progress stays on this child transcript. The cursor survives adapter restarts.
+async function relayProgress(s, ctl, say) {
+  const row = await readRowOrThrow(ctl.pending.rid);
+  const progress = row.progress ?? [];
+  for (const event of progress.slice(ctl.pending.progress_count ?? 0)) await say('agent_message_chunk', `${event.note}\n\n`);
+  ctl.pending.progress_count = progress.length;
+  publishPending(s, ctl);
+}
+async function handleQuestions(s, ctl, say, client, notice) {
+  const rid = ctl.pending.rid, receiptsDir = path.join(P.stateDir,'answers');
+  const listQuestions = async () => (await call(`/questions?id=${encodeURIComponent(rid)}`, rid)).questions ?? [];
+  // Read the question again before each step: the parent may take minutes, and meanwhile the job can finish, be claimed
+  // again, or get the answer elsewhere. Only an open question of an open job under the current claim is live.
+  const live = async questionId => {
+    const q = (await listQuestions()).find(item => item.question_id === questionId), row = await readRowOrThrow(rid);
+    if (!q || ['finished','cancelled'].includes(row.status) || q.answered_at || q.answer != null) return null;
+    return row.claim && (q.epoch !== row.claim.epoch || q.claim_id !== row.claim.claim_id) ? null : q;
+  };
+  const questions = await listQuestions();
+  for (const listed of questions) {
+    const q = await live(listed.question_id);
+    if (!q) continue;
+    const purpose = q.purpose ?? 'clarification';
+    const expectedRespondent = purpose === 'clarification' ? 'parent_agent' : 'human_owner';
+    const identity = {work_id:rid, question_id:q.question_id, purpose, expected_respondent:expectedRespondent};
+    if (expectedRespondent === 'human_owner') {
+      if (!ctl.humanNotices?.has(q.question_id)) {
+        (ctl.humanNotices ??= new Set()).add(q.question_id);
+        await say('agent_message_chunk', `${JSON.stringify(identity)}: ${q.text}. This question requires the human owner; it cannot be answered by the parent agent.\n\n`);
+      }
+      continue;
+    }
+    // An answer saved before a restart is sent again as saved; the parent is not asked a second time.
+    const saved = readJournal(journalPath(receiptsDir, rid, q.question_id), rid, q.question_id);
+    let text = saved && saved.state !== 'committed' ? saved.text : null;
+    if (text === null) {
+      if (saved || ctl.askedQuestions?.has(q.question_id)) continue;
+      (ctl.askedQuestions ??= new Set()).add(q.question_id);
+      const response = await client.request(acp.methods.client.elicitation.create, {
+        sessionId:s.id, mode:'form', message:`${JSON.stringify(identity)}\n${q.text}`,
+        requestedSchema:{type:'object', properties:{answer:{type:'string', title:q.question_id, description:q.text}}, required:['answer']},
+      });
+      if (ctl.cancelled) return;
+      if (response.action !== 'accept') {
+        await say('agent_message_chunk', `Work ${rid}: you declined to answer question ${q.question_id}. The question is still open and the job waits for an answer (child turn held).\n\n`);
+        continue;
+      }
+      if (!await live(q.question_id)) {
+        await say('agent_message_chunk', `Work ${rid}: question ${q.question_id} was answered or closed while you decided, so your answer was not sent.\n\n`);
+        continue;
+      }
+      text = response.content?.answer;
+    }
+    await answerThroughJournal({receiptsDir, job:rid, questionId:q.question_id, text,
+      readRevision:async () => (await readRowOrThrow(rid)).protocol_revision ?? null,
+      post:payload => call('/answer',rid,{method:'POST',payload}),
+      readQuestion:async () => (await call(`/questions?id=${encodeURIComponent(rid)}`,rid)).questions.find(item => item.question_id === q.question_id)});
+    await say('agent_message_chunk', `Answer recorded for work ${rid}, question ${q.question_id}.\n\n`);
+  }
+  if (!questions.length && notice.blocker_text && ctl.lastBlocker !== notice.blocker_text) {
+    ctl.lastBlocker = notice.blocker_text;
+    await say('agent_message_chunk', `Work ${rid}: ${notice.blocker_text} (waiting; child turn held).\n\n`);
   }
 }
 async function readRowOrThrow(rid) {
@@ -334,7 +395,7 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
   .onRequest(acp.methods.agent.session.load, ({ params }) => {
     sessionFile(params.sessionId); // validates the id
     const saved = readSession(params.sessionId); // a session without an assignment has no file: it restores empty
-    sessions.set(params.sessionId, { id: params.sessionId, cwd: params.cwd ?? saved?.cwd, model: MODEL, pending: saved?.pending ?? null, builds: saved?.builds ?? [], ctl: null });
+    sessions.set(params.sessionId, { id: params.sessionId, cwd: params.cwd ?? saved?.cwd, model: MODEL, pending: saved?.pending ?? null, builds: saved?.builds ?? [], completed: saved?.completed ?? [], loaded: true, ctl: null });
     return { configOptions: configOptions(MODEL) };
   })
   .onRequest(acp.methods.agent.session.setConfigOption, ({ params }) => {
@@ -344,11 +405,11 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
     if (params.configId !== 'model' || ![MODEL, 'default'].includes(params.value)) throw acp.RequestError.invalidParams(null, `only model "${MODEL}" exists`);
     return { configOptions: configOptions(MODEL) };
   })
-  .onRequest(acp.methods.agent.session.prompt, async ({ params, client }) => {
+  .onRequest(acp.methods.agent.session.prompt, async ({ params, client, requestId }) => {
     const s = sessions.get(params.sessionId);
     if (!s) throw acp.RequestError.invalidParams(null, `unknown session ${params.sessionId}`);
     if (s.ctl) throw acp.RequestError.invalidRequest(null, 'prompt already active');
-    const ctl = s.ctl = { abort: new AbortController(), cancelled: false, cancelDone: null, pending: null, generation: s.generation = (s.generation ?? 0) + 1 };
+    const ctl = s.ctl = { abort: new AbortController(), cancelled: false, cancelDone: null, pending: null, hostTaskId: params._meta?.delegatedTaskId ?? null, promptRequestId: requestId, generation: s.generation = (s.generation ?? 0) + 1 };
     const say = (type, text) => !currentTurn(s, ctl) ? Promise.resolve() : client.notify(acp.methods.client.session.update, { sessionId: s.id, update: { sessionUpdate: type, content: { type: 'text', text } } }).catch(() => {});
     let lock;
     try {
@@ -357,7 +418,19 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
       const saved = readSession(s.id);
       ctl.pending = s.pending = saved?.pending ?? null;
       s.builds = saved?.builds ?? s.builds ?? [];
-      await reportPresentPatches(s, say);
+      s.completed = saved?.completed ?? s.completed ?? [];
+      const text = promptText(params.prompt);
+      const replay = s.completed.findLast(item => text.includes(item.work_id)) ?? (s.loaded && text.trim() === CONTINUE_PROMPT ? s.completed.at(-1) : null);
+      s.loaded = false;
+      if (!ctl.pending && replay) {
+        if (ctl.hostTaskId && !replay.later_host_task_ids.includes(ctl.hostTaskId)) replay.later_host_task_ids.push(ctl.hostTaskId);
+        if (requestId !== replay.original_prompt_request_id && !replay.later_prompt_request_ids.includes(requestId)) replay.later_prompt_request_ids.push(requestId);
+        saveSession(s);
+        await say('agent_message_chunk', replay.terminal.text);
+        return { stopReason: 'end_turn' };
+      }
+      ctl.observations = [];
+      await reportPresentPatches(s, async (type, message) => { ctl.observations.push([type, message]); });
       if (ctl.cancelled) {
         await Promise.race([cancelPending(s, ctl), sleep(CANCEL_CLEANUP_MS)]);
         return { stopReason: 'cancelled' };
@@ -366,10 +439,11 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
       // T3 allows 10 s after session/cancel; if acquire or a notification stalls, answer anyway and let runTurn finish
       // in the background (its own cancelled check then cancels any job it created).
       const cancelled = new Promise(r => ctl.abort.signal.addEventListener('abort', () => setTimeout(() => r({ cancelled: true }), CANCEL_BUDGET_MS), { once: true }));
-      const turn = runTurn(s, ctl, promptText(params.prompt), say);
+      const turn = runTurn(s, ctl, text, say, client);
       turn.catch(() => {});
       try { outcome = await Promise.race([turn, cancelled]); }
       catch (e) {
+        for (const [type, message] of ctl.observations.splice(0)) await say(type, message);
         if (ctl.cancelled) outcome = { cancelled: true };
         else if (e instanceof Refusal) {
           const data={};
@@ -380,10 +454,11 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
         else throw refuse(`worker adapter error: ${e.message}`,{failure_type:transient(e)?'transport_error':'adapter_error',failure_type_source:'dot_acp_adapter'});
       }
       // Bounded: the 5 s fallback plus at most 2 s here stays inside T3's 10 s cancel window.
-      if (outcome.cancelled) { await Promise.race([ctl.cancelDone, sleep(CANCEL_CLEANUP_MS)]); return { stopReason: 'cancelled' }; }
+      if (outcome.cancelled) { await Promise.race([ctl.cancelDone, sleep(CANCEL_CLEANUP_MS)]); await say('agent_message_chunk', `requester_interrupted: true; worker_state: ${ctl.workerState ?? 'still_running'}; work_id: ${ctl.pending?.rid ?? ctl.cancelledWorkId ?? 'not yet assigned'}\n`); return { stopReason: 'cancelled' }; }
       const notes = ctl.pending.notes.map(n => `\n\nnot sent to the worker: ${n}`).join('');
       await say('agent_message_chunk', outcome.text + notes);
-      if (!outcome.blocked) ctl.pending = null; // finished: the next prompt is a new request
+      s.completed.push(ctl.pending);
+      ctl.pending = null;
       publishPending(s, ctl);
       return { stopReason: 'end_turn' };
     } finally {
@@ -391,8 +466,7 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
       lock?.release();
     }
   })
-  // Answer the pending prompt as cancelled, then cancel the assignment only if no one claimed it. A claimed assignment keeps
-  // running and stays retrievable: the next prompt (or a relaunch with the same token) re-attaches.
+  // Interrupt the requester and revoke work authority through the real cancel operation.
   .onNotification(acp.methods.agent.session.cancel, ({ params }) => {
     const s = sessions.get(params.sessionId);
     const ctl = s?.ctl;
@@ -406,11 +480,12 @@ async function cancelPending(s, ctl) {
   const pending = ctl.pending;
   if (!pending) return;
   try {
-    const r = await Promise.race([call('/cancel-if-queued', pending.rid, { method: 'POST', payload: { id: pending.rid } }), sleep(CANCEL_BUDGET_MS).then(() => null)]);
-    // Cancelled here or already (another session on the same token, or the operator): nothing is left to re-attach to.
-    if ((r?.cancelled || r?.status === 'cancelled') && ctl.pending === pending) { ctl.pending = null; publishPending(s, ctl); log(`cancelled queued ${pending.rid}`); }
-    else log(`cancel left ${pending.rid} ${r?.status ?? 'unknown'}`);
-  } catch (e) { log(`cancel-if-queued failed for ${pending.rid}: ${e.message}`); }
+    ctl.cancelledWorkId = pending.rid;
+    const row = await readRowOrThrow(pending.rid);
+    const r = await Promise.race([call('/cancel', pending.rid, { method: 'POST', payload: { id: pending.rid, command_key: `acp-cancel:${pending.rid}`, ...(Number.isSafeInteger(row.protocol_revision) ? {expected_revision:row.protocol_revision} : {}) } }), sleep(CANCEL_BUDGET_MS).then(() => null)]);
+    ctl.workerState = !r ? 'still_running' : (r.scope?.not_controlled === 'nothing was running, so there was no worker compute to stop' || !r.scope && row.status === 'queued') ? 'withdrawn' : r.compute_stopped === true ? 'withdrawn' : 'stop_requested';
+    if (r?.status === 'cancelled' && ctl.pending === pending) { ctl.pending = null; publishPending(s, ctl); }
+  } catch (e) { ctl.workerState = 'still_running'; log(`cancel failed for ${pending.rid}: ${e.message}`); }
 }
 
 // T3 closing our stdin means it is done with this session. Exit without cancelling anything: queued rows expire by
