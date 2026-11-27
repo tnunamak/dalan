@@ -10,6 +10,12 @@ test('the final tick before the deadline is valid and the deadline is exclusive'
   assert.throws(() => assertClaimAuthority(command, authority, 10), {code:'lease_expired'});
 });
 
+test('an invalid authority clock reading is refused', () => {
+  for (const now of [NaN, -1, 1.5, undefined]) {
+    assert.throws(() => assertClaimAuthority(command, authority, now), {code:'lease_expired'}, String(now));
+  }
+});
+
 test('identity mismatch retains precedence over the deadline check', () => {
   assert.throws(() => assertClaimAuthority(command, {...authority,epoch:2}, 10), {code:'stale_authority'});
 });
