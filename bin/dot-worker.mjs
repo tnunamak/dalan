@@ -36,7 +36,7 @@ import { workerPrompt } from '../src/worker-prompt.mjs';
 import { stoppedTrialFix } from '../src/try-command.mjs';
 import { formatGetSummary, formatGetEndNote, formatWaitLine } from '../src/get-summary.mjs';
 import { cliCommand } from '../src/cli-name.mjs';
-import { applyPatch, listPatchFiles, patchMatchesWorktree, worktreeRoot } from '../src/patch-apply.mjs';
+import { applyPatch, listPatchFiles, materializeDecision, readMaterializeGrant, patchMatchesWorktree, worktreeRoot } from '../src/patch-apply.mjs';
 import { terminalSafe, jsonTerminalSafe } from '../src/terminal-safe.mjs';
 import { loadOwnerWorkers, parseWorkers, submitTarget, updateWorkerRepoPolicy, writeGenericProfile, writeLegacyMarker, readWorkerRepoHistory, seedWorkerRepos, inspectGrantAudit, ensureWorkerRelationship, AUDIT_INTEGRITY_HINT } from '../src/workers.mjs';
 import { adminSocketPathError, adminSocketPath } from '../src/admin-socket.mjs';
@@ -115,7 +115,7 @@ function request(route, method = 'GET', payload, headers={}, timeoutMs=30000) {
   });
 }
 
-function download(id,output) { return new Promise((resolve,reject)=>{ const socketPathError=adminSocketPathError(socket); if(socketPathError) return reject(socketPathError); const req=http.request({socketPath:socket,path:'/artifact?id='+encodeURIComponent(id),headers:{'x-owner-capability':receiptForArtifact(id).token}},res=>{if(res.statusCode!==200){let body='';res.on('data',b=>body+=b);res.on('end',()=>reject(new Error(JSON.parse(body).error)));return;}const bytes=[];res.on('data',b=>bytes.push(b));res.on('end',()=>{const data=Buffer.concat(bytes),digest=createHash('sha256').update(data).digest('hex');if(digest!==res.headers['x-artifact-sha256']) return reject(new Error('artifact digest mismatch'));fs.writeFileSync(output,data,{flag:'wx',mode:0o600});resolve({artifact_id:id,output,bytes:data.length,sha256:digest});});});req.on('error',reject);req.end();}); }
+function download(id,output,ownerHeaders) { return new Promise((resolve,reject)=>{ const socketPathError=adminSocketPathError(socket); if(socketPathError) return reject(socketPathError); if(!artifactIdPattern.test(id)) return reject(new Error('invalid artifact ID')); const req=http.request({socketPath:socket,path:'/artifact?id='+encodeURIComponent(id),headers:ownerHeaders??{'x-owner-capability':receiptForArtifact(id).token}},res=>{if(res.statusCode!==200){let body='';res.on('data',b=>body+=b);res.on('end',()=>reject(new Error(JSON.parse(body).error)));return;}const bytes=[];res.on('data',b=>bytes.push(b));res.on('end',()=>{const data=Buffer.concat(bytes),digest=createHash('sha256').update(data).digest('hex');if(digest!==res.headers['x-artifact-sha256']) return reject(new Error('artifact digest mismatch'));fs.writeFileSync(output,data,{flag:'wx',mode:0o600});resolve({artifact_id:id,output,bytes:data.length,sha256:digest});});});req.on('error',reject);req.end();}); }
 const artifactIdPattern=/^art_[-\w]{8,128}$/;
 function receiptForArtifact(id) { if(!artifactIdPattern.test(id)) throw new Error('invalid artifact ID');let requestId;try{requestId=fs.readFileSync(path.join(root,'artifact-index',id),'utf8').trim();}catch{throw new Error('artifact owner unknown; run dalan get REQUEST_ID or wait REQUEST_ID first');}return receipt(requestId); }
 function canonical(value) { if(Array.isArray(value)) return value.map(canonical); if(value&&typeof value==='object') return Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonical(value[k])])); return value; }
@@ -641,6 +641,36 @@ async function main() {
       if(args.includes('--note')&&!option('--note')) throw new Error('--note requires text');
       result=await request('/decide','POST',{id,decision,...(args.includes('--note')?{note:option('--note')}:{})},{'x-owner-capability':receipt(id).token});
       if(!json&&process.stdout.isTTY) { result=`Recorded ${id} as ${decision}.`; plainOutput=true; }
+      break;
+    }
+    case 'materialize': {
+      const id=args[0], flags=args.slice(1);
+      if(!/^[-\w]{8,128}$/.test(id??'') || !flags.includes('--dry-run') ||
+          flags.some(flag=>!['--dry-run','--json'].includes(flag)) || new Set(flags).size!==flags.length) {
+        throw new Error('usage: dalan materialize ID --dry-run [--json]');
+      }
+      const grant=readMaterializeGrant(defaultPath(home,'.config/dot-bridge/materialize.json'));
+      const headers={'x-owner-capability':receipt(id).token};
+      const got=await request('/get?id='+encodeURIComponent(id)+'&peek=1','GET',null,headers);
+      if(got.status!=='finished'||got.revised_by) throw new Error('materialize needs a current, finished result');
+      const ev=got.report?.workspace_evidence, art=ev?.patch_artifact, inputs=got.assignment?.inputs;
+      if(!Array.isArray(inputs)||inputs.length!==1||!art?.artifact_id||!art.size||!/^[a-f0-9]{64}$/.test(art.sha256??'')) {
+        throw new Error('materialize needs one repository and a sealed patch');
+      }
+      const repo=inputs[0].github_repo, base_sha=ev.base_sha??inputs[0].base_sha;
+      if(!/^[a-f0-9]{40}$/.test(base_sha??'')) throw new Error('materialize needs a pinned base commit');
+      const decision=materializeDecision(grant,repo,id);
+      const temp=fs.mkdtempSync(path.join(os.tmpdir(),'dalan-materialize-')), file=path.join(temp,'patch.diff');
+      try {
+        const downloaded=await download(art.artifact_id,file,headers);
+        if(downloaded.sha256!==art.sha256||downloaded.bytes!==art.size) throw new Error('materialize patch does not match the report');
+        const files=listPatchFiles(temp,fs.readFileSync(file));
+        result={request_id:id,repo,base_sha,files,decision};
+        if(!json) {
+          result=[repo+' at '+base_sha, 'Dry run only: '+decision.reason+'; branch '+decision.branch, ...files.map(file=>'  '+file)].join('\n');
+          plainOutput=true;
+        }
+      } finally { fs.rmSync(temp,{recursive:true,force:true}); }
       break;
     }
     case 'apply': {

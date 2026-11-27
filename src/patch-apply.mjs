@@ -7,6 +7,53 @@ import path from 'node:path';
 
 const git = (dir, args, input, env) => spawnSync('git', ['-C', dir, ...args], { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env });
 
+const materializeName = '[A-Za-z0-9][A-Za-z0-9_.-]*';
+const materializeRepo = new RegExp('^' + materializeName + '/' + materializeName + '$');
+const materializeEntry = new RegExp('^(?:org:' + materializeName + '|repo:' + materializeName + '/' + materializeName + ')$');
+const grantError = (local_code, message) => Object.assign(new Error(local_code + ': ' + message), {local_code});
+
+export function readMaterializeGrant(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw grantError('materialize_grant_unsafe', 'cannot safely open the owner grant file');
+  }
+  try {
+    const state = fs.fstatSync(fd);
+    if (!state.isFile() || typeof process.getuid !== 'function' || state.uid !== process.getuid() || (state.mode & 0o777) !== 0o600) {
+      throw grantError('materialize_grant_unsafe', 'the owner grant must be a regular owner-owned mode 0600 file');
+    }
+    let parsed;
+    try {
+      if (state.size > 16 * 1024) throw new Error('too large');
+      parsed = JSON.parse(fs.readFileSync(fd, 'utf8'));
+    } catch {
+      throw grantError('materialize_grant_invalid', 'expected a small JSON grant document');
+    }
+    if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).length !== 2 ||
+        !['standing', 'per_pr'].includes(parsed.mode) || !Array.isArray(parsed.grant) ||
+        !parsed.grant.every(entry => typeof entry === 'string' && materializeEntry.test(entry))) {
+      throw grantError('materialize_grant_invalid', 'expected mode standing or per_pr and exact org: or repo: entries');
+    }
+    return parsed;
+  } finally { fs.closeSync(fd); }
+}
+
+export function materializeDecision(grant, repo, requestId) {
+  if (typeof repo !== 'string' || !materializeRepo.test(repo) || !/^[-\w]{8,128}$/.test(requestId)) {
+    throw grantError('materialize_result_invalid', 'expected one exact repository and a valid request ID');
+  }
+  const [org] = repo.toLowerCase().split('/');
+  const eligible = !!grant?.grant.some(entry => ['org:' + org, 'repo:' + repo.toLowerCase()].includes(entry.toLowerCase()));
+  const push = eligible && grant.mode === 'standing';
+  const needs_approval = eligible && grant.mode === 'per_pr';
+  return { push, draft_pr: push, needs_approval, branch: 'dalan/' + requestId,
+    reason: push ? 'standing_grant' : needs_approval ? 'per_pr_approval_required' : 'no_standing_grant' };
+}
+
+
 // git apply from a subdirectory can silently skip root-relative paths.
 export function worktreeRoot(dir, env) {
   const root = git(dir, ['rev-parse', '--show-toplevel'], undefined, env);

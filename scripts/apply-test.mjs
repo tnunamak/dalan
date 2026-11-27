@@ -111,7 +111,7 @@ let evidenceSha = sha(PATCH), served = PATCH, decided = [], getStatus = 'finishe
 let reservation = null, dropConfirm = false, correctionAfterReserve = false, releaseReasons = [], attemptNo = 0, currentAttempt = null, takeoverAfterReserve = false, artifactGate = null, artifactSeen = null;
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
-  if (url.pathname === '/get') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ request_id: RID, status: getStatus, assignment: { inputs: [{ base_sha: 'f'.repeat(40) }] }, ...(reservation ? { apply: { state: reservation === 'applying' ? 'applying' : reservation, uncertain: reservation === 'applying' } } : {}), ...(corrected && reservation !== 'applying' ? { revised_by: { request_id: 'req_correction1' } } : {}), report: { workspace_evidence: { base_sha: CLI_BASE, patch_artifact: { artifact_id: ART, size: PATCH.length, sha256: evidenceSha } } } })); }
+  if (url.pathname === '/get') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ request_id: RID, status: getStatus, assignment: { inputs: [{ base_sha: 'f'.repeat(40), github_repo: 'example-owner/example-repo' }] }, ...(reservation ? { apply: { state: reservation === 'applying' ? 'applying' : reservation, uncertain: reservation === 'applying' } } : {}), ...(corrected && reservation !== 'applying' ? { revised_by: { request_id: 'req_correction1' } } : {}), report: { workspace_evidence: { base_sha: CLI_BASE, patch_artifact: { artifact_id: ART, size: PATCH.length, sha256: evidenceSha } } } })); }
   if (url.pathname === '/artifact') { if (artifactSeen) artifactSeen(); if (artifactGate) return artifactGate.then(() => { if (correctionLandsDuringDownload) corrected = true; res.setHeader('x-artifact-sha256', sha(served)); res.setHeader('content-type', 'application/octet-stream'); res.end(served); }); if (correctionLandsDuringDownload) corrected = true; res.setHeader('x-artifact-sha256', sha(served)); res.setHeader('content-type', 'application/octet-stream'); return res.end(served); }
   if (url.pathname === '/decide') { let b = ''; req.on('data', c => b += c); req.on('end', () => {
     const body = JSON.parse(b), json = (code, value) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
@@ -152,6 +152,46 @@ const run = (...argv) => new Promise(resolve => {
 const clone = name => { const d = path.join(base, name); const r = spawnSync('git', ['clone', '-q', cli, d]); assert.equal(r.status, 0, String(r.stderr)); return d; };
 const cli = repo('cli'); write(cli, 'a.txt', 'one\ntwo\n'); const CLI_BASE = commit(cli, 'base');
 try {
+  // Materialize is a dry-run even when the fixture owner has a standing grant.
+  const fixtureConfig = path.join(home, '.config/dot-bridge/materialize.json');
+  fs.mkdirSync(path.dirname(fixtureConfig), {recursive: true});
+  const grantFile = (text, mode=0o600) => {
+    fs.writeFileSync(fixtureConfig, text, {mode});
+    fs.chmodSync(fixtureConfig, mode);
+  };
+  const preview = (...args) => run('materialize', RID, '--dry-run', '--json', ...args);
+  const ungranted = await preview();
+  assert.equal(ungranted.code, 0, ungranted.stderr);
+  assert.equal(JSON.parse(ungranted.stdout).decision.push, false);
+  for (const key of ['org:EXAMPLE-OWNER', 'repo:example-owner/EXAMPLE-REPO', 'repo:example-owner/other-repo', 'org:example-owne']) {
+    grantFile(JSON.stringify({grant:[key],mode:'standing'}));
+    const trial = await preview();
+    assert.equal(trial.code, 0, trial.stderr);
+    const result = JSON.parse(trial.stdout);
+    assert.equal(result.repo, 'example-owner/example-repo');
+    assert.equal(result.base_sha, CLI_BASE);
+    assert.ok(result.files.includes('new.txt'));
+    assert.equal(result.decision.branch, 'dalan/' + RID);
+    assert.equal(result.decision.push, key === 'org:EXAMPLE-OWNER' || key === 'repo:example-owner/EXAMPLE-REPO');
+  }
+  grantFile(JSON.stringify({grant:['repo:example-owner/example-repo'],mode:'per_pr'}));
+  const prompted = await preview();
+  assert.equal(prompted.code, 0, prompted.stderr);
+  assert.deepEqual(JSON.parse(prompted.stdout).decision, {
+    push:false, draft_pr:false, needs_approval:true, branch:'dalan/'+RID, reason:'per_pr_approval_required',
+  });
+  grantFile('{invalid');
+  assert.notEqual((await preview()).code, 0);
+  grantFile(JSON.stringify({grant:['org:example-owner'],mode:'standing'}), 0o644);
+  const wide = await preview();
+  assert.notEqual(wide.code, 0);
+  assert.match(wide.stdout + wide.stderr, /materialize_grant_unsafe/);
+  fs.unlinkSync(fixtureConfig);
+  assert.equal(decided.length, 0);
+  assert.equal(reservation, null);
+  assert.equal(fs.existsSync(path.join(cli, 'new.txt')), false);
+  assert.equal(fs.existsSync(path.join(root, 'artifact-index')), false);
+
   // digest in the evidence does not match the bytes served: refused, nothing applied, nothing recorded
   evidenceSha = sha('lie'); let r = await run('apply', RID, '--dir', cli);
   assert.notEqual(r.code, 0); assert.match(r.stderr, /sha256 does not match/); assert.equal(decided.length, 0); assert.equal(fs.existsSync(path.join(cli, 'new.txt')), false);
