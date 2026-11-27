@@ -234,7 +234,7 @@ cases.set(7, async () => fixture(async f => {
   const a = await f.adapter({ DOT_ACP_INFLIGHT_CAP: '3' }), sid = (await a.newSession(f.cwd)).sessionId;
   const p = a.prompt(sid, '[dot-decision:review_cap_forward]\nforward the cap');
   await waitFor(() => f.rows.has('review_cap_forward'), 'adapter submission');
-  assert.equal(cap, 3, 'adapter forwards its cap to atomic admission');
+  assert.equal(cap, undefined, 'adapter must not send an all-priority cap to atomic admission');
   a.cancel(sid); await bounded(p);
 }));
 cases.set(8, async () => fixture(async f => {
@@ -281,6 +281,13 @@ cases.set(10, async () => {
   // reached estimates (and the legacy flags an older bridge sent) do not refuse
   assert.equal(bridge.bridgeRefusal({ counts: [], throttle: { over_estimate: ['tool_calls_per_24h'], normal_rewake_throttled: false, rewake_throttled: false, holding: { rewake: [], submit: [] } } }, 5), null, 'a reached estimate refused work');
   assert.match(bridge.bridgeRefusal({ counts: [{ status: 'queued', count: 5 }], worker_break: brk('inferred') }, 5), /queue is full/);
+  const counts = [{ status: 'queued', count: 17 }];
+  const scoped = (row) => ({ counts, by_worker: { dot: row } });
+  assert.equal(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 2 }), 10, 'dot'), null);
+  assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 10 }), 10, 'dot'), /queue is full \(10 queued/);
+  assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12 }), 10, 'dot'), /queue is full \(12 queued/);
+  assert.match(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 2 }), 10), /queue is full \(17 queued/);
+  assert.equal(bridge.bridgeRefusal(scoped({ queued_live: 12, queued_normal: 0 }), 10, 'dot'), null);
 });
 const only = process.argv[2] ? Number(process.argv[2]) : null;
 for (const [finding, test] of cases) {

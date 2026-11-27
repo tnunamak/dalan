@@ -105,13 +105,15 @@ async function acquire(s, parsed) {
       return { root: parsed.requestRoot, rid, attempt, briefHash, validUntil: row.assignment.valid_until ?? null, notes: [], startedAt: Date.now() };
     }
     const status = await call('/status', null);
-    const refusal = bridgeRefusal(status, IN_FLIGHT_CAP);
+    const refusal = bridgeRefusal(status, IN_FLIGHT_CAP, WORKER);
     if (refusal) throw new Refusal(refusal,'deferred',{failure_type_source:'bridge_status_refusal',verdict:'defer'});
     let prepared=preparedByAttempt.get(rid);
     if(!prepared) {
       const validUntil = new Date(Date.now() + VALID_MS).toISOString();
       const assignment = await prepareAssignment({ cwd: s.cwd, requestId: rid, brief: parsed.brief, validUntil });
       const body = { max_queued: IN_FLIGHT_CAP, delivery: 'none', ...(WORKER ? { worker: WORKER } : {}), assignment, owner_token: tokenFor(rid), meta: { source: 'agent', ...(assignment.execution_scope === 'implementation' ? { task_kind: 'build' } : {}) }, ...(assignment.inputs.length && assignment.execution_scope !== 'implementation' ? { exclude_sensitive: true } : {}) };
+      // The server's legacy max_queued counts all priorities; the scoped facade check above is the cap.
+      delete body.max_queued;
       prepared={body,validUntil}; preparedByAttempt.set(rid,prepared);
     }
     const {body,validUntil}=prepared;
