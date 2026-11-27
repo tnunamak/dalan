@@ -601,5 +601,8 @@ say('CAP immutable_input_snapshot: unsupported (the workspace is a writable bind
 const fails = results.filter(r => r.status === 'FAIL');
 const count = status => results.filter(r => r.status === status).length;
 say(`\nSUMMARY ${count('PASS')} PASS, ${fails.length} FAIL, ${count('UNSUPPORTED')} UNSUPPORTED in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
-if (JSON_MODE) console.log(JSON.stringify({ suite: 'scripts/sandbox-probe-e2e.mjs', backend: hostBackend().name, probes: results, capabilities, summary: { pass: count('PASS'), fail: fails.length, unsupported: count('UNSUPPORTED') } }));
+const capability_probes = Object.fromEntries(caps);
+if (X1_ONLY) Object.assign(capability_probes,{host_pid_proc_isolated:['7.3'],run_phase_networkless:['9.1'],
+  pinned_budget_resists_candidate_metadata:['8.1']});
+if (JSON_MODE) console.log(JSON.stringify({ suite: 'scripts/sandbox-probe-e2e.mjs', backend: hostBackend().name, probes: results, capabilities, capability_probes, summary: { pass: count('PASS'), fail: fails.length, unsupported: count('UNSUPPORTED') } }));
 process.exit(fails.length ? 1 : 0);
