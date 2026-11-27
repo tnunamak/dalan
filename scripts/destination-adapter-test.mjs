@@ -157,6 +157,7 @@ await row('assignment delivery tuple backfills legacy rows, survives reopen, and
     const old=store.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,delivery) VALUES(?,?,?,?,?,?,?,?)');
     old.run('req_old_none','{}','hash','','','queued',new Date().toISOString(),'none');
     old.run('req_old_t3','{}','hash','legacy:thread','','queued',new Date().toISOString(),'t3:legacy:thread');
+    for(const [id,bad] of [['req_old_empty','t3:'],['req_old_short','t3:ab'],['req_old_space','t3:bad id 1234']]) old.run(id,'{}','hash','','','queued',new Date().toISOString(),bad);
     for(const field of ['delivery_adapter','delivery_address','delivery_adapter_version']){
       if(store.db.prepare('PRAGMA table_info(assignments)').all().some(column=>column.name===field))
         store.db.exec('ALTER TABLE assignments DROP COLUMN '+field);
@@ -166,6 +167,7 @@ await row('assignment delivery tuple backfills legacy rows, survives reopen, and
     store=new Store(file);
     assert.deepEqual(deliveryTuple(store,'req_old_none'),wantTuple('none',null));
     assert.deepEqual(deliveryTuple(store,'req_old_t3'),wantTuple('t3','legacy:thread'));
+    for(const id of ['req_old_empty','req_old_short','req_old_space']) assert.deepEqual(deliveryTuple(store,id),{delivery_adapter:null,delivery_address:null,delivery_adapter_version:null},'a malformed t3: row stays unknown: '+id);
     for(const [suffix,delivery,expected] of [
       ['none','none',wantTuple('none',null)],
       ['t3','t3:fixture:parent',wantTuple('t3','fixture:parent')],
