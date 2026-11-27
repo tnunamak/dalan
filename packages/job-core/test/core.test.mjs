@@ -331,3 +331,20 @@ test('renewal at the initial supplied clock advances a frozen revision without a
   });
   assert.equal(snapshot.leaseUntil, 50);
 });
+
+test('renewal resolves a new deadline from the supplied clock, not the previous lease', () => {
+  const snapshot = { revision: 8, leaseUntil: 120 };
+  const command = { operation: 'renew', expectedRevision: 8, args: { leaseMs: 10 } };
+  const early = decide(snapshot, command, { now: 100, maxLeaseMs: 20 });
+  const late = decide(snapshot, command, { now: 105, maxLeaseMs: 20 });
+  assert.deepEqual([early.leaseUntil, late.leaseUntil], [110, 115]);
+  assert.deepEqual(late.effects, early.effects);
+  assert.equal(snapshot.leaseUntil, 120);
+});
+
+test('ordinary decision output omits leaseUntil when serialized rather than sending null', () => {
+  const effect = decide({ revision: 1 }, { operation: 'progress', expectedRevision: 1 });
+  const wire = JSON.parse(canonicalJson(effect));
+  assert.equal(Object.hasOwn(wire, 'leaseUntil'), false);
+  assert.deepEqual(wire.effects, [{ expectedRevision: 1, type: 'advance_revision' }]);
+});
