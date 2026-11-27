@@ -11,16 +11,36 @@ try { checkParents(fs.realpathSync(os.homedir())); }
 catch { console.log(`SKIP prepared-node-modules-test: ${os.homedir()} or an ancestor is group- or world-writable; run with a HOME whose ancestors are not`); process.exit(77); }
 const root = fs.mkdtempSync(path.join(os.homedir(), 'prepared-test-'));
 const privateDir = dir => { fs.mkdirSync(dir, {mode:0o700}); fs.chmodSync(dir,0o700); return dir; };
-const fixtureEnv = home => ({...process.env, HOME:home, XDG_CACHE_HOME:path.join(home,'.cache'), npm_config_cache:path.join(home,'.npm-cache')});
-const src = path.join(root, 'source'), cache = path.join(root, 'cache');
-fs.mkdirSync(src);
-const testHome = privateDir(path.join(root,'fixture-home'));
-const options = { cacheDir: cache, env: fixtureEnv(testHome) };
-const marker = path.join(root, 'lifecycle-marker');
-const manifest = { name:'fixture', version:'1.0.0', scripts:{ install:`node -e "require('fs').writeFileSync('${marker}','bad')"` } };
-const lock = { name:'fixture', version:'1.0.0', lockfileVersion:3, packages:{ '':{ name:'fixture', version:'1.0.0', hasInstallScript:true } } };
-const write = (file, data) => fs.writeFileSync(path.join(src,file), JSON.stringify(data));
+const fixtureEnv = home => {
+  const env = {...process.env, HOME:home, XDG_CACHE_HOME:path.join(home,'.cache'), npm_config_cache:path.join(home,'.npm-cache')};
+  delete env.npm_execpath;
+  return env;
+};
+const restoreNpmExecpath = original => {
+  if (original === undefined) delete process.env.npm_execpath;
+  else process.env.npm_execpath = original;
+};
+const parentNpmExecpath = process.env.npm_execpath;
 try {
+  // Give the parent a distinct real npm entry, rather than a nonexistent path that lookup would ignore.
+  const layoutCli = fs.realpathSync(npmCliPath({ env: {} }));
+  const ambient = privateDir(path.join(root, 'real-ambient-npm'));
+  const ambientBin = privateDir(path.join(ambient, 'bin'));
+  const parentCli = path.join(ambientBin, 'npm-cli.js');
+  fs.copyFileSync(layoutCli, parentCli);
+  fs.symlinkSync(path.resolve(path.dirname(layoutCli), '../lib'), path.join(ambient, 'lib'));
+  process.env.npm_execpath = parentCli;
+  assert.equal(npmCliPath(), fs.realpathSync(parentCli), 'the parent npm hint is usable');
+  const src = path.join(root, 'source'), cache = path.join(root, 'cache');
+  fs.mkdirSync(src);
+  const testHome = privateDir(path.join(root,'fixture-home'));
+  const options = { cacheDir: cache, env: fixtureEnv(testHome) };
+  assert.equal(Object.hasOwn(options.env, 'npm_execpath'), false, 'real npm fixtures must ignore the parent hint');
+  assert.equal(npmCliPath({ env: options.env }), npmCliPath({ env: {} }));
+  const marker = path.join(root, 'lifecycle-marker');
+  const manifest = { name:'fixture', version:'1.0.0', scripts:{ install:`node -e "require('fs').writeFileSync('${marker}','bad')"` } };
+  const lock = { name:'fixture', version:'1.0.0', lockfileVersion:3, packages:{ '':{ name:'fixture', version:'1.0.0', hasInstallScript:true } } };
+  const write = (file, data) => fs.writeFileSync(path.join(src,file), JSON.stringify(data));
   assert.equal(resolvePreparedNodeModules(src, options), null);
   write('package.json', manifest); write('package-lock.json', lock);
   assert.throws(()=>resolvePreparedNodeModules(src, options), {code:'dependencies_unprepared', message:/\(missing\)/});
@@ -72,8 +92,9 @@ try {
   assert.deepEqual(resolvePreparedNodeModules(src,options),result);
   const bad = path.join(root,'bad'); fs.mkdirSync(bad); fs.writeFileSync(path.join(bad,'package.json'),JSON.stringify({name:'bad',version:'1',dependencies:{missing:'1.0.0'}})); fs.writeFileSync(path.join(bad,'package-lock.json'),JSON.stringify({name:'bad',version:'1',lockfileVersion:3,packages:{'':{name:'bad',version:'1'}}}));
   const offlineOptions = {...options, env:{...options.env,npm_config_offline:'true'}};
-  assert.throws(()=>prepareNodeModules(bad,offlineOptions), error => error.code==='dependencies_install_failed' && error.message.includes(npmCliPath()) && /exit status \d+/.test(error.message));
+  assert.throws(()=>prepareNodeModules(bad,offlineOptions), error => error.code==='dependencies_install_failed' && error.message.includes(npmCliPath({ env: options.env })) && /exit status \d+/.test(error.message));
   assert.throws(()=>resolvePreparedNodeModules(bad,options), {code:'dependencies_unprepared'});
+  restoreNpmExecpath(parentNpmExecpath);
   // A Node install whose `npm` beside the binary is a shell wrapper (mise) must still run npm's JavaScript entry.
   const fakeSrc = path.join(root,'fake-src'); fs.mkdirSync(fakeSrc);
   fs.writeFileSync(path.join(fakeSrc,'package.json'),JSON.stringify({name:'fake',version:'1.0.0'}));
@@ -86,7 +107,22 @@ try {
     if (cli) { const cliDir = path.join(dir,cli); fs.mkdirSync(path.dirname(cliDir),{recursive:true}); fs.writeFileSync(cliDir,fakeNpmCli); }
     return { execPath: path.join(bin,'node'), cli: cli && path.join(dir,cli) };
   };
-  const marker2 = path.join(root,'fake-npm-marker'), env2 = { ...fixtureEnv(privateDir(path.join(root,'fake-home'))), FAKE_NPM_MARKER: marker2 };
+  const unrelatedCli = path.join(root,'ambient','npm-cli.js');
+  fs.mkdirSync(path.dirname(unrelatedCli));
+  fs.writeFileSync(unrelatedCli,fakeNpmCli);
+  const previousNpmExecpath=process.env.npm_execpath;
+  let env2;
+  const marker2 = path.join(root,'fake-npm-marker');
+  // npm test/CI can set this to the runner's unrelated npm. Keep it alive in
+  // the parent to prove these explicit fixture options isolate layout lookup.
+  try {
+    process.env.npm_execpath=unrelatedCli;
+    env2={ ...fixtureEnv(privateDir(path.join(root,'fake-home'))), FAKE_NPM_MARKER:marker2 };
+    assert.equal(process.env.npm_execpath,unrelatedCli);
+    assert.equal(Object.hasOwn(env2,'npm_execpath'),false);
+  } finally {
+    restoreNpmExecpath(previousNpmExecpath);
+  }
   const layouts = [['lib layout','lib/node_modules/npm/bin/npm-cli.js'],['bin layout','bin/node_modules/npm/bin/npm-cli.js']];
   for (const [label, cli] of layouts) {
     const fake = fakeNode(label.replace(' ','-'),{cli}), fakeOptions = { cacheDir: path.join(root,`cache-${label.replace(' ','-')}`), execPath: fake.execPath, env: env2 };
@@ -105,6 +141,7 @@ try {
   assert.equal(npmCliPath({ execPath: running.execPath, env: { npm_execpath: '/usr/lib/node_modules/pnpm/bin/pnpm.cjs' } }), fs.realpathSync(running.cli));
   console.log('prepared dependencies focused tests passed (actual npm ci, no-network fixture)');
 } finally {
+  restoreNpmExecpath(parentNpmExecpath);
   // Test-owned read-only files are made removable before deleting the fixture.
   spawnSync('chmod',['-R','u+w',root]); fs.rmSync(root,{recursive:true,force:true});
 }
