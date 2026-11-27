@@ -668,7 +668,7 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,idleLeas
     const claim=async(next,acquisition_id)=>{
       try {
         const job=await tool('claim',{request_id:next,claimant:held.claimant,acquisition_id,lease_ms},principal,undefined,signal);
-        return job&&typeof job.error!=='string'&&job.claim_id?job:null;
+        return job&&typeof job.error!=='string'&&job.claim_id?{...job,already_claimed:true}:null;
       } catch { return null; }
     };
     // A repeated finish gets back the jobs its first reply carried. A job that is gone (finished, expired) is not replaced:
@@ -727,8 +727,12 @@ async function finishReply(reply,{principal,requestId,claimId,signal}) {
     const {jobs,empty,waited_ms}=await handOffNextJob({principal,requestId,claimId,waitMs:setting.waitMs,maxJobs:setting.maxJobs,idleLeaseMs:setting.idleLeaseMs,onlyWhenEmpty:setting.onlyWhenEmpty,signal}),job=jobs?.[0];
     log({kind:'finish_handoff',request_id:requestId,next_request_id:job?.request_id??null,jobs:jobs?.length??0,result:job?'claimed':empty?'empty':'none',waited_ms:waited_ms??0});
     const {next_queued,next_action,...rest}=reply;
-    if(job&&setting.maxJobs>1) return {...rest,next_job:job,next_jobs:jobs,guidance:`Your next ${jobs.length===1?'job':'jobs'} ${jobs.map(j=>j.request_id).join(', ')} ${jobs.length===1?'is':'are'} already claimed for you; the claim results are in next_jobs. Start all of them now, in parallel, in this turn, and call finish for each as soon as it is done. ${job.lease_expires_at?`The first lease ends at ${job.lease_expires_at}`:'The leases are short'}; every tool call on a job renews its lease.`};
-    if(job) return {...rest,next_job:job,guidance:`Your next job ${job.request_id} is already claimed for you; its claim result is in next_job. Work on it now, in this turn, and call finish for it. ${job.lease_expires_at?`Its lease ends at ${job.lease_expires_at}`:'Its lease is short'}; every tool call on it renews the lease.`};
+    if(job) {
+      const offers=jobs.map(j=>`${j.request_id} (lease ends ${j.lease_expires_at})`).join(', ');
+      const guidance=`Already claimed for you: ${offers}. Do not call claim again. Use the supplied claim_id and send progress before its lease expires to renew to the normal working lease. Start the offered work now in this turn and call finish for each job when done.`;
+      if(setting.maxJobs>1) return {...rest,next_job:job,next_jobs:jobs,guidance};
+      return {...rest,next_job:job,guidance};
+    }
     if(empty) return {...rest,queue_empty:true,waited_ms,guidance:waited_ms>=1000?`No job was queued for ${Math.round(waited_ms/1000)} seconds. Nothing is claimed for you. End this run; a new assignment wakes you.`:'No job is queued. Nothing is claimed for you. End this run; a new assignment wakes you.'};
   }
   const hint=store.claimHint(principal.worker);
@@ -995,7 +999,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       catch(e) { if(e instanceof RegistryError) throw new Error(e.message.startsWith(e.code)?e.message:`${e.code}: ${e.message}`); throw e; }
     }
     case 'list_pending': {
-      const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
+      const {free_lanes,worker_max_claims}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
       const assignments=store.listPending(worker);
       store.recordListed(assignments,free_lanes,worker);
       phaseTrace.listed(assignments.map(x=>x.request_id));
@@ -1006,7 +1010,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       const claims_accepted=!quiescing&&!store.paused();
       const next=claims_accepted?store.nextQueued(free_lanes,null,worker):{};
       const claimsNote=claims_accepted?'':quiescing?restartQuiesceText:'Claims are paused (temporary): do not claim now; call list_pending again later and claim once claims_accepted is true.';
-      return {assignments,policy_work:policyPage(worker),attention:store.attention(subject,worker),free_lanes,claims_accepted,...(claims_accepted?next:{next_action:claimsNote}),guidance};
+      return {assignments,policy_work:policyPage(worker),attention:store.attention(subject,worker),free_lanes,...(worker_max_claims===undefined?{}:{worker_max_claims}),claims_accepted,...(claims_accepted?next:{next_action:claimsNote}),guidance};
     }
     case 'claim': {
       const requestId=id(a.request_id),claimant=str(a.claimant,'claimant',128),ctx=commandContext('claim',{claimant,acquisition_id:a.acquisition_id??null,lease_ms:a.lease_ms??null}),row=store.get(requestId),held=row.claim?.state==='active'?row.claim:null,retry=holdsLiveGrant(worker,requestId,claimant,subject,a.acquisition_id);

@@ -50,6 +50,11 @@ assert.throws(()=>download('A-incomplete-gzip',cleanGzip.subarray(0,-5)),error=>
 
 const cleanZip=Buffer.from('UEsDBBQAAAAAAAAAAAB6g8OTEQAAABEAAAAJAAAAZW50cnkudHh0b3JkaW5hcnkgbG9nIHRleHRQSwECFAAUAAAAAAAAAAAAeoPDkxEAAAARAAAACQAAAAAAAAAAAAAAAAAAAAAAZW50cnkudHh0UEsFBgAAAAABAAEANwAAADgAAAAAAA==','base64');
 assert.deepEqual(download('A-clean-zip',cleanZip),cleanZip);
+const ordinaryBinary=Buffer.from([0x66,0x69,0x78,0x1f,0x8b,0x50,0x4b,0x03,0x04,0x74,0x61,0x69,0x6c]);
+assert.deepEqual(download('A-incidental-archive-bytes',ordinaryBinary),ordinaryBinary);
+const emptyZip=Buffer.alloc(22);
+emptyZip.writeUInt32LE(0x06054b50,0);
+assert.deepEqual(download('A-empty-zip',emptyZip),emptyZip);
 const nested=gzipSync(cleanZip);
 assert.deepEqual(download('A-clean-nested',nested),nested);
 assert.throws(()=>download('A-unreadable-zip',cleanZip.subarray(0,-5)),/^Error: artifact_unscannable: invalid_archive$/);
@@ -69,7 +74,7 @@ const zipOf=(name,data,method)=>{
 };
 const armored=fixtures[0][0];
 assert.deepEqual(download('A-built-clean-zip',zipOf('notes.txt',Buffer.from('ordinary log text'),8),0),zipOf('notes.txt',Buffer.from('ordinary log text'),8),'the test zip builder makes a zip the scanner accepts');
-for(const [label,bytes] of [['gzip',gzipSync(armored)],['stored-zip',zipOf('key.txt',armored,0)],['deflated-zip',zipOf('key.txt',armored,8)],['zip-in-gzip',gzipSync(zipOf('key.txt',armored,8))]]){
+for(const [label,bytes] of [['gzip',gzipSync(armored)],['stored-zip',zipOf('key.txt',armored,0)],['deflated-zip',zipOf('key.txt',armored,8)],['zip-in-gzip',gzipSync(zipOf('key.txt',armored,8))],['prefixed-zip',Buffer.concat([Buffer.from('#!stub\n'),zipOf('key.txt',armored,8)])],['4k-stub-zip',Buffer.concat([Buffer.alloc(4096,0x41),zipOf('key.txt',armored,0)])]]){
   assert.throws(()=>download(`A-secret-${label}`,bytes),error=>{
     assert.equal(error.code,'artifact_secret_content',label);
     assert.equal(error.message,'artifact_secret_content: private_key_armor',label);
