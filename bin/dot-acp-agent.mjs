@@ -81,7 +81,8 @@ async function readRow(rid, signal) {
   try { return await call(`/get?id=${encodeURIComponent(rid)}&peek=1`, rid, { signal }); }
   catch (e) {
     if (e.message === 'message not found' || e.message === 'assignment not found') return null;
-    if (e.message === 'invalid owner capability') throw new Refusal(`request ${rid} exists under another owner`);
+    // Not an admission refusal: the bridge holds this id for another owner, so label it as the bridge response it is.
+    if (e.message === 'invalid owner capability') throw new Refusal(`request ${rid} exists under another owner`,'adapter_error',{failure_type_source:'dot_acp_bridge_response'});
     throw e;
   }
 }
