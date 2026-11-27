@@ -1198,6 +1198,55 @@ export class Store {
     observed.sort((a,b)=>a-b);
     return {waits_ms:observed,expired_lower_bounds:expiredLowerBounds,samples:observed.length,window_days:days,worker,kind};
   }
+  // Use persisted worker progress for the start proxy. A reclaim resets the
+  // first workspace call on the single current claim row, so mixing that time
+  // in would make a job's measured first start change as it is reclaimed. Notes the bridge writes itself (the resume note)
+  // start with `[bridge] ` and are not a start. A finished job with no worker note did start, at an unobserved time.
+  admissionEvidence(worker,kind,days=7) {
+    kind=canonicalKindLabel(kind);
+    const since=iso(this.nowMs()-days*86400000);
+    const rows=this.db.prepare(`WITH selected AS MATERIALIZED (
+        SELECT a.request_id,a.target_worker,a.created_at,a.status,a.cancelled_reason
+        FROM assignments a WHERE a.created_at>=? AND a.target_worker=? AND ${queueKindSql}=?
+      ), lifecycle AS (
+        SELECT a.request_id,
+          min(CASE WHEN e.type='claimed' AND e.worker=a.target_worker THEN e.at END) claimed,
+          max(CASE WHEN e.type='cancelled' AND e.actor='system' AND e.reason='expired' THEN 1 ELSE 0 END) system_expiry
+        FROM selected a LEFT JOIN lifecycle_events e INDEXED BY lifecycle_events_request ON e.request_id=a.request_id
+        GROUP BY a.request_id
+      ) SELECT a.created_at,a.status,a.cancelled_reason,l.claimed,l.system_expiry,
+        c.lease_deadline_at,c.lease_deadline_monotonic_ms,c.lease_boot_id,c.request_id has_claim,
+        (SELECT p.created_at FROM progress p INDEXED BY progress_request WHERE p.request_id=a.request_id
+          AND (p.worker IS NULL OR p.worker=a.target_worker)
+          AND p.note NOT LIKE '[bridge] %'
+          ORDER BY p.id LIMIT 1) started
+      FROM selected a JOIN lifecycle l ON l.request_id=a.request_id
+      LEFT JOIN claims c ON c.request_id=a.request_id`).all(since,worker,kind);
+    const claimed=[], started=[], censored={expired_unclaimed:0,cancelled_unclaimed:0,claimed_not_started:0,finished_unobserved_start:0};
+    for (const row of rows) {
+      if (!row.claimed) {
+        if (row.status==='cancelled') {
+          if (row.cancelled_reason==='expired' && row.system_expiry) censored.expired_unclaimed++;
+          else censored.cancelled_unclaimed++;
+        }
+        continue;
+      }
+      const created=Date.parse(row.created_at), claimMs=Date.parse(row.claimed)-created;
+      if (!Number.isFinite(claimMs) || claimMs<0) continue;
+      claimed.push(claimMs);
+      const startMs=Date.parse(row.started)-created;
+      if (Number.isFinite(startMs) && startMs>=claimMs) started.push(startMs);
+      else if (row.status==='finished') censored.finished_unobserved_start++;
+      else if (row.status==='cancelled' || (row.has_claim && this.leaseExpired(row))) censored.claimed_not_started++;
+    }
+    const summary=times=>{
+      const n=times.length, insufficient_history=n<QUEUE_WINDOW.minSamples;
+      if (insufficient_history) return {n,p50_ms:null,p90_ms:null,insufficient_history};
+      times.sort((a,b)=>a-b);
+      return {n,p50_ms:times[Math.ceil(n*0.5)-1],p90_ms:times[Math.ceil(n*0.9)-1],insufficient_history};
+    };
+    return {worker,kind,window_days:days,min_samples:QUEUE_WINDOW.minSamples,claimed:summary(claimed),started:summary(started),censored};
+  }
   queueWaitsMs(worker,kind,days=7) { return this.queueWaitEvidence(worker,kind,days).waits_ms; }
   defaultValidUntil(worker,kind,days=7) {
     const evidence=this.queueWaitEvidence(worker,kind,days), waits=evidence.waits_ms;

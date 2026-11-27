@@ -87,6 +87,56 @@ try {
   log('queue sizing: worker and kind, first claim, censored expiry lower bounds, immutable caller deadline');
   log('failure provenance: expiry vs owner cancel vs observed lease expiry vs worker text inference');
 
+  // Admission estimates keep observed claim/start times separate from censored jobs.
+  {
+    let clock=Date.parse('2026-10-21T00:00:00Z');
+    const hist=new Store(path.join(home,'admission.db'),{now:()=>clock,capacity:50});
+    const create=(worker='dot',kind='review',extra={})=>{
+      const p=assignment({request_id:`admission_${++seq}`,...extra});
+      hist.submit(p,{mode:'none'},'',`owner_${seq}`,false,null,'normal',{task_kind:kind},p,null,worker,null,'host');
+      return p.request_id;
+    };
+    const claimed=(wait,work=null,worker='dot',kind='review')=>{
+      const id=create(worker,kind); clock+=wait;
+      const grant=hist.claim(id,'fixture','local-principal',50,null,worker);
+      assert.ok(grant.claim_id);
+      if(work!==null) { clock+=work; hist.progress(id,grant.claim_id,'Started fixture work','local-principal',false,worker); }
+      return {id,grant};
+    };
+    try {
+      for(const [wait,work] of [[1000,1000],[2000,2000],[3000,3000],[4000,null]]) claimed(wait,work);
+      const thin=n=>({n,p50_ms:null,p90_ms:null,insufficient_history:true});
+      assert.deepEqual(hist.admissionEvidence('dot','review').claimed,thin(4));
+      claimed(5000);
+      const abandoned=claimed(6000);
+      hist.db.prepare('INSERT INTO progress(request_id,note,created_at,worker) VALUES(?,?,?,?)')
+        .run(abandoned.id,'[bridge] run resumed: epoch 1 lease expired after 90s without activity; epoch 2 continues under a new claim',iso(clock),'dot');
+      const expired=create('dot','review',{valid_until:iso(clock+30000)});
+      clock+=60000;
+      hist.sweepExpired();
+      assert.equal(hist.get(expired).cancelled_reason,'expired');
+      hist.cancel(create(),'expired'); // owner reason text is not a system expiry
+      create(); // still-open unclaimed work is not an observation
+      // Another worker's claim and another kind are not observations here.
+      const lark=create('lark'); clock+=20; hist.lifecycle(lark,'claimed','system','fixture',{claim_id:'claim_lark',epoch:1,worker:'lark'});
+      claimed(30,30,'dot','build');
+      const summary=(n,p50_ms,p90_ms)=>({n,p50_ms,p90_ms,insufficient_history:false});
+      const cut=()=>hist.admissionEvidence('dot','review');
+      assert.deepEqual(cut(),{worker:'dot',kind:'review',window_days:7,min_samples:QUEUE_WINDOW.minSamples,
+        claimed:summary(6,3000,6000),started:thin(3),
+        censored:{expired_unclaimed:1,cancelled_unclaimed:1,claimed_not_started:0,finished_unobserved_start:0}});
+      claimed(7000,1000); claimed(8000,1000);
+      assert.deepEqual(cut().started,summary(5,6000,9000));
+      clock+=2*3600000;
+      assert.deepEqual(cut().censored,{expired_unclaimed:1,cancelled_unclaimed:1,claimed_not_started:3,finished_unobserved_start:0});
+      // A job that finished without a worker note did start; only its start time is unknown.
+      const quiet=claimed(1000); hist.finish(quiet.id,quiet.grant.claim_id,'completed','done','done');
+      assert.equal(cut().censored.finished_unobserved_start,1);
+      assert.equal(cut().censored.claimed_not_started,3);
+    } finally { hist.db.close(); }
+    log('admission evidence: claim vs durable progress, sparse history, separately censored work');
+  }
+
   // Construct an honest v44 fixture by removing only the additive v45 column, then upgrade twice.
   dropEmptyPost54FixtureState(store.db);
   store.db.exec('DROP INDEX IF EXISTS assignments_worker_status; ALTER TABLE assignments DROP COLUMN valid_until_source; PRAGMA user_version=44;'); store.db.close();
