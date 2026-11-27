@@ -1221,7 +1221,7 @@ const publicServer=(as?createBuiltinHttpServer:http.createServer)(async(req,res)
 const adminServer=http.createServer(async(req,res)=>{
   // A refused submit is logged with its reason so the owner can distinguish rejected requests from stored assignments.
   const requestStartedAt=Date.now();
-  let rejected=null, dryRequested=false;
+  let rejected=null, dryRequested=false, admission=null, previewMayReportAdmission=false;
   try {
     const raw=req.method==='POST'?await readBody(req):'',body=raw?JSON.parse(raw):{},url=new URL(req.url,'http://localhost');
     if(updateWindowOpen()&&!(req.method==='GET'&&url.pathname==='/service-check')) return refuseDuringUpdate(res);
@@ -1301,10 +1301,20 @@ const adminServer=http.createServer(async(req,res)=>{
       const declaredSource=body.meta?.source??'agent';
       for(const [value,label] of [[body,'submit request'],[body.meta,'meta'],[body.assignment,'assignment']]) assertNoDeclaredConsumer(value,label,declaredSource);
       const meta=normalizeMeta(body.meta);
+      // Advisory only, and not when a required operator authorization has not been checked.
+      previewMayReportAdmission=body.allow_main!==true;
+      admission=()=>{
+        const priority=body.background===true?'background':'normal';
+        const kind=meta.task_kind??(body.review===true?'review':payload.execution_scope??'unknown');
+        return store.admissionAnswer(storedTarget??target??'dot',kind,priority,
+          // The job a supersede replaces leaves the queue when this one is stored, so it is not ahead.
+          {excludeIds:[payload.request_id,supersedes?.target_id??null],createdBefore:existingRequest?.created_at??null});
+      };
       // A retry of an older row is not judged again; only a new submission has to prove the source it claims.
       if(!store.hasAssignment(payload.request_id)) {const refused=unprovenSource({request_id:payload.request_id,payload,meta},body.background===true?'background':'normal'); if(refused) throw new Error(refused);}
       {const input=payload.inputs[0];if(!store.hasAssignment(payload.request_id)&&payload.execution_scope==='implementation'&&body.review!==true&&input?.head_sha&&input.head_sha!==input.base_sha) throw new Error('head_sha_unsupported: implementation scope checks out base_sha; pin base_sha to the revision to work on, or use --review or read-only scope for head_sha');}
       if(body.allow_main===true) adminOperator(req);
+      previewMayReportAdmission=true;
       destination.admit(delivery,{allowMain:body.allow_main===true});
       if(body.sensitive_scope_override!==undefined&&(typeof body.sensitive_scope_override!=='string'||!body.sensitive_scope_override)) throw new Error('invalid sensitive scope override');
       // A retry validates nothing and sends the original assignment, so the identity of a request is the assignment as submitted,
@@ -1348,13 +1358,6 @@ const adminServer=http.createServer(async(req,res)=>{
       // An awaited repository/destination lookup may outlive a host policy edit.
       assertRepoAllowed(storedTarget??target??'dot',existingRequest?.assignment??payload);
       if(dryRun) store.checkRetry(submitted,delivery,environmentId,owner,body.review===true,body.background===true?'background':'normal',meta,submitted,target,explicitExecution,requiredCapabilities,commandKey,supersedes,destinationRevision,revises);
-      const admission=()=>{
-        const priority=body.background===true?'background':'normal';
-        const kind=meta.task_kind??(body.review===true?'review':payload.execution_scope??'unknown');
-        return store.admissionAnswer(storedTarget??target??'dot',kind,priority,
-          // The job a supersede replaces leaves the queue when this one is stored, so it is not ahead.
-          {excludeIds:[payload.request_id,supersedes?.target_id??null],createdBefore:existingRequest?.created_at??null});
-      };
       const disclosure=isNew?store.destinationSnapshot(target??'dot',jobExecution,payload):existingRequest.destination_approval?.snapshot??null;
       if(dryRun) {
         log({kind:'submit_dry_run',request_id:submitted.request_id,task_kind:meta.task_kind??null,source:meta.source??null,verdict:order?.verdict??'admissible',reason_codes:(order?.reasons??[]).map(r=>r.code),attempt_latency_ms:Date.now()-requestStartedAt});
@@ -1623,7 +1626,14 @@ const adminServer=http.createServer(async(req,res)=>{
     const reasons=!infrastructure&&rejected?(e.reasons??reasonsFromError(e).map(({verdict,retry,blocking,...r})=>r)):null;
     const verdict=reasons?(e.verdict??strongest(reasonsFromError(e))):null;
     // A dry run answers every verdict with a 200 and stores nothing, including a refusal raised before the compiler ran.
-    if(dryRequested&&reasons) { log({kind:'submit_dry_run',...rejected,verdict,reason_codes:reasons.map(r=>r.code),attempt_latency_ms:Date.now()-requestStartedAt}); return json(res,200,{dry_run:true,stored:false,request_id:rejected?.request_id??null,verdict,reasons,bytes:e.bytes??null,warnings:[]}); }
+    if(dryRequested&&reasons) {
+      let advice;
+      if(previewMayReportAdmission&&admission) {
+        try { advice=admission(); } catch { /* Advice must not hide the original refusal. */ }
+      }
+      log({kind:'submit_dry_run',...rejected,verdict,reason_codes:reasons.map(r=>r.code),attempt_latency_ms:Date.now()-requestStartedAt});
+      return json(res,200,{dry_run:true,stored:false,request_id:rejected?.request_id??null,verdict,reasons,bytes:e.bytes??null,warnings:[],...(advice?{admission:advice}:{})});
+    }
     if(rejected) log({kind:'submit_rejected',...rejected,status:infrastructure?503:400,reason:e.message.slice(0,300),...(reasons?{verdict,reason_codes:reasons.map(r=>r.code)}:{}),bytes:e.bytes??null,attempt_latency_ms:Date.now()-requestStartedAt,...(e.suggested_scope_paths?{suggested_scope_count:e.suggested_scope_paths.length}:{})});
     if(infrastructure&&!rejected) log({kind:'admin_infrastructure_error',route:String(req.url).split('?')[0],code:e.code??null,reason:e.message.slice(0,300)});
     const shown=publicErrorText(e,'admin request');
