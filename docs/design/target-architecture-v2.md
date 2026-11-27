@@ -172,3 +172,43 @@ Each workaround names the missing capability it supplies and what removes it.
 ## 11. Prior art used
 
 Captured in the research library (not in this repo): async completion contracts for seven coding harnesses; the late-2026 survey of how Claude Code, Codex, T3 Code, Copilot, Devin and Cursor return delegated work and which allow an outside wake; T3 local ACP providers running delegated children; the finding that delegated-agent products separate the job, its runs and its results, and that none shows a reliable ETA; hosted coding agents bridging to local orchestrators through PR and issue webhooks; the finding that agent standards fit edges, not contributor authority; and the finding that a ChatGPT agent can be woken only through its own conversation (MCP Events).
+
+## 12. Separation: Dalan and the tooling built on it
+
+Rule: this repository holds the bridge only: relationship, work, authority, delivery and wake, worker capability, and the surface that requester agents call. Tooling that an operator builds on top (job generators, admission gates, wake scripts, nudges to workers, filler rules, fleet reports) uses only Dalan's public interface. That interface is the CLI and MCP verbs, `status`/`metrics`/`get` JSON, the config files documented in `docs/`, and the requester adapters. Tooling holds no Dalan internals. Dalan holds no operator rules, host thread ids, account names or fleet vocabulary.
+
+Where the line is crossed today, and where each piece moves:
+
+| Crossing | Direction | Moves to |
+|---|---|---|
+| Host fields in the core schema: `assignments.thread_id` and `environment_id` NOT NULL, `parent_generation`, `t3_muted`, the `t3` notification kind, the `t3_audit` table | Host in core | The T3 adapter's own tables under `integrations/t3/`. The core keeps `{adapter, address, adapter_version}` (build L6). |
+| T3 worker tools (`t3_thread_*`), `t3` worker capability, `t3.read`/`t3.write` scopes, `DALAN_T3_*`, `--allow-main`, `--thread`, `--producer-thread`, `main_thread_ids` | Host in core | A T3 tool pack and a T3 destination, loaded as adapters. `main_thread_ids` becomes the T3 adapter's own config. |
+| The worker name `dot` hard-coded in the core: about 80 literals in `src/store.mjs` (dot-only `dispatch`, a break hold only for `dot`, a legacy default worker), plus `DOT_ACP_*`, the `dot-decision` prefix, and the `[dot-bridge event]` label | Deployment in core | Worker-neutral: every rule keyed by worker name from `workers.json`. The `DOT_*` names stay as aliases for one release. |
+| ACP facade: T3 role-preamble stripping and the T3 envelope (`src/acp-bridge.mjs`), and the producer config's `deny_path_terms` and `repo_selection` read by the facade | Host and operator policy in core | `integrations/t3/acp-kit/`. Repo selection becomes a documented config of the facade, not a producer file. |
+| `DALAN_ACP_PROSE_CHECK` (an external prose linter run on build output) | Operator tooling in the adapter | Stays as a generic, optional post-result hook with a documented contract. Dalan names no specific linter. |
+| Operator scripts that open the bridge database or Dalan's home directly: 34 files, 23 of them opening `bridge.db` | Tooling into internals | `dalan status --json`, `dalan metrics --json`, and new read verbs for whatever they need (queue by class, per-kind record, deliveries). The schema is internal and may change without notice. |
+| Patch landing (turning a worker patch into a branch and draft PR) done by operator tooling | Tooling doing bridge work | Dalan's materialize step (section 7.3). Tooling keeps only its own merge policy. |
+| Admission decisions in an operator gate (deny, then override on repeat) | Tooling doing bridge work | Dalan's forecast and `critical` refusal (section 6). An operator gate may still apply its own routing policy on top. |
+
+Test for the rule: a second operator with no fleet could install Dalan, use every requester route, and see no name or rule from this operator. And this operator's tooling keeps working across a Dalan schema change.
+
+## 13. Consumers and the product-neutrality check
+
+Dalan must not depend on T3, on any one fleet, or on any one product. Named consumers:
+
+| Consumer | Uses | Must not require from Dalan |
+|---|---|---|
+| T3 Code threads (Claude, Codex) | The T3 child-task adapter (4.1) | Nothing T3-specific outside `integrations/t3/` |
+| Plain Claude Code or Codex sessions | MCP requester (4.2) and wake adapters (4.3) | Nothing host-specific in the core |
+| An operator's fleet tooling | The public interface (section 12) | Fleet rules in Dalan |
+| Faravan (planned): people lend coding-agent time to people they trust | The relationship, work and authority model | Circles, lending strategies, presence, approval UI or people's names |
+
+Faravan check: could Faravan's lending loop sit on Dalan without Dalan learning anything Faravan-specific?
+
+- **Fits.**
+  - A lending arrangement is a relationship with role symmetry: either member may request or serve. A borrowed job is work. The lender's rules (hours, limits, approval mode) are authority grants on that relationship.
+  - The lender's local agent is a worker on the ACP-runtime pattern. The borrower's agent is a requester on the MCP route.
+  - Results, questions, cancel and delivery are Dalan's unchanged.
+- **Gap 1: authority has more than one human owner.** Dalan today has one owner and one operator key per install. Faravan needs two people, each the authority over their own side of a relationship. The core must keep authority per relationship side (C2 already separates the lifetimes) and must never assume one owner. v2 adds no new single-owner assumption.
+- **Gap 2: no always-on host.** Dalan today is one server with one SQLite store. Faravan's rule is that any online member serves the circle. The core must stay usable as an embedded library with its own store per member, with relationships that span peers. v2 does not build this. It keeps the store behind the Store class, puts all host I/O in adapters, and adds nothing that assumes a single server.
+- **Verdict.** Faravan fits the model. The two gaps are in authority ownership and deployment shape, not in the work model. v2 must not widen either gap, and a Faravan adapter must be possible without core changes beyond those two.
