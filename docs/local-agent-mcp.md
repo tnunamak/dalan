@@ -7,6 +7,9 @@
 | Tool | Does | Read-only |
 | --- | --- | --- |
 | `dalan_submit` | Queues an assignment, like `dalan submit`. Returns the `request_id` and the bridge verdict. A `clarify` or `reject` verdict comes back as an error result with its reasons. Optional: `worker`, `execution`, `dry_run`, `queue_anyway`, `refuse_defer`. | no |
+| `dalan_correct` | Queues a new job that corrects an earlier job you submitted, like `dalan submit --revises`. Pass `revises` (the earlier request_id) and `assignment`. The earlier job is not cancelled, but its result can no longer be accepted. | no |
+| `dalan_cancel` | Cancels a queued job, or asks the worker on a claimed job to stop, like `dalan cancel`. Optional `reason`. | no |
+| `dalan_accept` | Records your verdict on a finished job, like `dalan accept` or `dalan reject`. Pass `request_id` and `verdict` (`accept` or `reject`); optional `note`. | no |
 | `dalan_wait` | Waits for a finished report, question, blocker, cancellation, worker break or timeout. `timeout_seconds` defaults to 120 and is capped at 300. A timeout returns `status: timeout`; call again to keep waiting. | yes |
 | `dalan_result` | Returns the job state and, once finished, the report. Secrets are redacted. Output over 32 KiB is cut at 32 KiB and ends with a note on how to read the rest. | yes |
 | `dalan_questions` | Lists identified questions for a job. Pass `id` (the request_id). Human-only questions require operator action. | yes |
