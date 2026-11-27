@@ -483,6 +483,14 @@ test('host budget rejects non-object values and arrays with an explicit required
   }
 });
 
+test('host budgets reject fractional resource units without rounding', () => {
+  assert.deepEqual(parseHostBudget(HOST_BUDGET_CEILINGS), HOST_BUDGET_CEILINGS);
+  for (const key of ['memory_bytes', 'disk_write_bytes']) {
+    assert.throws(() => parseHostBudget({ ...HOST_BUDGET_CEILINGS, [key]: HOST_BUDGET_CEILINGS[key] - 1 }),
+      new RegExp('host_budget\\.' + key + ': expected a multiple of 4096'));
+  }
+});
+
 test('host budget rejects omitted values disguised by an extra counted key', () => {
   const { wall_ms: _missing, ...budget } = HOST_BUDGET_CEILINGS;
   assert.throws(() => parseHostBudget({...budget, unrelated: 1000}), /invalid host_budget.wall_ms/);
