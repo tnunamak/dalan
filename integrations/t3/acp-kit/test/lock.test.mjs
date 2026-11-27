@@ -9,6 +9,15 @@ import { readJsonPrivate, writeJsonPrivate } from '../src/session-store.mjs';
 
 import { CANCEL_BUDGET_MS, REFUSE_CODE, cancelBudgetMs, createRefuse } from '../src/errors.mjs';
 
+test('an empty wrapped request does not turn the closing tag into a prompt', async () => {
+  const { promptText } = await import('../src/t3-envelope.mjs');
+  const head = '<t3_code_instructions>\n## T3 Code interaction mode: default\nFixture instructions.\n</t3_code_instructions>\n\n';
+  const tail = '\n\n<runtime_info>Fixture metadata</runtime_info>';
+  const textOf = body => promptText([{ type: 'text', text: head + body + tail }]);
+  assert.equal(textOf('<user_request>\n</user_request>'), '');
+  assert.equal(textOf('<user_request>\nKeep this text\n</user_request>'), 'Keep this text');
+});
+
 test('a blocked directory leaves a session save error visible and preserves the blocking file', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-json-parent-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
