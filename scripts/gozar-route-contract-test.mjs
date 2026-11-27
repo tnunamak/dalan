@@ -201,6 +201,20 @@ test('a nonterminal first watch snapshot can reprove the same route before a ter
   await route.stop();
 });
 
+test('a handle-less retry refused before allocation returns to prepared', async () => {
+  const gozar = createFakeGozar();
+  const query = buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 5000 } });
+  const remembered = [];
+  const recovery = { home: HOME, operationId: 'fixture-operation', phase: 'dispatching' };
+  gozar.expose = async request => {
+    assert.equal(request.operationId, recovery.operationId);
+    throw new FakeGozarError('consent_expired', 'The fixture consent expired before reservation.');
+  };
+  await assert.rejects(startSessionRoute({ gozar, query, recovery, consent: yes,
+    remember: ref => remembered.push(ref) }), { code: 'consent_expired' });
+  assert.deepEqual(remembered, [recovery, { home: HOME, operationId: recovery.operationId, phase: 'prepared' }]);
+});
+
 test('invalid session startup removes the exact allocation only when no caller remembers it', async () => {
   const query = buildQuery({ home: HOME, target: targetFor(8799), usage: { kind: 'session', lifetimeMs: 5000 } });
   for (const mode of ['no-reference', 'retained', 'cleanup-debt']) {

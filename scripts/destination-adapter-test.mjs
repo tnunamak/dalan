@@ -39,6 +39,28 @@ import { r4ThreadStates, r4Inspect } from './fixtures/t3-r4-thread-states.mjs';
   assert.throws(()=>registerDestination('peer',{parse:()=>{},load:()=>{}}),/already registered/);
 }
 
+{
+  const store=new Store(':memory:');
+  try {
+    for(const [index,value] of [{mode:'t3',threadId:''},{mode:'t3'},{mode:'t3',threadId:42},{mode:'t3',threadId:'short'},{mode:'t3',threadId:'thread with spaces'}].entries()) {
+      const payload={schema_version:1,request_id:'req_adapter_bad_'+index,
+        brief:'test the rejected destination',expected_output:'a rejection',inputs:[],scope_paths:[],execution_scope:'read-only'};
+      // Not routable to T3: destinationName either names another adapter or refuses the value outright.
+      assert.throws(()=>{ if(destinationName(value)!=='t3') throw new Error('not t3'); });
+      assert.throws(()=>store.submit(payload,value,'env-under-test','fixture-owner'),
+        {code:'invalid_delivery',message:'invalid_delivery: t3 delivery needs a valid thread id'});
+      assert.equal(store.hasAssignment(payload.request_id),false);
+    }
+    assert.equal(destinationName('t3:short'),'t3','persisted strings retain compatibility');
+    for(const [index,value] of [{mode:'t3',threadId:'mcp:opaque-thread'},{mode:'none'}].entries()) {
+      const payload={schema_version:1,request_id:'req_adapter_good_'+index,
+        brief:'test the accepted destination',expected_output:'a receipt',inputs:[],scope_paths:[],execution_scope:'read-only'};
+      store.submit(payload,value,'env-under-test','fixture-owner');
+      assert.equal(store.hasAssignment(payload.request_id),true);
+    }
+  } finally { store.db.close(); }
+}
+
 const thread='thread-under-test', environment='env-under-test', rid='req_adapter_test';
 const report={outcome:'completed',summary:'x'.repeat(600)};
 const baseRow=(over={})=>({request_id:rid,delivery_mode:`t3:${thread}`,thread_id:thread,environment_id:environment,status:'finished',report,watch:null,t3_muted:false,...over});

@@ -347,6 +347,8 @@ After reading a finished result, record your decision with `dalan decide ID WORD
 
 **`dalan materialize ID --dry-run [--json]`** lists the repository, base, and touched files of a current finished patch and previews the grant decision. It reads the owner's `materialize.json` beside `checks.json`: `{"mode":"standing","grant":["org:example-owner","repo:another-owner/example-repo"]}`. Use `per_pr` to require per-PR approval for a matching repository. Matches are exact and case-insensitive; no file means no standing grant. Invalid, symlinked, or non-private grants are refused. The preview does not claim the result, apply the patch, open a PR, or push.
 
+**`dalan materialize ID [--dir PATH] [--approve] [--json]`** uses the same grant. `--approve` authorizes a matching per-PR grant for this invocation, not an unlisted repository. On an eligible result it creates a temporary detached worktree, commits with the local Git identity, and pushes only `dalan/ID` to the exact GitHub repository before opening a draft PR. It refuses to overwrite an existing branch with different content. If the draft cannot be confirmed after the push, the command reports the remaining branch. It does not merge or mark the job applied.
+
 **ACP adapter.** After a build result with a patch, the adapter remembers it for the session (the last 5). On the next prompt it checks whether the patch reverses cleanly against the working directory. A match produces an advisory message once. It never records an owner decision: the same change could predate the build or be a rejected trial. Only an explicit decision or a successful `dalan apply` records `applied`; neither proves verified owner use.
 
 

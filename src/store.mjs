@@ -25,6 +25,7 @@ import {answerProtocolQuestion,cancelProtocolJob} from './protocol-owner-mutatio
 import {defineProtocolRetentionInTransaction,assertProtocolAvailable as checkProtocolAvailable} from './protocol-retention.mjs';
 import {migrateProtocolDelivery} from './protocol-delivery-driver.mjs';
 import {migrateProtocolStopObserver} from './protocol-stop-observer.mjs';
+import { validT3ThreadId } from './destinations/index.mjs';
 
 // A reserved HTTP response is a live effect channel. Persist its owner so a
 // second process cannot reset a reservation whose callback can still respond.
@@ -112,6 +113,17 @@ function validateSubmitKey(key) {
 // Admission controls (queue caps, preflights) may change; the accepted job's intent cannot.
 // Intent digests are persisted, so they hash the stored spelling of the source, objective key and task kind: a retry hashes the same before and after the rename.
 const storedMeta=(meta,legacy)=>({...meta,objective_key:storedObjectiveKey(meta.objective_key,legacy),task_kind:storedTaskKind(meta.task_kind,legacy),source:toStoredSource(meta.source,legacy)});
+function checkedSubmitDelivery(input) {
+  if (typeof input === 'object' && input?.mode === 't3' && !validT3ThreadId(input.threadId)) {
+    throw Object.assign(new Error('invalid_delivery: t3 delivery needs a valid thread id'), {code:'invalid_delivery'});
+  }
+  // Legacy positional callers can still pass an opaque thread ID. New HTTP
+  // submissions arrive as parsed objects, which always take the strict path.
+  const delivery=typeof input==='string'?{mode:'t3',threadId:input}:input;
+  if(!delivery||!['t3','none'].includes(delivery.mode)||delivery.mode==='t3'&&!delivery.threadId) throw new Error('invalid delivery');
+  return delivery;
+}
+
 function submitIntentDigest(identity,delivery,environmentId,review,priority,meta,targetWorker,execution,requiredCapabilities,destinationRevision=null,legacyFixNames=true) {
   return hash(JSON.stringify(canonical({payload:identity,delivery,environmentId:environmentId??'',review:!!review,priority,meta:storedMeta(normalizeMeta(meta),legacyFixNames),targetWorker,execution,requiredCapabilities,...(destinationRevision===null?{}:{destination_revision:destinationRevision})})));
 }
@@ -1402,8 +1414,7 @@ export class Store {
   checkRetry(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, priority='normal', meta=null, identity=payload, targetWorker=undefined, execution=null, requiredCapabilities=null, commandKey=null, supersedes=null, destinationRevision=null, revises=null) {
     validateSubmitKey(commandKey);
     const m=normalizeMeta(meta);
-    const delivery=typeof deliveryOrThreadId==='string'?{mode:'t3',threadId:deliveryOrThreadId}:deliveryOrThreadId;
-    if(!delivery||!['t3','none'].includes(delivery.mode)||delivery.mode==='t3'&&!delivery.threadId) throw new Error('invalid delivery');
+    const delivery=checkedSubmitDelivery(deliveryOrThreadId);
     if(!['normal','background'].includes(priority)) throw new Error('invalid priority');
     const deliveryValue=delivery.mode==='t3'?`t3:${delivery.threadId}`:'none';
     const old=this.db.prepare('SELECT * FROM assignments WHERE request_id=?').get(payload.request_id);
@@ -1481,11 +1492,10 @@ export class Store {
     const protocol=!this.hasAssignment(payload.request_id)&&Object.hasOwn(payload,'protocol')?validateProtocol(payload.protocol):null;
     if(protocol)identity={...identity,protocol};
     if(targetWorker==='pool') throw new Error('worker \"pool\" is not supported');
-    const delivery=typeof deliveryOrThreadId==='string'?{mode:'t3',threadId:deliveryOrThreadId}:deliveryOrThreadId;
-    if(!delivery||!['t3','none'].includes(delivery.mode)||delivery.mode==='t3'&&!delivery.threadId) throw new Error('invalid delivery');
+    const delivery=checkedSubmitDelivery(deliveryOrThreadId);
     const m=normalizeMeta(meta),threadId=delivery.threadId??'',deliveryValue=delivery.mode==='t3'?`t3:${threadId}`:'none';
     if(!['normal','background'].includes(priority)) throw new Error('invalid priority');
-    const retry=this.checkRetry(payload,delivery,environmentId,ownerToken,review,priority,meta,identity,targetWorker,execution,requiredCapabilities,commandKey,supersedes,destinationRevision,revises);
+    const retry=this.checkRetry(payload,deliveryOrThreadId,environmentId,ownerToken,review,priority,meta,identity,targetWorker,execution,requiredCapabilities,commandKey,supersedes,destinationRevision,revises);
     if(retry) return retry;
     let relationship;
     if(inheritedOwnerHash) {

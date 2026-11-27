@@ -1,3 +1,5 @@
+import {crc32,gunzipSync,inflateRawSync} from 'node:zlib';
+
 // One content policy for admission and every worker-visible text path.
 // Known-prefix families match even glued to a word character; the generic shapes keep a leading word boundary.
 const tokenContent=/(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16}|\bsk-[A-Za-z0-9_-]{24,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|rk_live_[A-Za-z0-9]{16,}|(?:xoxe\.)?(?:xox[abposr]|xapp)-[A-Za-z0-9-]{10,}|xoxe-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{35}|whsec_[A-Za-z0-9+/=_-]{8,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|(?:https:\/\/)?hooks\.slack\.com\/services\/T[A-Z0-9]{8,}\/B[A-Z0-9]{8,}\/[A-Za-z0-9]{20,}|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|GOCSPX-[A-Za-z0-9_-]{20,}|\bya29\.[A-Za-z0-9_-]{20,}|\b1\/\/[A-Za-z0-9_-]{30,}|\b\d{8,10}:[A-Za-z0-9_-]{35}|\b[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27})\b|(?<![a-z0-9+.-])\b[a-z][a-z0-9+.-]*:\/\/[^\s:@\/]+:[^\s@\/]+@(?!(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|db|postgres|mysql|redis|mongo|example\.(?:com|org|net)|host\.docker\.internal)\b)[^\s\/]+/i;
@@ -603,9 +605,123 @@ export function hasCredentialHints(value, depth = 0) {
   return Object.entries(value).some(([key, item]) => (typeof item === 'string' && isCredentialField(key) && explicitValue(item)) || hasCredentialHints(item, depth + 1));
 }
 
-// Scan a verified buffer before any output slice. Embedded ASCII/UTF-8 markers in
-// binary data are visible too; this is not an archive or file-format decoder.
+// Scan verified artifact bytes before any output slice. Only recognized gzip
+// and ZIP containers are decoded; other formats keep the existing text scan.
+const artifactArchiveLimit=64*1024*1024;
+const artifactMemberLimit=256;
+const archiveRefusal=reason=>({unscannable:reason});
+
+function archiveError(reason){throw Object.assign(new Error(reason),{archiveReason:reason});}
+function ensureArchive(ok,reason='invalid_archive'){if(!ok)archiveError(reason);}
+function archiveBudget(budget,packed){
+  return Math.min(budget.remaining,Math.max(1,packed)*100);
+}
+function debitArchive(budget,amount){
+  ensureArchive(amount<=budget.remaining,'output_limit');
+  budget.remaining-=amount;
+}
+function checkedInflate(input,budget,decode){
+  const limit=archiveBudget(budget,input.length);
+  try {
+    const {buffer,engine}=decode(input,{maxOutputLength:Math.max(1,limit),info:true});
+    ensureArchive(engine.bytesWritten===input.length);
+    ensureArchive(buffer.length<=limit,'output_limit');
+    debitArchive(budget,buffer.length);
+    return buffer;
+  } catch(error) {
+    if(error.archiveReason) throw error;
+    archiveError(error.code==='ERR_BUFFER_TOO_LARGE'?'output_limit':'invalid_archive');
+  }
+}
+
+function* zipArtifactMembers(bytes,budget){
+  const u16=o=>bytes.readUInt16LE(o),u32=o=>bytes.readUInt32LE(o);
+  let end=-1;
+  for(let p=bytes.length-22;p>=Math.max(0,bytes.length-22-0xffff);p--){
+    if(u32(p)===0x06054b50&&p+22+u16(p+20)===bytes.length){
+      ensureArchive(end===-1);
+      end=p;
+    }
+  }
+  ensureArchive(end>=0);
+  const count=u16(end+10),start=u32(end+16);
+  ensureArchive(u16(end+4)===0&&u16(end+6)===0&&u16(end+8)===count,'unsupported_zip');
+  ensureArchive(count<=budget.members,'member_limit');
+  budget.members-=count;
+  ensureArchive(start<=end&&start+u32(end+12)===end);
+  let p=start;
+  const entries=[];
+  for(let i=0;i<count;i++){
+    ensureArchive(p+46<=end&&u32(p)===0x02014b50);
+    const flags=u16(p+8),method=u16(p+10),crc=u32(p+16),packed=u32(p+20),size=u32(p+24);
+    const nameLength=u16(p+28),offset=u32(p+42);
+    const next=p+46+nameLength+u16(p+30)+u16(p+32);
+    ensureArchive(nameLength>0&&next<=end&&offset+30<=start);
+    ensureArchive(u16(p+34)===0&&(flags&~0x080e)===0&&(method===0||method===8),'unsupported_zip');
+    ensureArchive(u32(offset)===0x04034b50&&u16(offset+6)===flags&&u16(offset+8)===method);
+    ensureArchive(u16(offset+26)===nameLength);
+    const data=offset+30+nameLength+u16(offset+28);
+    ensureArchive(data+packed<=start);
+    ensureArchive(bytes.subarray(offset+30,offset+30+nameLength).equals(bytes.subarray(p+46,p+46+nameLength)));
+    if(!(flags&8))ensureArchive(u32(offset+14)===crc&&u32(offset+18)===packed&&u32(offset+22)===size);
+    entries.push({flags,method,crc,packed,size,offset,data});
+    p=next;
+  }
+  ensureArchive(p===end);
+  entries.sort((a,b)=>a.offset-b.offset);
+  let previousEnd=0;
+  for(let i=0;i<entries.length;i++){
+    const {flags,method,crc,packed,size,offset,data}=entries[i];
+    const next=entries[i+1]?.offset??start;
+    const payloadEnd=data+packed;
+    ensureArchive(offset===previousEnd&&payloadEnd<=next);
+    if(flags&8){
+      const hasSignature=next-payloadEnd===16&&u32(payloadEnd)===0x08074b50;
+      const desc=payloadEnd+(hasSignature?4:0);
+      ensureArchive(next-desc===12&&u32(desc)===crc&&u32(desc+4)===packed&&u32(desc+8)===size);
+    } else ensureArchive(payloadEnd===next);
+    previousEnd=next;
+    ensureArchive(size<=archiveBudget(budget,packed),'output_limit');
+    const payload=bytes.subarray(data,payloadEnd);
+    let output;
+    if(method===0){
+      ensureArchive(packed===size);
+      debitArchive(budget,size);
+      output=payload;
+    } else {
+      // Also cap actual deflate output at the declared member size.
+      const memberBudget={remaining:Math.min(budget.remaining,size)};
+      output=checkedInflate(payload,memberBudget,inflateRawSync);
+      debitArchive(budget,output.length);
+      ensureArchive(output.length===size);
+    }
+    ensureArchive(crc32(output)===crc);
+    yield output;
+  }
+  ensureArchive(previousEnd===start);
+}
+
+function scanArtifactBytes(bytes,budget,depth){
+  const signature=bytes.length>=4?bytes.readUInt32LE(0):0;
+  const gzip=bytes[0]===0x1f&&bytes[1]===0x8b;
+  const zip=[0x04034b50,0x06054b50,0x08074b50,0x02014b50].includes(signature);
+  const rawRule=artifactTextRule(bytes);
+  if(rawRule||(!gzip&&!zip))return rawRule;
+  ensureArchive(depth<=1,'nesting_limit');
+  if(gzip)return scanArtifactBytes(checkedInflate(bytes,budget,gunzipSync),budget,depth+1);
+  for(const member of zipArtifactMembers(bytes,budget)){
+    const rule=scanArtifactBytes(member,budget,depth+1);
+    if(rule)return rule;
+  }
+  return null;
+}
+
 export function artifactSecretRule(bytes) {
+  try{return scanArtifactBytes(bytes,{remaining:artifactArchiveLimit,members:artifactMemberLimit},0);}
+  catch(error){return archiveRefusal(error.archiveReason??'invalid_archive');}
+}
+
+function artifactTextRule(bytes) {
   const text=bytes.toString('utf8');
   if(knownPattern&&text.search(knownPattern)!==-1) return 'registered_credential';
   if(privateKeyHeader.test(text)||pemBodyRanges(text).next().done===false) return 'private_key_armor';

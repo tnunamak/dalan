@@ -20,8 +20,11 @@ export function createArtifactDownloadGuard({scan=artifactSecretRule,log=()=>{},
       if(verdicts.size>maxEntries) verdicts.delete(verdicts.keys().next().value);
     }
     if(rule){
-      log({kind:'artifact_download_refused',request_id:requestId,artifact_id:id,rule});
-      throw Object.assign(new Error(`artifact_secret_content: ${rule}`),{code:'artifact_secret_content'});
+      const refusal=typeof rule==='string'?rule:'artifact_unscannable';
+      log({kind:'artifact_download_refused',request_id:requestId,artifact_id:id,rule:refusal});
+      // The existing protocol/HTTP route recognizes this classification as 422.
+      const message=typeof rule==='string'?'artifact_secret_content: '+rule:'artifact_unscannable: '+rule.unscannable;
+      throw Object.assign(new Error(message),{code:'artifact_secret_content'});
     }
   };
 }
