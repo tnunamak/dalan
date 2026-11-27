@@ -26,6 +26,25 @@ test('refusal preserves explicit diagnostic data without inventing data for an o
   assert.deepEqual(refuse('fixture rejected', false).args, [REFUSE_CODE, 'fixture rejected', false]);
 });
 
+test('an unreadable saved session returns a recovery message and keeps its bytes', {skip: process.platform === 'win32'}, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-session-read-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'fixture.json');
+  fs.writeFileSync(file, '{broken', {mode: 0o600});
+  assert.throws(() => readJsonPrivate(file), {
+    code: 'invalid_session_state',
+    message: 'Saved session is unreadable; start a new session or restore the saved state.',
+  });
+  assert.equal(fs.readFileSync(file, 'utf8'), '{broken');
+});
+
+test('sessionPath preserves a valid emitted UUID and an explicit sidecar suffix', async () => {
+  const { sessionPath } = await import('../src/session-store.mjs');
+  const id = '00000000-0000-4000-8000-000000000001';
+  assert.equal(sessionPath('fixture dir', id), path.join('fixture dir', id + '.json'));
+  assert.equal(sessionPath('fixture dir', id, '.lock'), path.join('fixture dir', id + '.lock'));
+});
+
 test('a failed session promotion removes its temporary file and preserves the destination', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dalan-session-rename-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
