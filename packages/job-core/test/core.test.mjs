@@ -322,6 +322,21 @@ test('canonical JSON keeps punctuation in object field names without turning it 
   assert.deepEqual(JSON.parse(encoded), value);
 });
 
+test('matching claim coordinates with unusable stored deadlines fail with lease_expired', () => {
+  const command = { job: 'fixture-job', subject: 'fixture-subject', worker: 'dot', claim: 'fixture-claim', epoch: 1 };
+  const base = { ...command, active: true };
+  for (const leaseUntil of [undefined, null, '200', 200.5, Infinity]) {
+    assert.throws(() => assertClaimAuthority(command, { ...base, leaseUntil }, 100), { code: 'lease_expired' });
+  }
+  assert.doesNotThrow(() => assertClaimAuthority(command, { ...base, leaseUntil: 200 }, 100));
+});
+
+test('canonical JSON preserves a scalar protocol value without wrapping it', () => {
+  for (const [input, expected] of [[null, 'null'], [false, 'false'], [0, '0'], ['', '""']]) {
+    assert.equal(canonicalJson(input), expected);
+  }
+});
+
 test('renewal at the initial supplied clock advances a frozen revision without altering it', () => {
   const snapshot = Object.freeze({ revision: 0, leaseUntil: 50 });
   const command = Object.freeze({ expectedRevision: 0, operation: 'renew', args: Object.freeze({ leaseMs: 10 }) });
