@@ -237,6 +237,20 @@ try {
   assert.equal(cancellation.status, 'cancelled', JSON.stringify(cancellation));
   assert.equal(textOf(await call('dalan_result', { request_id: cancelId })).status, 'cancelled');
   assert.equal((await call('dalan_accept', { request_id: 'req_unknown_verdict', verdict: 'accept' })).isError, true);
+  // These malformed identifiers are data, not real CLI options. The shared
+  // argument diagnostic is emitted before the owner operation can spawn.
+  for (const id of ['-fixture-id', '-x']) {
+    for (const [name, args] of [
+      ['dalan_cancel', { request_id: id }],
+      ['dalan_accept', { request_id: id, verdict: 'accept' }],
+      ['dalan_correct', { revises: id, assignment: { ...assignment, request_id: revisedId } }],
+      ['dalan_answer', { id, question_id: 'fixture-question', text: 'fixture answer' }],
+    ]) {
+      const refused = await call(name, args);
+      assert.equal(refused.isError, true, name);
+      assert.match(refused.content[0].text, /is not a valid request id.*cannot start with a dash/, name);
+    }
+  }
   for (const bad of ['-option', 'contains\u0000nul']) {
     for (const [name, args] of [
       ['dalan_cancel', { request_id: revisedId, reason: bad }],
