@@ -541,6 +541,8 @@ const realCookie = raw => {
 const knownSecrets = new Set();
 const registeredValues = new Set();
 let knownPattern = null;
+let artifactRuleEpoch = 0;
+export const artifactSecretRuleEpoch = () => artifactRuleEpoch;
 const base64At = (bytes, offset) => {
   const text = Buffer.concat([Buffer.alloc(offset), bytes]).toString('base64').replace(/=+$/, '');
   return text.slice(Math.ceil(offset * 8 / 6), Math.floor((offset + bytes.length) * 8 / 6));
@@ -560,6 +562,7 @@ export function registerSecret(value) {
   if (knownSecrets.size === before) return;
   // Longest first, so an encoded form that contains a shorter one is masked whole.
   knownPattern = new RegExp([...knownSecrets].sort((a, b) => b.length - a.length).map(form => form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  artifactRuleEpoch++;
 }
 // A worker thread starts with its own module state; pass it these values so it masks and refuses the same secrets.
 export const registeredSecrets = () => [...registeredValues];
@@ -598,6 +601,18 @@ export function hasCredentialHints(value, depth = 0) {
   if (typeof value === 'string') return hasCredentialFieldText(value);
   if (!value || typeof value !== 'object' || depth > MAX_DEPTH) return false;
   return Object.entries(value).some(([key, item]) => (typeof item === 'string' && isCredentialField(key) && explicitValue(item)) || hasCredentialHints(item, depth + 1));
+}
+
+// Scan a verified buffer before any output slice. Embedded ASCII/UTF-8 markers in
+// binary data are visible too; this is not an archive or file-format decoder.
+export function artifactSecretRule(bytes) {
+  const text=bytes.toString('utf8');
+  if(knownPattern&&text.search(knownPattern)!==-1) return 'registered_credential';
+  if(privateKeyHeader.test(text)||pemBodyRanges(text).next().done===false) return 'private_key_armor';
+  if(text.search(bearerText)!==-1) return 'bearer_credential';
+  if(text.search(basicText)!==-1) return 'basic_credential';
+  if(tokenContent.test(text)) return 'token_format';
+  return null;
 }
 
 // The text core every sink shares: known values, strong formats, then labelled values. JSON text first gets the

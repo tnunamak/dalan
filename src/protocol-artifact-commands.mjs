@@ -1,6 +1,31 @@
 import {openSync,closeSync,fstatSync,readSync,constants} from 'node:fs';
 import {createArtifactJournal,artifactBytesDigest} from './artifact-journal.mjs';
+import {artifactSecretRule,artifactSecretRuleEpoch} from './redaction.mjs';
 const fail=code=>{throw Object.assign(new Error(code),{code});};
+
+// Digest the exact buffer that will be served: a stale or replaced file cannot
+// borrow a clean verdict for previously verified bytes.
+export function createArtifactDownloadGuard({scan=artifactSecretRule,log=()=>{},maxEntries=512}={}) {
+  let epoch=artifactSecretRuleEpoch();
+  const verdicts=new Map();
+  return ({bytes,sha256,id,requestId})=>{
+    const digest=artifactBytesDigest(bytes);
+    if(typeof sha256!=='string'||digest!==sha256.toLowerCase()) fail('artifact_integrity_mismatch');
+    const now=artifactSecretRuleEpoch();
+    if(now!==epoch) { verdicts.clear(); epoch=now; }
+    let rule=verdicts.get(digest);
+    if(!verdicts.has(digest)){
+      rule=scan(bytes);
+      verdicts.set(digest,rule);
+      if(verdicts.size>maxEntries) verdicts.delete(verdicts.keys().next().value);
+    }
+    if(rule){
+      log({kind:'artifact_download_refused',request_id:requestId,artifact_id:id,rule});
+      throw Object.assign(new Error(`artifact_secret_content: ${rule}`),{code:'artifact_secret_content'});
+    }
+  };
+}
+
 function inspectNative(store,params,query) {
   const row=store.db.prepare("SELECT * FROM artifacts WHERE id=? AND request_id=? AND claim_id=? AND kind='upload'").get(query.reference,query.job,params.claimId);
   if(!row||!Number.isSafeInteger(row.size)||row.size<0||row.size>8*1024*1024)fail('artifact_integrity_mismatch');
