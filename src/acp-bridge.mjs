@@ -118,11 +118,12 @@ export function verdictRefusal(order) {
 }
 
 // The router's checks repeated as a backstop: the worker must be able to take work now.
-export function bridgeRefusal(status, inFlightCap) {
+export function bridgeRefusal(status, inFlightCap, worker) {
   if (status.paused) return `worker paused${status.pause_reason ? `: ${status.pause_reason}` : ''}`;
   // Only evidence holds work: an owner-confirmed break. An inferred break is silence; estimated limits are metrics.
   if (status.worker_break?.active && status.worker_break.source === 'owner') return `worker_break active since ${status.worker_break.since}`;
-  const queued = status.counts?.find(c => c.status === 'queued')?.count ?? 0;
+  const target = worker ? status.by_worker?.[worker] : undefined;
+  const queued = target?.queued_normal ?? target?.queued_live ?? status.counts?.find(c => c.status === 'queued')?.count ?? 0;
   if (queued >= inFlightCap) return `worker queue is full (${queued} queued, in-flight cap ${inFlightCap})`;
   return null;
 }
