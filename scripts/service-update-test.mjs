@@ -104,6 +104,14 @@ try {
     const result = { outcome: 'updated', timestamp: '2026-11-28T00:00:00.000Z' };
     fs.writeFileSync(file, JSON.stringify(result));
     assert.deepEqual(status(), result);
+    const retained = {
+      outcome: 'updated', version: '0.7.0', previous_version: '0.6.0', cleanup_warning: 'fixture cleanup warning',
+      adopted_legacy_server: true, connector_refresh_required: false, current_version: '0.7.0', latest_version: '0.8.0',
+      candidate_version: '0.8.0', failed_version: '0.9.0', message: 'fixture message', error: 'fixture error',
+      timestamp: '2026-11-28T00:00:00.000Z',
+    };
+    fs.writeFileSync(file, JSON.stringify({ ...retained, note: 'not a public result field', status: 'foreign' }));
+    assert.deepEqual(status(), retained, 'service status retains all known fields and drops unknown keys');
   }
   {
     const f = fixture(); const r = await updateService({ home: f.home, check: true }, f.seams);

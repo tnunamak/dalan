@@ -402,6 +402,13 @@ export async function updateService({ home, check = false, yes = false, retry = 
   }
 }
 
+// Persisted fields written by updateService; do not publish arbitrary file keys.
+const UPDATE_RESULT_FIELDS = [
+  'outcome', 'current_version', 'latest_version', 'candidate_version', 'failed_version',
+  'previous_version', 'version', 'connector_refresh_required', 'adopted_legacy_server',
+  'cleanup_warning', 'error', 'message', 'timestamp',
+];
+
 export function serviceStatus({ home }) {
   home = path.resolve(home ?? fail('home is required'));
   const { value: receipt } = readReceipt(home), current = path.join(home, 'current');
@@ -418,7 +425,8 @@ export function serviceStatus({ home }) {
       const result = JSON.parse(raw);
       last_result = result && typeof result === 'object' && !Array.isArray(result) &&
         Object.hasOwn(result, 'outcome') && typeof result.outcome === 'string'
-        ? result : { status: 'unavailable', reason: 'malformed' };
+        ? Object.fromEntries(UPDATE_RESULT_FIELDS.filter(key => Object.hasOwn(result, key)).map(key => [key, result[key]]))
+        : { status: 'unavailable', reason: 'malformed' };
     } catch {
       last_result = { status: 'unavailable', reason: 'malformed' };
     }
