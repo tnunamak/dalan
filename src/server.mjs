@@ -362,7 +362,7 @@ const optionsArray={type:'array',items:string,maxItems:16};
 const tools = [
   { name:'list_pending',description:'List up to 50 queued assignment IDs and titles.',inputSchema:schema({}) },
   { name:'claim',description:'Claim one immutable assignment and see available_checks before choosing run_check.check_id. lease_ms sets this grant’s duration, up to the owner-configured maximum. An exact live retry retains the grant and its stored duration.',inputSchema:schema({request_id:string,claimant:string,acquisition_id:{type:'string',minLength:1,maxLength:128,pattern:'^[A-Za-z0-9_-]+$'},lease_ms:{type:'integer',minimum:1,maximum:store.limits.leaseMs}},['request_id','claimant']) },
-  { name:'get',description:'Read assignment, available_checks, cancellation, progress, report and delivery facts; optional claim_id scopes heartbeat guidance.',inputSchema:schema({request_id:string,claim_id:string},['request_id']) },
+  { name:'get',description:'Read assignment, available_checks, cancellation, progress, report and delivery facts.',inputSchema:schema({request_id:string},['request_id']) },
   { name:'ack_message',description:'Acknowledge a lightweight message after reading it; no claim or finish is needed.',inputSchema:schema({message_id:string},['message_id']) },
   { name:'progress',description:'Append progress. Set blocker:true or start note with BLOCKED: or QUESTION: to forward a question to the owner thread. A note over 4096 bytes is cut.',inputSchema:schema({request_id:string,claim_id:string,note:message,blocker:bool},['request_id','claim_id','note']) },
   { name:'ask_question',description:'Ask an identified question under the current grant. The owner answers this question explicitly; ordinary notes do not answer it. Consume its answer before reporting completed. Set purpose to human_decision (a choice only a human may make), authentication (a sign-in only a human can complete) or tool_permission (a permission only a human may grant) when only a human may answer; no model can answer such a question for them.',inputSchema:schema({request_id:string,claim_id:string,question_id:{type:'string',minLength:1,maxLength:128},text:{type:'string',minLength:1,maxLength:4096},purpose:{type:'string',enum:['clarification','human_decision','authentication','tool_permission']}},['request_id','claim_id','question_id','text']) },
@@ -392,6 +392,10 @@ if(batchClaimProfile) {
   claim.inputSchema.required=['claimant'];
   claim.inputSchema.oneOf=[{required:['request_id']},{required:['next','acquisition_id'],not:{required:['request_id']}}];
   claim.inputSchema.oneOf[0].not={required:['next']};
+  // The stable catalog stays frozen: claim_id on get (heartbeat for that exact claim) is served only in this profile.
+  const get=tools.find(item=>item.name==='get');
+  get.description='Read assignment, available_checks, cancellation, progress, report and delivery facts; optional claim_id scopes heartbeat guidance.';
+  get.inputSchema.properties.claim_id=string;
 }
 // Opt-in compatibility catalog only; grant and lease enforcement are unchanged.
 if(catalogProfile==='legacy-v46') {

@@ -43,6 +43,8 @@ try {
   assert.ok(port,'isolated server did not become ready: '+errors);
   secret=fs.readFileSync(path.join(home,'.config/dalan/env'),'utf8').match(/^BRIDGE_PATH_SECRET=(.+)$/m)[1];
   if(batchFixture) {
+    const servedGet=(await rpc('',{},'tools/list')).tools.find(t=>t.name==='get');
+    assert.ok(servedGet.inputSchema.properties.claim_id,'batch-claim-v1 serves get.claim_id');
     const pendingIds=['a','b','c','d','e'].map(x=>'req_batch_'+x);
     const occupied=['req_batch_held1','req_batch_held2'];
     const skipped='req_batch_skipped',cancelled='req_batch_cancelled';
