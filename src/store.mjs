@@ -25,7 +25,20 @@ import {answerProtocolQuestion,cancelProtocolJob} from './protocol-owner-mutatio
 import {defineProtocolRetentionInTransaction,assertProtocolAvailable as checkProtocolAvailable} from './protocol-retention.mjs';
 import {migrateProtocolDelivery} from './protocol-delivery-driver.mjs';
 import {migrateProtocolStopObserver} from './protocol-stop-observer.mjs';
-import { validT3ThreadId } from './destinations/index.mjs';
+import {destinationVersion,validT3ThreadId} from './destinations/index.mjs';
+
+function deliveryColumns(value) {
+  // The old direct Store overload still accepts a bare T3 thread.
+  // New HTTP submissions arrive as parsed objects, which take the strict thread id check.
+  if(typeof value==='object'&&value?.mode==='t3'&&!validT3ThreadId(value.threadId)) {
+    throw Object.assign(new Error('invalid_delivery: t3 delivery needs a valid thread id'), {code:'invalid_delivery'});
+  }
+  const delivery=typeof value==='string'?{mode:'t3',threadId:value}:value;
+  const mode=delivery?.mode, version=destinationVersion(mode);
+  const address=mode==='none'?null:mode==='t3'?delivery?.threadId:delivery?.address;
+  if(!version || mode!=='none'&&(typeof address!=='string'||!address)) throw new Error('invalid delivery');
+  return {delivery,mode,address,version,threadId:mode==='t3'?address:'',deliveryValue:mode==='none'?'none':mode+':'+address};
+}
 
 // A reserved HTTP response is a live effect channel. Persist its owner so a
 // second process cannot reset a reservation whose callback can still respond.
@@ -51,7 +64,7 @@ function waiterOwnerGone(attemptId) {
   return !!(owner.boot&&owner.start&&current.boot&&current.start&&(owner.boot!==current.boot||owner.start!==current.start));
 }
 
-const SUPPORTED_SCHEMA_VERSION = 72;
+const SUPPORTED_SCHEMA_VERSION = 73;
 const monotonicMs=()=>Number(process.hrtime.bigint())/1e6;
 function systemBootId() {
   if(process.platform!=='linux') return null;
@@ -113,17 +126,6 @@ function validateSubmitKey(key) {
 // Admission controls (queue caps, preflights) may change; the accepted job's intent cannot.
 // Intent digests are persisted, so they hash the stored spelling of the source, objective key and task kind: a retry hashes the same before and after the rename.
 const storedMeta=(meta,legacy)=>({...meta,objective_key:storedObjectiveKey(meta.objective_key,legacy),task_kind:storedTaskKind(meta.task_kind,legacy),source:toStoredSource(meta.source,legacy)});
-function checkedSubmitDelivery(input) {
-  if (typeof input === 'object' && input?.mode === 't3' && !validT3ThreadId(input.threadId)) {
-    throw Object.assign(new Error('invalid_delivery: t3 delivery needs a valid thread id'), {code:'invalid_delivery'});
-  }
-  // Legacy positional callers can still pass an opaque thread ID. New HTTP
-  // submissions arrive as parsed objects, which always take the strict path.
-  const delivery=typeof input==='string'?{mode:'t3',threadId:input}:input;
-  if(!delivery||!['t3','none'].includes(delivery.mode)||delivery.mode==='t3'&&!delivery.threadId) throw new Error('invalid delivery');
-  return delivery;
-}
-
 function submitIntentDigest(identity,delivery,environmentId,review,priority,meta,targetWorker,execution,requiredCapabilities,destinationRevision=null,legacyFixNames=true) {
   return hash(JSON.stringify(canonical({payload:identity,delivery,environmentId:environmentId??'',review:!!review,priority,meta:storedMeta(normalizeMeta(meta),legacyFixNames),targetWorker,execution,requiredCapabilities,...(destinationRevision===null?{}:{destination_revision:destinationRevision})})));
 }
@@ -1056,6 +1058,14 @@ export class Store {
         addControlColumns(this.db);
         this.db.exec('PRAGMA user_version=72;');
       }
+      if(version<73) {
+        const columns=new Set(this.db.prepare('PRAGMA table_info(assignments)').all().map(row=>row.name));
+        for(const name of ['delivery_adapter','delivery_address','delivery_adapter_version'])
+          if(!columns.has(name))this.db.exec('ALTER TABLE assignments ADD COLUMN '+name+' TEXT');
+        // Older custom/invalid rows have no historical version evidence. Keep their tuple unknown. A t3: row is filled only
+        // when its address is a valid T3 thread id (destinations/index.mjs validT3ThreadId), so the tuple never names a bad thread.
+        this.db.exec("UPDATE assignments SET delivery_adapter=CASE WHEN delivery='none' THEN 'none' ELSE 't3' END, delivery_address=CASE WHEN delivery='none' THEN NULL ELSE substr(delivery,4) END, delivery_adapter_version='1' WHERE delivery_adapter IS NULL AND (delivery='none' OR (substr(delivery,1,3)='t3:' AND length(substr(delivery,4)) BETWEEN 8 AND 1024 AND substr(delivery,4) NOT GLOB '*[^A-Za-z0-9._:%-]*')); PRAGMA user_version=73;");
+      }
       // Which spelling of the fix-loop source this database stores. Schemas created before the rename list the earlier
       // spelling in the CHECK constraint on assignments.source; newer schemas list only the neutral one.
       this.legacyFixNames=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assignments' AND instr(sql,?)>0").get(`'${legacyFixLoopName}'`);
@@ -1180,8 +1190,8 @@ export class Store {
   insertConfinedCheckAssignment(requestId,payload) {
     const body=JSON.stringify(payload);
     // "unknown" is a reserved name that no configured worker can have, so only the integrator ever touches this row.
-    this.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,target_worker) VALUES(?,?,?,?,?,?,?,?)')
-      .run(requestId,body,hash(body),'integrator','integrator','running',this.stamp(),'unknown');
+    this.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,target_worker,delivery_adapter,delivery_adapter_version) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      .run(requestId,body,hash(body),'integrator','integrator','running',this.stamp(),'unknown','none',destinationVersion('none'));
     return this.db.prepare('SELECT * FROM assignments WHERE request_id=?').get(requestId);
   }
   // Queue waits are scoped to the selected worker and task kind, one sample per job. The first persisted claim is the
@@ -1428,9 +1438,8 @@ export class Store {
   checkRetry(payload, deliveryOrThreadId, environmentId, ownerToken, review=false, priority='normal', meta=null, identity=payload, targetWorker=undefined, execution=null, requiredCapabilities=null, commandKey=null, supersedes=null, destinationRevision=null, revises=null) {
     validateSubmitKey(commandKey);
     const m=normalizeMeta(meta);
-    const delivery=checkedSubmitDelivery(deliveryOrThreadId);
+    const {deliveryValue}=deliveryColumns(deliveryOrThreadId);
     if(!['normal','background'].includes(priority)) throw new Error('invalid priority');
-    const deliveryValue=delivery.mode==='t3'?`t3:${delivery.threadId}`:'none';
     const old=this.db.prepare('SELECT * FROM assignments WHERE request_id=?').get(payload.request_id);
     if(supersedes!==null&&(!supersedes||typeof supersedes!=='object'||Array.isArray(supersedes)||
       Object.keys(supersedes).some(k=>!['target_id','target_token'].includes(k))||
@@ -1506,8 +1515,8 @@ export class Store {
     const protocol=!this.hasAssignment(payload.request_id)&&Object.hasOwn(payload,'protocol')?validateProtocol(payload.protocol):null;
     if(protocol)identity={...identity,protocol};
     if(targetWorker==='pool') throw new Error('worker \"pool\" is not supported');
-    const delivery=checkedSubmitDelivery(deliveryOrThreadId);
-    const m=normalizeMeta(meta),threadId=delivery.threadId??'',deliveryValue=delivery.mode==='t3'?`t3:${threadId}`:'none';
+    const {delivery,mode:deliveryAdapter,address:deliveryAddress,version:deliveryAdapterVersion,threadId,deliveryValue}=deliveryColumns(deliveryOrThreadId);
+    const m=normalizeMeta(meta);
     if(!['normal','background'].includes(priority)) throw new Error('invalid priority');
     const retry=this.checkRetry(payload,deliveryOrThreadId,environmentId,ownerToken,review,priority,meta,identity,targetWorker,execution,requiredCapabilities,commandKey,supersedes,destinationRevision,revises);
     if(retry) return retry;
@@ -1562,7 +1571,7 @@ export class Store {
     }
     if(priority==='background'&&this.db.prepare(`SELECT count(*) n FROM assignments WHERE priority='background' AND target_worker=? AND request_id IS NOT ? AND (status='claimed' OR status='queued' AND ${live(this.nowMs())})`).get(targetWorker??'dot',supersededId).n>=this.backgroundMaxInFlight) throw new Error('background_capacity_full');
     // The target is a column, not payload: an omitted worker means 'dot'.
-    this.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,owner_hash,review,delivery,priority,objective_key,revision,task_kind,source,target_worker,execution,required_capabilities) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id,body,payloadHash,threadId,environmentId??'','queued',this.stamp(),ownerHash,review?1:0,deliveryValue,priority,...metaFields.map(k=>k==='source'?toStoredSource(m[k],this.legacyFixNames):m[k]),targetWorker??'dot',execution??defaultExecution,requiredCapabilities?JSON.stringify(requiredCapabilities):null);
+    this.db.prepare('INSERT INTO assignments(request_id,payload,payload_hash,thread_id,environment_id,status,created_at,owner_hash,review,delivery,priority,objective_key,revision,task_kind,source,target_worker,execution,required_capabilities,delivery_adapter,delivery_address,delivery_adapter_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id,body,payloadHash,threadId,environmentId??'','queued',this.stamp(),ownerHash,review?1:0,deliveryValue,priority,...metaFields.map(k=>k==='source'?toStoredSource(m[k],this.legacyFixNames):m[k]),targetWorker??'dot',execution??defaultExecution,requiredCapabilities?JSON.stringify(requiredCapabilities):null,deliveryAdapter,deliveryAddress,deliveryAdapterVersion);
     if(typeof parentGeneration==='string')this.db.prepare('UPDATE assignments SET parent_generation=? WHERE request_id=?').run(parentGeneration,id);
     if(relationship) this.db.prepare('UPDATE assignments SET relationship_id=? WHERE request_id=?').run(relationship.relationship_id,id);
     if(disclosure)this.db.prepare('INSERT INTO destination_approvals(request_id,revision,snapshot,actor,approved_at) VALUES(?,?,?,?,?)').run(id,disclosure.revision,JSON.stringify(disclosure),JSON.stringify({kind:'owner_capability',id:ownerHash}),this.stamp());
