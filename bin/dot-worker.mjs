@@ -115,7 +115,39 @@ function request(route, method = 'GET', payload, headers={}, timeoutMs=30000) {
   });
 }
 
-function download(id,output,ownerHeaders) { return new Promise((resolve,reject)=>{ const socketPathError=adminSocketPathError(socket); if(socketPathError) return reject(socketPathError); if(!artifactIdPattern.test(id)) return reject(new Error('invalid artifact ID')); const req=http.request({socketPath:socket,path:'/artifact?id='+encodeURIComponent(id),headers:ownerHeaders??{'x-owner-capability':receiptForArtifact(id).token}},res=>{if(res.statusCode!==200){let body='';res.on('data',b=>body+=b);res.on('end',()=>reject(new Error(JSON.parse(body).error)));return;}const bytes=[];res.on('data',b=>bytes.push(b));res.on('end',()=>{const data=Buffer.concat(bytes),digest=createHash('sha256').update(data).digest('hex');if(digest!==res.headers['x-artifact-sha256']) return reject(new Error('artifact digest mismatch'));fs.writeFileSync(output,data,{flag:'wx',mode:0o600});resolve({artifact_id:id,output,bytes:data.length,sha256:digest});});});req.on('error',reject);req.end();}); }
+function download(id,output,ownerHeaders) {
+  return new Promise((resolve,reject)=>{
+    const socketPathError=adminSocketPathError(socket);
+    if(socketPathError) return reject(socketPathError);
+    if(!artifactIdPattern.test(id)) return reject(new Error('invalid artifact ID'));
+    const req=http.request({socketPath:socket,path:'/artifact?id='+encodeURIComponent(id),headers:ownerHeaders??{'x-owner-capability':receiptForArtifact(id).token}},res=>{
+      if(res.statusCode!==200){
+        let body='', tooLarge=false;
+        res.on('data',chunk=>{
+          if(tooLarge) return;
+          body+=chunk;
+          if(body.length>8192){ body=''; tooLarge=true; }
+        });
+        res.on('end',()=>{
+          let error;
+          try { error=JSON.parse(body)?.error; } catch { /* status fallback */ }
+          reject(new Error(typeof error==='string'&&error.trim() ? error : `HTTP ${res.statusCode}`));
+        });
+        return;
+      }
+      const bytes=[];
+      res.on('data',b=>bytes.push(b));
+      res.on('end',()=>{
+        const data=Buffer.concat(bytes),digest=createHash('sha256').update(data).digest('hex');
+        if(digest!==res.headers['x-artifact-sha256']) return reject(new Error('artifact digest mismatch'));
+        fs.writeFileSync(output,data,{flag:'wx',mode:0o600});
+        resolve({artifact_id:id,output,bytes:data.length,sha256:digest});
+      });
+    });
+    req.on('error',reject);
+    req.end();
+  });
+}
 const artifactIdPattern=/^art_[-\w]{8,128}$/;
 function receiptForArtifact(id) { if(!artifactIdPattern.test(id)) throw new Error('invalid artifact ID');let requestId;try{requestId=fs.readFileSync(path.join(root,'artifact-index',id),'utf8').trim();}catch{throw new Error('artifact owner unknown; run dalan get REQUEST_ID or wait REQUEST_ID first');}return receipt(requestId); }
 function canonical(value) { if(Array.isArray(value)) return value.map(canonical); if(value&&typeof value==='object') return Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonical(value[k])])); return value; }
