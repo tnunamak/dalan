@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,6 +85,31 @@ try {
   } }), /could not start/);
   assert.equal(failedScratch.length, 2);
   assert(failedScratch.every(directory => !fs.existsSync(directory)), 'failed probes remove their own scratch without depending on other concurrent probes');
+
+  const fakeCandidateSpawn = () => {
+    let calls = 0;
+    return () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      child.exitCode = null; child.signalCode = null;
+      if (++calls === 1) queueMicrotask(() => {
+        child.stderr.emit('data', Buffer.from('service catalog guard mismatch'));
+        child.exitCode = 1;
+        child.emit('close');
+      });
+      return child;
+    };
+  };
+  const receipt = { enable_workspace: false, enable_t3: false };
+  for (const [message, expected] of [
+    ['service self-check version does not match selected package', 'candidate service did not pass its self-check: service self-check version does not match selected package'],
+    ['connect ECONNREFUSED fixture-private-socket-path', 'candidate service did not pass its self-check before timeout'],
+  ]) {
+    await assert.rejects(probeCandidate(home, receipt, candidate, {
+      spawn: fakeCandidateSpawn(), startupTimeoutMs: 100,
+      probeService: async () => { throw new Error(message); },
+    }), { message: expected });
+  }
 
   const socketDir = path.join(home, '.local', 'share', 'dot-bridge'); fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
   const socketPath = path.join(socketDir, 'admin.sock');

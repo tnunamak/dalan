@@ -246,6 +246,18 @@ async function requireCatalogGuard(repo, env, receipt, options) {
   } finally { await stopChild(child); }
 }
 
+// Only fixed diagnostics authored by this module; never propagate socket or filesystem data.
+const SAFE_CANDIDATE_PROBE_FAILURES = new Set([
+  'service self-check response is incomplete',
+  'service self-check returned an invalid worker catalog',
+  'service self-check worker set does not match configuration',
+  'service self-check version does not match selected package',
+  'worker configuration is invalid for service self-check',
+  'service operator key is invalid',
+  'service probe timeout must be positive',
+  'service probe timed out',
+]);
+
 export async function probeCandidate(home, receipt, repo, options = {}) {
   const scratchBase = path.join(os.homedir(), '.tmp');
   fs.mkdirSync(scratchBase, { recursive: true, mode: 0o700 });
@@ -266,14 +278,21 @@ export async function probeCandidate(home, receipt, repo, options = {}) {
     child.on('error', error => { spawnError = error; });
     child.once('close', () => { closed = true; });
     const deadline = Date.now() + (options.startupTimeoutMs ?? 20_000);
-    let result;
+    let result, lastSafeProbeFailure;
+    const probe = options.probeService ?? probeService;
     while (Date.now() < deadline) {
       if (spawnError) fail(`candidate service could not start: ${spawnError.message}`);
       if (closed) fail('candidate service exited before self-check');
       if (child.exitCode !== null || child.signalCode !== null) fail('candidate service exited before self-check');
-      try { result = await probeService(scratch, { ...receipt, repo }); break; } catch { await new Promise(resolve => setTimeout(resolve, 150)); }
+      try { result = await probe(scratch, { ...receipt, repo }); break; }
+      catch (error) {
+        if (error instanceof Error && SAFE_CANDIDATE_PROBE_FAILURES.has(error.message)) lastSafeProbeFailure = error.message;
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
     }
-    if (!result) fail('candidate service did not pass its self-check before timeout');
+    if (!result) fail(lastSafeProbeFailure
+      ? `candidate service did not pass its self-check: ${lastSafeProbeFailure}`
+      : 'candidate service did not pass its self-check before timeout');
     return result;
   } finally {
     await stopChild(child);
