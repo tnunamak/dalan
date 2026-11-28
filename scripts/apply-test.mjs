@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { applyPatch, baseProblem, detectPresentPatches, listPatchFiles, patchMatchesWorktree, readMaterializeGrant } from '../src/patch-apply.mjs';
+import { applyPatch, baseProblem, decodePatchPathOutput, detectPresentPatches, listPatchFiles, patchMatchesWorktree, readMaterializeGrant, worktreeRoot } from '../src/patch-apply.mjs';
 import { startAdapter } from './acp-client.mjs';
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'apply-'));
@@ -22,6 +22,53 @@ const main = repo('main'); write(main, 'a.txt', 'one\ntwo\n'); const BASE = comm
 write(main, 'a.txt', 'uno\ntwo\n'); write(main, 'new.txt', 'hello\n'); git(main, 'add', '-A');
 const PATCH = Buffer.from(git(main, 'diff', '--cached', '--binary') + '\n'); git(main, 'reset', '-q', '--hard');
 assert.match(PATCH.toString(), /diff --git a\/a.txt b\/a.txt/);
+
+// Decode the inspection frame in isolation; no malformed input is applied to a repository.
+const utf8InspectionFrame = '1\t0\tcafé name.txt\0';
+assert.equal(decodePatchPathOutput(Buffer.from(utf8InspectionFrame)), utf8InspectionFrame);
+assert.equal(decodePatchPathOutput(Buffer.from('valid replacement character: \uFFFD')), 'valid replacement character: \uFFFD');
+assert.throws(() => decodePatchPathOutput(Buffer.from([0xc3])), /patch path inspection is not valid UTF-8/);
+
+// Check the worktree-root inspector with synthetic output, without applying a patch.
+const rootInspector = path.join(base, 'root-inspector');
+fs.writeFileSync(rootInspector, "#!/bin/sh\nprintf '\\303\\n'\n", { mode: 0o700 });
+assert.throws(() => worktreeRoot(main, { ...process.env, DALAN_GIT: rootInspector }),
+  /patch path inspection is not valid UTF-8/, 'non-UTF-8 worktree path is refused');
+
+// End to end: a tracked file whose name holds raw byte 0xE9 (not UTF-8). The patch is refused before any change.
+const latin = repo('latin1-name');
+const latinName = Buffer.concat([Buffer.from(latin + '/caf'), Buffer.from([0xe9]), Buffer.from('.txt')]);
+fs.writeFileSync(latinName, 'one\n');
+commit(latin, 'latin1 name');
+fs.writeFileSync(latinName, 'two\n');
+const latinPatch = spawnSync('git', ['-C', latin, 'diff', '--binary'], { encoding: 'buffer' }).stdout;
+git(latin, 'checkout', '--', '.');
+const latinBefore = fs.readFileSync(latinName);
+assert.throws(() => listPatchFiles(latin, latinPatch), /patch path inspection is not valid UTF-8/);
+assert.deepEqual(fs.readFileSync(latinName), latinBefore, 'refusal leaves the file untouched');
+
+// Inject a closed inspector using a valid fixture patch.
+const inspector = path.join(base, 'inspect-git');
+fs.writeFileSync(inspector, "#!/bin/sh\napply=no; inspection=no; reverse=no; read_only=no\nfor arg do\n  [ \"$arg\" = apply ] && apply=yes\n  [ \"$arg\" = --numstat ] && inspection=yes\n  [ \"$arg\" = --reverse ] && reverse=yes\n  [ \"$arg\" = --check ] && read_only=yes\ndone\nif [ \"$inspection\" = yes ] && { [ \"$FAIL_INSPECTION\" = forward ] || [ \"$reverse\" = yes ]; }; then\n  printf '%s\\n' 'synthetic inspector refused' >&2\n  exit 9\nfi\nif [ \"$apply\" = yes ] && [ \"$inspection\" != yes ] && [ \"$read_only\" != yes ]; then\n  printf '%s\\n' write >> \"$WRITE_TRACE\"\nfi\nexec git \"$@\"\n", { mode: 0o700 });
+const writeTrace = path.join(base, 'apply-write.trace');
+const worktreeSnapshot = dir => ({
+  head: git(dir, 'rev-parse', 'HEAD'),
+  index: git(dir, 'ls-files', '--stage'),
+  files: fs.readdirSync(dir).filter(name => name !== '.git').sort()
+    .map(name => [name, sha(fs.readFileSync(path.join(dir, name)))]),
+});
+for (const direction of ['forward', 'reverse']) {
+  const checkout = repo('refuse-' + direction);
+  write(checkout, 'a.txt', 'one\ntwo\n');
+  const commitId = commit(checkout, 'base');
+  write(checkout, 'untracked.txt', 'local fixture bytes');
+  const before = worktreeSnapshot(checkout);
+  assert.throws(() => applyPatch({ dir: checkout, patch: PATCH, baseSha: commitId,
+    env: { ...process.env, DALAN_GIT: inspector, FAIL_INSPECTION: direction, WRITE_TRACE: writeTrace } }),
+  /git apply --numstat failed: synthetic inspector refused/);
+  assert.deepEqual(worktreeSnapshot(checkout), before);
+  assert.equal(fs.existsSync(writeTrace), false, 'inspector refusal never begins a write');
+}
 
 // A benign rename must record both sides so rollback can restore the old file.
 const renameRepo = repo('rename-snapshot');
@@ -171,11 +218,12 @@ const server = http.createServer((req, res) => {
   res.statusCode = 404; res.end('{"error":"nope"}');
 });
 await new Promise(r => server.listen(path.join(root, 'admin.sock'), r));
-const run = (...argv) => new Promise(resolve => {
-  const child = spawn(process.execPath, [new URL('../bin/dot-worker.mjs', import.meta.url).pathname, ...argv], { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] });
+const runWithEnv = (extra, ...argv) => new Promise(resolve => {
+  const child = spawn(process.execPath, [new URL('../bin/dot-worker.mjs', import.meta.url).pathname, ...argv], { env: { ...process.env, HOME: home, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = ''; child.stdout.on('data', b => stdout += b); child.stderr.on('data', b => stderr += b);
   child.on('close', code => resolve({ code, stdout, stderr }));
 });
+const run = (...argv) => runWithEnv({}, ...argv);
 const clone = name => { const d = path.join(base, name); const r = spawnSync('git', ['clone', '-q', cli, d]); assert.equal(r.status, 0, String(r.stderr)); return d; };
 const cli = repo('cli'); write(cli, 'a.txt', 'one\ntwo\n'); const CLI_BASE = commit(cli, 'base');
 try {
@@ -291,6 +339,15 @@ try {
   evidenceSha = sha('lie'); let r = await run('apply', RID, '--dir', cli);
   assert.notEqual(r.code, 0); assert.match(r.stderr, /sha256 does not match/); assert.equal(decided.length, 0); assert.equal(fs.existsSync(path.join(cli, 'new.txt')), false);
   evidenceSha = sha(PATCH);
+  const beforeInspection = worktreeSnapshot(cli);
+  const refusedInspection = await runWithEnv({
+    DALAN_GIT: inspector, FAIL_INSPECTION: 'reverse', WRITE_TRACE: writeTrace,
+  }, 'apply', RID, '--dir', cli);
+  assert.notEqual(refusedInspection.code, 0);
+  assert.match(refusedInspection.stderr, /synthetic inspector refused/);
+  assert.equal(decided.length, 0, 'no apply receipt is recorded');
+  assert.equal(fs.existsSync(writeTrace), false);
+  assert.deepEqual(worktreeSnapshot(cli), beforeInspection);
   // base not an ancestor of HEAD: refused with the reason
   const elsewhere = repo('elsewhere'); write(elsewhere, 'a.txt', 'one\ntwo\n'); commit(elsewhere, 'unrelated');
   r = await run('apply', RID, '--dir', elsewhere);
