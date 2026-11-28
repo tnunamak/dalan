@@ -1,6 +1,38 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { once } from 'node:events';
 import { DotBridgeAdapter } from './adapter-dot-bridge.mjs';
+
+// These malformed replies are entirely local: no bridge process, owner token or real route.
+{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'da-'));
+  const socket=path.join(dir,'a.sock');
+  const server=http.createServer((req,res)=>{
+    res.writeHead(req.url==='/unavailable'?503:200,{'Content-Type':'application/json'});
+    res.end('{broken-fixture');
+  });
+  try {
+    server.listen(socket);
+    await once(server,'listening');
+    const trace=[];
+    const ctx={socket,note(entry,ret){trace.push(entry);return ret;}};
+    for(const [route,status] of [['/success',200],['/unavailable',503]]) {
+      const reply=await DotBridgeAdapter.prototype.admin.call(ctx,'GET',route,undefined,undefined);
+      assert.deepEqual(reply,{error:`invalid admin JSON (HTTP ${status})`});
+      assert.equal(trace.at(-1).error,reply.error);
+      assert.equal(trace.at(-1).status,status);
+    }
+    assert.ok(!JSON.stringify(trace).includes('broken-fixture'),'malformed admin bodies do not enter the trace');
+    console.log('PASS malformed admin JSON is refused at both 200 and 503, with no raw body in the trace');
+  } finally {
+    try { if(server.listening) await new Promise((resolve,reject)=>server.close(error=>error?reject(error):resolve())); }
+    finally { fs.rmSync(dir,{recursive:true,force:true}); }
+  }
+}
 
 const a=new DotBridgeAdapter();
 try {
