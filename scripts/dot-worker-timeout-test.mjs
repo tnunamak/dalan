@@ -15,17 +15,20 @@ function fakeSocket() {
   req.setTimeout=(ms,expire)=>{timer={ms,expire};};
   const requestSource=source.slice(source.indexOf('\nfunction request('),source.indexOf('\nfunction download('));
   const waitSource=source.slice(source.indexOf('\nasync function waitForAssignment('),source.indexOf('\n// Records which request owns each artifact'));
-  const helpers=runInNewContext(requestSource+waitSource+'\n({request,waitForAssignment})',{
+  const downloadSource=source.slice(source.indexOf('\nfunction download('),source.indexOf('\nconst artifactIdPattern='));
+  let writes=0;
+  const helpers=runInNewContext(requestSource+waitSource+downloadSource+'\n({request,waitForAssignment,download})',{
     socket:'/tmp/synthetic-admin.sock',
     http:{request:(_options,response)=>{respond=response;return req;}},
     adminSocketPathError:()=>null, bridgeNotRunning:error=>error,
     receipt:()=>({token:'fixture-only'}), Buffer,
+    artifactIdPattern:/^art_[-\w]{8,128}$/, fs:{writeFileSync(){writes+=1;}},
   });
-  return {...helpers, timer:()=>timer, reply(body) {
+  return {...helpers, writes:()=>writes, timer:()=>timer, reply(body,{status=200,raw=false}={}) {
     const res=new EventEmitter();
-    res.statusCode=200;
+    res.statusCode=status;
     respond(res);
-    res.emit('data',JSON.stringify(body));
+    if(!raw||body)res.emit('data',raw?body:JSON.stringify(body));
     res.emit('end');
   }};
 }
@@ -48,6 +51,17 @@ test('assignment wait opts out of the default timeout and resolves only on respo
   assert.equal(received,false);
   fake.reply({status:'finished'});
   assert.equal((await pending).status,'finished');
+});
+
+test('download with an empty or non-JSON 502 rejects without output',async()=>{
+  for(const body of ['', 'synthetic upstream detail']){
+    const fake=fakeSocket();
+    const pending=fake.download('art_fixture_123','unused',{});
+    const rejected=assert.rejects(pending,/HTTP 502/);
+    assert.doesNotThrow(()=>fake.reply(body,{status:502,raw:true}));
+    await rejected;
+    assert.equal(fake.writes(),0);
+  }
 });
 
 test('explicit positive admin timeout is preserved',async()=>{
