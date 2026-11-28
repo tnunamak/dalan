@@ -96,62 +96,6 @@ await rows(2, {
   },
 });
 
-// Row 3: gh, dalan status/cancel/submit stderr reach Error messages; the run loop's log.jsonl and printed line.
-const prh = await import('../src/pr-head-reviewer.mjs');
-const cfg3 = { ...prh.DEFAULTS, bridge_db: ':memory:', t3_db: ':memory:', owners: ['o'], repos: ['o/r'], exclude_owners: [] };
-const depsWith = runCommand => prh.realDeps(cfg3, runCommand);
-const ok200 = json => `HTTP/2 200\r\netag: "e"\r\n\r\n${json}`;
-await rows(3, {
-  async ghFailure() {
-    await assert.rejects(depsWith(async () => ({ code: 1, stdout: '', stderr: body(200) })).prDetails('o/r', 1), e => (assertClean('gh error', e.message), true));
-  },
-  async ghMalformedJson() {
-    await assert.rejects(depsWith(async () => ({ code: 0, stdout: ok200(`${HEX} ${OPAQUE}`), stderr: '' })).prDetails('o/r', 1), e => (assertClean('gh malformed json', e.message), true));
-  },
-  async ghRateLimitMessage() {
-    await assert.rejects(depsWith(async () => ({ code: 1, stdout: '', stderr: 'rate limit exceeded ' + body(200) })).prDetails('o/r', 1), e => (assert.ok(e instanceof prh.GitHubRateLimit), assertClean('rate limit message', e.message), true));
-  },
-  async rateLimitHeadersBeyondTheClip() {
-    // Retry-After sits past the 2,000-character diagnostic clip; it must still set a 2 minute backoff, not the 1 hour default.
-    const stdout = `HTTP/2 429\r\nx-padding: ${'x'.repeat(2500)}\r\nretry-after: 120\r\n\r\n{}`;
-    const before = Date.now();
-    await assert.rejects(depsWith(async () => ({ code: 1, stdout, stderr: '' })).prDetails('o/r', 1), e => {
-      assert.ok(e instanceof prh.GitHubRateLimit);
-      const wait = Date.parse(e.until) - before;
-      assert.ok(wait >= 119_000 && wait < 600_000, `backoff was ${wait} ms`);
-      return true;
-    });
-  },
-  async statusFailure() {
-    await assert.rejects(depsWith(async () => ({ code: 1, stdout: '', stderr: body(200) })).status(), e => (assertClean('status error', e.message), /^status:/.test(e.message)));
-  },
-  async statusMalformedJson() {
-    await assert.rejects(depsWith(async () => ({ code: 0, stdout: `${HEX} ${OPAQUE}`, stderr: '' })).status(), e => (assertClean('status malformed json', e.message), true));
-  },
-  async cancelFailure() {
-    await assert.rejects(depsWith(async () => ({ code: 1, stdout: '', stderr: body(200) })).cancel('req_1', 'pr_closed'), e => (assertClean('cancel error', e.message), /^cancel req_1/.test(e.message)));
-  },
-  async submitFailure() {
-    const r = await depsWith(async () => ({ code: 1, stdout: '', stderr: body(200) })).submit({}, { delivery: 'none', objective: 'o', head: 'h' });
-    assert.equal(r.ok, false);
-    assertClean('submit error', r.error);
-  },
-  async submitOutError() {
-    const r = await depsWith(async () => ({ code: 0, stdout: JSON.stringify({ error: body(200) }), stderr: '' })).submit({}, { delivery: 'none', objective: 'o', head: 'h' });
-    assert.equal(r.ok, false);
-    assertClean('submit out.error', r.error);
-  },
-  async logLine() {
-    // `password=` is masked only by the log redactor; the message is not sanitized before it reaches log().
-    const stateDir = path.join(tmp, 'prh-log'), printed = [];
-    const deps = { now: () => Date.now(), status: async () => { throw new Error(`failed password=${OPAQUE} token ${GH}`); } };
-    await prh.run({ cfg: cfg3, deps, stateDir, only: { repo: 'o/r', number: 1 }, print: line => printed.push(line) });
-    assert.ok(printed.some(l => l.includes('"error"')), 'the run loop should log the error');
-    assertClean('printed line', printed.join('\n'));
-    assertClean('log.jsonl', fs.readFileSync(path.join(stateDir, 'log.jsonl'), 'utf8'));
-  },
-});
-
 // Row 4: an MCP response becomes a thrown error that `dalan try` prints.
 const { openSession } = await import('../src/demo-worker.mjs');
 const { describeTryError } = await import('../src/try.mjs');

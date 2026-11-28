@@ -310,10 +310,6 @@
     "imports": [],
     "tokens": 0
   },
-  "src/pr-head-reviewer.mjs": {
-    "imports": [],
-    "tokens": 11
-  },
   "src/pr-preflight.mjs": {
     "imports": [],
     "tokens": 0

@@ -71,50 +71,6 @@ test('dead-man CLI reports unsupported commands and extra status arguments witho
 });
 
 const options = { id: 'job-original', cli: 'dalan', decideWords: 'accepted|rejected|applied' };
-async function reviewArgumentFailure(t, args) {
-  const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
-  const { spawnSync } = await import('node:child_process');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
-  const root = await mkdtemp(join(tmpdir(), 'dalan-review-args-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, 'bin'));
-  await mkdir(join(root, 'src'));
-  const cli = join(root, 'bin', 'dot-pr-reviewer.mjs');
-  await copyFile(new URL('../bin/dot-pr-reviewer.mjs', import.meta.url), cli);
-  await writeFile(join(root, 'src', 'pr-head-reviewer.mjs'), `
-    const unexpected = () => { throw new Error('entered reviewer dependency'); };
-    export const paths = {};
-    export const loadConfig = unexpected, acquireLock = unexpected, parseOnly = unexpected,
-      realDeps = unexpected, run = unexpected;
-  `);
-  const result = spawnSync(process.execPath, [cli, ...args], {
-    env: { HOME: root, USERPROFILE: root }, encoding: 'utf8', timeout: 5000,
-  });
-  assert.ifError(result.error);
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, '');
-  return result.stderr.trim();
-}
-
-test('reviewer refuses an invalid --max before loading configuration', async t => {
-  for (const args of [['--max'], ['--max', '-1'], ['--max', '1.5']]) {
-    assert.equal(await reviewArgumentFailure(t, args), 'dalan-pr-reviewer: --max expects a non-negative integer');
-  }
-});
-
-test('reviewer refuses absent flag values before loading configuration', async t => {
-  for (const flag of ['--config', '--state-dir', '--only']) {
-    for (const args of [[flag], [flag, '--dry-run']]) {
-      assert.equal(await reviewArgumentFailure(t, args), `dalan-pr-reviewer: ${flag} requires a value`);
-    }
-  }
-});
-
-test('reviewer refuses the capacity override outside dry-run before loading configuration', async t => {
-  assert.equal(await reviewArgumentFailure(t, ['--ignore-capacity']), 'dalan-pr-reviewer: --ignore-capacity requires --dry-run');
-});
-
 for (const status of ['finished', 'running']) {
   test(`revised ${status} job points to correction without hiding original evidence`, () => {
     const job = { status, target_worker: 'dot', revised_by: { request_id: 'job-correction' },
@@ -213,51 +169,6 @@ test('running questions and original full-record access remain available after r
   assert.ok(summary.includes('Answer with: dalan note job-original "TEXT"'));
   assert.ok(summary.includes('Full record: dalan get job-original --json'));
   assert.ok(summary.includes('Next: dalan get job-correction'));
-});
-
-async function reviewerCliFixture(t) {
-  const { copyFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
-  const { spawnSync } = await import('node:child_process');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
-  const root = await mkdtemp(join(tmpdir(), 'dalan-reviewer-cli-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, 'bin'));
-  await mkdir(join(root, 'src'));
-  const cli = join(root, 'bin', 'dot-pr-reviewer.mjs');
-  await copyFile(new URL('../bin/dot-pr-reviewer.mjs', import.meta.url), cli);
-  await writeFile(join(root, 'src', 'pr-head-reviewer.mjs'), `
-    export const paths = { config: 'fixture-config', stateDir: 'fixture-state' };
-    export function loadConfig(path) { console.log('config:' + path); return {}; }
-    export function acquireLock(path) { console.log('lock:' + path); return null; }
-    export function parseOnly() { throw new Error('unexpected parseOnly'); }
-    export function realDeps() { throw new Error('unexpected realDeps'); }
-    export function run() { throw new Error('unexpected run'); }
-  `);
-  return (...args) => {
-    const result = spawnSync(process.execPath, [cli, ...args], {
-      env: { HOME: root, USERPROFILE: root }, encoding: 'utf8', timeout: 5000,
-    });
-    assert.ifError(result.error);
-    return result;
-  };
-}
-
-test('reviewer help exits before config load or lock acquisition', async t => {
-  const invoke = await reviewerCliFixture(t);
-  const result = invoke('--help');
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /^usage: dalan-pr-reviewer/);
-  assert.doesNotMatch(result.stdout, /config:|lock:/);
-  assert.equal(result.stderr, '');
-});
-
-test('reviewer reports an active run and does not construct its dependencies', async t => {
-  const invoke = await reviewerCliFixture(t);
-  const result = invoke('--config', 'custom-config', '--state-dir', 'custom-state');
-  assert.equal(result.status, 0);
-  assert.deepEqual(result.stdout.trim().split(/\r?\n/), ['config:custom-config', 'lock:custom-state']);
-  assert.equal(result.stderr.trim(), 'dalan-pr-reviewer: another run is active');
 });
 
 async function heartbeatFailureFixture(t, healthFailure) {
