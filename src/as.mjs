@@ -520,15 +520,17 @@ function createOwnedAs({ dir, resource, allowHttp = false, loopback = false, wor
     list() {
       const window = store.window();
       return { window: window ? { worker: window.worker, expires_at: new Date(window.expires_at).toISOString() } : null, callbacks: patterns.map(p => p.pattern),
-        connections: store.connections().map(c => ({ connection_id: c.connection_id, worker: c.worker, client_id: c.client_id, redirect_uri: c.redirect_uri, redirect_origin: validateRedirectUri(c.redirect_uri).origin ?? null, scopes: c.scopes.split(' '), created_at: new Date(c.created_at).toISOString(), revoked_at: c.revoked_at === null ? null : new Date(c.revoked_at).toISOString(), revoked_reason: c.revoked_reason })) };
+        connections: store.connections().map(c => ({ connection_id: c.connection_id, worker: c.worker, client_id: c.client_id, redirect_uri: c.redirect_uri, redirect_origin: validateRedirectUri(c.redirect_uri).origin ?? null, scopes: c.scopes.split(' '), created_at: new Date(c.created_at).toISOString(), revoked_at: c.revoked_at === null ? null : new Date(c.revoked_at).toISOString(), revoked_reason: c.revoked_reason })),
+        pending_replacements: store.pendingReplacements().map(c => ({ connection_id: c.connection_id, worker: c.worker, client_id: c.client_id,
+          redirect_origin: validateRedirectUri(c.redirect_uri).origin ?? null, created_at: new Date(c.created_at).toISOString(),
+          expires_at: new Date(c.expires_at).toISOString() })) };
     },
     revoke({ worker }) {
       if (!known(worker)) throw new Error('unknown worker');
-      const connection = store.activeConnection(worker);
-      if (!connection) throw new Error(`worker ${worker} has no active connection`);
-      store.revokeGrant(connection.grant_id, 'owner_revoked');
-      log({ kind: 'connection_revoked', connection_id: connection.connection_id, worker });
-      return { revoked: true, connection_id: connection.connection_id, worker };
+      const revoked = store.revokeWorker(worker, 'owner_revoked');
+      if (!revoked) throw new Error(`worker ${worker} has no active connection or pending replacement`);
+      log({ kind: 'connection_revoked', worker, ...revoked });
+      return { revoked: true, worker, ...revoked };
     },
     allowCallback({ pattern }) {
       const parsed = parseCallbackPattern(pattern);

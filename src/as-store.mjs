@@ -521,6 +521,25 @@ export class AsStore {
     return this.db.prepare("UPDATE pairings SET state='done' WHERE uid=? AND state='approved'").run(uid).changes === 1;
   }
 
+  pendingReplacements() {
+    return this.db.prepare('SELECT connection_id,worker,client_id,redirect_uri,created_at,expires_at FROM pending_replacements WHERE expires_at>? ORDER BY created_at,connection_id').all(this.now());
+  }
+  revokeWorker(worker, reason) {
+    const result = this.tx(() => {
+      const active = this.db.prepare('SELECT connection_id,grant_id FROM connections WHERE worker=? AND revoked_at IS NULL').get(worker);
+      const pending = this.db.prepare('SELECT connection_id,grant_id FROM pending_replacements WHERE worker=?').get(worker);
+      if (!active && !pending) return null;
+      const grants = [...new Set([active?.grant_id, pending?.grant_id].filter(Boolean))];
+      const now = this.now();
+      for (const grantId of grants) this.#revokeGrantRows(grantId, reason, now);
+      return { connection_id: active?.connection_id ?? pending.connection_id, pending_revoked: pending?.connection_id ?? null, grants };
+    });
+    if (!result) return null;
+    const { grants, ...receipt } = result;
+    for (const grantId of grants) this.onGrantRevoked(grantId, reason);
+    return receipt;
+  }
+
   // ---- connections -----------------------------------------------------------------------------------------------
   connectionByGrant(grantId) { return this.#resource(this.db.prepare('SELECT * FROM connections WHERE grant_id=?').get(grantId)); }
   activeConnection(worker) { return this.#resource(this.db.prepare('SELECT * FROM connections WHERE worker=? AND revoked_at IS NULL').get(worker)); }

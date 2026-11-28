@@ -13,6 +13,7 @@ import { barrierPreload, armStartBarrier, releaseStartBarrier } from './as-start
 import Keygrip from 'keygrip';
 import { createLocalJWKSet, jwtVerify } from 'jose';
 import { loadKeys, COOKIE_RETAIN_MS } from '../src/as-files.mjs';
+import { AsStore } from '../src/as-store.mjs';
 import { connectCommand } from '../src/connect-cli.mjs';
 import { createHash, createHmac, createCipheriv, createDecipheriv, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign as cryptoSign, verify as cryptoVerify } from 'node:crypto';
 import { CALLBACK, Jar, Vendor, form, hit, pkce } from './live-trial/fake-vendor.mjs';
@@ -565,6 +566,28 @@ try {
     assert.equal((await main.rpc(c.access, 'tools/list')).status, 401);
     const r = await vendor.refresh(c.refresh); assert.equal(r.status, 400); assert.equal(r.body.error, 'invalid_grant');
     assert.notEqual(main.cli(['connect', 'revoke', 'lark', '--json']).code, 0, 'revoking a worker without a connection must fail');
+  });
+
+  await check('8b', 'worker revoke atomically removes a pending replacement with or without an active row', async () => {
+    const store = new AsStore(path.join(root, 'worker-revoke-fixture.sqlite'), { now: () => 1_000 });
+    try {
+      const stamp = [];
+      store.onGrantRevoked = (grant, reason) => stamp.push([grant, reason]);
+      store.db.prepare('INSERT INTO connections(connection_id,worker,grant_id,client_id,redirect_uri,resource,scopes,created_at) VALUES(?,?,?,?,?,?,?,?)')
+        .run('active', 'fixture', 'active-grant', 'client-a', 'https://example.invalid/callback', 'unused', 'openid', 1);
+      const addPending = worker => store.db.prepare('INSERT INTO pending_replacements(connection_id,worker,grant_id,replaces_grant_id,client_id,redirect_uri,resource,scopes,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(worker + '-pending', worker, worker + '-grant', 'active-grant', 'client-b', 'https://example.invalid/callback', 'unused', 'openid', 2, 2_000);
+      addPending('fixture');
+      addPending('pending-only');
+      assert.deepEqual(store.pendingReplacements().map(row => row.connection_id), ['fixture-pending', 'pending-only-pending']);
+      assert.deepEqual(store.revokeWorker('fixture', 'owner_revoked'), { connection_id: 'active', pending_revoked: 'fixture-pending' });
+      assert.equal(store.db.prepare('SELECT revoked_reason FROM connections WHERE connection_id=?').get('active').revoked_reason, 'owner_revoked');
+      assert.deepEqual(store.pendingReplacements().map(row => row.connection_id), ['pending-only-pending']);
+      assert.deepEqual(store.revokeWorker('pending-only', 'owner_revoked'), { connection_id: 'pending-only-pending', pending_revoked: 'pending-only-pending' });
+      assert.deepEqual(store.pendingReplacements(), []);
+      assert.equal(store.revokeWorker('fixture', 'owner_revoked'), null);
+      assert.deepEqual(stamp, [['active-grant', 'owner_revoked'], ['fixture-grant', 'owner_revoked'], ['pending-only-grant', 'owner_revoked']]);
+    } finally { store.close(); }
   });
 
   // ---- 9. restart, keys, files -----------------------------------------------------------------------------------------------
