@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fixture, waitFor } from './acp-probe-fixture.mjs';
 import { CONTINUE_PROMPT } from '../src/acp-bridge.mjs';
-for (const point of ['after-submit', 'claimed-hold', 'result-before-delivery', 'session-load-mid-hold']) {
+for (const point of ['after-submit', 'claimed-hold', 'result-before-delivery', 'recorded-before-delivery', 'session-load-mid-hold']) {
   await fixture(async f => {
     const rid = `probe_${point.replaceAll('-', '_')}`, result = `RESULT ${rid}`;
     let gateReached = false;
@@ -26,12 +26,15 @@ fs.renameSync = function(from, to) {
   const result = rename.call(this, from, to);
   if (String(to).startsWith(process.env.DOT_ACP_STATE_DIR) && String(to).endsWith('.json')) {
     const saved = JSON.parse(fs.readFileSync(to, 'utf8'));
-    if (saved.pending?.terminal) process.kill(process.pid, 'SIGKILL');
+    const at = process.env.PROBE_CRASH_AT;
+    if (at === 'terminal' && saved.pending?.terminal) process.kill(process.pid, 'SIGKILL');
+    if (at === 'recorded' && saved.pending === null && saved.completed?.length) process.kill(process.pid, 'SIGKILL');
   }
   return result;
 };
 `);
-    const a = await f.adapter(point === 'result-before-delivery' ? { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` } : {}), sid = (await a.newSession(f.cwd)).sessionId;
+    const crashAt = { 'result-before-delivery': 'terminal', 'recorded-before-delivery': 'recorded' }[point];
+    const a = await f.adapter(crashAt ? { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`, PROBE_CRASH_AT: crashAt } : {}), sid = (await a.newSession(f.cwd)).sessionId;
     let oldSettled = false;
     const old = a.prompt(sid, `[dot-decision:${rid}]\nCrash probe ${point}`).then(r => { oldSettled = true; return r; });
     await waitFor(() => f.rows.has(rid), 'one submitted job');
@@ -41,13 +44,15 @@ fs.renameSync = function(from, to) {
     } else {
       f.rows.get(rid).status = 'claimed';
       await waitFor(() => a.rawText('agent_thought_chunk').includes('worker claimed'), 'claimed held turn');
-      if (point === 'result-before-delivery') {
+      if (crashAt) {
         f.finish(rid, result);
-        await waitFor(() => a.child.signalCode === 'SIGKILL', 'crash after terminal receipt');
+        await waitFor(() => a.child.signalCode === 'SIGKILL', 'crash after the result is recorded');
         await a.exited;
-        assert.equal((await f.state(sid)).pending.terminal.text.includes(result), true, 'result durably recorded before crash');
+        const saved = await f.state(sid);
+        if (crashAt === 'terminal') assert.equal(saved.pending.terminal.text.includes(result), true, 'result durably recorded before crash');
+        else assert.equal(saved.pending === null && saved.completed.at(-1).terminal.text.includes(result), true, 'completion recorded before the send');
       }
-      if (point !== 'result-before-delivery') assert.equal(oldSettled, false, 'claimed turn remains held');
+      if (!crashAt) assert.equal(oldSettled, false, 'claimed turn remains held');
     }
     assert.ok(!a.rawText('agent_message_chunk').includes(result), 'no delivery before crash');
     a.kill('SIGKILL'); await a.exited; await old;
@@ -58,7 +63,8 @@ fs.renameSync = function(from, to) {
     else assert.ok(!(await b.loadSession(sid, f.cwd)).error);
     let settled = false;
     const resumed = b.prompt(resumeSid, point === 'claimed-hold' ? `[dot-decision:${rid}]\nCrash probe ${point}` : CONTINUE_PROMPT).then(r => { settled = true; return r; });
-    await waitFor(() => b.rawText('agent_message_chunk').includes(`Work ${rid}`), 'same work re-attached');
+    // After a recorded completion the resumed turn replays the saved result; otherwise it re-attaches the same work.
+    await waitFor(() => b.rawText('agent_message_chunk').includes(crashAt === 'recorded' ? result : `Work ${rid}`), 'same work re-attached');
     if (point === 'session-load-mid-hold') {
       await waitFor(() => b.rawText('agent_thought_chunk').includes('worker claimed'), 'loaded session still held');
       assert.equal(settled, false);
