@@ -854,7 +854,8 @@ export class Workspace {
     try {
       const repo=assignment.inputs[0].github_repo;
       const declared=dir?availableChecks(repo,dir):this.availableChecksFor(assignment,worker);
-      if(execution!=='host') return {available_checks:declared};
+      if(execution!=='host') return {available_checks:declared,
+        available_check_runnable:Object.fromEntries(declared.map(id=>[id,{runnable:false,reason:'host_execution_unavailable'}]))};
       const namedRequested=assignment.execution_scope==='implementation'&&Array.isArray(assignment.checks)&&assignment.checks.length>0;
       const defaultSpec=namedRequested?(dir?detectCheck(repo,dir):this.checkMetadataFor(assignment,worker)?.default):null;
       const named=namedRequested&&defaultSpec?assignment.checks.flatMap((_,index)=>{
@@ -874,15 +875,21 @@ export class Workspace {
       const candidates=noHost?[]:ownerIds.filter(id=>!hostCheckRefusal(assignment,repo,id,null,absent));
       const namedMissing=namedRequested&&!defaultSpec?'named_check_default_missing: configure a default check before declaring checks':null;
       const available=[...candidates,...named.map(([id])=>id)];
-      const {namedDetails,runnable,reason}=summarizeCheckAvailability(candidates,named,noHost,namedMissing,
-        id=>hostCheckRefusal(assignment,repo,id,null,absent));
+      const namedRefusals=new Map(named.map(([id])=>[id,noHost||hostCheckRefusal(assignment,repo,id,null,absent)]));
+      const {namedDetails,runnable,reason}=summarizeCheckAvailability(candidates,named,noHost,namedMissing,id=>namedRefusals.get(id));
       const details={...(candidates.length?this.checkDetails(assignment,repo,candidates,dir,worker):{}),...namedDetails};
-      return {available_checks:available,...(available.length?{available_check_details:details,check_guidance:CHECK_GUIDANCE}:{}),
+      // Machine-readable admission snapshot; keep descriptions and the aggregate result intact.
+      const available_check_runnable=Object.fromEntries(available.map(id=>{
+        const refusal=namedRefusals.get(id);
+        const code=refusal?(refusal.match(/^([a-z][a-z0-9_]*)(?::|$)/)?.[1]??'host_execution_unavailable'):null;
+        return [id,{runnable:!refusal,reason:code}];
+      }));
+      return {available_checks:available,available_check_runnable,...(available.length?{available_check_details:details,check_guidance:CHECK_GUIDANCE}:{}),
         host_execution_available:runnable,host_execution_unavailable_reason:reason};
     } catch(error) {
       if(!String(error?.message??'').includes('check metadata')) throw error;
       if(execution==='host'&&assignment.execution_scope!=='implementation') throw error;
-      return {available_checks:[],available_checks_error:'invalid check metadata',...(execution==='host'?{host_execution_available:false,host_execution_unavailable_reason:'invalid check metadata'}:{})};
+      return {available_checks:[],available_check_runnable:{},available_checks_error:'invalid check metadata',...(execution==='host'?{host_execution_available:false,host_execution_unavailable_reason:'invalid check metadata'}:{})};
     }
   }
   // The reason this repository's manifest and lockfile cannot be prepared on the host, or null. Best effort: unreadable input is not a reason.

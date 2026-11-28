@@ -126,6 +126,8 @@ if(process.argv.includes('--fixture-server')) {
     // Since #157 each named check reports its own refusal in its details; the top-level reason is only set when nothing can run.
     assert.match(stillDeclared.available_check_details['named/1'],/not runnable: host_check_not_allowlisted/);
     assert.equal(stillDeclared.host_execution_available,true);assert.equal(stillDeclared.host_execution_unavailable_reason,null);
+    assert.deepEqual(stillDeclared.available_check_runnable['named/1'], {runnable:false,reason:'host_check_not_allowlisted'});
+    assert.deepEqual(stillDeclared.available_check_runnable.default, {runnable:true,reason:null});
     const refused=await call('run_check',{request_id,claim_id:claim.claim_id,check_id:'named/1'});
     assert.match(JSON.stringify(refused),/host_check_not_allowlisted/);
     assert.equal(fs.readFileSync(executions,'utf8').trim().split('\n').length,launches.length);
