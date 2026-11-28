@@ -638,7 +638,7 @@ const finishNextGuidance=next=>`Claim ${next[0].request_id} yourself before you 
 // finish gets the same job back, and a second finish by the same claimant name, which would otherwise count as an
 // exact retry of the first claim, is refused that job and takes the next one.
 // The claim starts on a short idle lease: the worker's finish_handoff.idle_lease_ms (workers.mjs, at most 2 minutes).
-const HANDOFF_POLL_MS=500,HANDOFF_MAX_ATTEMPTS=5,HANDOFF_PICK_WINDOW=64;
+const HANDOFF_POLL_MS=500,HANDOFF_MAX_ATTEMPTS=5;
 const nap=(ms,signal)=>new Promise(resolve=>{
   const done=()=>{clearTimeout(timer);signal?.removeEventListener('abort',done);resolve();};
   const timer=setTimeout(done,ms);
@@ -684,7 +684,7 @@ async function runHandoff({principal,requestId,claimId,waitMs,maxJobs=1,idleLeas
     // only_when_empty: work queued at the finish is the worker's to claim; no handoff, and the finish is not held.
     if(onlyWhenEmpty&&store.hasQueuedFor([worker])) return {};
     // Rows whose last handoff lapsed untouched are left for the worker's own list_pending: the same rows were handed ten times and never started.
-    const pick=free=>(store.nextQueued(HANDOFF_PICK_WINDOW+tried.size,null,worker,{applyHint:false}).next_queued??[]).filter(x=>!tried.has(x.request_id)&&!store.handoffLapsed(x.request_id,worker)).slice(0,free);
+    const pick=free=>store.nextQueued(free,null,worker,{applyHint:false,acceptCandidate:x=>!tried.has(x.request_id)&&!store.handoffLapsed(x.request_id,worker)}).next_queued??[];
     for(;;) {
       if(signal?.aborted||store.paused()) return jobs.length?{jobs}:{};
       const {free_lanes}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);

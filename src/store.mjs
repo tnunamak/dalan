@@ -2585,7 +2585,7 @@ export class Store {
   }
   // Wake bit: queued work, or an expired own claim ready for regrant.
   hasWakeFor(worker) { return this.hasQueuedFor([worker])||this.idleClaims(worker).length>0; }
-  listPending(worker='dot') {
+  listPending(worker='dot',{limit=50}={}) {
     // Recheck historical refusals against one lazily loaded configuration per listing.
     // Listing is read-only: it neither deletes audit evidence nor grants approval.
     let loaded=false,failed=false,profile,loadError;
@@ -2611,12 +2611,12 @@ export class Store {
         return !(!approval&&!current||approval&&current?.revision===approval.revision&&current.policy.allowed);
       } catch { return true; }
     };
-    const assignments=this.db.prepare(`SELECT request_id,payload,created_at,priority,review,EXISTS(SELECT 1 FROM destination_blocks b WHERE b.request_id=assignments.request_id) blocked FROM assignments WHERE status='queued' AND ${live(this.nowMs())} ORDER BY ${LIST_ORDER}`).all().filter(a=>this.mayAct(worker,a.request_id)&&this.protocolListingLive(a.request_id)).map(a=>({...a,blocked:!!a.blocked&&blocked(a.request_id)})).sort((a,b)=>Number(a.blocked)-Number(b.blocked)).slice(0,50).map(a=>({kind:'assignment',request_id:a.request_id,title:JSON.parse(a.payload).brief.slice(0,160),created_at:a.created_at,...(a.blocked?{blocked:true}:triageFields(JSON.parse(a.payload),a))}));
+    const assignments=this.db.prepare(`SELECT request_id,payload,created_at,priority,review,EXISTS(SELECT 1 FROM destination_blocks b WHERE b.request_id=assignments.request_id) blocked FROM assignments WHERE status='queued' AND ${live(this.nowMs())} ORDER BY ${LIST_ORDER}`).all().filter(a=>this.mayAct(worker,a.request_id)&&this.protocolListingLive(a.request_id)).map(a=>({...a,blocked:!!a.blocked&&blocked(a.request_id)})).sort((a,b)=>Number(a.blocked)-Number(b.blocked)).slice(0,limit).map(a=>({kind:'assignment',request_id:a.request_id,title:JSON.parse(a.payload).brief.slice(0,160),created_at:a.created_at,...(a.blocked?{blocked:true}:triageFields(JSON.parse(a.payload),a))}));
     const messages=this.listMessages(worker).map(m=>({kind:'message',request_id:m.message_id,message_id:m.message_id,title:m.preview,created_at:m.created_at})).sort((a,b)=>a.created_at.localeCompare(b.created_at));
     const resumes=this.idleClaims(worker).filter(c=>this.protocolListingLive(c.request_id)).map(c=>({kind:'assignment',request_id:c.request_id,resume:true,idle_seconds:Math.floor(this.claimIdleMs(c)/1000),previous_epoch:c.epoch,
       ...(this.db.prepare('SELECT 1 FROM destination_blocks WHERE request_id=?').get(c.request_id)&&blocked(c.request_id)?{blocked:true}:{}),
       note:'The prior lease expired. Call claim(request_id, claimant, acquisition_id) to request a new epoch after old host work has verifiably stopped. Read progress and owner notes with get first.'}));
-    return [...resumes,...messages,...assignments].sort((a,b)=>Number(!!a.blocked)-Number(!!b.blocked)).slice(0,50);
+    return [...resumes,...messages,...assignments].sort((a,b)=>Number(!!a.blocked)-Number(!!b.blocked)).slice(0,limit);
   }
   // Called for each list_pending answer to the worker: the first freeLanes assignments are the ones it could claim now. One that
   // is still there SKIP_AFTER_ELIGIBLE_MS after it first was, with no claim, is marked skipped_by_worker (and goes behind its
@@ -2848,13 +2848,18 @@ export class Store {
       .filter(c=>Date.parse(c.last_claim_activity_at??c.claimed_at)>=since).length;
   }
   // `applyHint:false` is for the bridge's own picks (a finish handoff), which must see every eligible row: the hint only shapes what a worker is told.
-  nextQueued(free,exceptId=null,worker='dot',{applyHint=true}={}) {
+  nextQueued(free,exceptId=null,worker='dot',{applyHint=true,acceptCandidate}={}) {
     const hint=applyHint?this.claimHint(worker):null,lanesFree=free;
     if(hint!==null) free=Math.min(free,Math.max(0,hint-this.recentClaimCount(worker)));
     if(free<=0) return {};
-    const all=this.listPending(worker).filter(x=>x.kind==='assignment'&&!x.blocked&&x.request_id!==exceptId);
-    if(!all.length) return {};
-    const next=all.slice(0,free).map(x=>Object.fromEntries(['request_id','title',...TRIAGE_KEYS].filter(k=>x[k]!==undefined).map(k=>[k,x[k]])));
+    const all=this.listPending(worker,acceptCandidate?{limit:Infinity}:undefined).filter(x=>x.kind==='assignment'&&!x.blocked&&x.request_id!==exceptId);
+    const picked=[];
+    for(const x of all) {
+      if(!acceptCandidate||acceptCandidate(x)) picked.push(x);
+      if(picked.length>=free) break;
+    }
+    if(!picked.length) return {};
+    const next=picked.map(x=>Object.fromEntries(['request_id','title',...TRIAGE_KEYS].filter(k=>x[k]!==undefined).map(k=>[k,x[k]])));
     const lanes=free<lanesFree?`${lanesFree} ${lanesFree===1?'lane':'lanes'} free, ${next.length} suggested`:`${free} ${free===1?'lane':'lanes'} free`;
     return {next_queued:next,next_action:`${all.length} queued and ${lanes}: claim ${next.map(x=>x.request_id).join(', ')} now (oldest first)`};
   }
