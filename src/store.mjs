@@ -2610,7 +2610,48 @@ export class Store {
   }
   // Wake bit: queued work, or an expired own claim ready for regrant.
   hasWakeFor(worker) { return this.hasQueuedFor([worker])||this.idleClaims(worker).length>0; }
-  listPending(worker='dot') {
+  // Persist the selected IDs before any asynchronous preflight. An exact retry
+  // may recover existing live grants but must never consume new queue entries,
+  // even after a process restart or an interrupted/partly refused first call.
+  async claimBatch({next,available,worker,subject,connectionId,claimant,acquisitionId,leaseMs},grant) {
+    if(!Number.isInteger(next)||next<1||next>8) throw new Error('invalid next');
+    if(typeof acquisitionId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(acquisitionId)) throw new Error('batch claim requires acquisition_id');
+    if(this.paused()) throw new Error(pausedClaimMessage);
+    const hash=(...values)=>createHash('sha256').update(JSON.stringify(values)).digest('hex');
+    const key='claim_batch_v1_'+hash(worker,subject,acquisitionId);
+    const parameters=hash(connectionId,claimant,next,leaseMs??null);
+    const plan=this.transaction(()=>{
+      const previous=this.db.prepare('SELECT value FROM bridge_state WHERE key=?').get(key);
+      if(previous) {
+        const saved=JSON.parse(previous.value);
+        if(saved.parameters!==parameters) throw new Error('batch acquisition parameters changed');
+        return {ids:saved.ids,retry:true};
+      }
+      const ids=available>0?this.listPending(worker,{batch:true}).filter(item=>!item.blocked)
+        .slice(0,Math.min(next,available)).map(item=>item.request_id):[];
+      this.db.prepare('INSERT INTO bridge_state(key,value) VALUES(?,?)').run(key,JSON.stringify({parameters,ids}));
+      return {ids,retry:false};
+    });
+    const replies=[];
+    for(const id of plan.ids) {
+      const perJob='batch_'+hash(key,id);
+      if(plan.retry) {
+        const held=this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id);
+        if(held?.worker!==worker||!this.isExactClaimRetry(held,claimant,subject,perJob)) continue;
+      }
+      try {
+        const reply=await grant(id,perJob,plan.retry?'retry':'queued');
+        if(!reply?.claim_id||reply.error)break;
+        replies.push(reply);
+      } catch {
+        // A later refusal cannot erase the successful prefix of the batch.
+        break;
+      }
+    }
+    return replies;
+  }
+
+  listPending(worker='dot',{batch=false}={}) {
     // Recheck historical refusals against one lazily loaded configuration per listing.
     // Listing is read-only: it neither deletes audit evidence nor grants approval.
     let loaded=false,failed=false,profile,loadError;
@@ -2636,7 +2677,8 @@ export class Store {
         return !(!approval&&!current||approval&&current?.revision===approval.revision&&current.policy.allowed);
       } catch { return true; }
     };
-    const assignments=this.db.prepare(`SELECT request_id,payload,created_at,priority,review,EXISTS(SELECT 1 FROM destination_blocks b WHERE b.request_id=assignments.request_id) blocked FROM assignments WHERE status='queued' AND ${live(this.nowMs())} ORDER BY ${LIST_ORDER}`).all().filter(a=>this.mayAct(worker,a.request_id)&&this.protocolListingLive(a.request_id)).map(a=>({...a,blocked:!!a.blocked&&blocked(a.request_id)})).sort((a,b)=>Number(a.blocked)-Number(b.blocked)).slice(0,50).map(a=>({kind:'assignment',request_id:a.request_id,title:JSON.parse(a.payload).brief.slice(0,160),created_at:a.created_at,...(a.blocked?{blocked:true}:triageFields(JSON.parse(a.payload),a))}));
+    const assignments=this.db.prepare(`SELECT request_id,payload,created_at,priority,review,EXISTS(SELECT 1 FROM destination_blocks b WHERE b.request_id=assignments.request_id) blocked FROM assignments WHERE status='queued' AND ${live(this.nowMs())}${batch?' AND skipped_at IS NULL':''} ORDER BY ${LIST_ORDER}`).all().filter(a=>this.mayAct(worker,a.request_id)&&this.protocolListingLive(a.request_id)&&(!batch||!this.isProtocolJob(a.request_id)&&!this.pullQueue.row(a.request_id))).map(a=>({...a,blocked:!!a.blocked&&blocked(a.request_id)})).sort((a,b)=>Number(a.blocked)-Number(b.blocked)).slice(0,50).map(a=>({kind:'assignment',request_id:a.request_id,title:JSON.parse(a.payload).brief.slice(0,160),created_at:a.created_at,...(a.blocked?{blocked:true}:triageFields(JSON.parse(a.payload),a))}));
+    if(batch) return assignments;
     const messages=this.listMessages(worker).map(m=>({kind:'message',request_id:m.message_id,message_id:m.message_id,title:m.preview,created_at:m.created_at})).sort((a,b)=>a.created_at.localeCompare(b.created_at));
     const resumes=this.idleClaims(worker).filter(c=>this.protocolListingLive(c.request_id)).map(c=>({kind:'assignment',request_id:c.request_id,resume:true,idle_seconds:Math.floor(this.claimIdleMs(c)/1000),previous_epoch:c.epoch,
       ...(this.db.prepare('SELECT 1 FROM destination_blocks WHERE request_id=?').get(c.request_id)&&blocked(c.request_id)?{blocked:true}:{}),
@@ -2729,11 +2771,18 @@ export class Store {
     } catch(error) { throw this.destinationConfigurationError(id,error); }
     if(digest!==approval.snapshot.connections_digest)throw refuse('Claim retry refused: the approved connection set changed.');
   }
-  claim(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,ctx=null,connectionId=null) {
+  claim(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,ctx=null,connectionId=null,batchMode=null) {
     const requestedLeaseMs=arguments[7]??null;
-    const claim=this.destinationOutcome(this.transaction(()=>this.isProtocolJob(id)
-      ?this.protocolClaimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,ctx?{...ctx,requestedLeaseMs}:ctx,connectionId)
-      :this.claimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,connectionId)));
+    const claim=this.destinationOutcome(this.transaction(()=>{
+      if(batchMode==='queued') {
+        const selected=this.db.prepare('SELECT status,skipped_at FROM assignments WHERE request_id=?').get(id);
+        if(selected?.status!=='queued'||selected.skipped_at!==null) throw new Error('batch assignment no longer eligible');
+      }
+      if(batchMode==='retry'&&!this.isExactClaimRetry(this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id),claimant,subject,acquisitionId)) throw new Error('batch grant no longer live');
+      return this.isProtocolJob(id)
+        ?this.protocolClaimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,ctx?{...ctx,requestedLeaseMs}:ctx,connectionId)
+        :this.claimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,connectionId);
+    }));
     return nonterminalOutcome(id,{...claim,...this.heartbeatForHeldClaim(id,claim.claim_id,worker)});
   }
   claimInTransaction(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,connectionId=null) {
