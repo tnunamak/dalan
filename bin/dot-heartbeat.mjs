@@ -17,14 +17,20 @@ try {
   const health = await bridgeHealth({ socketPath: adminSocketPath(root), drainerFile: readEnv('DALAN_DRAINER_HEALTH_FILE') });
   fs.writeFileSync(temporary, JSON.stringify(health) + '\n', { mode: 0o600 });
   fs.renameSync(temporary, healthFile);
-  const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./dot-deadman.mjs', import.meta.url)), 'heartbeat'], {
-    env: { ...process.env, DOT_BRIDGE_HEALTH_FILE: healthFile }, timeout: 10000,
-  });
-  process.stdout.write(stdout);
 } catch {
   fs.rmSync(temporary, { force: true });
-  // Remove stale positive evidence; a failed local check must not ping externally.
   fs.rmSync(healthFile, { force: true });
-  console.error('dalan-heartbeat: health check or external heartbeat failed');
+  console.error('dalan-heartbeat: local health check failed');
   process.exitCode = 1;
+}
+if (!process.exitCode) {
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./dot-deadman.mjs', import.meta.url)), 'heartbeat'], {
+      env: { ...process.env, DOT_BRIDGE_HEALTH_FILE: healthFile }, timeout: 10000,
+    });
+    process.stdout.write(stdout);
+  } catch {
+    console.error('dalan-heartbeat: external heartbeat failed');
+    process.exitCode = 1;
+  }
 }
