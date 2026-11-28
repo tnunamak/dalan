@@ -112,21 +112,38 @@ try {
   pass('a large changed-file list also respects the brief cap');
   git('clean', '-fdq');git('reset', '--hard', 'HEAD');
 
-  // Scope narrowing can use much more instruction space than the single directory scope submitted by the adapter.
+  // The whole-repo scope stays compact; its omissions are physical, not a long allow-list.
+  const omitted = ['.env.base'];
   write('.env.base', 'BASE_ENV_DO_NOT_INLINE\n');
   for (let i = 0; i < 180; i++) {
     const dir = `wide/${String(i).padStart(3, '0')}-${'d'.repeat(90)}`;
+    omitted.push(`${dir}/.env`);
     write(`${dir}/file.txt`, 'base text\n');write(`${dir}/.env`, 'BASE_ENV_DO_NOT_INLINE\n');
   }
   git('add', '.');git('commit', '-qm', 'wide pushed tree');git('push', '-q', 'origin', 'main');
   write('a.txt', 'wide local edit\n');
-  const short = await pack(), narrowed = admitted(short);
-  assert.ok(narrowed.scope_paths.length > 170);assert.match(narrowed.brief, /Bridge scope note:/);
-  assert.equal(withoutNote(narrowed.brief), request.brief);
-  assert.throws(() => admitted({ ...short, brief: short.brief + 'x'.repeat(6000) }), /task instructions: .*UTF-8 bytes exceeds/);
-  const instructionCap = await pack({ brief: 'x'.repeat(6000) });
-  assert.deepEqual(instructionCap.inputs, []);validateSubmission(instructionCap);
-  pass('scope narrowing and its appended note count toward the 24 KiB cap; stored packing still strips to requester text');
+  const short = await pack(), whole = admitted(short);
+  assert.equal(whole.execution_scope, 'read-only');
+  assert.deepEqual(whole.scope_paths, ['.']);
+  assert.deepEqual(new Set(whole.scope_excluded.map(entry => entry.path)), new Set(omitted));
+  assert.match(whole.brief, /Bridge scope note:/);
+  assert.equal(withoutNote(whole.brief), request.brief);
+
+  const { withholdExcludedPaths } = await import('../src/workspace.mjs');
+  const readOnlyCheckout = join(root, 'wide-read-only');
+  git('worktree', 'add', '--detach', readOnlyCheckout, whole.inputs[0].base_sha);
+  try {
+    withholdExcludedPaths(readOnlyCheckout, whole);
+    for (const file of omitted) assert.throws(() => fs.lstatSync(join(readOnlyCheckout, file)), { code: 'ENOENT' }, file);
+    for (const file of omitted.slice(1)) {
+      assert.equal(fs.readFileSync(join(readOnlyCheckout, file.replace(/\.env$/, 'file.txt')), 'utf8'), 'base text\n');
+    }
+    const status = spawnSync('git', ['-C', readOnlyCheckout, 'status', '--porcelain'], { encoding: 'utf8' });
+    assert.equal(status.status, 0, status.stderr);assert.equal(status.stdout, '');
+  } finally {
+    git('worktree', 'remove', '--force', readOnlyCheckout);
+  }
+  pass('whole-repo read-only scope withholds every omitted file and preserves the neighbouring files');
   git('reset', '--hard', 'HEAD');
 
   git('rm', 'a.txt');write('a.txt', 'recreated as untracked\n');

@@ -548,8 +548,8 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       if(rest.length) error.suggested_scope_paths=rest;
       throw error;
     }
-    // Repository-wide implementation scopes withhold unnamed sensitive files physically.
-    // Read-only directory scopes are physically narrowed for soft names. Directory-scoped
+    // Whole-repository scopes physically withhold unnamed excluded files.
+    // Read-only directory scopes use a narrower allow-list. Directory-scoped
     // implementations retain refusal because their source tree is not stripped of exclusions.
     // Named paths and patch paths still refuse above and below.
     for(const file of scan.files.filter(f=>within(f,scope)&&!scope.includes(f))) {
@@ -569,8 +569,8 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       }
     }
     for(const file of scan.files.filter(f=>scope.includes(f))) inspectPath(file);
-    // For a whole repository the workspace withholds unnamed entries before
-    // materialization; a directory still uses the existing read-only narrowing.
+    // For a whole repository the workspace removes excluded entries from the
+    // working tree before access; a directory uses the existing read-only narrowing.
     // Do not allow a named symlink just because another rule already dropped it.
     const explicit=new Set(scope.map(outputPathKeys[3]));
     for(const file of scan.symlinks||[]) {
