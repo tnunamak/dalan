@@ -16,7 +16,7 @@ export const FROZEN_CODES = Object.freeze(['invalid_input', 'requirements_unsati
   'configuration_stale', 'configuration_in_use', 'secret_in_use', 'secret_backend_locked', 'secret_backend_unavailable',
   'host_policy_denied', 'artifact_integrity_failed', 'configuration_migration_required', 'proof_refresh_unsupported', 'operation_conflict']);
 // Check the public exports before starting an install or trial.
-export const REQUIRED_EXPORTS = Object.freeze(['catalogRoutes', 'ensureRoute', 'adoptRoute', 'expose', 'routeStatus', 'closeRoute', 'watchRoutes', 'inspectLegacyRoute', 'runSetupAction', 'readSetupOperation', 'cancelSetupOperation', 'createGozar', 'listRoutes']);
+export const REQUIRED_EXPORTS = Object.freeze(['catalogRoutes', 'ensureRoute', 'adoptRoute', 'expose', 'routeStatus', 'closeRoute', 'watchRoutes', 'inspectLegacyRoute', 'runSetupAction', 'readSetupOperation', 'cancelSetupOperation', 'createGozar', 'listRoutes', 'releaseRoute', 'confirmHandBack']);
 
 export class RouteError extends Error {
   constructor(code, message, { nextAction = null, cause } = {}) { super(message, cause ? { cause } : undefined); this.name = 'RouteError'; this.code = code; this.nextAction = nextAction; }
