@@ -626,7 +626,18 @@ async function uninstallServiceLocked({ home, confirmRouteStop }, seams) {
   }
   const units = mac ? [] : [`${receipt.unit}.service`, `${receipt.unit}-target.socket`, `${receipt.unit}-target.service`, `${receipt.unit}-update.service`, `${receipt.unit}-update.timer`].filter(unit => fs.existsSync(path.join(unitDir, unit)));
   const spawn = seams.spawn ?? spawnSync;
-  if (units.length) runCommand('systemctl', ['--user', 'disable', '--now', ...units], { env, spawn });
+  let managerAbsent = false;
+  if (units.length) {
+    // Refuse ambiguous failures: lack of permission, timeout or a missing executable does not prove the manager is down.
+    const systemdEnv = { ...env, LC_ALL: 'C' };
+    try { runCommand('systemctl', ['--user', 'show-environment'], { env: systemdEnv, spawn }); }
+    catch (error) {
+      if (!/^systemctl --user show-environment failed \(exit \d+\): Failed to connect to (?:the )?(?:user scope )?bus(?: via local transport)?: (?:No medium found|No such file or directory|Connection refused|Host is down)(?:\r?\n|$)/i.test(error.message)) throw error;
+      managerAbsent = true;
+    }
+    if (managerAbsent) removed.push('systemd user bus unavailable; skipped stopping units');
+    else runCommand('systemctl', ['--user', 'disable', '--now', ...units], { env, spawn });
+  }
   if (receipt.route_handle) {
     const home = receipt.gozar_home ?? gozarHomeFor(env);
     const gozar = seams.gozar ?? await resolveGozar({ env, home, custody: receipt.route_custody });
@@ -650,8 +661,10 @@ async function uninstallServiceLocked({ home, confirmRouteStop }, seams) {
       fs.rmSync(path.join(unitDir, unit));
       removed.push(`removed ${path.join(unitDir, unit)}`);
     }
-    try { runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn }); }
-    catch (error) { removed.push(`systemd daemon-reload failed after removal: ${error.message}`); }
+    if (!managerAbsent) {
+      try { runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn }); }
+      catch (error) { removed.push(`systemd daemon-reload failed after removal: ${error.message}`); }
+    }
   }
   forgetDefaultHome(home, env);
   // The home holds secrets, grants and data, so it is moved aside, never deleted. A new install then starts from a fresh home at the same path.

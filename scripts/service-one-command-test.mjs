@@ -204,6 +204,26 @@ try {
   assert.ok(fs.existsSync(path.join(gone.moved_to, 'resource-url')));
 
   // ---- Linux: the same one command, through systemd ----------------------------------------------------------------------------------
+  {
+    const box = seamsFor('uninstall-no-manager', 'linux');
+    const installed = await installService(options(box), box.seams);
+    const receipt = JSON.parse(fs.readFileSync(path.join(defaultPath(installed.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
+    assert.ok(fs.readdirSync(receipt.unit_dir).length > 0);
+    const calls = [];
+    const gone = await uninstallService({ home: installed.home, confirmRouteStop: async () => true }, {
+      ...box.seams,
+      spawn(command, args) {
+        calls.push([command, ...args]);
+        return { status: 1, stdout: '', stderr: 'Failed to connect to bus: No medium found' };
+      },
+    });
+    assert.deepEqual(calls, [['systemctl', '--user', 'show-environment']]);
+    assert.deepEqual(fs.readdirSync(receipt.unit_dir), []);
+    assert.equal(fs.existsSync(installed.home), false);
+    assert.ok(fs.existsSync(path.join(gone.moved_to, 'resource-url')));
+    assert.equal(box.closed.length, 1, 'systemd bus absence does not skip confirmed route cleanup');
+  }
+
   const linux = seamsFor('linux', 'linux');
   const lin = await installService(options(linux), linux.seams);
   assert.equal(lin.started, true); assert.match(lin.origin, /^https:\/\//);
@@ -223,10 +243,11 @@ try {
       failedStopCalls.push(args);
       assert.equal(command, 'systemctl');
       assert.ok(spawnOptions.timeout > 0);
+      if (args[1] === 'show-environment') return { status: 0, stdout: '', stderr: '' };
       return { status: null, signal: 'SIGTERM', error: new Error('fixture stop timeout') };
     },
   }), /fixture stop timeout/);
-  assert.equal(failedStopCalls.length, 1, 'unconfirmed stop never reaches reload');
+  assert.deepEqual(failedStopCalls.map(args => args[1]), ['show-environment', 'disable'], 'unconfirmed stop never reaches reload');
   assert.deepEqual(contentsBeforeStop(), unitsBeforeStop);
   assert.equal(fs.readFileSync(receiptFile, 'utf8'), receiptBeforeStop);
   assert.equal(readDefaultHome(linux.env), lin.home);
