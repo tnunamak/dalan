@@ -77,6 +77,9 @@ test('errors: refuse is -32000 with injected RequestError; cancel budget rule', 
   assert.ok(e instanceof RequestError); assert.equal(e.code, REFUSE_CODE); assert.equal(e.code, -32000); assert.equal(e.data, undefined);
   assert.deepEqual(refuse('x', { code: 'c' }).data, { code: 'c' });
   assert.equal(cancelBudgetMs(undefined), 5000); assert.equal(cancelBudgetMs('2500'), 2500); assert.equal(cancelBudgetMs('-1'), 5000);
+  assert.equal(cancelBudgetMs(9000), 8000);
+  assert.equal(cancelBudgetMs(3000), 3000);
+  assert.equal(cancelBudgetMs('invalid'), CANCEL_BUDGET_MS);
   assert.ok(CANCEL_BUDGET_MS + CANCEL_CLEANUP_MS < T3_CANCEL_WINDOW_MS);
 });
 
