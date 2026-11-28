@@ -13,6 +13,7 @@ import { barrierPreload, armStartBarrier, releaseStartBarrier } from './as-start
 import Keygrip from 'keygrip';
 import { createLocalJWKSet, jwtVerify } from 'jose';
 import { loadKeys, COOKIE_RETAIN_MS } from '../src/as-files.mjs';
+import { AsStore } from '../src/as-store.mjs';
 import { connectCommand } from '../src/connect-cli.mjs';
 import { createHash, createHmac, createCipheriv, createDecipheriv, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign as cryptoSign, verify as cryptoVerify } from 'node:crypto';
 import { CALLBACK, Jar, Vendor, form, hit, pkce } from './live-trial/fake-vendor.mjs';
@@ -366,6 +367,22 @@ try {
       const tokens = await local.exchange(code, proof.verifier);
       assert.equal(tokens.status, 200);
       assert.equal((await main.rpc(tokens.body.access_token, 'tools/list')).status, 200);
+      const brokenReceiver = http.createServer(req => req.socket.destroy());
+      await new Promise(resolve => brokenReceiver.listen(0, '127.0.0.1', resolve));
+      try {
+        const brokenRedirect = 'http://127.0.0.1:' + brokenReceiver.address().port + '/callback';
+        const replacement = new Vendor(main, brokenRedirect);
+        assert.equal((await replacement.register()).status, 201);
+        const brokenProof = pkce();
+        const failed = await complete(replacement.authUrl({ challenge: brokenProof.challenge }), '--replace');
+        assert.notEqual(failed.code, 0);
+        const waiting = main.sql('SELECT connection_id FROM pending_replacements WHERE worker=?', 'dot')[0];
+        assert.ok(waiting?.connection_id);
+        assert.match(failed.stdout + failed.stderr, /approval is pending/i);
+        assert.match(failed.stdout + failed.stderr, /old connection still works/i);
+        assert.ok((failed.stdout + failed.stderr).includes(waiting.connection_id));
+        assert.equal((await main.rpc(tokens.body.access_token, 'tools/list')).status, 200);
+      } finally { await new Promise(resolve => brokenReceiver.close(resolve)); }
       const replay = await complete(url);
       assert.notEqual(replay.code, 0);
       assert.equal(callbacks.length, 1);
@@ -549,6 +566,28 @@ try {
     assert.equal((await main.rpc(c.access, 'tools/list')).status, 401);
     const r = await vendor.refresh(c.refresh); assert.equal(r.status, 400); assert.equal(r.body.error, 'invalid_grant');
     assert.notEqual(main.cli(['connect', 'revoke', 'lark', '--json']).code, 0, 'revoking a worker without a connection must fail');
+  });
+
+  await check('8b', 'worker revoke atomically removes a pending replacement with or without an active row', async () => {
+    const store = new AsStore(path.join(root, 'worker-revoke-fixture.sqlite'), { now: () => 1_000 });
+    try {
+      const stamp = [];
+      store.onGrantRevoked = (grant, reason) => stamp.push([grant, reason]);
+      store.db.prepare('INSERT INTO connections(connection_id,worker,grant_id,client_id,redirect_uri,resource,scopes,created_at) VALUES(?,?,?,?,?,?,?,?)')
+        .run('active', 'fixture', 'active-grant', 'client-a', 'https://example.invalid/callback', 'unused', 'openid', 1);
+      const addPending = worker => store.db.prepare('INSERT INTO pending_replacements(connection_id,worker,grant_id,replaces_grant_id,client_id,redirect_uri,resource,scopes,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(worker + '-pending', worker, worker + '-grant', 'active-grant', 'client-b', 'https://example.invalid/callback', 'unused', 'openid', 2, 2_000);
+      addPending('fixture');
+      addPending('pending-only');
+      assert.deepEqual(store.pendingReplacements().map(row => row.connection_id), ['fixture-pending', 'pending-only-pending']);
+      assert.deepEqual(store.revokeWorker('fixture', 'owner_revoked'), { connection_id: 'active', pending_revoked: 'fixture-pending' });
+      assert.equal(store.db.prepare('SELECT revoked_reason FROM connections WHERE connection_id=?').get('active').revoked_reason, 'owner_revoked');
+      assert.deepEqual(store.pendingReplacements().map(row => row.connection_id), ['pending-only-pending']);
+      assert.deepEqual(store.revokeWorker('pending-only', 'owner_revoked'), { connection_id: 'pending-only-pending', pending_revoked: 'pending-only-pending' });
+      assert.deepEqual(store.pendingReplacements(), []);
+      assert.equal(store.revokeWorker('fixture', 'owner_revoked'), null);
+      assert.deepEqual(stamp, [['active-grant', 'owner_revoked'], ['fixture-grant', 'owner_revoked'], ['pending-only-grant', 'owner_revoked']]);
+    } finally { store.close(); }
   });
 
   // ---- 9. restart, keys, files -----------------------------------------------------------------------------------------------
@@ -922,7 +961,7 @@ try {
         assert.doesNotMatch(shownText, /--confirm-redirect/, 'the typo check is never offered as a copyable flag');
       }
       // Approving one native code approves no other.
-      const retryApproval = tls.cli(['connect', 'approve', retry.code, '--worker', 'lark', '--confirm-redirect', teammate.redirect, '--replace']); assert.equal(retryApproval.code, 0); assert.match(retryApproval.stdout, /Replaced connection .*every queued and future job for worker "lark"/s, 'replacement output names the worker and the hand-over');
+      const retryApproval = tls.cli(['connect', 'approve', retry.code, '--worker', 'lark', '--confirm-redirect', teammate.redirect, '--replace']); assert.equal(retryApproval.code, 0); assert.match(retryApproval.stdout, /Replacement pending for connection .*every queued and future job for worker "lark"/s, 'replacement output names the worker and the hand-over');
       assert.ok(tls.pending().pending.some(item => item.code === intruderFlow.code), 'approving another native code leaves the later registrant pending');
       assert.ok(!tls.list().connections.some(connection => connection.client_id === intruder.client_id), 'no connection for the later registrant');
       for (const changedRedirect of ['http://127.0.0.1:43211/callback', 'http://127.0.0.1:43210/other']) {
@@ -964,7 +1003,48 @@ try {
     main.start_window('lark');
     const flow = await vendor.begin(); const refused = main.approve(flow.code, 'lark', false); assert.notEqual(refused.code, 0); assert.match(refused.stderr + refused.stdout, /--replace/); assert.match(refused.stderr + refused.stdout, /every queued and future job for worker lark, including briefs approved before the switch/);
     const replaced = main.approve(flow.code, 'lark', true); assert.equal(replaced.code, 0); assert.equal(replaced.json().replaced, a.approval.connection_id);
-    assert.equal((await main.rpc(a.access, 'tools/list')).status, 401, 'the replaced connection must end');
+    assert.equal((await main.rpc(a.access, 'tools/list')).status, 200, 'approval alone does not replace the old connection');
+    const callback = await vendor.finish(flow); assert.equal(callback.stage, 'callback');
+    assert.equal((await main.rpc(a.access, 'tools/list')).status, 200, 'a delivered code without a token is still only pending');
+    const exchange = await vendor.exchange(callback.code, flow.pkce.verifier); assert.equal(exchange.status, 200);
+    assert.equal((await main.rpc(a.access, 'tools/list')).status, 401, 'issuing the first replacement token ends the old connection');
+    assert.equal((await main.rpc(exchange.body.access_token, 'tools/list')).status, 200);
+  });
+
+  await check('11b', 'pending replacement survives restart; an expired code preserves the original connection', async () => {
+    const bridge = await new Bridge('pending-replacement').init();
+    try {
+      assert.equal(await bridge.start(), true);
+      assert.equal(bridge.cli(['connect', 'allow-callback', CALLBACK, '--json']).code, 0);
+      bridge.start_window('lark');
+      const first = new Vendor(bridge);
+      assert.equal((await first.register()).status, 201);
+      const original = await first.connect('lark');
+      const second = new Vendor(bridge);
+      assert.equal((await second.register()).status, 201);
+
+      const expired = await second.begin();
+      assert.equal(bridge.approve(expired.code, 'lark', true).code, 0);
+      const expiredCallback = await second.finish(expired);
+      assert.equal(expiredCallback.stage, 'callback');
+      bridge.sql("UPDATE oidc SET expires_at=? WHERE model='AuthorizationCode' AND id=?", Date.now()-1,
+        bridge.tokenId('AuthorizationCode', expiredCallback.code));
+      const refusal = await second.exchange(expiredCallback.code, expired.pkce.verifier);
+      assert.ok(refusal.status >= 400 && !refusal.body.access_token);
+      assert.equal((await bridge.rpc(original.access, 'tools/list')).status, 200);
+
+      const fresh = await second.begin();
+      assert.equal(bridge.approve(fresh.code, 'lark', true).code, 0);
+      const callback = await second.finish(fresh);
+      assert.equal(callback.stage, 'callback');
+      await bridge.stop();
+      assert.equal(await bridge.start(), true);
+      assert.equal((await bridge.rpc(original.access, 'tools/list')).status, 200);
+      const issued = await second.exchange(callback.code, fresh.pkce.verifier);
+      assert.equal(issued.status, 200);
+      assert.equal((await bridge.rpc(original.access, 'tools/list')).status, 401);
+      assert.equal((await bridge.rpc(issued.body.access_token, 'tools/list')).status, 200);
+    } finally { await bridge.stop(); }
   });
 
   // ---- 12. approval attacks --------------------------------------------------------------------------------------------------
@@ -1039,10 +1119,23 @@ try {
   });
   await check('12e', 'concurrent approvals create one connection (same code twice; by code for one worker)', async () => {
     main.start_window('lark');
-    const flow = await vendor.begin();
+    const previous = main.sql("SELECT connection_id,client_id FROM connections WHERE worker='lark' AND revoked_at IS NULL");
+    assert.equal(previous.length, 1, 'fixture has one existing connection');
+    const replacement = new Vendor(main);
+    assert.equal((await replacement.register()).status, 201);
+    assert.notEqual(replacement.client_id, previous[0].client_id);
+    const flow = await replacement.begin();
     const both = await Promise.all([main.cliAsync(['connect', 'approve', flow.code, '--worker', 'lark', '--replace', '--json']), main.cliAsync(['connect', 'approve', flow.code, '--worker', 'lark', '--replace', '--json'])]);
     assert.equal(both.filter(r => r.code === 0).length, 1, JSON.stringify(both.map(r => r.stderr + r.stdout)));
-    assert.equal(main.sql("SELECT count(*) n FROM connections WHERE worker='lark' AND grant_id IN (SELECT grant_id FROM pairings WHERE uid=?)", flow.uid)[0].n, 1);
+    // An approved replacement is durable but not active before redemption.
+    // Count both storage forms without weakening the one-winner race invariant.
+    const admitted = main.sql(`SELECT
+      (SELECT count(*) FROM connections WHERE worker='lark' AND grant_id IN (SELECT grant_id FROM pairings WHERE uid=?))
+      + (SELECT count(*) FROM pending_replacements WHERE worker='lark' AND grant_id IN (SELECT grant_id FROM pairings WHERE uid=?)) AS n`,
+      flow.uid, flow.uid)[0].n;
+    assert.equal(admitted, 1, 'one durable connection approval for this pairing');
+    const authorized = main.sql("SELECT connection_id,client_id FROM connections WHERE worker='lark' AND revoked_at IS NULL");
+    assert.deepEqual(authorized, previous, 'only the original client and connection are active before redemption');
     main.cli(['connect', 'revoke', 'lark', '--json']);
     const f1 = await vendor.begin(), f2 = await vendorB.begin();
     const race = await Promise.all([main.cliAsync(['connect', 'approve', f1.code, '--worker', 'lark', '--json']), main.cliAsync(['connect', 'approve', f2.code, '--worker', 'lark', '--json'])]);
