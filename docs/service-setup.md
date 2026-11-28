@@ -170,7 +170,7 @@ A service installed by 0.6.0 or 0.6.1 is adopted by its first `dalan service upd
 dalan service status --json
 ```
 
-In `last_result`, `outcome` is `connector_refresh_required` for a staged release (`candidate_version` names it), `rolled_back` or `rollback_failed` after a failed switch, `failed` when an update stops before or during the switch, `update_available` after a check finds a newer release, `skipped_failed_release` when the timer passes over a rolled-back release, and `up_to_date` when none is waiting. A top-level `failed_release` names a release that Dalan will not retry on its own.
+In `last_result`, `outcome` is `connector_refresh_required` for a staged release (`candidate_version` names it), `rolled_back` or `rollback_failed` after a failed switch, `commit_uncertain` when Dalan cannot tell whether the switch committed (it keeps the candidate and recovery data and does not retry that release on its own), `failed` when an update stops before or during the switch, `update_available` after a check finds a newer release, `skipped_failed_release` when the timer passes over a rolled-back release, and `up_to_date` when none is waiting. A top-level `failed_release` names a release that Dalan will not retry on its own.
 
 **Approve and refresh.** Run `dalan service update --yes`, then refresh the connector in each hosted client before you send new jobs. Until you do, the client may still offer the old tool list.
 

@@ -443,7 +443,16 @@ test('workspace check stores bridge evidence, a budget failure, and default-off 
   const repo=path.join(home,'repo');fs.mkdirSync(repo);
   const git=(...args)=>{const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();};
   git('init','-q');git('config','user.name','Fixture');git('config','user.email','fixture@example.test');
-  const checks={default:{host_budget:budgets,argv:['/runtime/node','-e','console.log(require("fs").readFileSync("installed","utf8"))'],install_argv:['/runtime/node','-e','require("fs").writeFileSync("installed","HOST_VERIFIED")'],timeout_ms:8000,output_bytes:16384}};
+  const inspectStorage = [
+    'const fs = require("node:fs"), { spawnSync } = require("node:child_process");',
+    'const names = fs.readdirSync(".");',
+    'if (!names.includes("code.txt") || names.includes(".git")) process.exit(71);',
+    'const git = spawnSync("/usr/bin/git", ["rev-parse", "--git-dir"], { stdio: "ignore" });',
+    'if (git.error || git.status === null || git.status === 0) process.exit(72);',
+    'console.log("HOST_VERIFIED", fs.readFileSync("installed", "utf8"));',
+    'console.log("CHECK_COPY_HAS_NO_GIT_METADATA");'
+  ].join("\n");
+  const checks={default:{host_budget:budgets,argv:['/runtime/node','-e',inspectStorage],install_argv:['/runtime/node','-e','require("fs").writeFileSync("installed","HOST_VERIFIED")'],timeout_ms:8000,output_bytes:16384}};
   fs.writeFileSync(path.join(repo,'.dot-bridge.json'),JSON.stringify({checks}));fs.writeFileSync(path.join(repo,'code.txt'),'candidate');git('add','.dot-bridge.json','code.txt');git('commit','-qm','fixture');
   const config=path.join(home,'.config/dot-bridge');fs.mkdirSync(config,{recursive:true});
   const allowlistFile=path.join(config,'host-check-allowlist.json');
@@ -464,6 +473,7 @@ test('workspace check stores bridge evidence, a budget failure, and default-off 
     process.env.DALAN_HOST_CHECKS='1';
     assert.equal(hostCheckRefusal({}),null);assert.match(hostCheckRefusal({scope_paths:['src']}),/scope_paths_read_isolation_unavailable/);
     const dir=ws.ensure(id,claim,'subject').dir,listed=ws.availableChecksResponse(store.get(id).assignment,dir,'host');
+    assert.equal(fs.existsSync(path.join(dir,'.git')),true,'the working fixture really has Git metadata before staging');
     assert.deepEqual(listed.available_checks,['default']);assert.equal(listed.host_execution_available,true,'a listed check is currently runnable');
     writeAllowlist([]);
     const revoked=await ws.check(id,claim,'subject','default');assert.equal(revoked.status,'capability_not_available');assert.equal(store.db.prepare('SELECT COUNT(*) n FROM check_jobs WHERE request_id=?').get(id).n,0,'revocation after listing blocks before check admission');
@@ -493,6 +503,7 @@ test('workspace check stores bridge evidence, a budget failure, and default-off 
     ws.runConfined=originalRunConfined;ws.checkResponseOptions=undefined;
     const good=await ws.check(id,claim,'subject','default');
     assert.equal(good.status,'completed',JSON.stringify(good));assert.equal(good.exit_code,0,JSON.stringify(good));assert.match(good.output_preview,/HOST_VERIFIED/);
+    assert.match(good.output_preview,/CHECK_COPY_HAS_NO_GIT_METADATA/);
     assert.equal(good.trust,'bridge_verified');assert.equal(good.evidence.host_budget.stop.verified,true);assert.deepEqual(good.evidence.host_budget.limits,budgets);
     assert.equal(good.evidence.post_run_tree_sha256,null);assert.equal(good.evidence.execution_storage,'private_tmpfs_copy_not_exported');
     assert.equal(fs.existsSync(path.join(dir,'installed')),false);

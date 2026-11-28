@@ -90,6 +90,30 @@ function testReplaceTree() {
 try {
   testReplaceTree();
   {
+    const f = fixture(), file = path.join(f.home, 'update-result.json');
+    const status = () => serviceStatus({ home: f.home }).last_result;
+    assert.equal(status(), null, 'only an absent result means no update attempt');
+    for (const text of ['fixture-non-json', '7', 'null', '[]', '{"outcome":7}']) {
+      fs.writeFileSync(file, text);
+      assert.deepEqual(status(), { status: 'unavailable', reason: 'malformed' });
+    }
+    fs.rmSync(file);
+    fs.mkdirSync(file);
+    assert.deepEqual(status(), { status: 'unavailable', reason: 'unreadable' });
+    fs.rmdirSync(file);
+    const result = { outcome: 'updated', timestamp: '2026-11-28T00:00:00.000Z' };
+    fs.writeFileSync(file, JSON.stringify(result));
+    assert.deepEqual(status(), result);
+    const retained = {
+      outcome: 'updated', version: '0.7.0', previous_version: '0.6.0', cleanup_warning: 'fixture cleanup warning',
+      adopted_legacy_server: true, connector_refresh_required: false, current_version: '0.7.0', latest_version: '0.8.0',
+      candidate_version: '0.8.0', failed_version: '0.9.0', message: 'fixture message', error: 'fixture error',
+      timestamp: '2026-11-28T00:00:00.000Z',
+    };
+    fs.writeFileSync(file, JSON.stringify({ ...retained, note: 'not a public result field', status: 'foreign' }));
+    assert.deepEqual(status(), retained, 'service status retains all known fields and drops unknown keys');
+  }
+  {
     const f = fixture(); const r = await updateService({ home: f.home, check: true }, f.seams);
     assert.equal(r.outcome, 'update_available'); assert.deepEqual(f.events, []);
   }
@@ -264,6 +288,9 @@ try {
       controlService: async (_receipt, action) => { f.events.push(action); if (action === 'restart' && f.events.filter(x => x === 'restart').length === 1) throw new Error('candidate restart failed'); },
     });
     await assert.rejects(updateService({ home: f.home, yes: true }, { ...f.seams, healthTimeoutMs: 100 }), /rollback failed: service health check timed out.*old service unhealthy/);
+    const failed = JSON.parse(fs.readFileSync(path.join(f.home, 'update-result.json'), 'utf8'));
+    assert.equal(failed.outcome, 'rollback_failed');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, 'update-failed.json'), 'utf8')).outcome, 'rollback_failed');
     assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
   }
   {
@@ -330,6 +357,11 @@ try {
       } };
       await assert.rejects(updateService({ home: f.home }, seams), /commit state is uncertain/);
     } finally { fs.renameSync = rename; }
+    const uncertain = JSON.parse(fs.readFileSync(path.join(f.home, 'update-result.json'), 'utf8'));
+    assert.equal(uncertain.outcome, 'commit_uncertain');
+    assert.match(uncertain.error, /commit state is uncertain; candidate and recovery data were preserved/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, 'update-failed.json'), 'utf8')).outcome, 'commit_uncertain');
+    assert.equal(f.events.filter(action => action === 'stop').length, 1, 'no rollback stop was attempted');
     assert.equal(fs.readFileSync(marker, 'utf8'), 'candidate mutation');
     assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(path.join(f.home, 'versions', '0.7.0', 'node_modules', '@tnunamak', 'dalan')));
     assert.ok(fs.existsSync(path.join(f.home, 'update-backup', 'snapshot', '.snapshot-complete.json')));

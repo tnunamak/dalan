@@ -298,7 +298,8 @@ export async function updateService({ home, check = false, yes = false, retry = 
     if (!forward) { result = { outcome: 'up_to_date', current_version: oldVersion, latest_version: r.version }; return result; }
     const failed = readFailed(home);
     if (!retry && failed && failed.version === r.version && failed.integrity === r.dist.integrity) {
-      result = { outcome: 'skipped_failed_release', current_version: oldVersion, latest_version: r.version, failed_version: failed.version, message: `Release ${r.version} was rolled back earlier; not retrying automatically. Run dalan service update --retry to try it again.` };
+      const reason = failed.outcome === 'commit_uncertain' ? 'has an uncertain earlier commit' : 'was rolled back earlier';
+      result = { outcome: 'skipped_failed_release', current_version: oldVersion, latest_version: r.version, failed_version: failed.version, message: `Release ${r.version} ${reason}; not retrying automatically. Run dalan service update --retry to try it again.` };
       return result;
     }
     attempted = r;
@@ -371,7 +372,7 @@ export async function updateService({ home, check = false, yes = false, retry = 
     } catch (error) {
       if (error.preserveCandidate) {
         const uncertain = new Error(`update commit state is uncertain; candidate and recovery data were preserved: ${error.message}`);
-        uncertain.updateOutcome = 'rollback_failed';
+        uncertain.updateOutcome = 'commit_uncertain';
         throw uncertain;
       }
       let rollbackError;
@@ -391,7 +392,7 @@ export async function updateService({ home, check = false, yes = false, retry = 
     return result;
   } catch (error) {
     result = { outcome: error.updateOutcome ?? 'failed', error: error.message };
-    if (attempted && (result.outcome === 'rolled_back' || result.outcome === 'rollback_failed')) {
+    if (attempted && ['rolled_back', 'rollback_failed', 'commit_uncertain'].includes(result.outcome)) {
       try { atomic(failedFile(home), JSON.stringify({ version: attempted.version, integrity: attempted.dist.integrity, outcome: result.outcome, timestamp: new Date().toISOString() })); } catch { /* best effort */ }
     }
     throw error;
@@ -401,12 +402,34 @@ export async function updateService({ home, check = false, yes = false, retry = 
   }
 }
 
+// Persisted fields written by updateService; do not publish arbitrary file keys.
+const UPDATE_RESULT_FIELDS = [
+  'outcome', 'current_version', 'latest_version', 'candidate_version', 'failed_version',
+  'previous_version', 'version', 'connector_refresh_required', 'adopted_legacy_server',
+  'cleanup_warning', 'error', 'message', 'timestamp',
+];
+
 export function serviceStatus({ home }) {
   home = path.resolve(home ?? fail('home is required'));
   const { value: receipt } = readReceipt(home), current = path.join(home, 'current');
   let version = receipt.version;
   if (fs.existsSync(current)) version = JSON.parse(fs.readFileSync(path.join(fs.realpathSync(current), 'package.json'), 'utf8')).version;
   let last_result = null;
-  try { last_result = JSON.parse(fs.readFileSync(path.join(home, 'update-result.json'), 'utf8')); } catch { /* no update attempt */ }
+  let raw;
+  try { raw = fs.readFileSync(path.join(home, 'update-result.json'), 'utf8'); }
+  catch (error) {
+    if (error.code !== 'ENOENT') last_result = { status: 'unavailable', reason: 'unreadable' };
+  }
+  if (raw !== undefined) {
+    try {
+      const result = JSON.parse(raw);
+      last_result = result && typeof result === 'object' && !Array.isArray(result) &&
+        Object.hasOwn(result, 'outcome') && typeof result.outcome === 'string'
+        ? Object.fromEntries(UPDATE_RESULT_FIELDS.filter(key => Object.hasOwn(result, key)).map(key => [key, result[key]]))
+        : { status: 'unavailable', reason: 'malformed' };
+    } catch {
+      last_result = { status: 'unavailable', reason: 'malformed' };
+    }
+  }
   return { version, auto_update: receipt.auto_update ?? false, last_result, failed_release: readFailed(home)?.version ?? null };
 }
