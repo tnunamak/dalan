@@ -36,32 +36,40 @@ export function authorizationServerMetadataUrl(issuer) {
 // The public address answers as this bridge: trusted TLS (the platform's fetch checks it), discovery that names this origin and
 // resource, an OAuth challenge on an unauthenticated MCP request, and no owner route. The secret path is known only to this bridge,
 // so a matching discovery document also shows that the route reaches it and not another program.
-export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clock = { now: Date.now, sleep }, timeoutMs, say = () => {}, signal }) {
-  const within = ms => signal ? AbortSignal.any([AbortSignal.timeout(ms), signal]) : AbortSignal.timeout(ms);
+export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clock = { now: () => performance.now(), sleep }, timeoutMs = 30_000, say = () => {}, signal }) {
+  const end = clock.now() + timeoutMs;
+  const budget = AbortSignal.timeout(Math.max(0, Math.ceil(timeoutMs)));
+  const shared = signal ? AbortSignal.any([signal, budget]) : budget;
+  const expired = () => budget.aborted || clock.now() >= end;
+  const request = (url, options = {}) => {
+    signal?.throwIfAborted();
+    if (expired()) throw new Error('public readiness deadline exceeded');
+    return raceSignal(fetchImpl(url, { ...options, signal: shared }), shared);
+  };
   const resource = `${origin}/${secret}/mcp`;
   const check = async () => {
-    const meta = await fetchImpl(`${origin}/.well-known/oauth-protected-resource/${secret}/mcp`, { redirect: 'manual', signal: within(10_000) });
+    const meta = await request(`${origin}/.well-known/oauth-protected-resource/${secret}/mcp`, { redirect: 'manual' });
     if (meta.status !== 200) return `discovery returned HTTP ${meta.status}`;
-    const doc = await meta.json().catch(() => null);
+    const doc = await raceSignal(meta.json(), shared).catch(() => null);
     if (doc?.resource !== resource) return 'discovery names a different resource';
     if (!Array.isArray(doc.authorization_servers) || doc.authorization_servers.length === 0) return 'discovery names no authorization server';
     if (!doc.authorization_servers.every(s => onOrigin(origin, String(s)))) return `discovery names an issuer outside this origin (${TRIAL_ORIGIN_RULE})`;
     // The issuer's own metadata: the exact issuer, and https endpoints for sign-in, tokens and registration on this origin.
     const issuer = String(doc.authorization_servers[0]);
     let asUrl; try { asUrl = authorizationServerMetadataUrl(issuer); } catch (error) { return error.message; }
-    const asMeta = await fetchImpl(asUrl, { redirect: 'manual', signal: within(10_000) });
+    const asMeta = await request(asUrl, { redirect: 'manual' });
     if (asMeta.status !== 200) return `authorization-server metadata returned HTTP ${asMeta.status}`;
-    const as = await asMeta.json().catch(() => null);
+    const as = await raceSignal(asMeta.json(), shared).catch(() => null);
     if (as?.issuer !== issuer) return 'the authorization-server issuer does not match the issuer in discovery';
     for (const key of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) {
       if (typeof as[key] !== 'string' || !onOrigin(origin, as[key])) return `the authorization server's ${key} is missing or is not an address on this origin (${TRIAL_ORIGIN_RULE})`;
     }
-    const challenge = await fetchImpl(resource, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}', signal: within(10_000) });
+    const challenge = await request(resource, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' });
     const isChallenge = challenge.status === 401 && /^Bearer/i.test(challenge.headers.get('www-authenticate') ?? '');
     void challenge.body?.cancel().catch(() => {});
     if (!isChallenge) return `an unauthenticated MCP request returned HTTP ${challenge.status}, not an OAuth challenge`;
     for (const owner of ['/admin', '/connect/pending', '/connect/list']) {
-      const res = await fetchImpl(`${origin}${owner}`, { redirect: 'manual', signal: within(10_000) });
+      const res = await request(`${origin}${owner}`, { redirect: 'manual' });
       const status = res.status;
       void res.body?.cancel().catch(() => {});
       if (status === 200) return `${owner} answers on the public address`;
@@ -73,15 +81,24 @@ export async function verifyPublicReady({ origin, secret, fetchImpl = fetch, clo
       authorizationServer: as,
     };
   };
-  const end = clock.now() + timeoutMs;
   let last = 'no answer yet', nextSay = clock.now() + 15_000;
   for (;;) {
     signal?.throwIfAborted();
-    try { last = await check(); if (last && typeof last === 'object') return { ready: true, identity: last }; }
-    catch (error) { if (signal?.aborted) throw error; last = safeDiagnostic(error.cause?.code ?? error.message, 120); }
-    if (clock.now() >= end) return { ready: false, last };
+    if (expired()) return { ready: false, last: 'public readiness deadline exceeded' };
+    try {
+      const observed = await check();
+      signal?.throwIfAborted();
+      if (expired()) return { ready: false, last: 'public readiness deadline exceeded' };
+      if (observed && typeof observed === 'object') return { ready: true, identity: observed };
+      last = observed;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      last = safeDiagnostic(error.cause?.code ?? error.message, 120);
+    }
+    if (expired()) return { ready: false, last };
     if (clock.now() >= nextSay) { say(`Still waiting for the public address to answer (${last})…`); nextSay += 15_000; }
-    await raceAbort(clock.sleep(2000), signal);
+    try { await raceSignal(clock.sleep(Math.min(2000, Math.max(0, end - clock.now()))), shared); }
+    catch (error) { if (signal?.aborted) throw error; if (expired()) return { ready: false, last }; throw error; }
   }
 }
 
