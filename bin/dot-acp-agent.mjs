@@ -493,7 +493,8 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
         if (ctl.hostTaskId && !replay.later_host_task_ids.includes(ctl.hostTaskId)) replay.later_host_task_ids.push(ctl.hostTaskId);
         if (requestId !== replay.original_prompt_request_id && !replay.later_prompt_request_ids.includes(requestId)) replay.later_prompt_request_ids.push(requestId);
         saveSession(s);
-        await say('agent_message_chunk', replay.terminal.text);
+        // Replay what the first delivery sent, notes included.
+        await say('agent_message_chunk', replay.terminal.text + (replay.notes ?? []).map(n => `\n\nnot sent to the worker: ${n}`).join(''));
         return { stopReason: 'end_turn' };
       }
       ctl.observations = [];
@@ -523,10 +524,12 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
       // Bounded: the 5 s fallback plus at most 2 s here stays inside T3's 10 s cancel window.
       if (outcome.cancelled) { await Promise.race([ctl.cancelDone, sleep(CANCEL_CLEANUP_MS)]); await say('agent_message_chunk', `requester_interrupted: true; worker_state: ${ctl.workerState ?? 'still_running'}; work_id: ${ctl.pending?.rid ?? ctl.cancelledWorkId ?? 'not yet assigned'}\n`); return { stopReason: 'cancelled' }; }
       const notes = ctl.pending.notes.map(n => `\n\nnot sent to the worker: ${n}`).join('');
-      await say('agent_message_chunk', outcome.text + notes);
+      // Record completion before sending: a crash between the two then replays the saved result once on
+      // CONTINUE_PROMPT, instead of finding the terminal still pending and sending it a second time.
       s.completed.push(ctl.pending);
       ctl.pending = null;
       publishPending(s, ctl);
+      await say('agent_message_chunk', outcome.text + notes);
       return { stopReason: 'end_turn' };
     } finally {
       if (currentTurn(s, ctl)) s.ctl = null;
