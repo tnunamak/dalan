@@ -59,6 +59,43 @@ import { startAdapter } from './acp-client.mjs';
   assert.equal(submits, 1, 'resume attaches the same assignment without a second submit');
 }
 
+// Exercise the real wait loop with a fake bridge and a deterministic clock.
+{
+  const source = readFileSync(new URL('../bin/dot-acp-agent.mjs', import.meta.url), 'utf8');
+  const from = source.indexOf('async function waitLoop(');
+  const to = source.indexOf('// Progress stays on this child transcript.', from);
+  for (const mode of ['stuck', 'recovered']) {
+    let now = 0, attempts = 0;
+    const thoughts = [];
+    const conflict = Object.assign(new Error('fixture conflict'), { http_status: 409 });
+    const waitLoop = runInNewContext(source.slice(from, to) + '\nwaitLoop', {
+      Date: { now: () => now }, HEARTBEAT_MS: 5000, OUTAGE_MS: 1500,
+      acp: { RequestError: class extends Error {} }, Refusal: class extends Error {},
+      transient: () => false,
+      call: async () => {
+        attempts++;
+        if (mode === 'recovered' && attempts === 2) return { status: 'finished' };
+        if (attempts > 4) throw new Error('exceeded fixture wait budget');
+        throw conflict;
+      },
+      sleep: async ms => { assert.equal(ms, 1000); now += ms; },
+      refuse: (msg, data) => Object.assign(new Error(msg), data),
+      readRowOrThrow: async () => ({}), relayProgress: async () => {},
+      resultText: async () => 'done', trackBuild: () => {}, publishPending: () => {},
+    });
+    const ctl = { cancelled: false, abort: new AbortController(), pending: { rid: 'fixture' } };
+    const run = waitLoop({}, ctl, async (_kind, message) => { thoughts.push(message); });
+    if (mode === 'stuck') {
+      await assert.rejects(run, err => err.failure_type === 'transport_error' && /previous waiter still attached/.test(err.message));
+      assert.equal(attempts, 3);
+    } else {
+      assert.equal((await run).text, 'done');
+      assert.equal(attempts, 2);
+    }
+    assert.equal(thoughts.filter(msg => msg.includes('previous waiter still attached; retrying')).length, 1);
+  }
+}
+
 const repo = resolve(new URL('..', import.meta.url).pathname);
 const home = await mkdtemp(join(tmpdir(), 'dalan-acp-robustness-'));
 const socket = join(home, '.local/share/dot-bridge/admin.sock');

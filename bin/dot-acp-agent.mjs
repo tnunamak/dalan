@@ -296,6 +296,7 @@ async function heartbeat(s, ctl, say, note = '', signal = ctl.abort.signal) {
 async function waitLoop(s, ctl, say, client) {
   const slice = Math.max(1, Math.ceil(HEARTBEAT_MS / 1000));
   let outageSince = null;
+  let reportedWaiterConflict = false;
   for (;;) {
     if (ctl.cancelled) return { cancelled: true };
     const signal = ctl.abort.signal;
@@ -309,9 +310,19 @@ async function waitLoop(s, ctl, say, client) {
       }
       // A successful /wait alone is not recovery if its follow-up read still fails.
       outageSince = null;
+      reportedWaiterConflict = false;
     } catch (e) {
       if (ctl.cancelled) return { cancelled: true };
-      if (waiting && e.http_status === 409) { await sleep(1000, signal); continue; } // our previous process's waiter has not detached yet
+      if (waiting && e.http_status === 409) {
+        outageSince ??= Date.now();
+        if (Date.now() - outageSince > OUTAGE_MS) throw refuse('worker bridge unreachable: previous waiter still attached',{failure_type:'transport_error',failure_type_source:'dot_acp_transport'});
+        if (!reportedWaiterConflict) {
+          reportedWaiterConflict = true;
+          await say('agent_thought_chunk', 'previous waiter still attached; retrying\n');
+        }
+        await sleep(1000, signal);
+        continue;
+      }
       if (e instanceof acp.RequestError || e instanceof Refusal) throw e;
       if (!transient(e)) throw refuse(`worker bridge error: ${e.message}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
       outageSince ??= Date.now();
