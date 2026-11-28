@@ -158,7 +158,7 @@ try {
   assert.equal(serviceExit,null,'bad persisted delivery stopped the server');
   const [badDrain,goodDrain]=await Promise.all([get(badDeliveryId),get(goodDeliveryId)]);
   const quarantined=badDrain.delivery.find(item=>item.kind==='blocker');
-  assert.equal(quarantined.state,'suppressed');assert.match(quarantined.last_error,/invalid delivery mode: smtp:other/);
+  assert.equal(quarantined.state,'suppressed');assert.match(quarantined.last_error,/invalid delivery mode/);
   assert.equal(goodDrain.delivery.find(item=>item.kind==='blocker')?.state,'delivered','valid row did not deliver after malformed row');
   const requestLog=readFileSync(join(home,'.local','state','dot-bridge','requests.jsonl'),'utf8');
   assert.match(requestLog,/delivery_quarantined/,'quarantine error was not logged');

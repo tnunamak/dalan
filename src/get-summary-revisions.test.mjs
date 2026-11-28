@@ -287,9 +287,10 @@ async function heartbeatFailureFixture(t, healthFailure) {
     env: { DALAN_HEALTH_FILE: health, FIXTURE_SENTINEL: sentinel },
   });
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /health check or external heartbeat failed/);
+  assert.match(result.stderr, /(local health check|external heartbeat) failed/);
   assert.equal(result.stdout, '');
-  await assert.rejects(readFile(health), { code: 'ENOENT' });
+  if (healthFailure) await assert.rejects(readFile(health), { code: 'ENOENT' });
+  else assert.deepEqual(JSON.parse(await readFile(health, 'utf8')), { healthy: true });
   return { readFile, sentinel };
 }
 
@@ -298,7 +299,7 @@ test('heartbeat probe failure removes stale health without launching the alert h
   await assert.rejects(readFile(sentinel), { code: 'ENOENT' });
 });
 
-test('heartbeat helper failure retracts the positive health file and exits nonzero', async t => {
+test('heartbeat helper failure keeps the fresh local health file and exits nonzero', async t => {
   const { readFile, sentinel } = await heartbeatFailureFixture(t, false);
   assert.equal(await readFile(sentinel, 'utf8'), 'entered');
 });
