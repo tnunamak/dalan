@@ -493,7 +493,8 @@ const agent = acp.agent({ name: 'dot-acp', version: '0.1.0' })
         if (ctl.hostTaskId && !replay.later_host_task_ids.includes(ctl.hostTaskId)) replay.later_host_task_ids.push(ctl.hostTaskId);
         if (requestId !== replay.original_prompt_request_id && !replay.later_prompt_request_ids.includes(requestId)) replay.later_prompt_request_ids.push(requestId);
         saveSession(s);
-        await say('agent_message_chunk', replay.terminal.text);
+        // Replay what the first delivery sent, notes included.
+        await say('agent_message_chunk', replay.terminal.text + (replay.notes ?? []).map(n => `\n\nnot sent to the worker: ${n}`).join(''));
         return { stopReason: 'end_turn' };
       }
       ctl.observations = [];
