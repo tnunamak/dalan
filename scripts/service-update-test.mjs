@@ -280,6 +280,9 @@ try {
       controlService: async (_receipt, action) => { f.events.push(action); if (action === 'restart' && f.events.filter(x => x === 'restart').length === 1) throw new Error('candidate restart failed'); },
     });
     await assert.rejects(updateService({ home: f.home, yes: true }, { ...f.seams, healthTimeoutMs: 100 }), /rollback failed: service health check timed out.*old service unhealthy/);
+    const failed = JSON.parse(fs.readFileSync(path.join(f.home, 'update-result.json'), 'utf8'));
+    assert.equal(failed.outcome, 'rollback_failed');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, 'update-failed.json'), 'utf8')).outcome, 'rollback_failed');
     assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(f.repo));
   }
   {
@@ -346,6 +349,11 @@ try {
       } };
       await assert.rejects(updateService({ home: f.home }, seams), /commit state is uncertain/);
     } finally { fs.renameSync = rename; }
+    const uncertain = JSON.parse(fs.readFileSync(path.join(f.home, 'update-result.json'), 'utf8'));
+    assert.equal(uncertain.outcome, 'commit_uncertain');
+    assert.match(uncertain.error, /commit state is uncertain; candidate and recovery data were preserved/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, 'update-failed.json'), 'utf8')).outcome, 'commit_uncertain');
+    assert.equal(f.events.filter(action => action === 'stop').length, 1, 'no rollback stop was attempted');
     assert.equal(fs.readFileSync(marker, 'utf8'), 'candidate mutation');
     assert.equal(fs.realpathSync(path.join(f.home, 'current')), fs.realpathSync(path.join(f.home, 'versions', '0.7.0', 'node_modules', '@tnunamak', 'dalan')));
     assert.ok(fs.existsSync(path.join(f.home, 'update-backup', 'snapshot', '.snapshot-complete.json')));
