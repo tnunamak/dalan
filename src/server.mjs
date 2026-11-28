@@ -390,8 +390,7 @@ if(batchClaimProfile) {
   claim.description+=' Use next (1 through 8) instead of request_id to claim several queued assignments with one acquisition_id. The reply contains claims and free_lanes.';
   claim.inputSchema.properties.next={type:'integer',minimum:1,maximum:8};
   claim.inputSchema.required=['claimant'];
-  claim.inputSchema.oneOf=[{required:['request_id']},{required:['next','acquisition_id'],not:{required:['request_id']}}];
-  claim.inputSchema.oneOf[0].not={required:['next']};
+  // No top-level oneOf: several MCP hosts reject combinators at the schema root. validate() enforces exactly one of request_id or next.
   // The stable catalog stays frozen: claim_id on get (heartbeat for that exact claim) is served only in this profile.
   const get=tools.find(item=>item.name==='get');
   get.description='Read assignment, available_checks, cancellation, progress, report and delivery facts; optional claim_id scopes heartbeat guidance.';
