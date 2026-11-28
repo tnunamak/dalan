@@ -120,15 +120,18 @@ for (const [which, code] of Object.entries(payloads)) {
   });
 }
 
-test('reclaiming page cache at the memory limit is not a memory failure', { skip: !linux && 'Linux systemd/cgroup backend required' }, async () => {
+test('reclaiming page cache at the memory limit is not a memory failure', { skip: !linux && 'Linux systemd/cgroup backend required' }, async t => {
   // Reading files fills page cache charged to the unit. At memory.max the kernel reclaims it (memory.events "max" counts
   // up) and the run goes on. Only an OOM kill is a memory failure.
   const reader = 'import os\nhold=bytearray(32*1024*1024)\nread=0\nfor root,_,files in os.walk("/usr/lib"):\n  for f in files:\n    p=os.path.join(root,f)\n    try:\n      if os.path.isfile(p) and not os.path.islink(p):\n        with open(p,"rb") as h:\n          while (b:=h.read(1<<20)): read+=len(b)\n    except OSError: pass\n    if read>=320*1024*1024: break\n  if read>=320*1024*1024: break\nev=dict(l.split() for l in open("/cgroup/memory.events"))\nprint("read",read>>20,"MiB max_events",ev.get("max"),"oom_kill",ev.get("oom_kill"))\n';
   const result = await runHostBudget({ dir: home, budgets: {...budgets, memory_bytes: 128 * 1024 * 1024, wall_ms: 60000, cpu_ms: 30000}, enabled: true,
     phases: [{name: 'check', argv: ['/usr/bin/python3', '-c', reader]}] });
   const output = Buffer.from(result.phases?.[0]?.output ?? '', 'base64').toString();
-  assert.match(output, /max_events [1-9]/, 'the run must actually reach the limit: '+output+JSON.stringify(result));
+  // On the old verdict the reclaim itself ends the run before it prints anything.
   assert.equal(result.error, null, JSON.stringify({...result, phases: undefined}));
+  // Pages already cached and charged elsewhere (a warm host) need no reclaim here; then this host cannot run the
+  // scenario, which is reported as a skip, not a pass.
+  if (!/max_events [1-9]/.test(output)) return t.skip('no reclaim at memory.max on this host: '+output.trim());
   assert.equal(result.exit.code, 0);
 });
 
