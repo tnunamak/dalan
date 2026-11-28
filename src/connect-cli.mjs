@@ -44,7 +44,7 @@ const authorityEndpoint = url => url.origin + url.pathname;
 // sent with the final local callback. No redirect is followed by the HTTP client.
 function interactionBrowser(issuer, signal) {
   const jar = new Map();
-  return async function get(url) {
+  return async function get(url, phaseSignal = signal) {
     if (url.origin !== issuer.origin || url.username || url.password || url.hash) throw new Error('Bridge sent an unexpected authorization redirect.');
     const now = Date.now();
     const headers = {};
@@ -52,7 +52,7 @@ function interactionBrowser(issuer, signal) {
       && (url.pathname === c.path || url.pathname.startsWith(c.path.endsWith('/') ? c.path : c.path + '/')));
     if (cookies.length) headers.cookie = cookies.sort((a, b) => b.path.length - a.path.length).map(c => c.part).join('; ');
     let response;
-    try { response = await fetch(url, { headers, signal, redirect: 'manual' }); }
+    try { response = await fetch(url, { headers, signal: phaseSignal, redirect: 'manual' }); }
     catch { throw new Error('Could not load the bridge authorization page.'); }
     const cookieHeaders = response.headers.getSetCookie();
     for (const line of cookieHeaders) {
@@ -124,7 +124,7 @@ function sendLocalCallback(url, signal) {
   });
 }
 
-async function completeLocalConnection(input, worker, replace, request, headers) {
+async function completeLocalConnection(input, worker, replace, request, headers, outerSignal) {
   let auth;
   try { auth = new URL(input); } catch { throw new Error('Use this bridge’s exact authorization endpoint URL.'); }
   if (!['http:', 'https:'].includes(auth.protocol) || auth.username || auth.password || auth.hash) throw new Error('Use this bridge’s exact authorization endpoint URL.');
@@ -139,7 +139,11 @@ async function completeLocalConnection(input, worker, replace, request, headers)
   const redirects = auth.searchParams.getAll('redirect_uri');
   if (redirects.length !== 1 || !isLocalRedirect(redirects[0])) throw new Error('A canonical loopback callback is required.');
   const issuer = new URL(auth.pathname.slice(0, -'/auth'.length), auth.origin);
-  const signal = AbortSignal.timeout(10000);
+  const phaseSignal = () => {
+    const budget = AbortSignal.timeout(10000);
+    return outerSignal ? AbortSignal.any([outerSignal, budget]) : budget;
+  };
+  const signal = phaseSignal();
   const get = interactionBrowser(issuer, signal);
   const interaction = nextUrl(await get(auth), auth);
   const interactionPrefix = issuer.pathname + '/interaction/';
@@ -157,21 +161,28 @@ async function completeLocalConnection(input, worker, replace, request, headers)
     throw new Error('Could not verify the exact loopback pairing for this authorization request.');
   }
   const result = await owner('/connect/approve', 'POST', { worker, replace, code: pairing.code, confirm_redirect: pairing.redirect_uri });
+  // Approval committed. Reuse the same interaction and cookies, with a new bounded
+  // callback phase. Do not retry the approval if local notification fails.
+  const followUp = phaseSignal();
   const expected = new URL(pairing.redirect_uri);
-  let step = interaction;
-  for (let hop = 0; hop < 5; hop++) {
-    const target = nextUrl(await get(step), step);
-    if (sameLocalCallback(target, expected, auth, issuer)) {
-      await sendLocalCallback(target, signal);
-      return { connection_id: result.connection_id };
+  try {
+    let step = interaction;
+    for (let hop = 0; hop < 5; hop++) {
+      const target = nextUrl(await get(step, followUp), step);
+      if (sameLocalCallback(target, expected, auth, issuer)) {
+        await sendLocalCallback(target, followUp);
+        return { connection_id: result.connection_id };
+      }
+      if (!target || target.origin !== issuer.origin || !target.pathname.startsWith(issuer.pathname + '/auth/')) break;
+      step = target;
     }
-    if (!target || target.origin !== issuer.origin || !target.pathname.startsWith(issuer.pathname + '/auth/')) break;
-    step = target;
+    throw new Error('No verified local callback was returned.');
+  } catch (cause) {
+    throw new Error(`Connection ${q(result.connection_id)} was approved, but the local callback did not complete. Check the connection before retrying.`, { cause });
   }
-  throw new Error('The bridge did not return the approved local callback. Check the connection before retrying.');
 }
 
-export async function connectCommand(args, { request, operator, option, json }) {
+export async function connectCommand(args, { request, operator, option, json, signal }) {
   const sub = args.shift();
   const headers = () => ({ 'x-operator-key': operator() });
   const flags = new Set(['--json', '--replace', '--rotate']);
@@ -225,7 +236,7 @@ export async function connectCommand(args, { request, operator, option, json }) 
     case 'complete': {
       if (positional.length !== 1 || !worker || args.filter(arg => arg === '--worker').length !== 1
           || args.some((arg, i) => arg.startsWith('--') && !['--worker', '--replace', '--json'].includes(arg))) throw new Error(USAGE);
-      const result = await completeLocalConnection(positional[0], worker, args.includes('--replace'), request, headers);
+      const result = await completeLocalConnection(positional[0], worker, args.includes('--replace'), request, headers, signal);
       return json ? { result } : { result: 'Connected: ' + q(result.connection_id), plain: true };
     }
     case 'approve': {
