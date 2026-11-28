@@ -436,5 +436,6 @@
   "node scripts/answer-journal-retention-test.mjs",
   "node scripts/characterize-native-questions-e2e.mjs",
   "node scripts/characterize-native-submit-e2e.mjs",
-  "node scripts/characterize-native-authority-e2e.mjs"
+  "node scripts/characterize-native-authority-e2e.mjs",
+  "node --test scripts/worker-bridge-setup-partial-test.mjs"
 ]
