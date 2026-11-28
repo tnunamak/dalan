@@ -227,8 +227,8 @@ function producerReceipts(producer,cache) {
 }
 // A failure worth retrying: the bridge restarting (transport) or unavailable (5xx).
 const transient=e=>e.kind==='transport'||e.http_status>=500;
-// /owner-states reads without recording an owner read. An older bridge lacks it; /get then works, but each finished task
-// it sees is recorded as consumed once. A 4xx for one request (unknown, not owned) marks it unknown; anything else throws.
+// /owner-states is explicitly non-consuming. A bridge lacking it might also
+// silently ignore /get's peek parameter; do not probe it with an actual receipt.
 async function ownerStates(items,legacy) {
   if(!legacy.on) try {
     let out=null;
@@ -239,14 +239,7 @@ async function ownerStates(items,legacy) {
     return out;
   }
   catch(e) { if(e.http_status!==404) throw e; legacy.on=true; }
-  const states=[];
-  for(const x of items) {
-    let got; try { got=await request('/get?id='+encodeURIComponent(x.id),'GET',null,{'x-owner-capability':x.token}); }
-    catch(e) { if(transient(e)) throw e; states.push({request_id:x.id,error:'unreadable'}); continue; }
-    if(typeof got.status!=='string') { states.push({request_id:x.id,error:'unreadable'}); continue; }
-    const blockers=(got.progress??[]).map(p=>p.note).filter(n=>/^\s*(?:BLOCKED:|QUESTION:)/im.test(n));
-    states.push({request_id:x.id,status:got.status,blocker_count:blockers.length,last_blocker:blockers.at(-1)??null});
-  }
+  const states=items.map(x=>({request_id:x.id,error:'unreadable'}));
   const s=await request('/status');
   // Only evidence holds refill: a pause or an owner-confirmed break (not an inferred break, not an estimated limit).
   const held=s.paused?'paused':s.worker_break?.active&&s.worker_break.source==='owner'?'worker_break':null;

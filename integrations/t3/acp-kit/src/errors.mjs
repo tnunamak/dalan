@@ -10,4 +10,7 @@ export const T3_CANCEL_WINDOW_MS = 10_000;
 export const CANCEL_BUDGET_MS = 5_000;
 export const CANCEL_CLEANUP_MS = 2_000;
 // A positive finite number (for example from an environment variable), else the default.
-export const cancelBudgetMs = raw => Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : CANCEL_BUDGET_MS;
+export const cancelBudgetMs = raw => {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.min(value, T3_CANCEL_WINDOW_MS - CANCEL_CLEANUP_MS) : CANCEL_BUDGET_MS;
+};

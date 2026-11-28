@@ -57,3 +57,22 @@ test('explicit positive admin timeout is preserved',async()=>{
   fake.timer().expire();
   await assert.rejects(pending,{code:'ETIMEDOUT',kind:'transport'});
 });
+
+test('a legacy refill poll leaves finished results untouched when non-consuming reads are unverified',async()=>{
+  const calls=[];
+  const request=async route=>{
+    calls.push(route);
+    if(route==='/owner-states') throw Object.assign(new Error('unsupported'),{http_status:404});
+    if(route==='/status') return {paused:false};
+    if(route.startsWith('/get?')) return {status:'finished'}; // Old servers may consume even with a peek query.
+    assert.fail('unexpected route '+route);
+  };
+  const excerpt=source.slice(source.indexOf('\nconst transient='),source.indexOf('\n// A peek at the owner'));
+  const poll=runInNewContext(excerpt+'\nownerStates',{request});
+  const legacy={on:false};
+  const result=await poll([{id:'fixture',token:'fixture-only'}],legacy);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.states)),[{request_id:'fixture',error:'unreadable'}]);
+  assert.deepEqual(calls,['/owner-states','/status']);
+  await poll([{id:'fixture',token:'fixture-only'}],legacy);
+  assert.deepEqual(calls,['/owner-states','/status','/status']);
+});
