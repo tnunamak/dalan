@@ -644,6 +644,27 @@ cases.set(28, async () => {
     await rm(outer, { recursive: true, force: true });
   }
 });
+cases.set(29, async () => fixture(async f => {
+  // The bridge stores the job, but the /submit reply fails (5xx) after the requester cancelled. The retry loop
+  // stops at its abort check; the job that did land must still be cancelled, not left queued for a later prompt.
+  const cancelled = deferred(); let submits = 0;
+  f.hook(async ({ url, body, rid, res, json }) => {
+    if (url.pathname === '/submit' && rid === 'review_submit_5xx') {
+      // The job lands only after the cancel's own first attempt found nothing to cancel.
+      submits++; await cancelled.promise;
+      f.rows.set(rid, { assignment: body.assignment, status: 'queued' });
+      json(res, { error: 'bridge restarting' }, 503); return true;
+    }
+    return false;
+  });
+  const a = await f.adapter(), sid = (await a.newSession(f.cwd)).sessionId;
+  const prompt = a.prompt(sid, '[dot-decision:review_submit_5xx]\nsubmit then fail');
+  await waitFor(() => submits === 1, 'submit reached the bridge');
+  a.cancel(sid); await sleep(300); cancelled.resolve();
+  assert.equal((await bounded(prompt)).result?.stopReason, 'cancelled');
+  await waitFor(() => f.rows.get('review_submit_5xx')?.status === 'cancelled', 'landed job cancelled after a failed submit reply', 10000);
+  assert.equal(submits, 1, 'no retry after the cancel');
+}));
 const only = process.argv[2] ? Number(process.argv[2]) : null;
 for (const [finding, test] of cases) {
   if (only && finding !== only) continue;

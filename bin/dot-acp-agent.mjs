@@ -239,7 +239,9 @@ async function runTurn(s, ctl, text, say, client) {
       const steerText = text.trim();
       if (steerText && steerText !== CONTINUE_PROMPT && sha256(incoming.brief) !== ctl.pending.briefHash && !ctl.pending.notes.includes(steerText.slice(0, 200))) ctl.pending.notes.push(steerText.slice(0, 200));
     } else {
-      ctl.pending = await acquire(s, parsed, ctl);
+      // A submit that failed after a cancel may still have landed: cancel what the recorded intent names.
+      try { ctl.pending = await acquire(s, parsed, ctl); }
+      catch (e) { if (ctl.cancelled && ctl.pending) await cancelPending(s, ctl); throw e; }
       ctl.pending.notes = notes;
       if (ctl.cancelled) {
         ctl.cancelDone = Promise.resolve(ctl.cancelDone).then(() => cancelPending(s, ctl));

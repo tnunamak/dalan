@@ -430,7 +430,7 @@ else console.log(JSON.stringify({ok:true,data:{}}));
   // no job may appear for this turn. (A cancel during an in-flight /submit still ends that job cancelled.)
   await sleep(4000);
   assert.equal(status('dec_race_1'), undefined, 'a turn cancelled before its submit leaves no job');
-  console.log('PASS a cancel during a slow submit answers in time and cancels the job the late submit created');
+  console.log('PASS a cancel during a slow submit answers in time and no job is submitted after it');
 
   // ---- 9. stdin EOF exits 0 without cancelling anything
   const k = adapter(); await k.init();
