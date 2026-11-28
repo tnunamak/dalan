@@ -377,8 +377,8 @@ export async function updateService({ home, check = false, yes = false, retry = 
       let rollbackError;
       try {
         if (tx.phase === 'switched') validateSnapshot(tx);
-        await control(receipt, 'stop'); select(home, oldRepo); if (unitFile && tx.oldUnit != null) atomic(unitFile, tx.oldUnit);
-        if (tx.phase === 'switched') for (const item of ['.config', '.local']) replaceTree(path.join(txDir, 'snapshot', item), path.join(home, item));
+        await control(receipt, 'stop');
+        if (tx.phase === 'switched') restoreFiles(home, tx);
         await control(receipt, 'daemon-reload'); await control(receipt, 'restart');
         const restored = await probeReady(probe, home, { ...receipt, repo: oldRepo }, healthTimeoutMs);
         if (restored.version !== oldVersion || !legacy && !catalogsEqual(base, restored, workers)) fail('old service health verification failed');
