@@ -143,6 +143,19 @@ try {
   // submit -> worker finishes -> wait -> result
   const requestId = `req_${randomUUID()}`;
   const assignment = { schema_version: 1, request_id: requestId, brief: 'Report the exact phrase: mcp roundtrip report.', inputs: [], expected_output: 'Text report.', execution_scope: 'read-only' };
+  // Malformed, inert fixture names must be rejected by the adapter, not by the CLI.
+  const workerRefusal = await call('dalan_submit', { assignment, worker: '-x', execution: 'none' });
+  assert.equal(workerRefusal.isError, true);
+  assert.match(workerRefusal.content[0].text, /worker name must not start with a dash/);
+  for (const [name, args] of [
+    ['dalan_wait', { request_id: '-fixture-id' }],
+    ['dalan_result', { request_id: '-fixture-id' }],
+    ['dalan_questions', { id: '-fixture-id' }],
+  ]) {
+    const refused = await call(name, args);
+    assert.equal(refused.isError, true, name);
+    assert.match(refused.content[0].text, /is not a valid request id.*cannot start with a dash/, name);
+  }
   const forecast = await call('dalan_forecast', { assignment, execution: 'none' });
   assert.notEqual(forecast.isError, true, JSON.stringify(forecast));
   const forecastAnswer = textOf(forecast);
