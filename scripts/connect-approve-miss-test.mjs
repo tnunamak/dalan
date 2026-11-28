@@ -1,7 +1,8 @@
 // `dalan connect approve CODE` with no matching attempt names the likely causes and the fix.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { connectCommand } from '../src/connect-cli.mjs';
+import * as connect from '../src/connect-cli.mjs';
+const { connectCommand } = connect;
 
 test('a code that matches no pending pairing names expiry, a mistyped code and the fix', async () => {
   const request = async route => route === '/connect/pending' ? { window: { worker: 'local', expires_at: 'later' }, pending: [] } : assert.fail(`unexpected request ${route}`);
@@ -15,4 +16,22 @@ test('a code that matches no pending pairing names expiry, a mistyped code and t
     assert.match(error.message, /dalan connect pending/);
     return true;
   });
+});
+
+test('notification failure reports the committed connection without retrying or exposing transport detail', async () => {
+  const approval = { connection_id: 'conn_fixture' };
+  let calls = 0;
+  await assert.rejects(async () => connect.notifyCommittedApproval(approval, async () => {
+    calls++;
+    throw new Error('private fixture transport detail');
+  }), error => {
+    assert.equal(error.name, 'PostApprovalCallbackError');
+    assert.equal(error.code, 'post_approval_callback_failed');
+    assert.equal(error.connection_id, approval.connection_id);
+    assert.match(error.message, /Approval is already committed.*conn_fixture/);
+    assert.match(error.message, /dalan connect list.*do not approve again/);
+    assert.doesNotMatch(error.message, /private fixture transport detail/);
+    return true;
+  });
+  assert.equal(calls, 1);
 });

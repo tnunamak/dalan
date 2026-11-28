@@ -162,13 +162,27 @@ async function completeLocalConnection(input, worker, replace, request, headers)
   for (let hop = 0; hop < 5; hop++) {
     const target = nextUrl(await get(step), step);
     if (sameLocalCallback(target, expected, auth, issuer)) {
-      await sendLocalCallback(target, signal);
-      return { connection_id: result.connection_id };
+      return notifyCommittedApproval(result, () => sendLocalCallback(target, signal));
     }
     if (!target || target.origin !== issuer.origin || !target.pathname.startsWith(issuer.pathname + '/auth/')) break;
     step = target;
   }
   throw new Error('The bridge did not return the approved local callback. Check the connection before retrying.');
+}
+
+export class PostApprovalCallbackError extends Error {
+  constructor(connectionId) {
+    super(`Approval is already committed for connection ${q(connectionId)}. Callback delivery failed. Run dalan connect list to check the connection; do not approve again.`);
+    this.name = 'PostApprovalCallbackError';
+    this.code = 'post_approval_callback_failed';
+    this.connection_id = connectionId;
+  }
+}
+
+export async function notifyCommittedApproval(approval, notify) {
+  try { await notify(); }
+  catch { throw new PostApprovalCallbackError(approval.connection_id); }
+  return { connection_id: approval.connection_id };
 }
 
 export async function connectCommand(args, { request, operator, option, json }) {
