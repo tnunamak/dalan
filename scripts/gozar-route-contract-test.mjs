@@ -9,7 +9,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import {
   FROZEN_CODES as DALAN_CODES, RouteError, approvalFor, buildQuery, canonicalHost, dalanRequirements, describeCandidate, describeDisclosure, ensureDurableRoute, explainRouteError,
-  normalizeRequestHost, pickCandidate, resolveGozar, startSessionRoute, targetFor,
+  closeExactRoute, normalizeRequestHost, pickCandidate, resolveGozar, startSessionRoute, targetFor,
 } from '../src/gozar-routes.mjs';
 import { FROZEN_CODES, FakeGozarError, createFakeGozar, requestChecks } from '../src/test-support/gozar-fake.mjs';
 import { parseTryArgs } from '../src/try.mjs';
@@ -79,6 +79,20 @@ test('`dalan try --route NAME` keeps NAME exactly, for a name no list knows; the
   assert.equal(parseTryArgs(['--public']).route, undefined, 'no route means no name is sent');
   assert.throws(() => parseTryArgs(['--public', '--client', 'chatgpt']), /unknown option|--client/);
   assert.throws(() => parseTryArgs(['--local', '--route', INVENTED]), /--local cannot be combined with --route/);
+});
+
+test('exact route already absent counts as removed, but other errors do not', async () => {
+  const gozar = createFakeGozar();
+  const handle = { id: 'fixture-route', owner: 'dalan', generation: 1 };
+  const ref = { home: '/fixture-home', handle };
+  gozar.closeRoute = async args => {
+    assert.equal(args.handle, handle);
+    throw Object.assign(new Error('synthetic absent'), { code: 'route_not_found' });
+  };
+  assert.deepEqual(await closeExactRoute(gozar, ref), { removed: true });
+  gozar.closeRoute = async () => { throw Object.assign(new Error('synthetic conflict'), { code: 'route_conflict' }); };
+  assert.match((await closeExactRoute(gozar, ref)).detail, /replaced|conflict/i);
+  assert.equal((await closeExactRoute(gozar, ref)).removed, false);
 });
 
 test('the name reaches Gozar unchanged and an unknown name is Gozar\'s route_not_found, not a local refusal', async () => {
