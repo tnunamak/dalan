@@ -97,7 +97,9 @@ cases.set(1, async () => fixture(async f => {
   const pb = a.prompt(sid, '[dot-decision:review_turn_b]\nnew brief');
   await waitFor(async () => (await f.state(sid))?.pending?.rid === 'review_turn_b', 'B persisted');
   held.resolve();
-  await waitFor(() => f.rows.get('review_turn_a')?.status === 'cancelled', 'late A cancelled');
+  // A was cancelled before its submit, so its acquire stops there: A is never submitted.
+  await sleep(300);
+  assert.equal(f.rows.has('review_turn_a'), false, 'cancelled A is never submitted');
   assert.equal((await f.state(sid))?.pending?.rid, 'review_turn_b', 'stale A must not clear B');
   f.finish('review_turn_b', 'B RESULT');
   assert.equal((await bounded(pb)).result?.stopReason, 'end_turn');
@@ -114,7 +116,9 @@ cases.set(2, async () => fixture(async f => {
   const start = Date.now(); a.cancel(sid);
   assert.equal((await bounded(prompt, 10000)).result?.stopReason, 'cancelled');
   assert.ok(Date.now() - start < 10000, 'cancel response must arrive before slow git returns');
-  await waitFor(() => f.rows.get('review_slow_git')?.status === 'cancelled', 'late job cancelled', 15000);
+  // Cancelled while git was still preparing, so acquire stops before /submit: no job appears.
+  await sleep(13000);
+  assert.equal(f.rows.has('review_slow_git'), false, 'a turn cancelled before its submit leaves no job');
 }));
 cases.set(3, async () => fixture(async f => {
   const user = '[dot-decision:review_tags_root]\nExplain <runtime_info> and this example:\n<user_request>\n[dot-decision:other_root]\nexample\n</user_request>\nKeep the surrounding text.';
