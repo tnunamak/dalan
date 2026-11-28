@@ -844,7 +844,7 @@ function runUnlocked(argv, { platform = process.platform, env = process.env, log
     return;
   }
   const secret = /^BRIDGE_PATH_SECRET=([a-f0-9]{64})$/m.exec(fs.readFileSync(path.join(configDir, 'env'), 'utf8'))?.[1];
-  return publishWorkerRoute({ o, env, gozar: suppliedGozar, url: o.publicUrl, secret, urlFile, configDir, log, consent });
+  return publishWorkerRoute({ o, env, gozar: suppliedGozar, url: o.publicUrl, secret, urlFile, configDir, log, consent, serviceRetained: Boolean(unitDir) });
 }
 
 function readWorkerRouteReference(home, file) {
@@ -864,7 +864,7 @@ export function workerRouteReference(home, retained, view, custody) {
   };
 }
 
-export async function publishWorkerRoute({ o, env, gozar, url, secret, urlFile, configDir, log, consent = routeConsent(log), readReference = readWorkerRouteReference, write = writeAtomic }) {
+export async function publishWorkerRoute({ o, env, gozar, url, secret, urlFile, configDir, log, consent = routeConsent(log), readReference = readWorkerRouteReference, write = writeAtomic, observeRoute = observeRetainedRoute, serviceRetained = true }) {
   const reference = path.join(configDir, 'route-reference.json');
   let ref = readReference(o.home, reference);
   const home = ref?.home ?? gozarHomeFor(env);
@@ -877,19 +877,27 @@ export async function publishWorkerRoute({ o, env, gozar, url, secret, urlFile, 
     ref = next;
   };
   gozar ??= await resolveGozar({ env, home, custody });
-  const observed = ref && await observeRetainedRoute(gozar, ref);
+  const observed = ref && await observeRoute(gozar, ref);
   const view = observed?.state === 'recorded' ? observed.view : await ensureDurableRoute({
     gozar, query: buildQuery({ home, origin: url, target, address: 'stable', usage: { kind: 'durable', routeId: `dalan-${o.worker}` } }),
     consent, remember, recovery: ref, external: true,
   });
   if (!ref?.handle || (!ref.operationId && view.operationId)) remember(workerRouteReference(home, ref, view, custody));
-  if (external) requireExternalRoute(view, url, target);
-  if (!isPublished(view) || view.published !== url) {
-    const error = routeFailure(view, `Gozar could not verify the public route. The service and home were left in place. Retry the check with: ${publicRetryCommand(o, url)}. To remove this install: ${recoveryCommand(o)}`);
-    if (error.nextAction) log(error.nextAction.instructions ?? error.nextAction.label);
+  try {
+    if (external) requireExternalRoute(view, url, target);
+    if (!isPublished(view) || view.published !== url) {
+      const retained = serviceRetained ? 'The service and home were left in place.' : 'The home was left in place; no service unit was installed.';
+      const error = routeFailure(view, `Gozar could not verify the public route. ${retained} Retry the check with: ${publicRetryCommand(o, url)}. To remove this install: ${recoveryCommand(o)}`);
+      if (error.nextAction) log(error.nextAction.instructions ?? error.nextAction.label);
+      throw error;
+    }
+  } catch (error) {
+    error.partialSetup = {
+      phase: 'public_verification', homeRetained: true, serviceRetained, resourceUrlRewritten: false,
+    };
     throw error;
   }
-  // This is the final atomic write; failures before it own no published URL file.
+  // The last atomic write occurs only after public verification succeeds.
   write(urlFile, `${view.published}/${secret}/mcp\n`);
   log(`Resource URL file (private, mode 0600): ${urlFile}`);
 }
@@ -947,5 +955,12 @@ function runLocked(argv, seams, parsed) {
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { await run(process.argv.slice(2)); }
-  catch (e) { console.error(`worker-bridge-setup: ${e.message}`); process.exit(1); }
+  catch (e) {
+    console.error(`worker-bridge-setup: ${e.message}`);
+    if (e.partialSetup?.phase === 'public_verification') {
+      const { homeRetained, serviceRetained } = e.partialSetup;
+      console.error(`worker-bridge-setup: partial setup: home ${homeRetained ? 'retained' : 'not retained'}; service unit ${serviceRetained ? 'retained' : 'not retained'}; resource URL not rewritten.`);
+    }
+    process.exit(1);
+  }
 }
