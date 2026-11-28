@@ -189,6 +189,7 @@
   "node scripts/deadman-publication-crash-test.mjs",
   "node scripts/deadman-readonly-status-test.mjs",
   "node scripts/deadman-transport-test.mjs",
+  "node --test scripts/dot-deadman-clock.test.mjs",
   "node scripts/host-health-test.mjs",
   "node scripts/heartbeat-e2e.mjs",
   "node scripts/question-lifecycle-test.mjs",

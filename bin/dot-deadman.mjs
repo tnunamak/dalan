@@ -36,7 +36,8 @@ async function heartbeat() {
   if (target.search || target.hash) throw new Error('heartbeat base URL cannot include a query or fragment');
   const health = JSON.parse(fs.readFileSync(file, 'utf8'));
   const observed = Date.parse(health.observed_at);
-  if (health.healthy !== true || !Number.isFinite(observed) || Date.now() - observed > 90_000 || observed > Date.now() + 30_000) {
+  const now = Date.now();
+  if (health.healthy !== true || !Number.isFinite(observed) || now - observed > 90_000 || observed > now + 30_000) {
     throw new Error('bridge health evidence is absent, unhealthy, or stale');
   }
   target.pathname = `${target.pathname.replace(/\/+$/, '')}/heartbeat`;
