@@ -21,6 +21,22 @@ const free={held:null};
   await assert.rejects(wait(), /DOT_DRAINED_INTERVAL_MS/);
 }
 
+// An invalid unreachable allowance must fail before the first side effect.
+{
+  const source = readFileSync(new URL('../bin/dot-worker.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('async function waitDrained()');
+  const boundary = source.indexOf('  fs.mkdirSync(drainedDir', start);
+  const makeWait = (env, body) => runInNewContext(source.slice(start, boundary) +
+    '\n' + body + '\n}\nwaitDrained', {
+      producerId: () => 'fixture-producer', option: () => null, process: { env },
+      fs: { mkdirSync: () => assert.fail('invalid unreachable limit reached side effects') },
+    });
+  for (const value of ['invalid', '0', '-5', '', '2147483648']) {
+    await assert.rejects(makeWait({ DOT_DRAINED_UNREACHABLE_MS: value }, 'fs.mkdirSync()')(), /DOT_DRAINED_UNREACHABLE_MS/);
+  }
+  assert.equal(await makeWait({}, 'return unreachableMs')(), 600000);
+}
+
 // Nothing in flight: refill now.
 assert.equal(decideDrained([],free,memo())?.status,'drained');
 // Above low water, then two finish: drained, with the finished list.
