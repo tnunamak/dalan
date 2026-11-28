@@ -335,7 +335,8 @@ async function waitDrained() {
     if(!Number.isInteger(v)||v<0||v>100) throw new Error(`${flag} must be an integer from 0 to 100`);
     limits[key]=v;
   }
-  const intervalMs=Number(process.env.DOT_DRAINED_INTERVAL_MS||15000);
+  const intervalMs=Number(process.env.DOT_DRAINED_INTERVAL_MS ?? 15000);
+  if(!Number.isSafeInteger(intervalMs)||intervalMs<1||intervalMs>2147483647) throw new Error('DOT_DRAINED_INTERVAL_MS must be a positive integer no greater than 2147483647');
   const unreachableMs=Number(process.env.DOT_DRAINED_UNREACHABLE_MS||600000);
   // One waiter per producer: a second one exits at once, so the hook and a forgetful agent cannot stack them.
   fs.mkdirSync(drainedDir,{recursive:true,mode:0o700});
