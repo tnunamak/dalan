@@ -174,7 +174,7 @@ try {
     assert.equal((await cli(['resume'])).code, 0);
     assert.equal((await cli(['break','--reason','synthetic usage break'])).code,0);
     const breakQueued=scoped(); const breakSubmit=await cli(['submit','--stdin','--json'],JSON.stringify(breakQueued)); assert.equal(breakSubmit.code,0,breakSubmit.stderr); assert.equal(hasRow(breakQueued.request_id),true);
-    // The PR-head-reviewer's ordinary live CLI shape includes background/review metadata and must queue during a break.
+    // A background review submission with scope pruning and an objective key must queue during a break.
     const reviewerOrder=scoped(); const reviewerSubmit=await cli(['submit','--stdin','--json','--background','--exclude-sensitive','--allow-scope-prune','--deliver','none','--objective-key','pr:test/repo#70','--revision',base,'--task-kind','review','--source','agent'],JSON.stringify(reviewerOrder)); assert.equal(reviewerSubmit.code,0,reviewerSubmit.stderr); assert.equal(hasRow(reviewerOrder.request_id),true);
     const beforeRefusal=receiptCount(); const breakRefused=scoped(); const breakRefusal=await refusal(breakRefused,['--refuse-defer']); assert.equal(breakRefusal.code,4,JSON.stringify(breakRefusal)); assert.equal(breakRefusal.err.verdict,'defer'); assert.equal(hasRow(breakRefused.request_id),false); assert.equal(receiptCount(),beforeRefusal,'usage-break refusal leaves no fresh receipt');
     assert.equal((await cli(['break','--clear'])).code,0);

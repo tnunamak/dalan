@@ -157,27 +157,18 @@ async function completeLocalConnection(input, worker, replace, request, headers)
     throw new Error('Could not verify the exact loopback pairing for this authorization request.');
   }
   const result = await owner('/connect/approve', 'POST', { worker, replace, code: pairing.code, confirm_redirect: pairing.redirect_uri });
-  try {
-    const expected = new URL(pairing.redirect_uri);
-    let step = interaction;
-    for (let hop = 0; hop < 5; hop++) {
-      const target = nextUrl(await get(step), step);
-      if (sameLocalCallback(target, expected, auth, issuer)) {
-        await sendLocalCallback(target, signal);
-        return { connection_id: result.connection_id };
-      }
-      if (!target || target.origin !== issuer.origin || !target.pathname.startsWith(issuer.pathname + '/auth/')) break;
-      step = target;
+  const expected = new URL(pairing.redirect_uri);
+  let step = interaction;
+  for (let hop = 0; hop < 5; hop++) {
+    const target = nextUrl(await get(step), step);
+    if (sameLocalCallback(target, expected, auth, issuer)) {
+      await sendLocalCallback(target, signal);
+      return { connection_id: result.connection_id };
     }
-    throw new Error('The bridge did not return the approved local callback. Check the connection before retrying.');
-  } catch (error) {
-    if (!result.pending) throw error;
-    const status = await owner('/connect/list', 'GET', null).catch(() => null);
-    const old = status?.connections?.find(connection => connection.connection_id === result.replaced);
-    if (old?.revoked_at === null)
-      throw new Error(`Callback failed; replacement approval is pending for connection ${result.connection_id}. The old connection still works until the first successful token issuance.`);
-    throw new Error(`Callback failed after approval for connection ${result.connection_id}. Check connection status before retrying.`);
+    if (!target || target.origin !== issuer.origin || !target.pathname.startsWith(issuer.pathname + '/auth/')) break;
+    step = target;
   }
+  throw new Error('The bridge did not return the approved local callback. Check the connection before retrying.');
 }
 
 export async function connectCommand(args, { request, operator, option, json }) {
@@ -255,7 +246,7 @@ export async function connectCommand(args, { request, operator, option, json }) 
       } else if (confirmRedirect !== null) throw new Error('--confirm-redirect is only valid for a native callback');
       const approval = await request('/connect/approve', 'POST', { code: positional[0], worker, replace: args.includes('--replace'), ...(confirmRedirect !== null ? { confirm_redirect: confirmRedirect } : {}) }, headers());
       const review = formatPending({ ...view, pending: [pairing] });
-      return json ? { result: approval, review } : { result: `${review}\n\nApproved ${q(pairing.code)} for worker ${q(pairing.worker)}.${approval.replaced ? ` Replacement pending for connection ${q(approval.connection_id)}: after its first token, the new client gets every queued and future job for worker ${q(pairing.worker)}, including briefs approved before the switch.` : ''}`, plain: true };
+      return json ? { result: approval, review } : { result: `${review}\n\nApproved ${q(pairing.code)} for worker ${q(pairing.worker)}.${approval.replaced ? ` Replaced connection ${q(approval.replaced)}: this client now gets every queued and future job for worker ${q(pairing.worker)}, including briefs approved before the switch.` : ''}`, plain: true };
     }
     case 'list': if (positional.length) throw new Error(USAGE); return { result: await request('/connect/list', 'GET', null, headers()) };
     case 'revoke': if (positional.length !== 1 || worker) throw new Error(USAGE); return { result: await request('/connect/revoke', 'POST', { worker: positional[0] }, headers()) };

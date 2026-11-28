@@ -32,7 +32,7 @@ The bridge reports observations and labels, not diagnoses. `dalan status --json`
 
 **After a restart.** A claim last touched before startup is not swept until startup plus that claim's own lease duration. A claim touched since startup gets no restart grace. The first maintenance tick after the applicable deadline performs the sweep. Native protocol claims require explicit `renew_claim`; ordinary activity does not extend their fixed deadline.
 
-**Queued work.** Preparation expiry and default-worker skip expiry continue during pause or a usage break. The PR-head reviewer cancels work for merged or closed PRs. See [Jobs the worker never takes](pull-workers.md#jobs-the-worker-never-takes) and [PR-head reviewer](pr-head-reviewer.md).
+**Queued work.** Preparation expiry and default-worker skip expiry continue during pause or a usage break. See [Jobs the worker never takes](pull-workers.md#jobs-the-worker-never-takes).
 
 **Alerts and wake-ups.** The liveness classes above are observations, not proof of a cause. Attention alerts require 30 continuous observed minutes before publication; a recovery notice follows only an alert that was sent. `denial_mentioned` is log-only. Queue re-wakes are normally limited to one event per subscription every 90 seconds, with older work backing off after two hours. Pause, full capacity, inactive subscriptions and unresolved delivery can suppress them. For exact eligibility, settings and terminal transport behavior, see [Lifecycle events and metrics](operations.md#lifecycle-events-and-metrics).
 

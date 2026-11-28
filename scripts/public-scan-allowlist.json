@@ -1,8 +1,6 @@
 [
   {"rule": "person", "path": "^LICENSE$", "token": "^Tim$", "reason": "Copyright holder line of the license."},
   {"rule": "person", "line": "tnunamak(?:/|\\\\/)dalan", "reason": "The public repository path (clone URL, release URL, package metadata)."},
-  {"rule": "internal-role", "path": "^src/legacy-names\\.mjs$", "token": "lead_thread_id", "reason": "Config key that releases before 0.4.0 wrote for the reviewer report thread. The reviewer still reads it."},
-  {"rule": "internal-role", "path": "^docs/dalan-upgrade\\.md$", "token": "lead_thread_id", "reason": "Upgrade note for the legacy reviewer config key."},
   {"rule": "job-code", "path": "^(src/store\\.mjs|scripts/worker-isolation-test\\.mjs|docs/operations\\.md)$", "token": "^s1v2-worker-facts-20261022$", "reason": "Schema marker row that existing databases hold. The upgrade check looks for it by this exact name."},
 
   {"rule": "worker-nickname", "token": "dot-bridge|dot-worker|dot-deadman|dot-heartbeat|dot-alert|dot-acp|dot-pr-reviewer|dot-launcher", "reason": "Legacy install paths, systemd units, executable aliases, environment-file names, OAuth scope names and stored format labels that existing installs depend on."},
