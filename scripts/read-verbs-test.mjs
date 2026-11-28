@@ -23,6 +23,25 @@ const page = (verb, ...args) => {
 };
 let store;
 try {
+  const markerHome = path.join(home, 'marker-only');
+  const trial = path.join(markerHome, '.local/share/dalan-trial');
+  fs.mkdirSync(trial, { recursive: true });
+  fs.writeFileSync(path.join(trial, '.dalan-trial'), '');
+  for (const verb of ['jobs', 'events']) {
+    const result = spawnSync(process.execPath, [cli, verb, '--json'], {
+      env: { HOME: markerHome, PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(markerHome, '.config'), DALAN_NO_FOLLOW: '1' },
+      encoding: 'utf8', timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '');
+    const refusal = JSON.parse(result.stderr);
+    assert.equal(refusal.schema_version, 1, result.stderr);
+    assert.equal(refusal.kind, 'local');
+    assert.match(refusal.error, /DALAN_HOME is not set/);
+    assert.ok(refusal.error.includes(trial), refusal.error);
+  }
+
   let now = Date.parse('2026-11-01T00:00:00Z');
   store = new Store(file, { now: () => now });
   for (let i = 0; i < 4; i++) {
