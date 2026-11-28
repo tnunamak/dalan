@@ -63,6 +63,11 @@ export class AsStore {
         redirect_uri TEXT NOT NULL, resource TEXT NOT NULL, scopes TEXT NOT NULL, created_at INTEGER NOT NULL,
         revoked_at INTEGER, revoked_reason TEXT);
       CREATE UNIQUE INDEX IF NOT EXISTS connections_one_active ON connections(worker) WHERE revoked_at IS NULL;
+      CREATE TABLE IF NOT EXISTS pending_replacements(
+        connection_id TEXT PRIMARY KEY, worker TEXT NOT NULL UNIQUE, grant_id TEXT NOT NULL UNIQUE,
+        replaces_grant_id TEXT NOT NULL, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL,
+        resource TEXT NOT NULL, scopes TEXT NOT NULL, created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL, code_id TEXT);
       CREATE TABLE IF NOT EXISTS pairings(
         code TEXT PRIMARY KEY, uid TEXT NOT NULL UNIQUE, worker TEXT NOT NULL, client_id TEXT NOT NULL, client_name TEXT,
         redirect_uri TEXT NOT NULL, resource TEXT NOT NULL, scopes TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -282,6 +287,9 @@ export class AsStore {
     this.db.prepare(`INSERT INTO oidc(model,id,payload,grant_id,uid,user_code,consumed,created_at,expires_at) VALUES(?,?,?,?,?,?,NULL,?,?)
       ON CONFLICT(model,id) DO UPDATE SET payload=excluded.payload,grant_id=excluded.grant_id,uid=excluded.uid,user_code=excluded.user_code,expires_at=excluded.expires_at`)
       .run(model, this.#id(model, id), this.#seal(JSON.stringify(payload), `oidc:${model}:${this.#id(model, id)}`), grantId, this.#lookup('uid', payload.uid), this.#lookup('user_code', payload.userCode), now, expires);
+    if (model === 'AuthorizationCode' && grantId && expires !== null)
+      this.db.prepare('UPDATE pending_replacements SET code_id=?,expires_at=? WHERE grant_id=?')
+        .run(this.#id(model, id), expires, grantId);
   }
   #row(row) {
     if (!row || (row.expires_at !== null && row.expires_at <= this.now())) return undefined;
@@ -308,6 +316,8 @@ export class AsStore {
     this.db.prepare("DELETE FROM oidc WHERE model='Grant' AND id=?").run(grantId);
     this.db.prepare('DELETE FROM refresh_heads WHERE grant_id=?').run(grantId);
     this.db.prepare('UPDATE connections SET revoked_at=?,revoked_reason=? WHERE grant_id=? AND revoked_at IS NULL').run(now, reason, grantId);
+    if (this.db.prepare('DELETE FROM pending_replacements WHERE grant_id=?').run(grantId).changes)
+      this.db.prepare("UPDATE pairings SET state='failed' WHERE grant_id=? AND state IN ('approved','done')").run(grantId);
   }
   // The one revocation path: tokens, codes and the Grant record go, and the connection row is marked. Idempotent.
   revokeGrant(grantId, reason) {
@@ -349,6 +359,7 @@ export class AsStore {
   }
   purge() {
     const now = this.now();
+    this.tx(() => this.#purgePendingReplacements(now));
     this.db.prepare('DELETE FROM refresh_receipts WHERE deadline<=?').run(now);
     this.db.prepare('DELETE FROM refresh_heads WHERE grant_id NOT IN (SELECT grant_id FROM connections WHERE revoked_at IS NULL)').run();
     const expired = this.db.prepare('DELETE FROM oidc WHERE expires_at IS NOT NULL AND expires_at<=?').run(now).changes;
@@ -450,30 +461,83 @@ export class AsStore {
     });
   }
   failPairing(code) { this.db.prepare("UPDATE pairings SET state='failed' WHERE code=? AND state='approving'").run(code); }
-  // One transaction: the pairing becomes approved, the connection row appears, and (with replace) the old connection ends.
+  // A replacement is approved but gains no worker authority until token issuance.
   commitApproval({ code, worker, grantId, snapshot, replace }) {
     return this.tx(() => {
       const now = this.now();
-      // Removal and approval serialize here, so a delayed approval cannot recreate a connection after client removal.
+      this.#purgePendingReplacements(now);
       if (!this.db.prepare("SELECT 1 FROM oidc WHERE model='Client' AND id=?").get(snapshot.client_id)) throw new Error('client was removed');
-      let replaced = null;
       const active = this.db.prepare('SELECT * FROM connections WHERE worker=? AND revoked_at IS NULL').get(worker);
-      if (active) {
-        if (!replace) throw new Error(`worker ${worker} already has an active connection. Approving with --replace ends it and gives the new client every queued and future job for worker ${worker}, including briefs approved before the switch. Approve only a code you started yourself`);
-        this.db.prepare("UPDATE connections SET revoked_at=?,revoked_reason='replaced' WHERE connection_id=?").run(now, active.connection_id);
-        replaced = this.#resource(active);
-      }
+      if (active && !replace) throw new Error(`worker ${worker} already has an active connection. With --replace, the new client receives every queued and future job for worker ${worker}, including briefs approved before the switch, once it receives its first token. Approve only a code you started yourself`);
+      const previous = this.db.prepare('SELECT grant_id FROM pending_replacements WHERE worker=?').get(worker);
+      if (previous) this.#revokeGrantRows(previous.grant_id, 'superseded_pending_replacement', now);
       const connectionId = randomUUID();
-      this.db.prepare('INSERT INTO connections(connection_id,worker,grant_id,client_id,redirect_uri,resource,scopes,created_at) VALUES(?,?,?,?,?,?,?,?)')
-        .run(connectionId, worker, grantId, snapshot.client_id, snapshot.redirect_uri, this.#seal(snapshot.resource, `connections:${connectionId}`), snapshot.scopes, now);
+      const resource = this.#seal(snapshot.resource, `connections:${connectionId}`);
+      if (active) {
+        this.db.prepare('INSERT INTO pending_replacements(connection_id,worker,grant_id,replaces_grant_id,client_id,redirect_uri,resource,scopes,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+          .run(connectionId, worker, grantId, active.grant_id, snapshot.client_id, snapshot.redirect_uri, resource, snapshot.scopes, now, snapshot.expires_at);
+      } else {
+        this.db.prepare('INSERT INTO connections(connection_id,worker,grant_id,client_id,redirect_uri,resource,scopes,created_at) VALUES(?,?,?,?,?,?,?,?)')
+          .run(connectionId, worker, grantId, snapshot.client_id, snapshot.redirect_uri, resource, snapshot.scopes, now);
+      }
       const done = this.db.prepare("UPDATE pairings SET state='approved',grant_id=?,connection_id=? WHERE code=? AND state='approving'").run(grantId, connectionId, code);
       if (done.changes !== 1) throw new Error('pairing is no longer being approved');
-      return { connection_id: connectionId, replaced };
+      return { connection_id: connectionId, replaced: this.#resource(active) ?? null, pending: Boolean(active) };
     });
+  }
+  #purgePendingReplacements(now) {
+    const expired = this.db.prepare(`SELECT grant_id FROM pending_replacements p WHERE p.expires_at<=? OR
+      (p.code_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM oidc o WHERE o.model='AuthorizationCode' AND o.id=p.code_id AND o.expires_at>?))`).all(now, now);
+    for (const row of expired) this.#revokeGrantRows(row.grant_id, 'replacement_expired', now);
+  }
+  approvedConnectionByGrant(grantId) {
+    const existing = this.connectionByGrant(grantId);
+    if (existing) return existing;
+    return this.#resource(this.db.prepare(`SELECT p.*,NULL AS revoked_at FROM pending_replacements p
+      JOIN connections c ON c.grant_id=p.replaces_grant_id AND c.revoked_at IS NULL WHERE p.grant_id=? AND p.expires_at>?`).get(grantId, this.now()));
+  }
+  activateIssuedConnection(grantId, clientId) {
+    const result = this.tx(() => {
+      const now = this.now();
+      this.#purgePendingReplacements(now);
+      const pending = this.db.prepare('SELECT * FROM pending_replacements WHERE grant_id=?').get(grantId);
+      if (!pending) return { active: !!this.db.prepare('SELECT 1 FROM connections WHERE grant_id=? AND client_id=? AND revoked_at IS NULL').get(grantId, clientId) };
+      const old = this.db.prepare('SELECT grant_id FROM connections WHERE worker=? AND revoked_at IS NULL').get(pending.worker);
+      if (pending.client_id !== clientId || old?.grant_id !== pending.replaces_grant_id) {
+        this.#revokeGrantRows(grantId, 'replacement_no_longer_current', now);
+        return { active: false };
+      }
+      this.#revokeGrantRows(old.grant_id, 'replaced', now);
+      this.db.prepare('INSERT INTO connections(connection_id,worker,grant_id,client_id,redirect_uri,resource,scopes,created_at) VALUES(?,?,?,?,?,?,?,?)')
+        .run(pending.connection_id, pending.worker, pending.grant_id, pending.client_id, pending.redirect_uri, pending.resource, pending.scopes, pending.created_at);
+      this.db.prepare('DELETE FROM pending_replacements WHERE grant_id=?').run(grantId);
+      return { active: true, replaced: old.grant_id };
+    });
+    if (result.replaced) this.onGrantRevoked(result.replaced, 'replaced');
+    return result.active;
   }
   // The browser completes an approved pairing exactly once.
   finishPairing(uid) {
     return this.db.prepare("UPDATE pairings SET state='done' WHERE uid=? AND state='approved'").run(uid).changes === 1;
+  }
+
+  pendingReplacements() {
+    return this.db.prepare('SELECT connection_id,worker,client_id,redirect_uri,created_at,expires_at FROM pending_replacements WHERE expires_at>? ORDER BY created_at,connection_id').all(this.now());
+  }
+  revokeWorker(worker, reason) {
+    const result = this.tx(() => {
+      const active = this.db.prepare('SELECT connection_id,grant_id FROM connections WHERE worker=? AND revoked_at IS NULL').get(worker);
+      const pending = this.db.prepare('SELECT connection_id,grant_id FROM pending_replacements WHERE worker=?').get(worker);
+      if (!active && !pending) return null;
+      const grants = [...new Set([active?.grant_id, pending?.grant_id].filter(Boolean))];
+      const now = this.now();
+      for (const grantId of grants) this.#revokeGrantRows(grantId, reason, now);
+      return { connection_id: active?.connection_id ?? pending.connection_id, pending_revoked: pending?.connection_id ?? null, grants };
+    });
+    if (!result) return null;
+    const { grants, ...receipt } = result;
+    for (const grantId of grants) this.onGrantRevoked(grantId, reason);
+    return receipt;
   }
 
   // ---- connections -----------------------------------------------------------------------------------------------
