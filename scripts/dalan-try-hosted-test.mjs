@@ -92,7 +92,7 @@ async function withTrialPort(home, start) {
 }
 
 // ---- a hosted run ------------------------------------------------------------------------------------------------------
-async function hostedRun(name, { argv = [], gozar, gozarFor, clock, fetchImpl, route: savedRoute, trialMs, noHome, consentAnswer = 'y\n', watchPublicIdentity: watchIdentity } = {}) {
+async function hostedRun(name, { argv = [], gozar, gozarFor, clock, fetchImpl, route: savedRoute, trialMs, noHome, consentAnswer = 'y\n', watchPublicIdentity: watchIdentity, revokeTrialWorker } = {}) {
   const home = path.join(tmp, name);
   const route = fakeRoute();
   if (savedRoute) writeRouteSetting(savedRoute, { XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`) });
@@ -104,7 +104,7 @@ async function hostedRun(name, { argv = [], gozar, gozarFor, clock, fetchImpl, r
   run.finished = withTrialPort(home, port => runTry({
     argv: ['--public', ...(noHome ? [] : ['--home', home]), '--port', String(port), ...argv], env: { PATH: process.env.PATH, XDG_CONFIG_HOME: path.join(tmp, `cfg-${name}`), XDG_STATE_HOME: path.join(tmp, `state-${name}`) },
     out, input: run.input, signal: run.controller.signal, errorContext: run.errorContext, clock,
-    hosted: { interactive: true, gozar: gozar ?? gozarFor?.(route.gozar) ?? route.gozar, serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, ...(watchIdentity ? { watchPublicIdentity: watchIdentity } : {}), ...(trialMs ? { trialMs } : {}) },
+    hosted: { interactive: true, gozar: gozar ?? gozarFor?.(route.gozar) ?? route.gozar, serverEnv: { DALAN_TEST_OAUTH: '1' }, fetchImpl, revokeTrialWorker, ...(watchIdentity ? { watchPublicIdentity: watchIdentity } : {}), ...(trialMs ? { trialMs } : {}) },
   })).then(() => ({}), error => ({ error })).finally(() => route.closeAll());
   run.gozar = route.gozar;
   run.until = async (pattern, ms = 60_000) => {
@@ -720,6 +720,27 @@ test('denial or input EOF never exposes a route', async () => {
     assert.equal(run.gozar.fake.state.calls.includes('expose'), false, `${name}: no route is exposed`);
     assert.equal(run.gozar.fake.state.effects.length, 0, `${name}: no route cleanup is needed`);
   }
+});
+
+test('failed revocation reports cleanup debt after local server and fixture route close', async () => {
+  let called = 0;
+  const run = await hostedRun('failed-revocation', { revokeTrialWorker: async (args, options) => {
+    assert.deepEqual(args.slice(0, 2), ['connect', 'revoke']);
+    assert.equal(options.abortable, false);
+    called++;
+    throw new Error('private synthetic transport detail');
+  } });
+  try {
+    await run.until(/Waiting for sign-in/);
+    const done = await run.close();
+    assert.equal(called, 1);
+    assert.match(done.error?.message ?? '', /Credential revocation is unconfirmed/);
+    assert.match(run.out, /Credential revocation is unconfirmed for worker/);
+    assert.doesNotMatch(run.out, /private synthetic transport detail|Public route removed\. Bridge stopped\./);
+    assert.equal(run.route.stopped, 1);
+    assert.equal(fs.existsSync(path.join(run.home, 'resource-url')), false);
+    for (const port of [run.route.gatePort, run.errorContext.bindPort]) await assert.rejects(realFetch(`http://127.0.0.1:${port}`));
+  } finally { await run.close(); }
 });
 
 test('route loss during approval revokes connections and closes bridge and gate', async () => {

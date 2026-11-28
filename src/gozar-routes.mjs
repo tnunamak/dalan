@@ -264,6 +264,7 @@ async function dispatchRouteOperation(query, recovery, remember, dispatch) {
 const sameRouteHandle = (left, right) => left?.kind === right.kind && left?.id === right.id && left?.generation === right.generation;
 
 export async function closeExactRoute(gozar, { home, operationId, handle }) {
+  const recordedHandle = handle;
   try {
     if (!handle) {
       const observed = await observeRetainedRoute(gozar, { home, operationId });
@@ -281,6 +282,7 @@ export async function closeExactRoute(gozar, { home, operationId, handle }) {
     const explanation = explainRouteError({ code: 'cleanup_debt', message: closed.cleanup.message, nextAction: remedy });
     return { removed: false, detail: [explanation.line, explanation.fix].filter(Boolean).join(' ') };
   } catch (error) {
+    if (recordedHandle && error?.code === 'route_not_found') return { removed: true };
     return { removed: false, detail: explainRouteError(error).line };
   }
 }
