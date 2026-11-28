@@ -84,6 +84,34 @@ try {
   }
   pass('matching retry retains its duration; a shorter rival cannot change or take the live grant');
 
+  // An ordinary holder mix-up is a typed diagnostic, not a new authority.
+  {
+    const s=open('mismatch');
+    try {
+      const target='req_new_work', previous='req_finished_work';
+      for(const id of [target,previous]) s.submit(payload(id),{mode:'none'},null,'owner');
+      const old=s.claim(previous,'fixture-holder','subject_a',6);
+      s.finish(previous,old.claim_id,'completed','done','done','subject_a');
+      const live=s.claim(target,'fixture-holder','subject_a',6);
+      const claimBefore=row(s,target);
+      const journal=()=>s.db.prepare('SELECT COUNT(*) AS n FROM lifecycle_events WHERE request_id=?').get(target).n;
+      const beforeEvents=journal();
+      now+=MIN;
+      const mismatch=e=>{
+        const body=JSON.parse(e.message);
+        return body.error==='claim_mismatch'&&body.request_id===target&&body.message.includes('call get')&&
+          !e.message.includes(live.claim_id)&&!e.message.includes(old.claim_id);
+      };
+      assert.throws(()=>s.progress(target,old.claim_id,'fixture note','subject_a'),mismatch);
+      assert.throws(()=>s.finish(target,old.claim_id,'completed','done','done','subject_a'),mismatch);
+      assert.throws(()=>s.progress(target,'claim_fixture_unknown','fixture note','subject_a'),/^Error: invalid claim$/);
+      assert.equal(s.refuseClaim(target,old.claim_id,'subject_a','fixture-other').message,'invalid claim');
+      assert.throws(()=>s.progress(target,old.claim_id,'fixture note','subject_b'),/^Error: invalid claim$/);
+      assert.deepEqual(row(s,target),claimBefore,'no lease, activity or holder change');
+      assert.equal(journal(),beforeEvents,'a refusal never changes the journal');
+    } finally {s.db.close();}
+  }
+
   // ---- resume: same subject, new claim_id, next epoch; the old claim_id is fenced for progress/finish/touch
   {
     const s=open('resume');
