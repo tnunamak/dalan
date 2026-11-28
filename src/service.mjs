@@ -346,7 +346,7 @@ function writeUnits(dir, files) {
 function runCommand(command, args, { env, spawn = spawnSync, timeout = 30000 } = {}) {
   const result = spawn(command, args, { encoding: 'utf8', env, timeout, maxBuffer: 1024 * 1024 });
   if (result.error) throw new Error(`${command} ${args.join(' ')} could not run: ${result.error.message}`);
-  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed (exit ${result.status ?? result.signal}): ${(result.stderr || result.stdout || '').trim().slice(0, 1000)}`);
+  if (result.status !== 0 || result.signal) throw new Error(`${command} ${args.join(' ')} failed (exit ${result.status ?? result.signal}): ${(result.stderr || result.stdout || '').trim().slice(0, 1000)}`);
   return result.stdout ?? '';
 }
 
@@ -621,10 +621,15 @@ async function uninstallServiceLocked({ home, confirmRouteStop }, seams) {
   if (!unitDir || !path.isAbsolute(unitDir)) fail('the service receipt names no unit directory');
   // Verify both jobs before removing either plist or disabling automatic updates.
   if (mac) for (const label of Object.values(launchdLabels(receipt.unit))) isLoaded(label, seams.launchd);
+  if (receipt.route_handle && (!confirmRouteStop || !await confirmRouteStop(receipt.route_handle))) {
+    fail('Public route stop requires explicit approval for the saved handle.');
+  }
+  const units = mac ? [] : [`${receipt.unit}.service`, `${receipt.unit}-target.socket`, `${receipt.unit}-target.service`, `${receipt.unit}-update.service`, `${receipt.unit}-update.timer`].filter(unit => fs.existsSync(path.join(unitDir, unit)));
+  const spawn = seams.spawn ?? spawnSync;
+  if (units.length) runCommand('systemctl', ['--user', 'disable', '--now', ...units], { env, spawn });
   if (receipt.route_handle) {
     const home = receipt.gozar_home ?? gozarHomeFor(env);
     const gozar = seams.gozar ?? await resolveGozar({ env, home, custody: receipt.route_custody });
-    if (!confirmRouteStop || !await confirmRouteStop(receipt.route_handle)) fail('Public route stop requires explicit approval for the saved handle.');
     const result = await closeExactRoute(gozar, { home, handle: receipt.route_handle });
     if (!result.removed) fail(`Public route removal is unconfirmed. Retained the service receipt. ${result.detail}`);
     const file = path.join(defaultPath(receipt.home, '.config/dot-bridge'), 'service-install.json');
@@ -634,14 +639,19 @@ async function uninstallServiceLocked({ home, confirmRouteStop }, seams) {
     if (pending?.handle && JSON.stringify(pending.handle) === JSON.stringify(receipt.route_handle)) fs.rmSync(pendingPath, { force: true });
     removed.push('public route released');
   }
-  if (receipt.auto_update) { try { await setAutoUpdate({ home, enabled: false }, { ...seams, env, platform }); removed.push('automatic updates off'); } catch (error) { if (mac) throw error; removed.push(`update job not removed: ${error.message}`); } }
-  if (mac) removed.push(...removeAgents({ unit: receipt.unit, unit_dir: unitDir }, seams.launchd));
-  else {
-    const spawn = seams.spawn ?? spawnSync, name = receipt.unit;
-    const units = [`${name}.service`, `${name}-target.socket`, `${name}-target.service`, `${name}-update.service`, `${name}-update.timer`].filter(unit => fs.existsSync(path.join(unitDir, unit)));
-    if (units.length) { spawn('systemctl', ['--user', 'disable', '--now', ...units], { encoding: 'utf8', env }); }
-    for (const unit of units) { fs.rmSync(path.join(unitDir, unit)); removed.push(`removed ${path.join(unitDir, unit)}`); }
-    spawn('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8', env });
+  if (mac) {
+    if (receipt.auto_update) {
+      await setAutoUpdate({ home, enabled: false }, { ...seams, env, platform });
+      removed.push('automatic updates off');
+    }
+    removed.push(...removeAgents({ unit: receipt.unit, unit_dir: unitDir }, seams.launchd));
+  } else {
+    for (const unit of units) {
+      fs.rmSync(path.join(unitDir, unit));
+      removed.push(`removed ${path.join(unitDir, unit)}`);
+    }
+    try { runCommand('systemctl', ['--user', 'daemon-reload'], { env, spawn }); }
+    catch (error) { removed.push(`systemd daemon-reload failed after removal: ${error.message}`); }
   }
   forgetDefaultHome(home, env);
   // The home holds secrets, grants and data, so it is moved aside, never deleted. A new install then starts from a fresh home at the same path.

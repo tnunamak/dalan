@@ -211,6 +211,25 @@ try {
   assert.equal(readDefaultHome(linux.env), lin.home);
   const again = await installService(options(linux), linux.seams); assert.equal(again.already_installed, true); assert.equal(again.origin, lin.origin);
   const linuxReceipt = JSON.parse(fs.readFileSync(path.join(defaultPath(lin.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
+  const unitDir = path.join(linux.userHome, '.config/systemd/user');
+  const contentsBeforeStop = () => Object.fromEntries(fs.readdirSync(unitDir).sort().map(name => [name, fs.readFileSync(path.join(unitDir, name), 'utf8')]));
+  const unitsBeforeStop = contentsBeforeStop();
+  const receiptFile = path.join(defaultPath(lin.home, '.config/dot-bridge'), 'service-install.json');
+  const receiptBeforeStop = fs.readFileSync(receiptFile, 'utf8');
+  const failedStopCalls = [];
+  await assert.rejects(uninstallService({ home: lin.home, confirmRouteStop: async () => true }, {
+    ...linux.seams,
+    spawn(command, args, spawnOptions) {
+      failedStopCalls.push(args);
+      assert.equal(command, 'systemctl');
+      assert.ok(spawnOptions.timeout > 0);
+      return { status: null, signal: 'SIGTERM', error: new Error('fixture stop timeout') };
+    },
+  }), /fixture stop timeout/);
+  assert.equal(failedStopCalls.length, 1, 'unconfirmed stop never reaches reload');
+  assert.deepEqual(contentsBeforeStop(), unitsBeforeStop);
+  assert.equal(fs.readFileSync(receiptFile, 'utf8'), receiptBeforeStop);
+  assert.equal(readDefaultHome(linux.env), lin.home);
   const removedLinux = await uninstallService({ home: lin.home, confirmRouteStop: async () => true }, linux.seams);
   assert.ok(removedLinux.removed.some(line => line.endsWith('.service')));
   assert.deepEqual(fs.readdirSync(path.join(linux.userHome, '.config/systemd/user')), [], 'no unit file is left');
