@@ -119,6 +119,28 @@ try {
     s.setPause('maintenance');d=dispatch(s);assert(d.state==='paused','paused '+JSON.stringify(d));
     log('status.dispatch reports dispatch_gap, supply_gap, full and paused; explain carries dispatch=');
   }
+  // Both dispatch summaries name the same oldest eligible row, with a stable tie.
+  {
+    const s=fresh('status-oldest-id');
+    submit(s,'earlier-skipped','earlier-cancelled');
+    s.db.prepare("UPDATE assignments SET skipped_at=? WHERE request_id='earlier-skipped'").run(s.stamp());
+    s.cancelIfQueued('earlier-cancelled');
+    now+=5*MIN;
+    const sameTime=s.stamp();
+    submit(s,'ready-z','ready-a');
+    s.db.prepare("UPDATE assignments SET created_at=? WHERE request_id IN ('ready-a','ready-z')").run(sameTime);
+    now+=MIN;
+    let status=dispatch(s);
+    for (const state of [status,status.by_worker.dot]) {
+      assert(state.oldest_unclaimed_request_id==='ready-a','oldest tie follows request id');
+      assert(state.oldest_unclaimed_age_ms===now-Date.parse(sameTime),'age and request id refer to the same row');
+      assert(state.queued_live===2,'only two live candidates');
+    }
+    s.cancelIfQueued('ready-a');s.cancelIfQueued('ready-z');
+    status=dispatch(s);
+    assert(status.oldest_unclaimed_request_id===null,'empty legacy queue has no request id');
+    assert(status.by_worker.dot.oldest_unclaimed_request_id===null,'empty worker queue has no request id');
+  }
   // Skipped rows remain in the queue but do not signal a dispatch failure.
   {
     const s=fresh('status-skipped');
@@ -170,7 +192,7 @@ try {
     s.db.prepare("UPDATE assignments SET skipped_at=? WHERE request_id='skip-second'").run(s.stamp());
     now+=2*MIN;
     const {by_worker: workersDispatch,...legacy}=dispatch(s);
-    assert(JSON.stringify(legacy)===JSON.stringify({scope:'dot',state:'full',free_lanes:0,queued_live:0,oldest_unclaimed_age_ms:null}),
+    assert(JSON.stringify(legacy)===JSON.stringify({scope:'dot',state:'full',free_lanes:0,queued_live:0,oldest_unclaimed_age_ms:null,oldest_unclaimed_request_id:null}),
       'unchanged legacy dispatch '+JSON.stringify(legacy));
     assert(workersDispatch?.dot.state==='full'&&workersDispatch.dot.free_lanes===0,'dot must report full');
     const second=workersDispatch?.second;

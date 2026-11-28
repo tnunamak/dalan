@@ -320,6 +320,21 @@ test('installed bundled resolution: the package inside Dalan\'s own tree wins; a
   await assert.rejects(() => resolveGozar({ importer: async () => { throw Object.assign(new Error('nope'), { code: 'ERR_MODULE_NOT_FOUND' }); } }), error => error.code === 'runtime_missing');
 });
 
+test('missing hand-back contract is refused before creating Gozar', async () => {
+  let createCalls = 0;
+  const module = Object.fromEntries([
+    'catalogRoutes', 'ensureRoute', 'adoptRoute', 'expose', 'routeStatus', 'closeRoute',
+    'watchRoutes', 'inspectLegacyRoute', 'runSetupAction', 'readSetupOperation',
+    'cancelSetupOperation', 'listRoutes', 'releaseRoute',
+  ].map(name => [name, () => {}]));
+  module.createGozar = () => { createCalls += 1; return {}; };
+  await assert.rejects(
+    resolveGozar({ env: { HOME: tmp }, importer: async () => module }),
+    error => error.code === 'runtime_missing' && /confirmHandBack/.test(error.message),
+  );
+  assert.equal(createCalls, 0);
+});
+
 // ---- errors and display -------------------------------------------------------------------------------------------------------------------
 test('every frozen code has an explanation; Gozar\'s next action is shown; no provider text is added', () => {
   for (const code of FROZEN_CODES) {

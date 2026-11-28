@@ -435,5 +435,7 @@
   "node scripts/answer-journal-retention-test.mjs",
   "node scripts/characterize-native-questions-e2e.mjs",
   "node scripts/characterize-native-submit-e2e.mjs",
-  "node scripts/characterize-native-authority-e2e.mjs"
+  "node scripts/characterize-native-authority-e2e.mjs",
+  "node --test src/kx_bh_*.test.mjs",
+  "node scripts/acp-crash-points-e2e.mjs"
 ]

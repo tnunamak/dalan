@@ -98,6 +98,8 @@ export async function describeTryError(error, context) {
   return formatTryError(error, context, await alternateTrial(error?.alternatePort).catch(() => null));
 }
 
+const PUBLIC_CALLBACK_ERROR = "--callback is for a local client; a public trial uses the MCP client's own callback";
+
 export function parseTryArgs(argv) {
   const out = { home: null, port: null, callbacks: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -120,7 +122,7 @@ export function parseTryArgs(argv) {
   // Conflicts are refused here, before any file, process or route exists. --client and --route only make sense for a public trial.
   if (out.mode === 'local' && out.route !== undefined) throw new Error('--local cannot be combined with --route; that option is for a public trial');
   if (out.route !== undefined && !out.mode) out.mode = 'public';
-  if (out.mode === 'public' && out.callbacks.length) throw new Error('--callback is for a local client; a public trial uses the MCP client\'s own callback');
+  if (out.mode === 'public' && out.callbacks.length) throw new Error(PUBLIC_CALLBACK_ERROR);
   return out;
 }
 
@@ -283,11 +285,12 @@ export async function runTry({ argv = [], env = process.env, out = process.stdou
   const interactive = hosted.interactive ?? Boolean(input.isTTY && out.isTTY);
   if (options.mode === 'public' || (!options.mode && interactive)) {
     const hostedMode = await import('./try-hosted.mjs');
-    if (!options.mode) Object.assign(options, await hostedMode.chooseMode({ input, out, signal }));
+    if (!options.mode) Object.assign(options, await (hosted.chooseMode ?? hostedMode.chooseMode)({ input, out, signal }));
     if (options.mode === 'public') {
+      if (options.callbacks.length) throw new Error(PUBLIC_CALLBACK_ERROR);
       const cli = errorContext.cli ?? `node ${errorContext.shellCli ?? shellQuote(path.join(repo, 'bin/dalan.mjs'))}`;
       if (!interactive) throw new Error(`Hosted setup needs an interactive terminal for the URL and connection approval. Run this in an interactive terminal:\n${commandLine(`${cli} try --public${options.route !== undefined ? ` --route ${shellQuote(options.route)}` : ''}`)}`);
-      return hostedMode.runHosted({ options, env, out, input, signal, errorContext, clock, deps: hosted, helpers: tryInternals });
+      return (hosted.runHosted ?? hostedMode.runHosted)({ options, env, out, input, signal, errorContext, clock, deps: hosted, helpers: tryInternals });
     }
   }
   const realHome = fs.realpathSync(os.homedir());

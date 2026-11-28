@@ -115,7 +115,39 @@ function request(route, method = 'GET', payload, headers={}, timeoutMs=30000) {
   });
 }
 
-function download(id,output,ownerHeaders) { return new Promise((resolve,reject)=>{ const socketPathError=adminSocketPathError(socket); if(socketPathError) return reject(socketPathError); if(!artifactIdPattern.test(id)) return reject(new Error('invalid artifact ID')); const req=http.request({socketPath:socket,path:'/artifact?id='+encodeURIComponent(id),headers:ownerHeaders??{'x-owner-capability':receiptForArtifact(id).token}},res=>{if(res.statusCode!==200){let body='';res.on('data',b=>body+=b);res.on('end',()=>reject(new Error(JSON.parse(body).error)));return;}const bytes=[];res.on('data',b=>bytes.push(b));res.on('end',()=>{const data=Buffer.concat(bytes),digest=createHash('sha256').update(data).digest('hex');if(digest!==res.headers['x-artifact-sha256']) return reject(new Error('artifact digest mismatch'));fs.writeFileSync(output,data,{flag:'wx',mode:0o600});resolve({artifact_id:id,output,bytes:data.length,sha256:digest});});});req.on('error',reject);req.end();}); }
+function download(id,output,ownerHeaders) {
+  return new Promise((resolve,reject)=>{
+    const socketPathError=adminSocketPathError(socket);
+    if(socketPathError) return reject(socketPathError);
+    if(!artifactIdPattern.test(id)) return reject(new Error('invalid artifact ID'));
+    const req=http.request({socketPath:socket,path:'/artifact?id='+encodeURIComponent(id),headers:ownerHeaders??{'x-owner-capability':receiptForArtifact(id).token}},res=>{
+      if(res.statusCode!==200){
+        let body='', tooLarge=false;
+        res.on('data',chunk=>{
+          if(tooLarge) return;
+          body+=chunk;
+          if(body.length>8192){ body=''; tooLarge=true; }
+        });
+        res.on('end',()=>{
+          let error;
+          try { error=JSON.parse(body)?.error; } catch { /* status fallback */ }
+          reject(new Error(typeof error==='string'&&error.trim() ? error : `HTTP ${res.statusCode}`));
+        });
+        return;
+      }
+      const bytes=[];
+      res.on('data',b=>bytes.push(b));
+      res.on('end',()=>{
+        const data=Buffer.concat(bytes),digest=createHash('sha256').update(data).digest('hex');
+        if(digest!==res.headers['x-artifact-sha256']) return reject(new Error('artifact digest mismatch'));
+        fs.writeFileSync(output,data,{flag:'wx',mode:0o600});
+        resolve({artifact_id:id,output,bytes:data.length,sha256:digest});
+      });
+    });
+    req.on('error',reject);
+    req.end();
+  });
+}
 const artifactIdPattern=/^art_[-\w]{8,128}$/;
 function receiptForArtifact(id) { if(!artifactIdPattern.test(id)) throw new Error('invalid artifact ID');let requestId;try{requestId=fs.readFileSync(path.join(root,'artifact-index',id),'utf8').trim();}catch{throw new Error('artifact owner unknown; run dalan get REQUEST_ID or wait REQUEST_ID first');}return receipt(requestId); }
 function canonical(value) { if(Array.isArray(value)) return value.map(canonical); if(value&&typeof value==='object') return Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonical(value[k])])); return value; }
@@ -303,8 +335,10 @@ async function waitDrained() {
     if(!Number.isInteger(v)||v<0||v>100) throw new Error(`${flag} must be an integer from 0 to 100`);
     limits[key]=v;
   }
-  const intervalMs=Number(process.env.DOT_DRAINED_INTERVAL_MS||15000);
-  const unreachableMs=Number(process.env.DOT_DRAINED_UNREACHABLE_MS||600000);
+  const intervalMs=Number(process.env.DOT_DRAINED_INTERVAL_MS ?? 15000);
+  if(!Number.isSafeInteger(intervalMs)||intervalMs<1||intervalMs>2147483647) throw new Error('DOT_DRAINED_INTERVAL_MS must be a positive integer no greater than 2147483647');
+  const unreachableMs=Number(process.env.DOT_DRAINED_UNREACHABLE_MS ?? 600000);
+  if(!Number.isSafeInteger(unreachableMs)||unreachableMs<1||unreachableMs>2147483647) throw new Error('DOT_DRAINED_UNREACHABLE_MS must be a positive integer no greater than 2147483647');
   // One waiter per producer: a second one exits at once, so the hook and a forgetful agent cannot stack them.
   fs.mkdirSync(drainedDir,{recursive:true,mode:0o700});
   const file=drainedPidfile(producer), mine={pid:process.pid,token:randomBytes(8).toString('hex'),producer,started_at:new Date().toISOString()};
