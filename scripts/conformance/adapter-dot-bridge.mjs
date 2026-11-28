@@ -193,7 +193,12 @@ export class DotBridgeAdapter {
     const serviceCap=serviceRole?protocolServiceCapability(fs.readFileSync(path.join(this.home,'.config/dot-bridge/operator.key'),'utf8').trim(),serviceRole):null;
     const headers = { 'content-type': 'application/json', ...(capability ? { 'x-owner-capability': capability } : {}),...(serviceCap?{'x-protocol-service-capability':serviceCap}:{}) };
     const r = await request({ socketPath: this.socket, method, pathName, headers, body: body === undefined ? undefined : body, signal });
-    let j; try { j = JSON.parse(r.text); } catch { j = { raw: r.text }; }
+    let j;
+    try { j = JSON.parse(r.text); }
+    catch {
+      const error = `invalid admin JSON (HTTP ${r.status})`;
+      return this.note({ kind: 'admin', method, path: pathName, status: r.status, error }, { error });
+    }
     if (r.status >= 400) return this.note({ kind: 'admin', method, path: pathName, status: r.status, error: j.error }, { error: j.error ?? r.text });
     return this.note({ kind: 'admin', method, path: pathName, status: r.status, result: trim(j) }, { value: j });
   }

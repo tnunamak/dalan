@@ -2,7 +2,7 @@
 
 A service made by `dalan service install` updates itself and through `dalan service update`; see [service updates](service-setup.md#service-updates). This guide covers services and checkouts that earlier releases set up, and the ordered steps for a manual upgrade.
 
-`dalan` is the main command. The package also installs `dalan-worker`, `dalan-acp-agent`, `dalan-alert`, `dalan-deadman`, `dalan-heartbeat` and `dalan-pr-reviewer`. It does not install the commands of the `dot-bridge` package; change scripts, units and timers that run `dot-worker`, `dot-deadman`, `dot-heartbeat`, `dot-alert`, `dot-acp-agent` or `dot-pr-reviewer` to the `dalan` or `dalan-*` command. `DALAN_X` takes precedence over `DOT_BRIDGE_X`, including an explicitly empty value except `AUTH_MODE`; an empty `DALAN_AUTH_MODE` falls back to a non-empty legacy auth mode, or stays unset if neither supplies one; an actual legacy fallback emits at most one warning from the main thread in each process. The `DOT_ACP_*` and `DOT_DRAINED_*` adapter settings keep their existing names.
+`dalan` is the main command. The package also installs `dalan-worker`, `dalan-acp-agent`, `dalan-alert`, `dalan-deadman` and `dalan-heartbeat`. `dalan-pr-reviewer` stays for one release as a stub that exits 2 and says the reviewer was retired. It does not install the commands of the `dot-bridge` package; change scripts, units and timers that run `dot-worker`, `dot-deadman`, `dot-heartbeat`, `dot-alert`, `dot-acp-agent` or `dot-pr-reviewer` to the `dalan` or `dalan-*` command. `DALAN_X` takes precedence over `DOT_BRIDGE_X`, including an explicitly empty value except `AUTH_MODE`; an empty `DALAN_AUTH_MODE` falls back to a non-empty legacy auth mode, or stays unset if neither supplies one; an actual legacy fallback emits at most one warning from the main thread in each process. The `DOT_ACP_*` and `DOT_DRAINED_*` adapter settings keep their existing names.
 
 ## Pre-upgrade checklist
 
@@ -249,6 +249,3 @@ The producer source for the fix loop is now `fix-loop`. The name used before thi
 
 Deploy the CLI and the server together. A request that the new CLI sends or stores with `fix-loop` as its source, objective key or task kind is rejected by a server that has been rolled back to an earlier release, so a rollback of the server needs a rollback of the CLI, and the reverse. The database itself needs no change in either direction.
 
-## PR-head reviewer report thread key
-
-The `report_thread_id` key of the PR-head reviewer config was named `lead_thread_id` before this release. The old key is still read; when both are set, `report_thread_id` wins. The `delivery_via` value in the reviewer log for this fallback is now `report-thread` (it was `lead`).

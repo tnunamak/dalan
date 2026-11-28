@@ -6,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { acquireHomeLock } from '../src/try-hosted.mjs';
-import { acquireLock } from '../src/pr-head-reviewer.mjs';
 import { takeSlot } from '../src/drained-slot.mjs';
 import { liveWaiter } from '../src/drained-owner.mjs';
 import { waitForChildExit } from '../src/child-exit.mjs';
@@ -21,15 +20,6 @@ test('a failed process probe keeps a hosted trial lock', () => {
   process.kill = () => { throw denied; };
   assert.throws(() => acquireHomeLock(hosted), /another trial is using this home/);
   assert.equal(fs.readFileSync(hostedLock, 'utf8'), '123456789', 'unknown hosted-lock owner keeps its lock');
-  process.kill = originalKill;
-});
-
-test('a failed process probe keeps a reviewer lock', () => {
-  const reviewer = path.join(root, 'reviewer'); fs.mkdirSync(reviewer);
-  const reviewerLock = path.join(reviewer, 'run.lock'); fs.writeFileSync(reviewerLock, '123456789');
-  process.kill = () => { throw denied; };
-  assert.equal(acquireLock(reviewer), null, 'unknown reviewer-lock owner blocks a second run');
-  assert.equal(fs.readFileSync(reviewerLock, 'utf8'), '123456789', 'unknown reviewer-lock owner keeps its lock');
   process.kill = originalKill;
 });
 

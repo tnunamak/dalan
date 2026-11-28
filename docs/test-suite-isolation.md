@@ -189,7 +189,6 @@ This is a conservative source inventory of every explicit `homedir()` and `userI
 | `src/integrator.mjs` | 19 |
 | `src/limits.mjs` | 8, 16, 25 |
 | `src/paths.mjs` | 52, 56 |
-| `src/pr-head-reviewer.mjs` | 15 |
 | `src/prepared-node-modules.mjs` | 10 |
 | `src/projects.mjs` | 15, 90 |
 | `src/route-setting.mjs` | 14 |

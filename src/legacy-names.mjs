@@ -4,5 +4,3 @@
 export const legacyFixLoopName = 'dot-fix';
 // Directory of the fix ledger that `dalan backfill-objectives` reads when no path is given.
 export const legacyFixLedgerPath = `.local/share/${legacyFixLoopName}/ledger.jsonl`;
-// Earlier name of the `report_thread_id` key in the PR-head reviewer config. Still read; `report_thread_id` wins when both are set.
-export const legacyReportThreadKey = 'lead_thread_id';
