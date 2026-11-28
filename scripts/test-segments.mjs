@@ -212,8 +212,13 @@ async function runSegment(command) {
     const skippedChecks = [], malformedLines = [];
     for (const [offset, line] of text.split('\n').entries()) {
       if (!line) continue;
-      try { skippedChecks.push(JSON.parse(line)); }
-      catch { malformedLines.push(offset + 1); }
+      try {
+        const check = JSON.parse(line);
+        if (!check || typeof check.name !== 'string' || typeof check.reason !== 'string' ||
+            (check.count !== undefined && (!Number.isSafeInteger(check.count) || check.count < 1))) {
+          malformedLines.push(offset + 1);
+        } else skippedChecks.push(check);
+      } catch { malformedLines.push(offset + 1); }
     }
     if (malformedLines.length) {
       const status = exitStatus(result);

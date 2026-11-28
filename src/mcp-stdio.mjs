@@ -113,7 +113,7 @@ function runCli(args, { input, timeoutMs = 60_000, env = process.env } = {}) {
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
     child.on('error', error => finish({ code: null, stdout, stderr: error.message }));
-    child.on('close', code => finish({ code, stdout, stderr }));
+    child.on('close', (code, signal) => finish({ code, signal, stdout, stderr }));
     child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
@@ -125,7 +125,8 @@ const lastJsonLine = text => text.trim().split('\n').reverse().map(parseJson).fi
 export function cliError(run, label) {
   const body = lastJsonLine(run.stderr) ?? lastJsonLine(run.stdout);
   if (body) return { isError: true, value: body };
-  return { isError: true, message: `${label} failed${run.code === null ? '' : ` (exit ${run.code})`}: ${safeDiagnostic((run.stderr || run.stdout).trim(), 4000) || 'no output'}` };
+  const exit = run.signal ? ` (signal ${run.signal})` : run.code === null ? '' : ` (exit ${run.code})`;
+  return { isError: true, message: `${label} failed${exit}: ${safeDiagnostic((run.stderr || run.stdout).trim(), 4000) || 'no output'}` };
 }
 
 function capped(value) {

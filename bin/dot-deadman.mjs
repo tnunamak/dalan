@@ -49,6 +49,7 @@ async function heartbeat() {
 }
 
 try {
+  if (command === 'heartbeat' && args.length) throw new Error('usage: dalan-deadman heartbeat');
   loadEnv();
   if (command === 'heartbeat') await heartbeat();
   else if(command==='status') {

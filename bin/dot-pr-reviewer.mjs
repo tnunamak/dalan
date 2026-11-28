@@ -30,7 +30,7 @@ try {
   // A present --only with a missing or malformed value must fail, never fall through to every open PR.
   if (args.includes('--only')) only = parseOnly(opt('--only'));
   const max = opt('--max') === null ? null : Number(opt('--max'));
-  if (max !== null && !(Number.isInteger(max) && max >= 0)) throw new Error('--max expects a non-negative integer');
+  if (max !== null && !(Number.isSafeInteger(max) && max >= 0)) throw new Error('--max expects a non-negative integer');
   const cfg = loadConfig(opt('--config') ?? paths.config), stateDir = opt('--state-dir') ?? paths.stateDir;
   const release = dryRun ? () => {} : acquireLock(stateDir);
   if (!release) { console.error('dalan-pr-reviewer: another run is active'); process.exit(0); }

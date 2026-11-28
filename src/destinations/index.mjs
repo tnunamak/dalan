@@ -65,7 +65,7 @@ export const destinationName=delivery=>{
   const [mode,address]=typeof delivery==='string'?split(delivery):[delivery?.mode,undefined];
   const adapter=destinations.get(mode);
   if(adapter&&(adapter.routes?adapter.routes(delivery,address):parseAddress(mode,adapter,typeof delivery==='string'?address:delivery?.address))) return mode;
-  const error=new Error(`invalid delivery mode: ${String(delivery)}`);
+  const error=new Error('invalid delivery mode');
   error.code='INVALID_DELIVERY_MODE';
   throw error;
 };
