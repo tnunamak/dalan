@@ -73,17 +73,29 @@ export function adminRequest(socket, route, { method = 'GET', payload, token, si
 // Raw artifact bytes (the admin route answers octet-stream, not JSON). Resolves null on any failure: evidence is best effort.
 export function adminArtifact(socket, artifactId, token, timeoutMs = 5000) {
   return new Promise(resolve => {
+    let timer, settled = false;
+    const finish = value => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+      return true;
+    };
     const req = http.request({ socketPath: socket, path: `/artifact?id=${encodeURIComponent(artifactId)}`, headers: { 'x-owner-capability': token } }, res => {
       const chunks = [];
-      res.on('data', b => chunks.push(b));
-      res.on('error', () => resolve(null));
+      res.on('data', b => { if (!settled) chunks.push(b); });
+      res.on('error', () => finish(null));
+      res.on('aborted', () => finish(null));
       res.on('end', () => {
+        if (settled) return;
         const data = Buffer.concat(chunks);
-        resolve(res.statusCode === 200 && sha256(data) === res.headers['x-artifact-sha256'] ? data : null);
+        finish(res.statusCode === 200 && sha256(data) === res.headers['x-artifact-sha256'] ? data : null);
       });
     });
-    req.on('error', () => resolve(null));
-    req.setTimeout(timeoutMs, () => req.destroy());
+    req.on('error', () => finish(null));
+    const expire = () => { if (finish(null)) req.destroy(); };
+    req.setTimeout(timeoutMs, expire);
+    timer = setTimeout(expire, timeoutMs);
     req.end();
   });
 }

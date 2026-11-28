@@ -204,6 +204,26 @@ try {
   assert.ok(fs.existsSync(path.join(gone.moved_to, 'resource-url')));
 
   // ---- Linux: the same one command, through systemd ----------------------------------------------------------------------------------
+  {
+    const box = seamsFor('uninstall-no-manager', 'linux');
+    const installed = await installService(options(box), box.seams);
+    const receipt = JSON.parse(fs.readFileSync(path.join(defaultPath(installed.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
+    assert.ok(fs.readdirSync(receipt.unit_dir).length > 0);
+    const calls = [];
+    const gone = await uninstallService({ home: installed.home, confirmRouteStop: async () => true }, {
+      ...box.seams,
+      spawn(command, args) {
+        calls.push([command, ...args]);
+        return { status: 1, stdout: '', stderr: 'Failed to connect to bus: No medium found' };
+      },
+    });
+    assert.deepEqual(calls, [['systemctl', '--user', 'show-environment']]);
+    assert.deepEqual(fs.readdirSync(receipt.unit_dir), []);
+    assert.equal(fs.existsSync(installed.home), false);
+    assert.ok(fs.existsSync(path.join(gone.moved_to, 'resource-url')));
+    assert.equal(box.closed.length, 1, 'systemd bus absence does not skip confirmed route cleanup');
+  }
+
   const linux = seamsFor('linux', 'linux');
   const lin = await installService(options(linux), linux.seams);
   assert.equal(lin.started, true); assert.match(lin.origin, /^https:\/\//);
@@ -211,6 +231,26 @@ try {
   assert.equal(readDefaultHome(linux.env), lin.home);
   const again = await installService(options(linux), linux.seams); assert.equal(again.already_installed, true); assert.equal(again.origin, lin.origin);
   const linuxReceipt = JSON.parse(fs.readFileSync(path.join(defaultPath(lin.home, '.config/dot-bridge'), 'service-install.json'), 'utf8'));
+  const unitDir = path.join(linux.userHome, '.config/systemd/user');
+  const contentsBeforeStop = () => Object.fromEntries(fs.readdirSync(unitDir).sort().map(name => [name, fs.readFileSync(path.join(unitDir, name), 'utf8')]));
+  const unitsBeforeStop = contentsBeforeStop();
+  const receiptFile = path.join(defaultPath(lin.home, '.config/dot-bridge'), 'service-install.json');
+  const receiptBeforeStop = fs.readFileSync(receiptFile, 'utf8');
+  const failedStopCalls = [];
+  await assert.rejects(uninstallService({ home: lin.home, confirmRouteStop: async () => true }, {
+    ...linux.seams,
+    spawn(command, args, spawnOptions) {
+      failedStopCalls.push(args);
+      assert.equal(command, 'systemctl');
+      assert.ok(spawnOptions.timeout > 0);
+      if (args[1] === 'show-environment') return { status: 0, stdout: '', stderr: '' };
+      return { status: null, signal: 'SIGTERM', error: new Error('fixture stop timeout') };
+    },
+  }), /fixture stop timeout/);
+  assert.deepEqual(failedStopCalls.map(args => args[1]), ['show-environment', 'disable'], 'unconfirmed stop never reaches reload');
+  assert.deepEqual(contentsBeforeStop(), unitsBeforeStop);
+  assert.equal(fs.readFileSync(receiptFile, 'utf8'), receiptBeforeStop);
+  assert.equal(readDefaultHome(linux.env), lin.home);
   const removedLinux = await uninstallService({ home: lin.home, confirmRouteStop: async () => true }, linux.seams);
   assert.ok(removedLinux.removed.some(line => line.endsWith('.service')));
   assert.deepEqual(fs.readdirSync(path.join(linux.userHome, '.config/systemd/user')), [], 'no unit file is left');

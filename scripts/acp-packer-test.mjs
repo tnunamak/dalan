@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { runInNewContext } from 'node:vm';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -7,6 +9,36 @@ import { join } from 'node:path';
 import { prepareAssignment, withoutNote, NO_REPO_NOTE, repoInputs, sha256 } from '../src/acp-bridge.mjs';
 import { validateSubmission, submissionLimits, outputPathsHeading } from '../src/submission-policy.mjs';
 import { withoutBridgeSuffix } from '../src/acp-context.mjs';
+// Exercise only artifact completion with inert emitters and a deterministic clock.
+{
+  const source = fs.readFileSync(new URL('../src/acp-bridge.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('export function adminArtifact(');
+  const end = source.indexOf('\n// ---------------------------------------------------------------- brief and ids', start);
+  const req = new EventEmitter(), res = new EventEmitter();
+  let deadline, timeoutCleared = false, destroyed = 0, hashes = 0;
+  req.setTimeout = () => {};
+  req.end = () => {};
+  req.destroy = () => { destroyed += 1; req.emit('error', new Error('fixture close')); };
+  const read = runInNewContext(source.slice(start, end).replace(/^export /, '') + '\nadminArtifact', {
+    http: { request(_options, respond) { respond(res); return req; } },
+    setTimeout(callback, ms) { deadline = { callback, ms }; return 1; },
+    clearTimeout(id) { timeoutCleared = id === 1; },
+    Buffer, sha256() { hashes += 1; return 'fixture'; },
+  });
+  res.statusCode = 200; res.headers = { 'x-artifact-sha256': 'fixture' };
+  const pending = read('/fixture', 'art_fixture', 'fixture', 25);
+  res.emit('data', Buffer.from('a'));
+  res.emit('data', Buffer.from('b'));
+  assert.equal(deadline?.ms, 25, 'artifact read has a fixed wall deadline');
+  deadline.callback();
+  assert.equal(await pending, null);
+  assert.equal(destroyed, 1);
+  assert.equal(timeoutCleared, true);
+  res.emit('data', Buffer.from('late'));
+  res.emit('end');
+  assert.equal(hashes, 0, 'late completion does not hash or return bytes');
+}
+
 // The bridge's output_paths block is a known suffix: the attach guard still recovers the requester's brief.
 assert.equal(withoutBridgeSuffix(`Brief text\n\n${outputPathsHeading}\nnotes/a.md\nnotes/b.md`),'Brief text');
 
