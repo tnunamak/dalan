@@ -628,7 +628,7 @@ async function attachWaiter(req,res,requestId,timeoutMs,consume=true) {
 const listGuidance='Claim every listed assignment you can start now, up to free_lanes, in this turn. Do not claim one and stop. Never exceed free_lanes.';
 const claimMoreGuidance='If free_lanes > 0 and work is queued, claim more now.';
 // A worker with worker_claim_hint (limits.json) is told to hold a few claims, not every free lane: claims it drops when its run ends hold their lanes for a lease.
-const hintGuidance=n=>`Hold at most ${n} claims at once, however many lanes are free: claim only as many listed assignments as ${n} minus the claims you already hold, and send progress at least every 3 minutes while you work. free_lanes is the bridge's limit, not your target.`;
+const hintGuidance=n=>`Hold at most ${n} claims at once, however many lanes are free. Suggested picks subtract active claims touched in the last 3 minutes; check older or near-expiry claims before resuming. Send progress at least every 3 minutes while you work. free_lanes is the bridge's limit, not your target.`;
 const hintMoreGuidance=n=>`If you hold fewer than ${n} claims and work is queued, claim more now; at ${n}, finish one first.`;
 // A finishing lane takes the next queued item itself; an error on any claim means the list changed, so list again.
 const finishNextGuidance=next=>`Claim ${next[0].request_id} yourself before you end this run, then keep claiming up to free lanes. After any claim error such as assignment_expired, call list_pending and claim from that list.`;

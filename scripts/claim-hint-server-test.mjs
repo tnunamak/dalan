@@ -41,6 +41,8 @@ try {
   const listed=parse(await rpc('list_pending'));
   assert.ok(listed.free_lanes>1,'free_lanes stays the bridge limit: '+listed.free_lanes);
   assert.match(listed.guidance,/Hold at most 1 claims at once/);
+  assert.match(listed.guidance,/touched in the last 3 minutes/);
+  assert.match(listed.guidance,/older or near-expiry/);
   assert.match(listed.guidance,/progress at least every 3 minutes/);
   assert.doesNotMatch(listed.guidance,/up to free_lanes/);
   assert.equal(listed.next_queued.length,1);
