@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { fixture, waitFor } from './acp-probe-fixture.mjs';
+import { fixture, waitFor, sleep } from './acp-probe-fixture.mjs';
 import { CONTINUE_PROMPT } from '../src/acp-bridge.mjs';
 for (const point of ['after-submit', 'claimed-hold', 'result-before-delivery', 'recorded-before-delivery', 'session-load-mid-hold']) {
   await fixture(async f => {
@@ -48,6 +48,8 @@ fs.renameSync = function(from, to) {
         f.finish(rid, result);
         await waitFor(() => a.child.signalCode === 'SIGKILL', 'crash after the result is recorded');
         await a.exited;
+        // 'exit' can come before the last stdout bytes are parsed: drain them so a send before the crash is seen.
+        await new Promise(r => a.child.stdout.readableEnded ? r() : a.child.stdout.once('end', r)); await sleep(50);
         const saved = await f.state(sid);
         if (crashAt === 'terminal') assert.equal(saved.pending.terminal.text.includes(result), true, 'result durably recorded before crash');
         else assert.equal(saved.pending === null && saved.completed.at(-1).terminal.text.includes(result), true, 'completion recorded before the send');
@@ -56,7 +58,12 @@ fs.renameSync = function(from, to) {
     }
     assert.ok(!a.rawText('agent_message_chunk').includes(result), 'no delivery before crash');
     a.kill('SIGKILL'); await a.exited; await old;
-    f.hook(async () => false);
+    if (crashAt) {
+      // The resumed facade must deliver from its saved receipt: the backend no longer offers the result,
+      // and every wait for it fails. A facade that re-fetched the result instead would never deliver.
+      const row = f.rows.get(rid); row.status = 'claimed'; delete row.report;
+      f.hook(async ({ url, res, json }) => (url.pathname === '/wait' || (crashAt === 'recorded' && url.pathname === '/get')) ? (json(res, { error: 'probe: terminal fetch refused' }, 500), true) : false);
+    } else f.hook(async () => false);
     const b = await f.adapter();
     let resumeSid = sid;
     if (point === 'claimed-hold') resumeSid = (await b.newSession(f.cwd)).sessionId;
@@ -69,9 +76,10 @@ fs.renameSync = function(from, to) {
       await waitFor(() => b.rawText('agent_thought_chunk').includes('worker claimed'), 'loaded session still held');
       assert.equal(settled, false);
     }
-    f.finish(rid, result);
+    if (!crashAt) f.finish(rid, result);
     await waitFor(() => settled, 'one final delivery');
     assert.equal((await resumed).result?.stopReason, 'end_turn');
+    if (crashAt) assert.ok(b.rawText('agent_message_chunk').includes(result), 'delivered from the saved receipt');
     assert.equal(f.calls.filter(c => c.route === '/submit').length, 1, 'exactly one submit call');
     assert.equal(f.rows.size, 1, 'exactly one assignment');
     const deliveries = [a, b].flatMap(x => x.updates).filter(u => u.sessionUpdate === 'agent_message_chunk' && u.content.text.includes(result));

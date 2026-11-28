@@ -19,13 +19,14 @@ await fixture(async f => {
   const listener = net.createServer(); await new Promise(r => listener.listen(0, '127.0.0.1', r));
   const port = listener.address().port; await new Promise(r => listener.close(r));
   const server = spawn(t3, ['serve', '--base-dir', t3Home, '--host', '127.0.0.1', '--port', String(port), '--no-browser'], { cwd: f.cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const exited = new Promise(r => server.once('exit', r));
-  let ready = false;
+  let ready = false, startError = null;
+  server.once('error', e => { startError = e; });
+  const exited = new Promise(r => { server.once('exit', r); server.once('error', r); });
   // Never forward server output: it contains scratch pairing credentials.
   const onData = b => { if (String(b).includes('server is ready')) ready = true; };
   server.stdout.on('data', onData); server.stderr.on('data', onData);
   try {
-    await waitFor(() => ready, 'scratch T3 startup', 60000);
+    await waitFor(() => { if (startError) throw new Error(`scratch T3 did not start: ${startError.message}`); if (server.exitCode !== null) throw new Error(`scratch T3 exited (${server.exitCode}) before it was ready`); return ready; }, 'scratch T3 startup', 60000);
     const auth = JSON.parse(execFileSync(t3, ['auth', 'session', 'issue', '--json', '--ttl', '1h', '--label', 'probe', '--subject', 'probe', '--base-dir', t3Home], { env, encoding: 'utf8' }));
     const api = new T3Api({ origin: `http://127.0.0.1:${port}` }, auth.token);
     const config = await api.rpc('server.getConfig', {});
@@ -49,8 +50,9 @@ await fixture(async f => {
       projection = (await api.threadDetail(threadId)).projection;
       assert.ok(!projection.runs.some(r => r.status === 'failed'), 'scratch provider run failed');
       request = projection.runtimeRequests.find(r => r.kind === 'user_input' && r.status === 'pending');
-      return request;
-    }, 'pending user_input', 30000);
+      // The timeline item can be projected a moment after the pending request.
+      return request && projection.turnItems.some(i => i.type === 'user_input_request' && i.requestId === request.id);
+    }, 'pending user_input in the timeline', 30000);
     const run = projection.runs.find(r => r.id === request.runId) ?? projection.runs.at(-1);
     assert.ok(!['completed', 'failed', 'cancelled'].includes(run.status), 'question holds the run');
     const item = projection.turnItems.find(i => i.type === 'user_input_request' && i.requestId === request.id);
