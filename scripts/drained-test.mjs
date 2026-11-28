@@ -1,10 +1,41 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { decideDrained } from '../src/drained.mjs';
 
 const memo=()=>({baseline:new Map(),startTerminal:new Set(),lastHeld:undefined});
 const s=(request_id,status,blocker_count=0,last_blocker=null)=>({request_id,status,blocker_count,last_blocker});
 const free={held:null};
+
+// An invalid interval must fail before creating the slot, sending a request or setting a timer.
+{
+  const source = readFileSync(new URL('../bin/dot-worker.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('async function waitDrained()');
+  const boundary = source.indexOf('  fs.mkdirSync(drainedDir', start);
+  const wait = runInNewContext(source.slice(start, boundary) + '\nfs.mkdirSync();\n}\nwaitDrained', {
+    producerId: () => 'fixture-producer', option: () => null,
+    process: { env: { DOT_DRAINED_INTERVAL_MS: 'not-a-number' } },
+    fs: { mkdirSync: () => assert.fail('invalid interval reached side effects') },
+  });
+  await assert.rejects(wait(), /DOT_DRAINED_INTERVAL_MS/);
+}
+
+// An invalid unreachable allowance must fail before the first side effect.
+{
+  const source = readFileSync(new URL('../bin/dot-worker.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('async function waitDrained()');
+  const boundary = source.indexOf('  fs.mkdirSync(drainedDir', start);
+  const makeWait = (env, body) => runInNewContext(source.slice(start, boundary) +
+    '\n' + body + '\n}\nwaitDrained', {
+      producerId: () => 'fixture-producer', option: () => null, process: { env },
+      fs: { mkdirSync: () => assert.fail('invalid unreachable limit reached side effects') },
+    });
+  for (const value of ['invalid', '0', '-5', '', '2147483648']) {
+    await assert.rejects(makeWait({ DOT_DRAINED_UNREACHABLE_MS: value }, 'fs.mkdirSync()')(), /DOT_DRAINED_UNREACHABLE_MS/);
+  }
+  assert.equal(await makeWait({}, 'return unreachableMs')(), 600000);
+}
 
 // Nothing in flight: refill now.
 assert.equal(decideDrained([],free,memo())?.status,'drained');

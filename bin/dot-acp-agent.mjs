@@ -93,11 +93,12 @@ async function readRow(rid, signal) {
 //   row with another brief     -> refuse (one root token must not serve two briefs)
 //   row cancelled or expired   -> next attempt id `<root>_r<n>`
 //   row queued/claimed/finished-> attach; the wait returns the result or keeps waiting
-async function acquire(s, parsed) {
+async function acquire(s, parsed, ctl) {
   const briefHash = sha256(parsed.brief);
   let submitRetries = 0;
   const preparedByAttempt=new Map();
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    ctl.abort.signal.throwIfAborted();
     const rid = attemptId(parsed.requestRoot, attempt);
     const row = await readRow(rid);
     if (row) {
@@ -132,11 +133,29 @@ async function acquire(s, parsed) {
       if(transient(e)&&submitRetries++<SUBMIT_RETRIES) { attempt--; continue; }
       throw e;
     }
+    // Persist only the deterministic work identity, not the request body or capability.
+    // A late response may arrive after bounded cancel has released the session lock.
+    ctl.abort.signal.throwIfAborted();
+    if (!currentTurn(s, ctl)) throw new Error('Cannot submit outside the active ACP turn.');
+    const intent = { root: parsed.requestRoot, rid, attempt, briefHash, validUntil,
+      priority: parsed.priority, requirements: parsed.requirements, notes: ctl.pending?.notes ?? [],
+      work_id: rid, original_host_task_id: ctl.hostTaskId ?? null, original_prompt_request_id: ctl.promptRequestId,
+      later_prompt_request_ids: [], later_host_task_ids: [], startedAt: Date.now(), submission_pending: true };
+    ctl.pending = intent;
+    publishPending(s, ctl);
     // Admission belongs to the bridge; the richer forecast can replace this reply without changing ACP.
     try { const admitted = await call('/submit', null, { method: 'POST', payload: body, timeoutMs: SUBMIT_DEADLINE_MS }); prepared.admission = admitted.admission ?? {status:admitted.status ?? 'queued', execution:admitted.execution, submission_warnings:admitted.submission_warnings}; }
     catch (e) {
       if (e.message === 'request_id conflict') { attempt--; continue; } // lost a race: re-read the row
-      if(e.verdict) throw verdictRefusal(e);
+      if(e.verdict) {
+        // A first explicit admission refusal did not create work. After an ambiguous
+        // send, even a later refusal cannot prove the original submit did not land.
+        if (submitRetries === 0 && currentTurn(s, ctl) && ctl.pending === intent) {
+          ctl.pending = null;
+          publishPending(s, ctl);
+        }
+        throw verdictRefusal(e);
+      }
       // The bridge may have stored the job before the deadline; the same id and brief make the retry attach to it.
       if (transient(e) && submitRetries++ < SUBMIT_RETRIES) { attempt--; continue; }
       if (/^(?:worker|dot) queue is full/.test(e.message)) throw new Refusal(e.message);
@@ -193,7 +212,24 @@ async function runTurn(s, ctl, text, say, client) {
   let parsed = incoming;
   const notes = ctl.pending?.notes ?? [];
   if (ctl.pending) {
-    const row = await readRowOrThrow(ctl.pending.rid);
+    const row = ctl.pending.submission_pending ? await readRow(ctl.pending.rid) : await readRowOrThrow(ctl.pending.rid);
+    if (!row) {
+      const { rid, validUntil } = ctl.pending;
+      if (Date.parse(validUntil ?? '') <= Date.now()) {
+        // The authoritative lookup still found no row after its admission window.
+        // Clear the stale intent, but never reinterpret a continuation as new work.
+        ctl.pending = null;
+        publishPending(s, ctl);
+        throw new Refusal(`submission ${rid} did not appear before its admission window ended; no new work was submitted`);
+      }
+      throw new Refusal(`submission ${rid} is not yet confirmed; retained its identity and did not submit again`);
+    }
+    if (ctl.pending.submission_pending) {
+      const storedHash = row.assignment.acp_brief_hash ?? sha256(withoutNote(row.assignment.brief ?? ''));
+      if (storedHash !== ctl.pending.briefHash) throw new Refusal(`request ${ctl.pending.rid} resolved to a different brief`);
+      ctl.pending.admission = { status: row.status, execution: row.execution };
+      delete ctl.pending.submission_pending;
+    }
     parsed = { brief: withoutNote(row.assignment.brief), priority: ctl.pending.priority ?? 'normal', requirements: ctl.pending.requirements ?? [], requestRoot: ctl.pending.root };
   }
   for (let expiries = 0; ; expiries++) {
@@ -203,8 +239,14 @@ async function runTurn(s, ctl, text, say, client) {
       const steerText = text.trim();
       if (steerText && steerText !== CONTINUE_PROMPT && sha256(incoming.brief) !== ctl.pending.briefHash && !ctl.pending.notes.includes(steerText.slice(0, 200))) ctl.pending.notes.push(steerText.slice(0, 200));
     } else {
-      ctl.pending = await acquire(s, parsed);
+      // A submit that failed after a cancel may still have landed: cancel what the recorded intent names.
+      try { ctl.pending = await acquire(s, parsed, ctl); }
+      catch (e) { if (ctl.cancelled && ctl.pending) await cancelPending(s, ctl); throw e; }
       ctl.pending.notes = notes;
+      if (ctl.cancelled) {
+        ctl.cancelDone = Promise.resolve(ctl.cancelDone).then(() => cancelPending(s, ctl));
+        return { cancelled: true };
+      }
     }
     ctl.pending.priority ??= parsed.priority;
     ctl.pending.requirements ??= parsed.requirements;
@@ -256,6 +298,7 @@ async function heartbeat(s, ctl, say, note = '', signal = ctl.abort.signal) {
 async function waitLoop(s, ctl, say, client) {
   const slice = Math.max(1, Math.ceil(HEARTBEAT_MS / 1000));
   let outageSince = null;
+  let reportedWaiterConflict = false;
   for (;;) {
     if (ctl.cancelled) return { cancelled: true };
     const signal = ctl.abort.signal;
@@ -269,9 +312,19 @@ async function waitLoop(s, ctl, say, client) {
       }
       // A successful /wait alone is not recovery if its follow-up read still fails.
       outageSince = null;
+      reportedWaiterConflict = false;
     } catch (e) {
       if (ctl.cancelled) return { cancelled: true };
-      if (waiting && e.http_status === 409) { await sleep(1000, signal); continue; } // our previous process's waiter has not detached yet
+      if (waiting && e.http_status === 409) {
+        outageSince ??= Date.now();
+        if (Date.now() - outageSince > OUTAGE_MS) throw refuse('worker bridge unreachable: previous waiter still attached',{failure_type:'transport_error',failure_type_source:'dot_acp_transport'});
+        if (!reportedWaiterConflict) {
+          reportedWaiterConflict = true;
+          await say('agent_thought_chunk', 'previous waiter still attached; retrying\n');
+        }
+        await sleep(1000, signal);
+        continue;
+      }
       if (e instanceof acp.RequestError || e instanceof Refusal) throw e;
       if (!transient(e)) throw refuse(`worker bridge error: ${e.message}`,{failure_type:'adapter_error',failure_type_source:'dot_acp_bridge_response'});
       outageSince ??= Date.now();

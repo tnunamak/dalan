@@ -18,6 +18,22 @@ import { defaultPath } from '../src/paths.mjs';
 import { WORKER_INSTRUCTIONS } from '../src/worker-instructions.mjs';
 
 const repo = path.resolve(import.meta.dirname, '..');
+test('interactive public mode rejects local callbacks before hosted setup', async () => {
+  let chooseCalls = 0, hostedCalls = 0;
+  const input = new PassThrough();
+  const out = new PassThrough();
+  input.end('public\n');
+  await assert.rejects(runTry({
+    argv: ['--callback', 'http://localhost/callback'], input, out,
+    hosted: {
+      interactive: true,
+      chooseMode: async () => { chooseCalls++; return { mode: 'public' }; },
+      runHosted: async () => { hostedCalls++; throw new Error('fixture hosted runner must not run'); },
+    },
+  }), { message: "--callback is for a local client; a public trial uses the MCP client's own callback" });
+  assert.equal(chooseCalls, 1);
+  assert.equal(hostedCalls, 0);
+});
 test('finished outcomes only offer acceptance for completed reports', async () => {
   for (const outcome of ['blocked', 'failed', undefined, 'unexpected']) {
     const lines = [], prompts = [];
