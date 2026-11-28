@@ -31,6 +31,43 @@ git(renameRepo, 'mv', 'before name.txt', 'after name.txt');
 const renamePatch = Buffer.from(git(renameRepo, 'diff', '--cached', '-M') + '\n');
 assert.deepEqual(listPatchFiles(renameRepo, renamePatch).sort(), ['after name.txt', 'before name.txt']);
 
+// Inject a write failure after Git has really changed the throwaway checkout.
+const renameRollback = repo('rename-rollback');
+const beforeRename = 'original rename bytes\n', beforeOther = 'original other bytes\n';
+write(renameRollback, 'before name.txt', beforeRename);
+write(renameRollback, 'other.txt', beforeOther);
+const renameBase = commit(renameRollback, 'base for rollback');
+git(renameRollback, 'mv', 'before name.txt', 'after name.txt');
+write(renameRollback, 'other.txt', 'candidate other bytes\n');
+git(renameRollback, 'add', '-A');
+const mixedRename = Buffer.from(git(renameRollback, 'diff', '--cached', '-M') + '\n');
+git(renameRollback, 'reset', '-q', '--hard');
+const renameGit = path.join(base, 'rename-write-git');
+const renameTrace = path.join(base, 'rename-write.trace');
+fs.writeFileSync(renameGit, [
+  '#!/bin/sh',
+  'writing=no; inspecting=no',
+  'for arg do case "$arg" in apply) writing=yes;; --check|--numstat) inspecting=yes;; esac; done',
+  'if [ "$writing" = yes ] && [ "$inspecting" = no ]; then',
+  '  git "$@" || exit "$?"',
+  '  test ! -e "$RENAME_FIXTURE/before name.txt" || exit 91',
+  '  test -f "$RENAME_FIXTURE/after name.txt" || exit 92',
+  '  grep -qx "candidate other bytes" "$RENAME_FIXTURE/other.txt" || exit 93',
+  '  printf "rename and second write reached\\n" > "$RENAME_TRACE"',
+  '  printf "synthetic write failure after rename\\n" >&2',
+  '  exit 9',
+  'fi',
+  'exec git "$@"',
+].join('\n') + '\n', { mode: 0o700 });
+assert.throws(() => applyPatch({ dir: renameRollback, patch: mixedRename, baseSha: renameBase,
+  env: { ...process.env, DALAN_GIT: renameGit, RENAME_FIXTURE: renameRollback, RENAME_TRACE: renameTrace } }),
+/every touched file was restored.*synthetic write failure after rename/);
+assert.match(fs.readFileSync(renameTrace, 'utf8'), /rename and second write reached/);
+assert.equal(fs.readFileSync(path.join(renameRollback, 'before name.txt'), 'utf8'), beforeRename);
+assert.equal(fs.existsSync(path.join(renameRollback, 'after name.txt')), false);
+assert.equal(fs.readFileSync(path.join(renameRollback, 'other.txt'), 'utf8'), beforeOther);
+assert.equal(git(renameRollback, 'status', '--porcelain'), '');
+
 // Simulate extra permission flags in stat metadata only; no special mode is set on disk.
 if (typeof process.getuid === 'function') {
   const grant = path.join(renameRepo, 'fixture-grant.json');
