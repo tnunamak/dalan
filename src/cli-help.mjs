@@ -6,6 +6,8 @@ import { docsUrl } from './docs-url.mjs';
 // commands without a group only appear under `dalan help --all`, and internal maintenance commands only under
 // `dalan help --internal`. Every command runs and has its own help either way.
 export const COMMANDS = [
+  { name: 'jobs', summary: 'Read a versioned page of jobs', usage: 'dalan jobs --json [--worker W] [--status S] [--since T] [--kind K] [--source S] [--limit N] [--cursor C]', detail: ['Reads local state without changing it. Default page size 100, maximum 1000. Pass next_cursor to --cursor for the next page. --since filters creation time (Nh, Nd, RFC3339, or all). See docs/operations.md#stable-read-interface for fields and compatibility.'] },
+  { name: 'events', summary: 'Read a versioned page of lifecycle events', usage: 'dalan events --json [--since T] [--worker W] [--type TYPE] [--limit N] [--cursor C]', detail: ['Reads retained lifecycle events in ID order without changing state. Default page size 100, maximum 1000. --since takes Nh, Nd, RFC3339, or all. Pass next_cursor to --cursor for the next page. See docs/operations.md#stable-read-interface.'] },
   { name: 'relationships', group: 'operator', summary: 'List or end relationships', usage: 'dalan relationships list | end RELATIONSHIP_ID [--json]', detail: ['Ending a relationship blocks new work; existing jobs and grants remain.'] },
   { name: 'grants', group: 'operator', summary: 'List authority held by each enforcer', usage: 'dalan grants [--json]', detail: ['Shows relationship and grant lifetimes independently.'] },
   { name: 'try', group: 'start', summary: 'Try Dalan with a hosted MCP client, or on this computer only', usage: 'dalan try [--local | --public [--route NAME]] [--home DIR] [--port N] [--callback PATTERN]...',

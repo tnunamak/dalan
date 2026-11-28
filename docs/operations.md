@@ -12,6 +12,53 @@ The admin socket is mode `0600`, but every process that runs as the bridge's own
 
 Fresh homes use Dalan directories; existing installations retain their populated legacy roots. Use `dalan paths --json` with the service HOME and environment for the effective config, data, state and workspace roots. See [the upgrade guide](dalan-upgrade.md) for settings, catalog retention, local HTTP and explicit path migration.
 
+## Stable read interface
+
+Local operator tools should use `dalan jobs --json` and `dalan events --json` instead of opening `bridge.db`. The JSON documented here is a stable interface. The database, its tables, columns and schema version are private implementation details. These commands open the selected home's database read-only; they do not migrate it, create a missing store, mark results read, or change jobs. Use the CLI version installed with the service and set `DALAN_HOME` when selecting another home. This is local operator access to all jobs in that home, not a remote authorization boundary.
+
+```sh
+dalan jobs --json --worker assistant --status queued --limit 100
+dalan events --json --since 24h --worker assistant --type completed
+```
+
+Both responses carry `schema_version: 1`, an array (`jobs` or `events`), and `next_cursor` (an opaque string, or `null` at the end). Each call returns at most `--limit` rows: default 100, maximum 1000. Continue with `--cursor VALUE` and the same filters. Jobs sort by `(created_at, request_id)` ascending; events sort by increasing event ID. Cursors exclude the last returned row, including when jobs have identical creation times. Pages show current state, not a frozen snapshot: a job that changes filters between calls can enter or leave the result. Restart a job scan to observe updates to earlier rows. Events may expire under lifecycle retention; this is not an archival event feed.
+
+`--since` takes an RFC3339 timestamp, a duration such as `24h` or `3d`, or `all`. The cutoff is inclusive. Omit it for all retained rows. Jobs filter **assignment creation time**; events filter event time. For report-rate or claim-age calculations, scan jobs without a cutoff and filter `finished_at` or `claimed_at` in the caller. Resolve relative cutoffs to a fixed timestamp before paginating.
+
+Jobs support exact `--worker` (the assigned target), `--status`, `--kind` (task kind), and `--source` filters. Filters combine with AND. Historical fix-loop metadata spellings are normalized as in other Dalan metadata output. Events support exact `--worker` and `--type` filters. Unknown options, missing values, invalid times, limits or cursors fail with exit 1 and a JSON error on stderr carrying `schema_version: 1`; stdout remains empty. These verbs print JSON even without `--json`.
+
+### Job fields
+
+| Fields | Meaning |
+| --- | --- |
+| `request_id`, `status`, `worker`, `priority` | Job identity, current assignment status, target worker and queue priority. |
+| `task_kind`, `source`, `objective_key` | Assignment metadata; absent values are `null`. |
+| `created_at`, `claimed_at`, `finished_at` | Assignment creation, current claim creation, and report creation timestamps. A missing claim or report yields `null`. |
+| `outcome`, `summary`, `result`, `report_worker` | Report outcome, summary, full result text and reporting worker; `null` before a report exists. |
+| `decision` | Latest owner/system decision word, with legacy acceptance/rejection fallback; `null` if undecided. |
+| `payload` | Parsed assignment JSON, including `inputs`, for callers that route results by repository or inspect the brief. |
+| `cancelled_at`, `valid_until`, `skipped_at` | Assignment cancellation, expiry and worker skip timestamps; `null` when absent. |
+| `claim_worker`, `claim_state`, `abandoned_at`, `last_claim_activity_at`, `acquisition_id` | Current claim worker, active/abandoned state, abandonment and activity timestamps, and acquisition identifier; `null` without a claim. |
+
+`worker`, `claim_worker`, and `report_worker` represent separate facts. For example, counts of queued jobs use `worker`, while counts of completed reports use `report_worker`. Presence of a report is observable through `finished_at`. No owner capability or capability hash is returned or accepted as a filter; no current migration caller needs one.
+
+### Event fields
+
+Each event returns `id`, `request_id`, `claim_id`, `epoch`, `type`, `at`, `actor`, `source`, `reason`, `worker`, `scope`, and `outcome`. `source` is the lifecycle provenance (`live` or `backfill`), not the job's submitter source. Optional event details are `null` when absent. Use IDs for continuation; multiple events may have the same timestamp.
+
+Consumers must check `schema_version` and ignore added fields. Incompatible field meanings or removals require a new JSON schema version. This version is independent of the private SQLite schema number and package release number.
+
+### Existing local-reader coverage
+
+| Caller | Database columns read or used in predicates | Public job fields |
+| --- | --- | --- |
+| `kitchen/kitchen-gen` | assignments: `request_id`, `target_worker`, `status`, `cancelled_at`, `skipped_at`; claims: `worker`, `state`, `claimed_at`, `request_id`; reports: `request_id`, `worker`, `outcome`, `created_at` | `request_id`, `worker`, `status`, `cancelled_at`, `skipped_at`, `claim_worker`, `claim_state`, `claimed_at`, `report_worker`, `outcome`, `finished_at` |
+| `util/full-gate.py` | claims: `worker`, `claimed_at`, `last_claim_activity_at`, `acquisition_id`, `abandoned_at`, `request_id`; assignments: `request_id`, `status`, `cancelled_at`, `target_worker`, `valid_until`; reports: `request_id`, `worker`, `created_at` | `claim_worker`, `claimed_at`, `last_claim_activity_at`, `acquisition_id`, `abandoned_at`, `request_id`, `status`, `cancelled_at`, `worker`, `valid_until`, `report_worker`, `finished_at` |
+| `util/results-router.py` | reports: `request_id`, `outcome`, `summary`, `result`; assignments: `request_id`, `task_kind`, `payload` | `request_id`, `outcome`, `summary`, `result`, `task_kind`, `payload` |
+| `keepfull-due` | assignments: `target_worker`, `status`, `cancelled_at` | `worker`, `status`, `cancelled_at` |
+
+No columns read by these four callers remain uncovered. Aggregation and result-ID selection remain caller-side operations over all pages. Migrating those callers is separate work; these commands do not change fleet tools.
+
 ## Versions and upgrades
 
 **Versions (0.6.0).** Package releases and SQLite schema numbers are

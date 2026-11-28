@@ -48,7 +48,9 @@ if (help) {
   // doctor is exempt: it diagnoses a missing bridge home and reports it as a finding.
   if (!process.env.DALAN_HOME && command && !['help', '--help', '-h', 'paths', 'doctor'].includes(command) && fs.existsSync(path.join(trial, '.dalan-trial'))) {
     const message = `DALAN_HOME is not set, so "dalan ${command}" does not know which bridge home to use. To use the trial bridge, run this, then run the command again:\n  export DALAN_HOME='${trial.replaceAll("'", "'\\''")}'`;
-    process.stderr.write(process.argv.includes('--json') ? `${JSON.stringify({ error: message, kind: 'local' })}\n` : `dalan: ${message}\n`);
+    const error = { error: message, kind: 'local' };
+    const payload = ['jobs', 'events'].includes(command) ? { schema_version: 1, ...error } : error;
+    process.stderr.write(process.argv.includes('--json') ? `${JSON.stringify(payload)}\n` : `dalan: ${message}\n`);
     process.exit(1);
   }
   if (process.env.DALAN_HOME) process.env.HOME = path.resolve(process.env.DALAN_HOME);
@@ -63,6 +65,8 @@ if (help) {
     }
     process.argv.splice(2, 2, 'submit', '--revises', id);
   }
-  await import('./dot-worker.mjs');
+  if (['jobs', 'events'].includes(command)) {
+    (await import('../src/read-api.mjs')).readMain(command, process.argv.slice(3), os.homedir());
+  } else await import('./dot-worker.mjs');
 }
 }
