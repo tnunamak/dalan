@@ -3,8 +3,12 @@
 # conversation only after the candidate service is active, answering on its admin socket, and the branch is advanced.
 # Usage: bin/catalog-release.sh <branch>
 set -euo pipefail
+if [[ $# -ne 1 || -z "$1" ]]; then
+  echo 'usage: catalog-release.sh <branch>' >&2
+  exit 2
+fi
 cd "$(dirname "$0")/.."
-branch=${1:?usage: catalog-release.sh <branch>}
+branch=$1
 [ -z "$(git status --porcelain)" ] || { echo "working tree is dirty; commit or stash first" >&2; exit 1; }
 current_ref=$(git symbolic-ref -q HEAD) || { echo "release requires a checked-out branch" >&2; exit 1; }
 previous=$(git rev-parse --verify HEAD)
