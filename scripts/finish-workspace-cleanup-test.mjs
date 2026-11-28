@@ -202,6 +202,22 @@ try {
     const tree2 = id => path.join(root2, 'worktrees', id);
     const row2 = id => !!db2.prepare('SELECT 1 FROM workspaces WHERE request_id=?').get(id);
 
+    // Crash-write debris: leave the fresh file, a durable indexed neighbor and unrelated files.
+    const alive = 'req_artifact_fixture';
+    store.submit({schema_version:1,request_id:alive,brief:'artifact retention fixture',inputs:[],expected_output:'fixture',execution_scope:'read-only'}, {mode:'none'}, null, 'owner');
+    const grant = store.claim(alive, 'dot', 'subject');
+    const indexed = ws.saveArtifact(alive, grant.claim_id, 'check-output', Buffer.from('fixture'), 'art_indexed_fixture');
+    const artifactRoot = path.join(root2, 'artifacts');
+    const file = name => path.join(artifactRoot, name);
+    for (const name of ['art_old_fixture', 'art_fresh_fixture', 'unrelated']) fs.writeFileSync(file(name), 'synthetic');
+    const old = new Date(Date.now() - 48 * 3600000);
+    for (const name of ['art_old_fixture', 'unrelated', indexed.artifact_id]) fs.utimesSync(file(name), old, old);
+    const artifactSweep = await ws.sweepExpired(() => {});
+    assert((artifactSweep.artifacts_removed) === (1), 'expected artifactSweep.artifacts_removed === 1');
+    assert((fs.existsSync(file('art_old_fixture'))) === (false), "expected fs.existsSync(file('art_old_fixture')) === false");
+    for (const name of ['art_fresh_fixture', 'unrelated', indexed.artifact_id]) assert(fs.existsSync(file(name)), name);
+    store.finish(alive, grant.claim_id, 'completed', 'fixture', 'fixture', 'subject');
+
     // A row that is not terminal keeps its tree: a finish recorded while another grant is live must not remove it.
     const live = makeFinished();
     db2.prepare("UPDATE assignments SET status='claimed' WHERE request_id=?").run(live);

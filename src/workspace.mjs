@@ -785,6 +785,28 @@ export class Workspace {
       try{await fs.promises.unlink(row.path);}catch(e){if(e.code!=='ENOENT'){failed({artifact_id:row.id},e);continue;}}
       db.prepare('DELETE FROM artifacts WHERE id=?').run(row.id);summary.artifacts_removed++;
     }
+    const orphanCutoff=Date.parse(now)-24*60*60*1000;
+    const artifactIndexed=db.prepare('SELECT 1 FROM artifacts WHERE id=? OR path=? LIMIT 1');
+    let entries=[];
+    try { entries=await fs.promises.readdir(artifacts,{withFileTypes:true}); }
+    catch(error) { if(error.code!=='ENOENT') failed({scope:'orphan_artifacts'},error); }
+    for(let i=0;i<entries.length;i++) {
+      if(i%100===0) await yieldLoop();
+      const item=entries[i],id=item.name;
+      if(!item.isFile()||!/^art_[a-zA-Z0-9_-]{8,128}$/.test(id)) continue;
+      const file=path.join(artifacts,id);
+      try {
+        // Artifact writers hold this same database write transaction from file creation to index insertion.
+        const removed=this.store.transaction(()=>{
+          if(artifactIndexed.get(id,file)) return false;
+          const info=fs.lstatSync(file);
+          if(!info.isFile()||info.mtimeMs>orphanCutoff) return false;
+          fs.unlinkSync(file);
+          return true;
+        });
+        if(removed) summary.artifacts_removed++;
+      } catch(error) { if(error.code!=='ENOENT') failed({artifact_id:id},error); }
+    }
     const terminal=`SELECT w.request_id,w.path,a.payload,a.status,a.cancelled_at,r.created_at finished_at,
       w.fetched_at
       FROM workspaces w JOIN assignments a USING(request_id) LEFT JOIN reports r USING(request_id)

@@ -7,6 +7,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { fixtureEnv } from '../src/test-support/fixture-env.mjs';
 import { parseWorkers } from '../src/workers.mjs';
 import { HANDOFF_ACQUISITION_PREFIX, Store } from '../src/store.mjs';
@@ -55,7 +56,16 @@ async function startBridge(label, workerExtra, limits, extraEnv = {}) {
   const claimNew = async id => { await submit(id); const c = await ok('claim', { request_id: id, claimant: 'fixture-worker' }); return c; };
   const finish = (job, extra = {}, signal) => ok('finish', { request_id: job.request_id, claim_id: job.claim_id, outcome: 'completed', summary: 'done', result: 'done', ...extra }, signal);
   const queuedIds = async () => (await ok('list_pending')).assignments.map(x => x.request_id);
-  return { rpc, ok, submit, admin, operator, stop, claimNew, finish, queuedIds };
+  const seedUntouchedLapses = ids => {
+    const db = new DatabaseSync(path.join(path.dirname(socketPath), 'bridge.db'), { timeout: 5000 });
+    try {
+      const insert = db.prepare("INSERT INTO lifecycle_events(request_id,type,at,actor,source,reason,worker) VALUES(?,'abandoned',?,'system','live',?,'dot')");
+      db.exec('BEGIN IMMEDIATE');
+      for (const id of ids) insert.run(id, '2026-11-27T00:00:00.000Z', 'lease_expired: 1 call, last claim at fixture');
+      db.exec('COMMIT');
+    } finally { db.close(); }
+  };
+  return { rpc, ok, submit, admin, operator, stop, claimNew, finish, queuedIds, seedUntouchedLapses };
 }
 const pass = message => console.log(`PASS ${message}`);
 
@@ -416,6 +426,22 @@ try {
     const f2 = await b.claimNew('req_hl_second');
     assert.equal((await b.finish(f2)).next_job?.request_id, 'req_hl_fresh', 'the fresh row behind the lapsed one is handed, hint or not');
     pass('claim hint + finish handoff: the handoff pick ignores the hint and reaches the fresh row behind a lapsed one');
+  }
+
+  {
+    const b = await start('full-lapsed-page', { finish_handoff: { wait_ms: 0 } }, { max_claimed_outer_assignments: 4 });
+    const first = await b.claimNew('req_full_page_finish');
+    const lapsed = Array.from({length:64}, (_,i)=>`req_full_page_a${String(i).padStart(2,'0')}`);
+    for (const id of lapsed) await b.submit(id);
+    const eligible = 'req_full_page_z_eligible';
+    await b.submit(eligible);
+    b.seedUntouchedLapses(lapsed);
+    assert.deepEqual(await b.queuedIds(), lapsed.slice(0,50), 'ordinary list remains capped');
+    assert.equal((await b.ok('get', { request_id: eligible })).status, 'queued');
+    const result = await b.finish(first);
+    assert.equal(result.next_job?.request_id, eligible);
+    assert.deepEqual(await b.queuedIds(), lapsed.slice(0,50), 'lapsed rows remain queued for explicit pickup');
+    pass('finish reaches an eligible row behind a full page of lapsed work');
   }
 
 } finally {
