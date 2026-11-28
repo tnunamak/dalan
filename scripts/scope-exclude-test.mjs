@@ -66,9 +66,9 @@ assert.throws(() => validateSubmission(task(['codex-rs']), { scanInput: scan }),
 }
 // Precise secret words in a code file's name, extensionless secret names and password stores stay
 // sensitive; images are not exempt; growth is capped; secret-shaped values refuse, local fixture URLs do not
-{ const tree = ['src/config/credentials.ts', 'src/secrets.py', 'src/keys/private-key.ts', 'src/owner-credential.ts', 'src/service-account.ts', 'config/jwt_secret', 'config/client_secret', 'auth/passwords.txt', 'auth/htpasswd', 'img/recovery-key.png', 'src/logout-cancels-credential-setup.test.ts', 'docs/secrets.md', 'src/ok.ts'];
+{ const tree = ['src/config/credentials.ts', 'src/secrets.py', 'src/keys/private-key.ts', 'src/owner-credential.ts', 'src/service-account.ts', 'config/jwt_secret', 'config/client_secret', 'auth/passwords.txt', 'auth/htpasswd', 'img/recovery-key.png', 'auth/github-recovery-codes.txt', 'src/recovery-key.ts', 'src/logout-cancels-credential-setup.test.ts', 'docs/secrets.md', 'src/ok.ts'];
   const one = f => () => validateSubmission(task([f]), { scanInput: () => ({ files: tree, diffFiles: [], diff: '', symlinks: [] }) });
-  for (const f of tree.filter(f => !['src/logout-cancels-credential-setup.test.ts', 'src/ok.ts', 'img/recovery-key.png'].includes(f))) assert.throws(one(f), /sensitive/, f);
+  for (const f of tree.filter(f => !['src/logout-cancels-credential-setup.test.ts', 'src/ok.ts'].includes(f))) assert.throws(one(f), /sensitive/, f);
   for (const f of ['src/logout-cancels-credential-setup.test.ts', 'src/ok.ts']) assert.doesNotThrow(one(f), f);
   const many = Array.from({ length: 201 }, (_, i) => `src/f${i}.ts`);
   assert.throws(() => validateSubmission(task(['docs'], { brief: `Review ${many.join(', ')}.` }), { scanInput: () => ({ files: ['docs/a.md', ...many], diffFiles: [], diff: '', symlinks: [] }) }), /scope growth limit/);

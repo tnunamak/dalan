@@ -120,7 +120,7 @@ function loadPolicy() {
 const alwaysHardNames=String.raw`\.env[^/]*|\.ssh|\.gnupg|\.aws|\.npmrc|\.netrc|\.git-credentials|\.pgpass|\.pypirc|\.htpasswd|kubeconfig(?:\.[^/]*)?|id_(?:rsa|dsa|ed25519|ecdsa)(?:[-_.][^/]*)?|sign[-_][^/]*release[^/]*`;
 const sensitivePathTail=String.raw`(?:\/|$)|(?:^|\/)(?:\.docker|\.kube)\/config(?:\.json)?$|\.(?:pem|p12|pfx|key|keystore|jks|ppk|tfstate(?:\.backup)?)$`;
 const alwaysHard=new RegExp(`(?:^|/)(?:${alwaysHardNames})${sensitivePathTail}`,'i');
-const hardPath=new RegExp(String.raw`(?:^|/)(?:${alwaysHardNames}|service[-_]account(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|[^/]*(?:credentials?|private[-_.]?key|gpg[-_.]?secret)[^/]*|(?:[^/]*[-_.])?signing(?:[-_.][^/]*)?)${sensitivePathTail}`,'i');
+const hardPath=new RegExp(String.raw`(?:^|/)(?:${alwaysHardNames}|service[-_]account(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|[^/]*(?:credentials?|private[-_.]?key|recovery[-_.]?(?:key|codes?)|gpg[-_.]?secret)[^/]*|(?:[^/]*[-_.])?signing(?:[-_.][^/]*)?)${sensitivePathTail}`,'i');
 // "token" alone is not a credential: tokens.css and design-tokens.json are design tokens. A token file is sensitive when a
 // credential word qualifies it (auth-token, access_token, gh-tokens.txt, npm.token), or it is a bare `token` file or a
 // `tokens.txt|env|key|secret`. Plain `tokens/` and `tokens.json` are the usual design-token names and pass.
@@ -138,7 +138,7 @@ export function isSourceExemptionPath(file) {
 }
 // In a code file's own name, the precise secret words still mark secret material (credentials.ts, secrets.py, private-key.ts,
 // service-account.ts, owner-credential.ts); a word inside a longer name (logout-cancels-credential-setup.test.ts) does not.
-const codeSecretName=/(?:^|\/)(?:credentials?|secrets?|private[-_.]?key|service[-_.]?account|[^/]*[-_.](?:credentials?|secrets?))\.[^/.]+$/i;
+const codeSecretName=/(?:^|\/)(?:credentials?|secrets?|private[-_.]?key|recovery[-_.]?(?:key|codes?)|service[-_.]?account|[^/]*[-_.](?:credentials?|secrets?))\.[^/.]+$/i;
 // Password stores are secret material by name in any form.
 const passwordName=/(?:^|\/)(?:\.?htpasswd|shadow|[^/]*passw(?:or)?ds?(?:\.[^/]*)?)$/i;
 const secretDirectory=/(?:^|\/)(?:secrets?|credentials?)\//i;
