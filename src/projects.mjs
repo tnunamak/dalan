@@ -96,7 +96,7 @@ export function loadCapacity(file = defaultPath(os.homedir(),'.config/dot-bridge
 }
 
 export function assignmentInput(assignment) {
-  if (!['read-only', 'implementation'].includes(assignment.execution_scope)) throw new Error('invalid execution scope');
+  if (!['read-only', 'implementation'].includes(assignment.execution_scope)) throw new Error('invalid execution_scope: expected one of read-only, implementation');
   if (assignment.inputs?.length !== 1) throw new Error('one pinned GitHub input required');
   const input = assignment.inputs[0];
   if (!validRepo(input.github_repo) || !fullSha.test(input.base_sha || '')) throw new Error('github_repo and full base_sha required');
