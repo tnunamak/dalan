@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
-import { checkPublicIdentity, watchPublicIdentity } from '../src/try-exposure.mjs';
+import { checkPublicIdentity, verifyPublicReady, watchPublicIdentity } from '../src/try-exposure.mjs';
 
 const origin = 'https://trial.example';
 const secret = randomBytes(24).toString('hex');
@@ -86,6 +86,22 @@ test('one transient miss recovers without ending the first identity', async () =
     await withTimeout(recovered, 500, 'watcher did not recover after a transient failure');
     assert.deepEqual(statuses.slice(0, 2), ['retrying', 'ready']);
   } finally { await watcher.stop(); }
+});
+
+test('initial public readiness rejects even a valid final response after the total deadline', async () => {
+  let now = 0, misses = 0;
+  const lateFetch = async (input, options) => {
+    if (new URL(input).pathname === '/connect/list') {
+      now = 51;
+      return new Response(null, { status: 404 });
+    }
+    if (['/admin', '/connect/pending'].includes(new URL(input).pathname)) return new Response(null, { status: 404 });
+    return readyFetch(input, options);
+  };
+  const result = await verifyPublicReady({ origin, secret, fetchImpl: lateFetch, timeoutMs: 50,
+    clock: { now: () => now, sleep: async () => { misses += 1; now += 50; } } });
+  assert.equal(result.ready, false);
+  assert.equal(misses, 0, 'no second sweep after expiry');
 });
 
 test('identity probes bound slow fetches and bodies to one deadline', async () => {
