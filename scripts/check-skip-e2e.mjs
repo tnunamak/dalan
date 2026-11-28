@@ -123,7 +123,9 @@ if(process.argv.includes('--fixture-server')) {
     fs.writeFileSync(path.join(config,'host-check-allowlist.json'),JSON.stringify({version:1,checks:Object.keys(checks).map(check_id=>({repo:'test/fixture',check_id}))}),{mode:0o600});
     const stillDeclared=await call('get',{request_id});
     assert(stillDeclared.available_checks.includes('named/1'));
-    assert.match(stillDeclared.host_execution_unavailable_reason,/host_check_not_allowlisted/);
+    // Since #157 each named check reports its own refusal in its details; the top-level reason is only set when nothing can run.
+    assert.match(stillDeclared.available_check_details['named/1'],/not runnable: host_check_not_allowlisted/);
+    assert.equal(stillDeclared.host_execution_available,true);assert.equal(stillDeclared.host_execution_unavailable_reason,null);
     const refused=await call('run_check',{request_id,claim_id:claim.claim_id,check_id:'named/1'});
     assert.match(JSON.stringify(refused),/host_check_not_allowlisted/);
     assert.equal(fs.readFileSync(executions,'utf8').trim().split('\n').length,launches.length);
