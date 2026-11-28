@@ -63,6 +63,8 @@ if (help) {
     }
     process.argv.splice(2, 2, 'submit', '--revises', id);
   }
-  await import('./dot-worker.mjs');
+  if (['jobs', 'events'].includes(command)) {
+    (await import('../src/read-api.mjs')).readMain(command, process.argv.slice(3), os.homedir());
+  } else await import('./dot-worker.mjs');
 }
 }
