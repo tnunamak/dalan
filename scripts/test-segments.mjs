@@ -208,7 +208,20 @@ async function runSegment(command) {
   const report = path.join(dir, 'skips.jsonl');
   try {
     const result = await runCommand(command, { env: { ...process.env, DALAN_TEST_SKIP_REPORT: report } });
-    const text = await readFile(report, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
+    let text;
+    try {
+      text = await readFile(report, 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        text = '';
+      } else {
+        const status = exitStatus(result);
+        return {
+          ...result, code: status === 0 || status === 77 ? 1 : status,
+          error: new Error('unreadable skip report'), skippedChecks: []
+        };
+      }
+    }
     const skippedChecks = [], malformedLines = [];
     for (const [offset, line] of text.split('\n').entries()) {
       if (!line) continue;
@@ -241,11 +254,7 @@ async function verifyFailureDoesNotShortCircuit() {
     `${node} -e 'process.stdout.write("later segment ran")'`,
     `${node} -e 'process.exit(9)'`
   ];
-  const results = [];
-  for (const [index, command] of fixture.entries()) {
-    const result = await runCommand(command, { quiet: true });
-    results.push({ index: index + 1, command, exitCode: exitStatus(result) });
-  }
+  const results = await runSegments(fixture);
   assert.deepEqual(results.map(result => result.exitCode), [7, 0, 9]);
   const report = failureSummary(results);
   assert.match(report, /FAIL #1\/3 exit=7/);
@@ -254,18 +263,7 @@ async function verifyFailureDoesNotShortCircuit() {
   console.log('PASS segment runner continues after failures and reports every failed segment');
 }
 
-async function main() {
-  if (process.argv.includes('--self-test')) {
-    await verifyFailureDoesNotShortCircuit();
-    await import('./test-segments-test.mjs');
-    return;
-  }
-  const segments = JSON.parse(await readFile(segmentFile, 'utf8'));
-  const pkg = JSON.parse(await readFile(packageFile, 'utf8'));
-  assert(Array.isArray(segments) && segments.length > 0, 'test segment list must be a non-empty array');
-  assert(segments.every(command => typeof command === 'string' && command.trim()), 'test segments must contain non-empty command strings');
-  assert.equal(pkg.scripts.test, 'node scripts/test-segments.mjs', 'npm test must use the sequential runner');
-
+async function runSegments(segments) {
   const results = [];
   for (const [offset, command] of segments.entries()) {
     const index = offset + 1;
@@ -282,6 +280,22 @@ async function main() {
     console.log(`=== SEGMENT ${index}/${segments.length}: ${exitCode === 77 ? 'SKIP' : exitCode === 0 ? (result.skippedChecks.length ? `PASS, ${countSkipped(result.skippedChecks)} check(s) SKIPPED` : 'PASS') : `FAIL exit=${exitCode}`} === ${seconds.toFixed(3)}s`);
     if (interrupted) break;
   }
+  return results;
+}
+
+async function main() {
+  if (process.argv.includes('--self-test')) {
+    await verifyFailureDoesNotShortCircuit();
+    await import('./test-segments-test.mjs');
+    return;
+  }
+  const segments = JSON.parse(await readFile(segmentFile, 'utf8'));
+  const pkg = JSON.parse(await readFile(packageFile, 'utf8'));
+  assert(Array.isArray(segments) && segments.length > 0, 'test segment list must be a non-empty array');
+  assert(segments.every(command => typeof command === 'string' && command.trim()), 'test segments must contain non-empty command strings');
+  assert.equal(pkg.scripts.test, 'node scripts/test-segments.mjs', 'npm test must use the sequential runner');
+
+  const results = await runSegments(segments);
 
   const report = failureSummary(results);
   console.log(`\n${report}`);

@@ -422,6 +422,7 @@
   "node scripts/shutdown-signal-log-test.mjs",
   "node scripts/sandbox-probe-e2e.mjs",
   "node --test scripts/test-segments-test.mjs",
+  "node --test scripts/test-segments-unreadable-report.test.mjs",
   "node scripts/pull-queue-test.mjs",
   "node scripts/pull-queue-destination-test.mjs",
   "node scripts/pull-catalog-hash-test.mjs",
