@@ -1096,7 +1096,12 @@ try {
   });
   await check('12e', 'concurrent approvals create one connection (same code twice; by code for one worker)', async () => {
     main.start_window('lark');
-    const flow = await vendor.begin();
+    const previous = main.sql("SELECT connection_id,client_id FROM connections WHERE worker='lark' AND revoked_at IS NULL");
+    assert.equal(previous.length, 1, 'fixture has one existing connection');
+    const replacement = new Vendor(main);
+    assert.equal((await replacement.register()).status, 201);
+    assert.notEqual(replacement.client_id, previous[0].client_id);
+    const flow = await replacement.begin();
     const both = await Promise.all([main.cliAsync(['connect', 'approve', flow.code, '--worker', 'lark', '--replace', '--json']), main.cliAsync(['connect', 'approve', flow.code, '--worker', 'lark', '--replace', '--json'])]);
     assert.equal(both.filter(r => r.code === 0).length, 1, JSON.stringify(both.map(r => r.stderr + r.stdout)));
     // An approved replacement is durable but not active before redemption.
@@ -1106,8 +1111,8 @@ try {
       + (SELECT count(*) FROM pending_replacements WHERE worker='lark' AND grant_id IN (SELECT grant_id FROM pairings WHERE uid=?)) AS n`,
       flow.uid, flow.uid)[0].n;
     assert.equal(admitted, 1, 'one durable connection approval for this pairing');
-    const authorized = main.sql("SELECT count(*) n FROM connections WHERE worker='lark' AND revoked_at IS NULL")[0].n;
-    assert.equal(authorized, 1, 'only the existing connection is authoritative before redemption');
+    const authorized = main.sql("SELECT connection_id,client_id FROM connections WHERE worker='lark' AND revoked_at IS NULL");
+    assert.deepEqual(authorized, previous, 'only the original client and connection are active before redemption');
     main.cli(['connect', 'revoke', 'lark', '--json']);
     const f1 = await vendor.begin(), f2 = await vendorB.begin();
     const race = await Promise.all([main.cliAsync(['connect', 'approve', f1.code, '--worker', 'lark', '--json']), main.cliAsync(['connect', 'approve', f2.code, '--worker', 'lark', '--json'])]);
