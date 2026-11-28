@@ -10,9 +10,26 @@ import {spawn,spawnSync} from 'node:child_process';
 import {generateKeyPairSync,sign,randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
+import {once} from 'node:events';
 import {portFromListeningBanner} from '../src/test-support/port.mjs';
 
 const root=fileURLToPath(new URL('..',import.meta.url));
+const COMMAND_TIMEOUT_MS=15000;
+const HARD_STOP={timeout:COMMAND_TIMEOUT_MS,killSignal:'SIGKILL'};
+const exited=child=>child.exitCode!==null||child.signalCode!==null;
+const waitForExit=async(child,ms)=>{
+  if(exited(child)) return true;
+  const signal=AbortSignal.timeout(ms);
+  try { await once(child,'exit',{signal}); return true; }
+  catch(error) { if(!signal.aborted) throw error; return exited(child); }
+};
+const stopService=async(child)=>{
+  if(exited(child)) return;
+  child.kill('SIGTERM');
+  if(await waitForExit(child,2000)) return;
+  child.kill('SIGKILL');
+  if(!await waitForExit(child,1500)) throw new Error('fixture service did not exit after SIGTERM and SIGKILL');
+};
 if(process.argv.includes('--fixture-server')) {
   // This child replaces executor readiness and launch. Policy, HTTP, check
   // orchestration, recording, lifecycle and result projection are production code.
@@ -35,9 +52,9 @@ if(process.argv.includes('--fixture-server')) {
     assert(['scripts/test-segments.mjs','scripts/named-skip.mjs','scripts/armored-skip.mjs'].includes(command[1]));
     assert.equal(command.length,2);
     const started=Date.now(),chunks=[];
-    const child=spawn(process.execPath,command.slice(1),{cwd:dir,env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},stdio:['ignore','pipe','pipe'],timeout:10000});
+    const child=spawn(process.execPath,command.slice(1),{cwd:dir,env:{PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR},stdio:['ignore','pipe','pipe'],timeout:10000,killSignal:'SIGKILL'});
     child.stdout.on('data',b=>chunks.push(b));child.stderr.on('data',b=>chunks.push(b));
-    const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',resolve);});
+    const [code]=await once(child,'close',{signal:AbortSignal.timeout(11000)});
     const bytes=Buffer.concat(chunks),duration_ms=Date.now()-started,stop={verified:true,reason:'fixture_child_exited'};
     const receipt={exit:{code},timedOut:false,cancelled:false,duration_ms,stop,budgets:options.host_budget,usage:{},phases:[{name:'check',exit:{code},timedOut:false,cancelled:false,duration_ms,stop,bytes,truncated:false}]};
     fs.appendFileSync(process.env.CHECK_SKIP_EXECUTIONS,JSON.stringify({requestId,command,exit:code})+'\n');
@@ -49,7 +66,7 @@ if(process.argv.includes('--fixture-server')) {
   const home=fs.mkdtempSync(path.join(os.tmpdir(),'cse-')),repo=path.join(home,'repo'),config=path.join(home,'.config/dot-bridge');
   fs.mkdirSync(path.join(repo,'scripts'),{recursive:true});fs.mkdirSync(config,{recursive:true});
   console.log(`Check skip end-to-end fixtures retained: ${home}`);
-  const git=(...args)=>{const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();};
+  const git=(...args)=>{const r=spawnSync('git',['-C',repo,...args],{encoding:'utf8',...HARD_STOP});assert.ifError(r.error);assert.equal(r.status,0,r.stderr);return r.stdout.trim();};
   git('init','-q');git('config','user.email','fixture@example.test');git('config','user.name','Synthetic fixture');
   fs.copyFileSync(new URL('./test-segments.mjs',import.meta.url),path.join(repo,'scripts/test-segments.mjs'));
   fs.writeFileSync(path.join(repo,'scripts/skip.mjs'),"console.log('SKIP host executor journey:');process.exit(77);\n");
@@ -65,8 +82,12 @@ if(process.argv.includes('--fixture-server')) {
   git('add','scripts','package.json','.dot-bridge.json');git('commit','-qm','synthetic exit-77 segments');
   const base=git('rev-parse','HEAD'),{privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
   const jwk={...publicKey.export({format:'jwk'}),kid:'fixture',use:'sig'};
-  const jwks=http.createServer((req,res)=>res.end(JSON.stringify({keys:[jwk]})));
-  await new Promise(resolve=>jwks.listen(0,'127.0.0.1',resolve));
+  const jwks=http.createServer((req,res)=>{
+    if(req.url==='/stall') return;
+    res.end(JSON.stringify({keys:[jwk]}));
+  });
+  jwks.listen(0,'127.0.0.1');
+  await once(jwks,'listening',{signal:AbortSignal.timeout(10000)});
   const issuer=`http://127.0.0.1:${jwks.address().port}`;
   let port=null;
   fs.writeFileSync(path.join(config,'workers.json'),JSON.stringify({default_execution:'host',workers:{dot:{workspaceAllowed:true,connections:[{issuer,subject:'fixture',client_id:'fixture-client'}],repos:['test/fixture']}}}),{mode:0o600});
@@ -85,13 +106,26 @@ if(process.argv.includes('--fixture-server')) {
     const payload=Buffer.from(JSON.stringify({iss:issuer,aud:'https://fixture.test',exp:Math.floor(Date.now()/1000)+300,sub:'fixture',azp:'fixture-client',scope:'dot-bridge.read dot-bridge.work'})).toString('base64url');
     const unsigned=`${header}.${payload}`,token=`${unsigned}.${sign('RSA-SHA256',Buffer.from(unsigned),privateKey).toString('base64url')}`;
     const secret=fs.readFileSync(path.join(config,'env'),'utf8').match(/BRIDGE_PATH_SECRET=(.+)/)[1];
-    const call=async(name,args)=>{
-      const response=await fetch(`http://127.0.0.1:${port}/${secret}/mcp`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method:'tools/call',params:{name,arguments:args}})});
-      assert.equal(response.status,200);const result=(await response.json()).result;assert(!result.isError,result.content[0].text);return JSON.parse(result.content[0].text);
+    const call=async(name,args,{url=`http://127.0.0.1:${port}/${secret}/mcp`,deadlineMs=COMMAND_TIMEOUT_MS}={})=>{
+      const signal=AbortSignal.timeout(deadlineMs);
+      try {
+        const response=await fetch(url,{signal,method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({jsonrpc:'2.0',id:randomUUID(),method:'tools/call',params:{name,arguments:args}})});
+        assert.equal(response.status,200);const result=(await response.json()).result;assert(!result.isError,result.content[0].text);return JSON.parse(result.content[0].text);
+      } catch(error) {
+        if(signal.aborted) throw new Error(`MCP ${name} exceeded ${deadlineMs} ms`,{cause:error});
+        throw error;
+      }
     };
+    let watchdog;
+    try {
+      const bounded=call('stalled-fixture',{}, {url:`${issuer}/stall`,deadlineMs:100});
+      const guard=new Promise((_,reject)=>{watchdog=setTimeout(()=>reject(new Error('stalled fixture exceeded outer watchdog')),1500);});
+      await assert.rejects(Promise.race([bounded,guard]),/MCP stalled-fixture exceeded 100 ms/);
+    } finally {clearTimeout(watchdog);}
     const request_id=`req_${randomUUID()}`,file=path.join(home,'assignment.json');
     fs.writeFileSync(file,JSON.stringify({schema_version:1,request_id,brief:'Exercise synthetic skip coverage',inputs:[{github_repo:'test/fixture',base_sha:base}],scope_paths:['.'],expected_output:'report',execution_scope:'implementation',checks:['node scripts/named-skip.mjs']}));
-    const submitted=spawnSync(process.execPath,['bin/dot-worker.mjs','submit','--file',file,'--execution','host','--json'],{cwd:root,env,encoding:'utf8'});
+    const submitted=spawnSync(process.execPath,['bin/dot-worker.mjs','submit','--file',file,'--execution','host','--json'],{cwd:root,env,encoding:'utf8',...HARD_STOP});
+    assert.ifError(submitted.error);
     assert.equal(submitted.status,0,submitted.stderr);
     const claim=await call('claim',{request_id,claimant:'fixture'});
     db=new DatabaseSync(path.join(home,'.local/share/dot-bridge/bridge.db'),{readOnly:true});
@@ -129,7 +163,8 @@ if(process.argv.includes('--fixture-server')) {
     const refused=await call('run_check',{request_id,claim_id:claim.claim_id,check_id:'named/1'});
     assert.match(JSON.stringify(refused),/host_check_not_allowlisted/);
     assert.equal(fs.readFileSync(executions,'utf8').trim().split('\n').length,launches.length);
-    const owner=spawnSync(process.execPath,['bin/dot-worker.mjs','get',request_id,'--json'],{cwd:root,env,encoding:'utf8'});
+    const owner=spawnSync(process.execPath,['bin/dot-worker.mjs','get',request_id,'--json'],{cwd:root,env,encoding:'utf8',...HARD_STOP});
+    assert.ifError(owner.error);
     assert.equal(owner.status,0,owner.stderr);
     const ownerChecks=JSON.parse(owner.stdout).checks;
     for(const [check_id,segment] of [['default','scripts/skip.mjs'],['direct','scripts/named-skip.mjs'],['armored','scripts/named-skip.mjs'],['named/1','scripts/named-skip.mjs']]) {
@@ -139,7 +174,15 @@ if(process.argv.includes('--fixture-server')) {
     }
     console.log('PASS current-head MCP check journey: real exit-77 segments persist and surface skipped rows with segment names');
   } finally {
-    db?.close();if(service.exitCode===null&&service.signalCode===null){service.kill('SIGTERM');await new Promise(resolve=>service.once('exit',resolve));}
-    await new Promise(resolve=>jwks.close(resolve));
+    try { db?.close(); }
+    finally {
+      try { await stopService(service); }
+      finally {
+        const closed=once(jwks,'close',{signal:AbortSignal.timeout(2000)});
+        jwks.close();
+        jwks.closeAllConnections();
+        await closed;
+      }
+    }
   }
 }
