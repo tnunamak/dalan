@@ -37,7 +37,11 @@ function deliveryColumns(value) {
   const mode=delivery?.mode, version=destinationVersion(mode);
   const address=mode==='none'?null:mode==='t3'?delivery?.threadId:delivery?.address;
   if(!version || mode!=='none'&&(typeof address!=='string'||!address)) throw new Error('invalid delivery');
-  return {delivery,mode,address,version,threadId:mode==='t3'?address:'',deliveryValue:mode==='none'?'none':mode+':'+address};
+  // A bare string is the legacy overload: it still stores and routes as t3:<value>, but, like the schema 73 backfill,
+  // its tuple stays unknown unless the value is a valid T3 thread id. So the tuple never names a bad thread.
+  const known=typeof value!=='string'||validT3ThreadId(value);
+  return {delivery,mode:known?mode:null,address:known?address:null,version:known?version:null,
+    threadId:mode==='t3'?address:'',deliveryValue:mode==='none'?'none':mode+':'+address};
 }
 
 // A reserved HTTP response is a live effect channel. Persist its owner so a

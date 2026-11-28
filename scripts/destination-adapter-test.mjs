@@ -179,6 +179,14 @@ await row('assignment delivery tuple backfills legacy rows, survives reopen, and
       assert.equal(store.get(request_id).delivery_mode,delivery);
       assert.equal(store.submit({request_id},parseDelivery(delivery),'fixture-env','fixture-owner').duplicate,true);
     }
+    // The legacy bare-string overload keeps its delivery value but never writes a tuple for a bad thread id.
+    for(const [request_id,bare] of [['req_bare_space','bad id'],['req_bare_short','ab'],['req_bare_prefixed','t3:bad id']]){
+      store.submit({request_id},bare,'fixture-env','fixture-owner');
+      assert.deepEqual(deliveryTuple(store,request_id),{delivery_adapter:null,delivery_address:null,delivery_adapter_version:null},'bare '+bare);
+      assert.equal(store.get(request_id).delivery_mode,'t3:'+bare);
+    }
+    store.submit({request_id:'req_bare_ok'},'fixture:bare','fixture-env','fixture-owner');
+    assert.deepEqual(deliveryTuple(store,'req_bare_ok'),wantTuple('t3','fixture:bare'));
     // A rewound marker must never retry ALTER on existing columns.
     store.db.exec('PRAGMA user_version=72');
     store.db.close();
