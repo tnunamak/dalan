@@ -4,6 +4,7 @@ This file lists user-visible changes, newest first. Check the section for your t
 
 ## Unreleased
 
+- **The PR-head reviewer is retired, and Dalan no longer reads T3's private database.** `dalan-pr-reviewer` now prints that the reviewer was retired and exits 2; the command stays for one release so an upgrade leaves no dangling command. Its systemd units, example config and docs are removed. Fleet tooling owns PR-head reviews. Disable any `dot-pr-reviewer.timer` you installed.
 - **Each job records its delivery as adapter, address and adapter version (schema 73).** New columns `delivery_adapter`, `delivery_address` and `delivery_adapter_version` hold the delivery tuple next to the existing `delivery` string. Each registered destination declares a version (built-ins are `1`). The upgrade fills the tuple for existing `none` and `t3:` rows and leaves other rows unknown. A Dalan release from before this change refuses to open the upgraded database.
 - **A delivery adapter without its own route check needs a valid address.** The default routing check now uses the same address parser as admission, so a malformed stored row no longer loads such an adapter; `none` and stored `t3` rows route as before.
 - **The admission track record counts jobs that ended in the last 7 days.** It used to select by creation time, so a job queued just before the window and finished yesterday was left out. Jobs are now placed by their report, cancellation or terminal lifecycle time, with creation time only for old rows that have none.

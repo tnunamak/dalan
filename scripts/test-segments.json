@@ -276,7 +276,6 @@
   "node scripts/acp-packer-test.mjs",
   "node scripts/acp-prose-check-test.mjs",
   "node scripts/acp-regression-test.mjs",
-  "node scripts/pr-head-reviewer-test.mjs",
   "node scripts/diagnostics-redaction-test.mjs",
   "node scripts/execution-capability-test.mjs",
   "node scripts/adapter-qualification-test.mjs",
