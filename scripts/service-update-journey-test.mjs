@@ -138,7 +138,12 @@ test('isolated two-worker bridge stages, switches with consent, and restores dat
     const next = packageFixture('0.9.1', true);
     const sentinel = path.join(defaultPath(home, '.local/share/dot-bridge'), 'migration-sentinel');
     fs.writeFileSync(sentinel, 'saved'); failRestart = true;
-    await assert.rejects(updateService({ home }, { ...seams, latestRelease: async () => release('0.9.1'), installRelease: async () => next }), /injected restart failure/);
+    const obstructedResult = path.join(home, 'update-result.json');
+    fs.rmSync(obstructedResult);
+    fs.mkdirSync(obstructedResult);
+    try {
+      await assert.rejects(updateService({ home }, { ...seams, latestRelease: async () => release('0.9.1'), installRelease: async () => next }), /injected restart failure/);
+    } finally { fs.rmdirSync(obstructedResult); }
     assert.equal(fs.readFileSync(sentinel, 'utf8'), 'saved');
     assert.equal(fs.realpathSync(path.join(home, 'current')), candidate);
     assert.equal((await probeService(home, { ...receipt, repo: candidate })).version, '0.9.0');

@@ -397,6 +397,7 @@ export async function updateService({ home, check = false, yes = false, retry = 
     throw error;
   } finally {
     try { if (result) atomic(resultFile, JSON.stringify({ ...result, timestamp: new Date().toISOString() })); }
+    catch { console.error('dalan: could not write the optional update-result.json record'); }
     finally { releaseLock(); }
   }
 }
