@@ -2648,7 +2648,9 @@ export class Store {
         break;
       }
     }
-    return replies;
+    // A reused acquisition_id names a batch that is over: say so instead of answering with an empty batch forever.
+    if(plan.retry&&!replies.length) throw new Error('acquisition_id was already used for a batch whose claims have all ended; call claim again with a fresh acquisition_id');
+    return {claims:replies,retry:plan.retry};
   }
 
   listPending(worker='dot',{batch=false}={}) {

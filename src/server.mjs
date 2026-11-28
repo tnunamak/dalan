@@ -1033,9 +1033,9 @@ async function dispatchTool(name,a,principal,notifyMeta,signal,batchMode=null) {
       if(Object.hasOwn(a,'next')) {
         const claimant=str(a.claimant,'claimant',128);
         const lanes=()=>store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity).free_lanes;
-        const claims=await store.claimBatch({next:a.next,available:lanes(),worker,subject,connectionId,claimant,acquisitionId:a.acquisition_id,leaseMs:a.lease_ms},
+        const {claims,retry}=await store.claimBatch({next:a.next,available:lanes(),worker,subject,connectionId,claimant,acquisitionId:a.acquisition_id,leaseMs:a.lease_ms},
           (request_id,acquisition_id,mode)=>signal?.aborted?null:tool('claim',{request_id,claimant,acquisition_id,...(a.lease_ms===undefined?{}:{lease_ms:a.lease_ms})},principal,undefined,signal,mode));
-        return {claims,free_lanes:lanes()};
+        return {claims,...(retry?{retry:true}:{}),free_lanes:lanes()};
       }
       const requestId=id(a.request_id),claimant=str(a.claimant,'claimant',128),ctx=commandContext('claim',{claimant,acquisition_id:a.acquisition_id??null,lease_ms:a.lease_ms??null}),row=store.get(requestId),held=row.claim?.state==='active'?row.claim:null,retry=holdsLiveGrant(worker,requestId,claimant,subject,a.acquisition_id);
       if(!retry)assertRepoAllowed(worker,row.assignment);

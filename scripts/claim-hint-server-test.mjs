@@ -77,6 +77,14 @@ try {
     assert.equal(batch.free_lanes,0);
     const again=parse(await rpc('claim',args));
     assert.deepEqual(again.claims.map(x=>x.claim_id),batch.claims.map(x=>x.claim_id));
+    assert.equal(again.retry,true,'a retry is marked as one');
+    assert.equal(Object.hasOwn(batch,'retry'),false,'a first batch is not marked as a retry');
+    // No lane is free now: a new id gets an empty first batch, and reusing that id is an error, never a silent empty batch.
+    const empty=parse(await rpc('claim',{next:2,claimant:'batch-worker',acquisition_id:'reused-batch'}));
+    assert.deepEqual(empty.claims,[]);
+    const reused=await rpc('claim',{next:2,claimant:'batch-worker',acquisition_id:'reused-batch'});
+    assert.equal(reused.isError,true);
+    assert.match(reused.content[0].text,/fresh acquisition_id/);
     const remaining=parse(await rpc('list_pending')).assignments.filter(x=>pendingIds.includes(x.request_id));
     assert.deepEqual(remaining.map(x=>x.request_id),pendingIds.slice(3));
     assert.equal(parse(await rpc('get',{request_id:skipped})).status,'queued');
