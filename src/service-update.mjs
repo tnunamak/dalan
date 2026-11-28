@@ -407,6 +407,20 @@ export function serviceStatus({ home }) {
   let version = receipt.version;
   if (fs.existsSync(current)) version = JSON.parse(fs.readFileSync(path.join(fs.realpathSync(current), 'package.json'), 'utf8')).version;
   let last_result = null;
-  try { last_result = JSON.parse(fs.readFileSync(path.join(home, 'update-result.json'), 'utf8')); } catch { /* no update attempt */ }
+  let raw;
+  try { raw = fs.readFileSync(path.join(home, 'update-result.json'), 'utf8'); }
+  catch (error) {
+    if (error.code !== 'ENOENT') last_result = { status: 'unavailable', reason: 'unreadable' };
+  }
+  if (raw !== undefined) {
+    try {
+      const result = JSON.parse(raw);
+      last_result = result && typeof result === 'object' && !Array.isArray(result) &&
+        Object.hasOwn(result, 'outcome') && typeof result.outcome === 'string'
+        ? result : { status: 'unavailable', reason: 'malformed' };
+    } catch {
+      last_result = { status: 'unavailable', reason: 'malformed' };
+    }
+  }
   return { version, auto_update: receipt.auto_update ?? false, last_result, failed_release: readFailed(home)?.version ?? null };
 }
