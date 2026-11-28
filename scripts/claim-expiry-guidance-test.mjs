@@ -61,7 +61,7 @@ try {
     assert.doesNotMatch(configured.guidanceFor('other'),/short note at least every/);
     const initialLease=configured.get('heartbeat').claim.lease_expires_at;
     now+=5000;
-    assert.equal(configured.workerGetHeartbeat(configured.get('heartbeat'),'dot','subject').progress_due_at,new Date(now+120000).toISOString());
+    assert.equal(configured.workerGetHeartbeat(configured.get('heartbeat'),'dot','subject',first.claim_id).progress_due_at,first.progress_due_at);
     assert.deepEqual(configured.workerGetHeartbeat(configured.get('heartbeat'),'dot','other-subject'),{});
     assert.equal(configured.get('heartbeat').claim.lease_expires_at,initialLease,'advisory get does not renew a claim');
     const progressed=configured.progress('heartbeat',first.claim_id,'still working','subject');
@@ -71,12 +71,21 @@ try {
     configured.submit({schema_version:1,request_id:next,brief:'handoff guidance',inputs:[],expected_output:'one',execution_scope:'read-only'},{mode:'none'},null,'owner');
     const acquisition=HANDOFF_ACQUISITION_PREFIX+first.claim_id;
     const handed=configured.claim(next,'worker','subject',10,null,'dot',acquisition,90000);
-    assert.equal(handed.progress_due_at,new Date(now+120000).toISOString());
-    assert.equal(configured.claim(next,'worker','subject',10,null,'dot',acquisition,90000).claim_id,handed.claim_id);
+    assert.equal(handed.progress_due_at,new Date(now+90000).toISOString());
     const saved=configured.get(next),deadline=saved.claim.lease_expires_at;
     assert.deepEqual(configured.workerGetHeartbeat(saved,'dot','other-subject'),{});
     assert.equal(configured.workerGetHeartbeat(saved,'dot','subject').progress_due_at,handed.progress_due_at);
     assert.equal(configured.get(next).claim.lease_expires_at,deadline);
+    const retry=configured.claim(next,'worker','subject',10,null,'dot',acquisition,90000);
+    assert.equal(retry.claim_id,handed.claim_id);
+    assert.equal(retry.progress_due_at,new Date(now+120000).toISOString(),'working handoff retry refreshes activity and lease');
+    now=Date.parse(configured.get(next).claim.lease_expires_at)+1;
+    configured.sweepStaleLeases();
+    const fresh=configured.claim(next,'worker','subject',10,null,'dot','fresh-heartbeat',90000);
+    const current=configured.get(next);
+    assert.notEqual(fresh.claim_id,handed.claim_id);
+    assert.deepEqual(configured.workerGetHeartbeat(current,'dot','subject',handed.claim_id),{});
+    assert.equal(configured.workerGetHeartbeat(current,'dot','subject',fresh.claim_id).progress_due_at,fresh.progress_due_at);
     assert.equal(configured.db.prepare('SELECT count(*) n FROM claims WHERE request_id=?').get(next).n,1);
   } finally {configured.db.close();}
   console.log('PASS actionable expired question, cancelled-after-expiry reason and unchanged late-output fences');

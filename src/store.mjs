@@ -2562,13 +2562,19 @@ export class Store {
     return Object.hasOwn(intervals,worker)?intervals[worker]:null;
   }
   // The due time is reply guidance only; it never renews or fences a grant.
-  workerHeartbeatFields(worker) {
+  workerHeartbeatFields(worker,claim) {
     const ms=this.workerHeartbeatMs(worker);
-    return ms===null?{}:{progress_due_at:iso(this.nowMs()+ms)};
+    if(ms===null||!claim) return {};
+    const activity=Date.parse(claim.last_claim_activity_at??claim.claimed_at);
+    return {progress_due_at:iso(Math.min(activity+ms,Date.parse(this.leaseExpiresAt(claim))))};
   }
-  workerGetHeartbeat(row,worker,subject) {
+  workerGetHeartbeat(row,worker,subject,claimId) {
     const c=row.claim;
-    return row.status==='claimed'&&!row.cancellation_requested&&c?.state==='active'&&c.worker===worker&&c.subject===subject&&!this.leaseExpired(c)?this.workerHeartbeatFields(worker):{};
+    return row.status==='claimed'&&!row.cancellation_requested&&c?.state==='active'&&c.worker===worker&&c.subject===subject&&(claimId===undefined||c.claim_id===claimId)&&!this.leaseExpired(c)?this.workerHeartbeatFields(worker,c):{};
+  }
+  heartbeatForHeldClaim(id,claimId,worker) {
+    if(this.workerHeartbeatMs(worker)===null||!claimId) return {};
+    return this.workerHeartbeatFields(worker,this.db.prepare("SELECT * FROM claims WHERE request_id=? AND claim_id=? AND worker=? AND state='active'").get(id,claimId,worker));
   }
   guidanceFor(worker) {
     const base=this.workers.workers.get(worker)?.guidance==='resume'?`${workerGuidance} ${resumeNudge(this.resumeIdleMs()||defaultResumeIdleMs)}`:workerGuidance;
@@ -2719,7 +2725,7 @@ export class Store {
     const claim=this.destinationOutcome(this.transaction(()=>this.isProtocolJob(id)
       ?this.protocolClaimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,ctx?{...ctx,requestedLeaseMs}:ctx,connectionId)
       :this.claimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,connectionId)));
-    return nonterminalOutcome(id,{...claim,...this.workerHeartbeatFields(worker)});
+    return nonterminalOutcome(id,{...claim,...this.heartbeatForHeldClaim(id,claim.claim_id,worker)});
   }
   claimInTransaction(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,connectionId=null) {
     if(!this.db.isTransaction)protocolError('transaction_required');
@@ -2980,7 +2986,7 @@ export class Store {
       return {...receipt.value,revision:receipt.revision};
     });
     // Decorate after replay validation too, including receipts stored before this field existed.
-    return question?result:nonterminalOutcome(id,{...result,...this.workerHeartbeatFields(worker)});
+    return question?result:nonterminalOutcome(id,{...result,...this.heartbeatForHeldClaim(id,claimId,worker)});
   }
   progressInTransaction(id,claimId,note,subject='local-principal',blocker=false,worker='dot',question=null) {
     if(!this.db.isTransaction) throw new Error('progress requires a caller-owned transaction');
