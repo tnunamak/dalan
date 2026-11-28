@@ -66,9 +66,9 @@ assert.throws(() => validateSubmission(task(['codex-rs']), { scanInput: scan }),
 }
 // Precise secret words in a code file's name, extensionless secret names and password stores stay
 // sensitive; images are not exempt; growth is capped; secret-shaped values refuse, local fixture URLs do not
-{ const tree = ['src/config/credentials.ts', 'src/secrets.py', 'src/keys/private-key.ts', 'src/owner-credential.ts', 'src/service-account.ts', 'config/jwt_secret', 'config/client_secret', 'auth/passwords.txt', 'auth/htpasswd', 'img/recovery-key.png', 'src/logout-cancels-credential-setup.test.ts', 'docs/secrets.md', 'src/ok.ts'];
+{ const tree = ['src/config/credentials.ts', 'src/secrets.py', 'src/keys/private-key.ts', 'src/owner-credential.ts', 'src/service-account.ts', 'config/jwt_secret', 'config/client_secret', 'auth/passwords.txt', 'auth/htpasswd', 'img/recovery-key.png', 'auth/github-recovery-codes.txt', 'src/recovery-key.ts', 'src/logout-cancels-credential-setup.test.ts', 'docs/secrets.md', 'src/ok.ts'];
   const one = f => () => validateSubmission(task([f]), { scanInput: () => ({ files: tree, diffFiles: [], diff: '', symlinks: [] }) });
-  for (const f of tree.filter(f => !['src/logout-cancels-credential-setup.test.ts', 'src/ok.ts', 'img/recovery-key.png'].includes(f))) assert.throws(one(f), /sensitive/, f);
+  for (const f of tree.filter(f => !['src/logout-cancels-credential-setup.test.ts', 'src/ok.ts'].includes(f))) assert.throws(one(f), /sensitive/, f);
   for (const f of ['src/logout-cancels-credential-setup.test.ts', 'src/ok.ts']) assert.doesNotThrow(one(f), f);
   const many = Array.from({ length: 201 }, (_, i) => `src/f${i}.ts`);
   assert.throws(() => validateSubmission(task(['docs'], { brief: `Review ${many.join(', ')}.` }), { scanInput: () => ({ files: ['docs/a.md', ...many], diffFiles: [], diff: '', symlinks: [] }) }), /scope growth limit/);
@@ -135,6 +135,30 @@ const many = Array.from({ length: 300 }, (_, i) => `big/d${i}/auth-token.json`).
 assert.throws(() => narrowScope(['big'], many, many.filter(f => f.endsWith('auth-token.json'))), /would need \d+ scope entries.*submit a narrower scope/s);
 // at submit, a scope too sprawling to narrow is refused, not kept broad: an exact-path exclusion can miss a case alias on macOS
 assert.throws(() => validateSubmission(task(['big']), { scanInput: () => ({ files: many, diffFiles: [], diff: '', symlinks: [] }), excludeSensitive: true }), /too many files to exclude from "big".*submit a narrower scope/s);
+// Broad scopes retain '.', exclude only declared entries, and do not relax
+// the explicit path or directory restrictions.
+{
+  const symlink = 'web/Re\u0301sume\u0301-link';
+  const input = () => ({files: ['web/app.js',symlink],diffFiles: [],diff: '',symlinks: [symlink]});
+  const options = {scanInput: input};
+  const expected = 'web/r\u00e9sum\u00e9-link';
+  const canonical = value => value.split('/').map(part=>part.normalize('NFC').toLowerCase()).join('/');
+  const result = validateSubmission(task(['.'], {execution_scope: 'implementation',brief: 'Update the app.'}), options);
+  assert.deepEqual(result.scope_paths,['.']);
+  assert.deepEqual(result.scope_excluded.map(item=>canonical(item.path)),[expected]);
+  assert.throws(()=>validateSubmission(task([symlink],{brief:'Read the result.'}), {...options,excludeSensitive:true}),
+    /symlink in repository scope/,'directly named fixture still refuses');
+}
+{
+  const withheld=Array.from({length:250},(_,i)=>'many/d'+i+'/.env');
+  const present=Array.from({length:250},(_,i)=>'many/d'+i+'/app.js');
+  const options={excludeSensitive:true,scanInput:()=>({files:[...withheld,...present],diffFiles:[],diff:'',symlinks:[]})};
+  const result=validateSubmission(task(['.'],{brief:'Review the app.'}),options);
+  assert.deepEqual(result.scope_paths,['.']);
+  assert.deepEqual(result.scope_excluded.map(item=>item.path).sort(),withheld.sort());
+  assert.throws(()=>validateSubmission(task(['many'],{brief:'Review the app.'}),options),/too many files to exclude/);
+}
+
 // a symlink in a directory scope is dropped (the workspace never follows it) under excludeSensitive; refused without it
 { const linkScan = () => ({ files: ['web/a.js', 'web/link'], diffFiles: [], diff: '', symlinks: ['web/link'] });
   const r = validateSubmission(task(['web']), { scanInput: linkScan, excludeSensitive: true });

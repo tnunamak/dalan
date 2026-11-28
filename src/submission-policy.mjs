@@ -125,7 +125,7 @@ function loadPolicy() {
 const alwaysHardNames=String.raw`\.env[^/]*|\.ssh|\.gnupg|\.aws|\.npmrc|\.netrc|\.git-credentials|\.pgpass|\.pypirc|\.htpasswd|kubeconfig(?:\.[^/]*)?|id_(?:rsa|dsa|ed25519|ecdsa)(?:[-_.][^/]*)?|sign[-_][^/]*release[^/]*`;
 const sensitivePathTail=String.raw`(?:\/|$)|(?:^|\/)(?:\.docker|\.kube)\/config(?:\.json)?$|\.(?:pem|p12|pfx|key|keystore|jks|ppk|tfstate(?:\.backup)?)$`;
 const alwaysHard=new RegExp(`(?:^|/)(?:${alwaysHardNames})${sensitivePathTail}`,'i');
-const hardPath=new RegExp(String.raw`(?:^|/)(?:${alwaysHardNames}|service[-_]account(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|[^/]*(?:credentials?|private[-_.]?key|gpg[-_.]?secret)[^/]*|(?:[^/]*[-_.])?signing(?:[-_.][^/]*)?)${sensitivePathTail}`,'i');
+const hardPath=new RegExp(String.raw`(?:^|/)(?:${alwaysHardNames}|service[-_]account(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|[^/]*(?:credentials?|private[-_.]?key|recovery[-_.]?(?:key|codes?)|gpg[-_.]?secret)[^/]*|(?:[^/]*[-_.])?signing(?:[-_.][^/]*)?)${sensitivePathTail}`,'i');
 // "token" alone is not a credential: tokens.css and design-tokens.json are design tokens. A token file is sensitive when a
 // credential word qualifies it (auth-token, access_token, gh-tokens.txt, npm.token), or it is a bare `token` file or a
 // `tokens.txt|env|key|secret`. Plain `tokens/` and `tokens.json` are the usual design-token names and pass.
@@ -143,7 +143,7 @@ export function isSourceExemptionPath(file) {
 }
 // In a code file's own name, the precise secret words still mark secret material (credentials.ts, secrets.py, private-key.ts,
 // service-account.ts, owner-credential.ts); a word inside a longer name (logout-cancels-credential-setup.test.ts) does not.
-const codeSecretName=/(?:^|\/)(?:credentials?|secrets?|private[-_.]?key|service[-_.]?account|[^/]*[-_.](?:credentials?|secrets?))\.[^/.]+$/i;
+const codeSecretName=/(?:^|\/)(?:credentials?|secrets?|private[-_.]?key|recovery[-_.]?(?:key|codes?)|service[-_.]?account|[^/]*[-_.](?:credentials?|secrets?))\.[^/.]+$/i;
 // Password stores are secret material by name in any form.
 const passwordName=/(?:^|\/)(?:\.?htpasswd|shadow|[^/]*passw(?:or)?ds?(?:\.[^/]*)?)$/i;
 const secretDirectory=/(?:^|\/)(?:secrets?|credentials?)\//i;
@@ -553,8 +553,8 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       if(rest.length) error.suggested_scope_paths=rest;
       throw error;
     }
-    // Repository-wide implementation scopes withhold unnamed sensitive files physically.
-    // Read-only directory scopes are physically narrowed for soft names. Directory-scoped
+    // Whole-repository scopes physically withhold unnamed excluded files.
+    // Read-only directory scopes use a narrower allow-list. Directory-scoped
     // implementations retain refusal because their source tree is not stripped of exclusions.
     // Named paths and patch paths still refuse above and below.
     for(const file of scan.files.filter(f=>within(f,scope)&&!scope.includes(f))) {
@@ -574,12 +574,20 @@ export function validateSubmission(assignment,{sensitiveScopeOverride=null,scanI
       }
     }
     for(const file of scan.files.filter(f=>scope.includes(f))) inspectPath(file);
-    // A symlink inside a directory scope: the workspace never follows one (list skips it, read refuses), so read-only work
-    // with excludeSensitive records it as dropped instead of refusing the scope. A named symlink still refuses.
-    for(const file of scan.symlinks||[]) if(within(file,scope)&&!scope.includes(file)&&excludeSensitive&&rendered.execution_scope!=='implementation') dropped.push({path:file,reason:'symlink (the workspace never follows symlinks)'});
-    // A scope whose narrowing needs more than maxNarrowedEntries entries is refused (fail closed): keeping the broad scope
-    // would rest on an exact-path exclusion that a case or Unicode alias on a case-insensitive filesystem can miss.
-    if(dropped.length) narrowedScope=repositoryImplementation?scope:narrowScope(scope,[...new Set([...scan.files,...scan.diffFiles])],dropped.map(d=>d.path));
+    // For a whole repository the workspace removes excluded entries from the
+    // working tree before access; a directory uses the existing read-only narrowing.
+    // Do not allow a named symlink just because another rule already dropped it.
+    const explicit=new Set(scope.map(outputPathKeys[3]));
+    for(const file of scan.symlinks||[]) {
+      if(!within(file,scope)) continue;
+      if(explicit.has(outputPathKeys[3](file))) throw new Error(`symlink in repository scope: ${file}`);
+      if(repositoryImplementation||(excludeSensitive&&rendered.execution_scope!=='implementation')) {
+        if(!dropped.some(d=>d.path===file)) dropped.push({path:file,reason:'symlink (the workspace never follows symlinks)'});
+      }
+    }
+    // The workspace enforces broad exclusions under canonical names and proves
+    // physical absence before checks. Directory scopes still have the narrow cap.
+    if(dropped.length) narrowedScope=scope.includes('.')?scope:narrowScope(scope,[...new Set([...scan.files,...scan.diffFiles])],dropped.map(d=>d.path));
     for(const file of scan.symlinks||[]) if(within(file,narrowedScope??scope)&&!dropped.some(d=>d.path===file)) throw new Error(`symlink in repository scope: ${file}`);
     if(input.input_patch) {
       if(/^new (?:file )?mode 120000$/m.test(input.input_patch)) throw new Error('symlink in input patch scope');

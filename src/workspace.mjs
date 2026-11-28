@@ -391,10 +391,10 @@ export function sensitiveMasks(dir,repo,copyDir) {
   if(maskedPaths.length>MASK_LIMIT) throw new Error(`sensitive_mask_limit: ${maskedPaths.length} sensitive files in the checkout (limit ${MASK_LIMIT}); a check cannot be confined around that many`);
   return {paths:maskedPaths,sourceExemptions,policyError:policy.error};
 }
-// Excluded implementation files never enter the runner's source tree. Skip-worktree
-// keeps these deliberate omissions out of the worker's patch without reading blobs.
-function withholdExcludedPaths(dir,assignment) {
-  if(assignment.execution_scope!=='implementation'||!assignment.scope_paths?.includes('.')||!assignment.scope_excluded?.length) return;
+// Remove whole-repository omissions from the working tree before exposing it.
+// Skip-worktree keeps deliberate omissions out of worker patches without reading blobs.
+export function withholdExcludedPaths(dir,assignment) {
+  if(!['implementation','read-only'].includes(assignment.execution_scope)||!assignment.scope_paths?.includes('.')||!assignment.scope_excluded?.length) return;
   const excluded=assignment.scope_excluded.map(entry=>relative(entry.path));
   for(const file of excluded) {
     const parent=path.posix.dirname(file);
