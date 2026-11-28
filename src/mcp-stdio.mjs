@@ -147,6 +147,7 @@ const forecastAnswer = value => Object.fromEntries(['verdict', 'reasons', 'admis
   .filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
 
 async function submit(args, extraFlags = [], {forecast = false} = {}) {
+  if (args.worker?.startsWith('-') || args.worker?.includes('\u0000')) throw fail('worker name must not start with a dash or contain NUL');
   const flags = [...extraFlags, ...(forecast ? ['--dry-run'] : [])];
   if (args.worker) flags.push('--worker', args.worker);
   if (args.execution) flags.push('--execution', args.execution);
