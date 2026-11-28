@@ -138,6 +138,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
   lines.once('close', () => { inputEnded = true; });
   const stopRequested = () => signal?.aborted || inputEnded;
   let exited = true, stopped = Promise.resolve(), server = null, routeDied = false, routeLossReason = null;
+  let approvedConnection = null, revocationUnconfirmed = false;
   const stopPromise = new Promise(resolve => { if (signal?.aborted) resolve(); signal?.addEventListener('abort', resolve, { once: true }); lines.once('close', resolve); });
   let resolveRouteGone;
   let routeGone = new Promise(resolve => { resolveRouteGone = resolve; });
@@ -392,7 +393,7 @@ export async function runHosted({ options, env, out, input, signal, errorContext
 
     const showPrompt = () => say(`Finish sign-in in its browser tab, then enable "${CONNECTOR_NAME}" in a chat. Paste this into the chat:\n${hostedPrompt(requestId, phrase)}`);
     const seen = new Set();
-    let approvedConnection = null, reminded = 0, retryNow = false, stage = 'signin';
+    let reminded = 0, retryNow = false, stage = 'signin';
     let remindAt = clock.now() + DIAGNOSE_AFTER_MS;
     const stageNote = () => ({
       signin: `No sign-in request yet. Add ${CONNECTOR_NAME} in your MCP client and start sign-in. Type help here to see the steps again.`,
@@ -492,7 +493,11 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     // Withdraw handoff, revoke the trial's app credentials, then close the retained route.
     try { fs.rmSync(path.join(home, 'resource-url'), { force: true }); }
     catch (error) { if (!route?.handoffFailure?.()) throw error; }
-    if (errorContext.started && !exited) await dalan(['connect', 'revoke', HOSTED_WORKER], { abortable: false }).catch(() => {});
+    if (errorContext.started && !exited) {
+      try { await (deps.revokeTrialWorker ?? dalan)(['connect', 'revoke', HOSTED_WORKER], { abortable: false }); }
+      // "has no active connection" means there is nothing left to revoke (the trial never paired, or the grant is gone).
+      catch (error) { if (!/has no active connection/.test(String(error?.message ?? ''))) revocationUnconfirmed = true; }
+    } else if (approvedConnection !== null) revocationUnconfirmed = true;
     if (route) routeStopped = await route.stop().catch(error => ({ removed: false, detail: safeDiagnostic(error.message, 240) }));
     else if (dispatchedHere && routeRef && !routeNotDispatched(routeRef)) routeStopped = await closeExactRoute(gozar, routeRef);
     if (routeRef && routeStopped?.removed) fs.rmSync(referenceFile, { force: true });
@@ -503,8 +508,13 @@ export async function runHosted({ options, env, out, input, signal, errorContext
     releaseHome();
     cleaned = routeStopped ? routeStopped.removed : true;
     if (!cleaned) out.write(`dalan: Bridge stopped; public-route cleanup is unconfirmed: ${terminalSafe(routeStopped.detail)}\n`);
+    if (revocationUnconfirmed) {
+      const id = typeof approvedConnection === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(approvedConnection) ? ` (connection ${approvedConnection})` : '';
+      say(`Credential revocation is unconfirmed for worker ${HOSTED_WORKER}${id}.`);
+    }
   }
   if (!cleaned) throw new RouteError('cleanup_debt', 'Gozar could not confirm route removal.');
+  if (revocationUnconfirmed) throw new RouteError('cleanup_debt', `Credential revocation is unconfirmed for worker ${HOSTED_WORKER}.`);
   if (route) say(durable ? 'Bridge stopped. The saved route remains.' : 'Public route removed. Bridge stopped.');
   else if (routeRef) say('Bridge stopped. The saved route operation is retained.');
   else say('No public route was started. Bridge stopped.');
