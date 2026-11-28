@@ -90,6 +90,22 @@ function testReplaceTree() {
 try {
   testReplaceTree();
   {
+    const f = fixture(), file = path.join(f.home, 'update-result.json');
+    const status = () => serviceStatus({ home: f.home }).last_result;
+    assert.equal(status(), null, 'only an absent result means no update attempt');
+    for (const text of ['fixture-non-json', '7', 'null', '[]', '{"outcome":7}']) {
+      fs.writeFileSync(file, text);
+      assert.deepEqual(status(), { status: 'unavailable', reason: 'malformed' });
+    }
+    fs.rmSync(file);
+    fs.mkdirSync(file);
+    assert.deepEqual(status(), { status: 'unavailable', reason: 'unreadable' });
+    fs.rmdirSync(file);
+    const result = { outcome: 'updated', timestamp: '2026-11-28T00:00:00.000Z' };
+    fs.writeFileSync(file, JSON.stringify(result));
+    assert.deepEqual(status(), result);
+  }
+  {
     const f = fixture(); const r = await updateService({ home: f.home, check: true }, f.seams);
     assert.equal(r.outcome, 'update_available'); assert.deepEqual(f.events, []);
   }
