@@ -11,7 +11,53 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
+import { runInNewContext } from 'node:vm';
 import { startAdapter } from './acp-client.mjs';
+
+// Simulate an uncertain submit without sockets or a live worker. A fresh
+// controller gets only the durable pending record, like session/load.
+{
+  const source = readFileSync(new URL('../bin/dot-acp-agent.mjs', import.meta.url), 'utf8');
+  const slice = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+  // Use the entire runTurn block, ending at its next top-level declaration.
+  const turnStart = source.indexOf('function currentTurn(');
+  const next = source.indexOf('\nasync function ', source.indexOf('\n}', source.indexOf('async function runTurn(')) + 2);
+  const exact = slice('async function acquire(', '\nasync function resultText(') + source.slice(turnStart, next);
+  const parsed = { brief: 'fixture brief', requestRoot: 'fixture_req', priority: 'normal', requirements: [] };
+  const row = { status: 'queued', execution: 'none', assignment: { brief: parsed.brief, acp_brief_hash: 'fixture hash' } };
+  let saved, submits = 0, settleSubmit, committed = false;
+  const dispatched = new Promise(resolve => { settleSubmit = resolve; });
+  let returnSubmit;
+  const response = new Promise(resolve => { returnSubmit = resolve; });
+  const runTurn = runInNewContext(exact + '\nrunTurn', {
+    Date, Buffer, MAX_ATTEMPTS: 2, MAX_EXPIRIES: 2, VALID_MS: 60000, SUBMIT_RETRIES: 0, SUBMIT_DEADLINE_MS: 100,
+    IN_FLIGHT_CAP: 2, WORKER: 'fixture', CONTINUE_PROMPT: 'continue', parsePrompt: () => parsed,
+    sha256: () => 'fixture hash', withoutNote: value => value, attemptId: root => root,
+    readRow: async () => committed ? row : null, readRowOrThrow: async () => row,
+    bridgeRefusal: () => null, prepareAssignment: async () => ({ execution_scope: 'read-only', inputs: [] }),
+    tokenFor: () => 'fixture', saveSession: session => { saved = JSON.parse(JSON.stringify(session.pending)); },
+    call: async (route) => {
+      if (route === '/status') return {};
+      if (route === '/submit-preview') return { verdict: 'admissible' };
+      assert.equal(route, '/submit');
+      submits += 1; settleSubmit(); return response;
+    },
+    cancelPending: async () => null, waitLoop: async (_s, ctl) => ({ text: ctl.pending.rid }),
+  });
+  const ctl = { generation: 1, abort: new AbortController(), pending: null, observations: [], promptRequestId: 'old', cancelled: false };
+  const s = { generation: 1, ctl, pending: null };
+  const oldTurn = runTurn(s, ctl, parsed.brief, async () => {});
+  await dispatched;
+  ctl.cancelled = true; ctl.abort.abort(); s.ctl = null; // bounded cancel returned
+  committed = true; returnSubmit({ status: 'queued' });
+  await oldTurn;
+  assert.equal(saved?.rid, 'fixture_req', 'pending identity survives without the late response writer');
+  const nextCtl = { generation: 2, abort: new AbortController(), pending: saved, observations: [], promptRequestId: 'new', cancelled: false };
+  const nextSession = { generation: 2, ctl: nextCtl, pending: saved };
+  const result = await runTurn(nextSession, nextCtl, 'continue', async () => {});
+  assert.equal(result.text, 'fixture_req');
+  assert.equal(submits, 1, 'resume attaches the same assignment without a second submit');
+}
 
 const repo = resolve(new URL('..', import.meta.url).pathname);
 const home = await mkdtemp(join(tmpdir(), 'dalan-acp-robustness-'));
