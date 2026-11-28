@@ -154,7 +154,9 @@ def inspect():
     global error
     used = usage()
     which = ('disk_write' if used['disk_write_bytes'] >= budgets['disk_write_bytes'] else
-             'memory' if fields('memory.events').get('max', 0) else
+             # memory.events 'max' only counts reclaim at the limit (page cache, for example); the run goes on.
+             # Only a kernel OOM kill means the memory budget was exceeded.
+             'memory' if fields('memory.events').get('oom_kill', 0) else
              'processes' if fields('pids.events').get('max', 0) else
              'cpu' if used['cpu_ms'] >= budgets['cpu_ms'] else None)
     if which and error is None:
