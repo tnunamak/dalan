@@ -9,5 +9,9 @@ export const createRefuse = RequestError => (message, data) => data === undefine
 export const T3_CANCEL_WINDOW_MS = 10_000;
 export const CANCEL_BUDGET_MS = 5_000;
 export const CANCEL_CLEANUP_MS = 2_000;
-// A positive finite number (for example from an environment variable), else the default.
-export const cancelBudgetMs = raw => Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : CANCEL_BUDGET_MS;
+// An override must leave the cancellation cleanup budget inside T3's response window.
+export function cancelBudgetMs(raw) {
+  const requested = Number(raw);
+  const max = T3_CANCEL_WINDOW_MS - CANCEL_CLEANUP_MS;
+  return Number.isFinite(requested) && requested > 0 && requested <= max ? requested : CANCEL_BUDGET_MS;
+}
