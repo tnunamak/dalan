@@ -21,6 +21,14 @@ Messages that the owner sends with `dalan tell` show up in `list_pending`; read 
 
 Put this loop in the worker's standing instructions, for example in its scheduled task prompt. The bridge also returns short guidance in each `get` response.
 
+### Claim several ready assignments in one call
+
+The opt-in `batch-claim-v1` catalog advertises `claim({ next, claimant, acquisition_id, lease_ms? })`. Set `next` to 1 through 8 instead of `request_id`. The bridge returns `{ claims, free_lanes }`; each entry is a normal claim reply with the assignment, claim ID and epoch. Treat each entry as a separate grant and start the work before moving on. Save the original acquisition ID and the returned grants across retries. Choose a new acquisition ID for a new batch.
+
+The bridge takes ordinary, unskipped queued assignments in list order, limited by current free lanes. It stops at the first refusal and returns the admitted prefix. Cancelled, skipped, and resumable grants are not batch candidates. Native protocol jobs and policy work still use the explicit request ID or their existing acquisition path. A retry with the same batch arguments can recover the still-live grants in that batch; it never claims additional work, even if the first call was interrupted or a lane opened later. If the returned batch is partial, call `list_pending` to see what's ready and use a fresh acquisition ID for a new batch.
+
+Older profiles and single-request calls are unchanged. Only enable the opt-in catalog after coordinating the deployment pin and refreshing the connector's tool schema. Until both advertise `next`, continue using `request_id`.
+
 ## Ways to start a run
 
 | Pattern | How it works | Latency | Cost when idle | Use when |

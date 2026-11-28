@@ -74,7 +74,7 @@ try {
   response=await enabled.admin('POST','/answer',{id,question_id:'Q',text:'A'},owner);assert(response.value);
   response=await enabled.mcp('W1','consume_answer',{request_id:id,claim_id:grant.claim_id,question_id:'Q'});assert.equal(response.value.answer,'A');
   const invalid=new DotBridgeAdapter({serverEnv:{DOT_BRIDGE_CATALOG_PROFILE:'question-typo'}});adapters.push(invalid);await invalid.init();
-  await assert.rejects(invalid.reset(),/DALAN_CATALOG_PROFILE must be stable, questions-v1 or protocol-v0/);
+  await assert.rejects(invalid.reset(),/DALAN_CATALOG_PROFILE must be stable, questions-v1, protocol-v0, legacy-v46 or batch-claim-v1/);
   assert.equal(fs.existsSync(invalid.home+'/.local/share/dot-bridge/bridge.db'),false,'invalid profile opened the Store');
   console.log('PASS stable and questions catalogs, protocol-only command fields and renew, strict admission gate, direct-call refusal, native question flow and invalid profile refusal');
 } finally {for(const adapter of adapters.reverse())await adapter.close();}

@@ -106,10 +106,11 @@ if(oauthMetadata) oauthMetadata.OAUTH_RESOURCE_METADATA=new URL(`/.well-known/oa
 const claimCapacity=loadCapacity();
 const backgroundMaxInFlight=loadBackgroundMaxInFlight();
 const catalogProfile=readEnv('DALAN_CATALOG_PROFILE')||'stable';
+const batchClaimProfile=catalogProfile==='batch-claim-v1';
 const t3ToolsSetting=readEnv('DALAN_ENABLE_T3_TOOLS')??'0';
 if(!['0','1'].includes(t3ToolsSetting))throw new Error('DALAN_ENABLE_T3_TOOLS must be 0 or 1');
 const t3ToolsEnabled=t3ToolsSetting==='1';
-if(!['stable','questions-v1','protocol-v0','legacy-v46'].includes(catalogProfile)) throw new Error('DALAN_CATALOG_PROFILE must be stable, questions-v1 or protocol-v0; legacy-v46 is also supported');
+if(!['stable','questions-v1','protocol-v0','legacy-v46','batch-claim-v1'].includes(catalogProfile)) throw new Error('DALAN_CATALOG_PROFILE must be stable, questions-v1, protocol-v0, legacy-v46 or batch-claim-v1');
 if(protocolServiceAdapters&&catalogProfile!=='protocol-v0')throw new Error('protocol dependencies require protocol-v0 profile');
 const port=Number(readEnv('DALAN_PORT')||8787);
 if(!Number.isInteger(port)||port<0||port>65535) { const error=new RangeError(`options.port should be >= 0 and < 65536. Received ${port}`); error.code='ERR_SOCKET_BAD_PORT'; throw error; }
@@ -383,7 +384,18 @@ const tools = [
   { name:'list_tools',description:'Call this first to learn which tools you can use. Returns registry_version and each available tool with its description, input schema, class (read or write) and schema_hash.',inputSchema:schema({}) },
   { name:'call_tool_read',description:'Run an available read-only tool by name, as listed by list_tools. Pass its schema_hash from list_tools.',inputSchema:schema({tool:short,arguments:{type:'object',additionalProperties:true},schema_hash:hashField,idempotency_key:keyField},['tool','arguments']) },
   { name:'call_tool_write',description:'Run an available tool that changes state or sends something, by name, as listed by list_tools. Requires its schema_hash from list_tools and an idempotency_key that is new for each distinct request.',inputSchema:schema({tool:short,arguments:{type:'object',additionalProperties:true},schema_hash:hashField,idempotency_key:keyField},['tool','arguments','schema_hash','idempotency_key']) }
-].filter(tool=>(catalogProfile!=='stable'||!['ask_question','consume_answer'].includes(tool.name))&&(t3ToolsEnabled||!tool.name.startsWith('t3_')));
+].filter(tool=>((catalogProfile!=='stable'&&!batchClaimProfile)||!['ask_question','consume_answer'].includes(tool.name))&&(t3ToolsEnabled||!tool.name.startsWith('t3_')));
+if(batchClaimProfile) {
+  const claim=tools.find(item=>item.name==='claim');
+  claim.description+=' Use next (1 through 8) instead of request_id to claim several queued assignments with one acquisition_id. The reply contains claims and free_lanes.';
+  claim.inputSchema.properties.next={type:'integer',minimum:1,maximum:8};
+  claim.inputSchema.required=['claimant'];
+  // No top-level oneOf: several MCP hosts reject combinators at the schema root. validate() enforces exactly one of request_id or next.
+  // The stable catalog stays frozen: claim_id on get (heartbeat for that exact claim) is served only in this profile.
+  const get=tools.find(item=>item.name==='get');
+  get.description='Read assignment, available_checks, cancellation, progress, report and delivery facts; optional claim_id scopes heartbeat guidance.';
+  get.inputSchema.properties.claim_id=string;
+}
 // Opt-in compatibility catalog only; grant and lease enforcement are unchanged.
 if(catalogProfile==='legacy-v46') {
   const names=new Set(['list_pending','claim','get','ack_message','progress','finish',
@@ -505,6 +517,10 @@ function validate(name,args) {
   const s=definition.inputSchema;
   for(const field of Object.keys(args)) if(!Object.hasOwn(s.properties,field)) throw new Error(name==='run_check'?`unknown field ${field}: ${argumentFixes.run_check.check_id}`:`unknown field ${field}`);
   for(const field of s.required) if(!Object.hasOwn(args,field)) throw refuse('missing',field);
+  if(name==='claim'&&batchClaimProfile) {
+    if(Object.hasOwn(args,'next')===Object.hasOwn(args,'request_id')) throw new Error('supply exactly one of request_id or next');
+    if(Object.hasOwn(args,'next')&&!Object.hasOwn(args,'acquisition_id')) throw refuse('missing','acquisition_id');
+  }
   // The schema no longer requires summary, but one must exist by now: repairArguments could not derive it when the result is blank.
   if(name==='finish'&&(args.summary===undefined||typeof args.summary==='string'&&!args.summary.trim())) throw refuse('missing','summary');
   for(const [field,value] of Object.entries(args)) {
@@ -625,13 +641,13 @@ async function attachWaiter(req,res,requestId,timeoutMs,consume=true) {
   notifyAttachedWaiter(requestId);
 }
 // Result guidance only; tool descriptions stay fixed.
-const listGuidance='Claim every listed assignment you can start now, up to free_lanes, in this turn. Do not claim one and stop. Never exceed free_lanes.';
-const claimMoreGuidance='If free_lanes > 0 and work is queued, claim more now.';
+const listGuidance=batchClaimProfile?'Call claim once with next set to free_lanes (at most 8), to take the ready assignments you can start now. Use a fresh acquisition_id per batch; use request_id for an explicit resume or previously skipped job.':'Claim every listed assignment you can start now, up to free_lanes, in this turn. Do not claim one and stop. Never exceed free_lanes.';
+const claimMoreGuidance=batchClaimProfile?'If work is queued, call claim once with next set to free_lanes (at most 8).':'If free_lanes > 0 and work is queued, claim more now.';
 // A worker with worker_claim_hint (limits.json) is told to hold a few claims, not every free lane: claims it drops when its run ends hold their lanes for a lease.
-const hintGuidance=n=>`Hold at most ${n} claims at once, however many lanes are free: claim only as many listed assignments as ${n} minus the claims you already hold, and send progress at least every 3 minutes while you work. free_lanes is the bridge's limit, not your target.`;
-const hintMoreGuidance=n=>`If you hold fewer than ${n} claims and work is queued, claim more now; at ${n}, finish one first.`;
+const hintGuidance=n=>batchClaimProfile?`Hold at most ${n} claims at once: call claim once with next set to the smaller of free_lanes, 8, and ${n} minus the claims you hold. If that number is zero, finish one first. Send progress at least every 3 minutes.`:`Hold at most ${n} claims at once, however many lanes are free: claim only as many listed assignments as ${n} minus the claims you already hold, and send progress at least every 3 minutes while you work. free_lanes is the bridge's limit, not your target.`;
+const hintMoreGuidance=n=>batchClaimProfile?`If work is queued and you hold fewer than ${n}, call claim once with next set to the smaller of free_lanes, 8, and ${n} minus the claims you hold. At ${n}, finish one first.`:`If you hold fewer than ${n} claims and work is queued, claim more now; at ${n}, finish one first.`;
 // A finishing lane takes the next queued item itself; an error on any claim means the list changed, so list again.
-const finishNextGuidance=next=>`Claim ${next[0].request_id} yourself before you end this run, then keep claiming up to free lanes. After any claim error such as assignment_expired, call list_pending and claim from that list.`;
+const finishNextGuidance=next=>batchClaimProfile?'Call claim once with next set to free_lanes (at most 8) before ending this run. After a partial batch, call list_pending again.':`Claim ${next[0].request_id} yourself before you end this run, then keep claiming up to free lanes. After any claim error such as assignment_expired, call list_pending and claim from that list.`;
 // A worker with finish_handoff gets its next job inside the finish reply, or waits a bounded time for work.
 // The claim is the worker's own `claim` call, run by the bridge: same policy, preflight, scope, pause, capacity and
 // connection checks, one claim per job. The claim carries acquisition_id handoff-<finished claim_id>, so a repeated
@@ -736,6 +752,7 @@ async function finishReply(reply,{principal,requestId,claimId,signal}) {
     if(empty) return {...rest,queue_empty:true,waited_ms,guidance:waited_ms>=1000?`No job was queued for ${Math.round(waited_ms/1000)} seconds. Nothing is claimed for you. End this run; a new assignment wakes you.`:'No job is queued. Nothing is claimed for you. End this run; a new assignment wakes you.'};
   }
   const hint=store.claimHint(principal.worker);
+  if(batchClaimProfile&&reply.next_queued?.length&&!store.paused()) return {...reply,guidance:hint===null?finishNextGuidance(reply.next_queued):hintMoreGuidance(hint)};
   return reply.next_queued?.length&&!store.paused()?{...reply,guidance:hint===null?finishNextGuidance(reply.next_queued):`Claim ${reply.next_queued[0].request_id} yourself before you end this run. ${hintMoreGuidance(hint)} After any claim error such as assignment_expired, call list_pending and claim from that list.`}:reply;
 }
 // The finish is committed and its receipt exists: the report, patch and check evidence are already artifacts, and
@@ -861,7 +878,7 @@ function quiesceStatus() {
 }
 
 // Record the call on the claim it names (one UPDATE); a thrown error or a structured {error} result is kept as the last tool error.
-async function tool(name,a,principal,notifyMeta,signal) {
+async function tool(name,a,principal,notifyMeta,signal,batchMode=null) {
   if(!toolNames.has(name)) throw new Error('unknown tool');
   if(quiescing&&toolAnnotations[name]?.readOnlyHint!==true) throw new Error(restartQuiesceText);
   admittedInFlight++;
@@ -871,7 +888,7 @@ async function tool(name,a,principal,notifyMeta,signal) {
       !holdsLiveGrant(principal.worker,a.request_id,a.claimant,principal.subject,a.acquisition_id)) {
       assertRepoAllowed(principal.worker,store.get(a.request_id).assignment);
     }
-    const result=await dispatchTool(name,a,principal,notifyMeta,signal);
+    const result=await dispatchTool(name,a,principal,notifyMeta,signal,batchMode);
     if(typeof result?.error==='string') error=redactNote(result.error);
     return result;
   } catch(e) { error=redactNote(String(e?.message??e)); if(e.destination&&typeof a?.request_id==='string')notifyAttachedWaiter(a.request_id); throw e; }
@@ -884,7 +901,7 @@ async function tool(name,a,principal,notifyMeta,signal) {
     } finally { admittedInFlight--; }
   }
 }
-async function dispatchTool(name,a,principal,notifyMeta,signal) {
+async function dispatchTool(name,a,principal,notifyMeta,signal,batchMode=null) {
   const t3Audit=(t3Tools.has(name)||notifyTools.has(name))?await loadT3Audit():null;
   if(t3Audit) t3Audit.admitT3Audit(store.db,principal.worker,principal.subject);
   store.recordWorkerCall(principal.subject,toolNames.has(name)?name:'unknown',principal.worker);
@@ -1013,6 +1030,13 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       return {assignments,policy_work:policyPage(worker),attention:store.attention(subject,worker),free_lanes,...(worker_max_claims===undefined?{}:{worker_max_claims}),claims_accepted,...(claims_accepted?next:{next_action:claimsNote}),guidance};
     }
     case 'claim': {
+      if(Object.hasOwn(a,'next')) {
+        const claimant=str(a.claimant,'claimant',128);
+        const lanes=()=>store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity).free_lanes;
+        const {claims,retry}=await store.claimBatch({next:a.next,available:lanes(),worker,subject,connectionId,claimant,acquisitionId:a.acquisition_id,leaseMs:a.lease_ms},
+          (request_id,acquisition_id,mode)=>signal?.aborted?null:tool('claim',{request_id,claimant,acquisition_id,...(a.lease_ms===undefined?{}:{lease_ms:a.lease_ms})},principal,undefined,signal,mode));
+        return {claims,...(retry?{retry:true}:{}),free_lanes:lanes()};
+      }
       const requestId=id(a.request_id),claimant=str(a.claimant,'claimant',128),ctx=commandContext('claim',{claimant,acquisition_id:a.acquisition_id??null,lease_ms:a.lease_ms??null}),row=store.get(requestId),held=row.claim?.state==='active'?row.claim:null,retry=holdsLiveGrant(worker,requestId,claimant,subject,a.acquisition_id);
       if(!retry)assertRepoAllowed(worker,row.assignment);
       const needsWorkspace=workspaceEnabled&&(row.assignment.execution_scope==='implementation'||row.assignment.output_paths?.length);
@@ -1037,7 +1061,7 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       // claimant's own connection is still live. The token was verified before
       // the awaited preflight/quiesce above, so a revoke in between must not
       // admit the claim. External-OAuth principals pass null and are unchanged.
-      const claimed=store.claim(requestId,claimant,subject,claimCapacity,preflight,worker,a.acquisition_id,a.lease_ms,ctx,principal.builtin?(principal.connection_id??''):null);
+      const claimed=store.claim(requestId,claimant,subject,claimCapacity,preflight,worker,a.acquisition_id,a.lease_ms,ctx,principal.builtin?(principal.connection_id??''):null,batchMode);
       const grant=store.db.prepare('SELECT * FROM claims WHERE request_id=?').get(requestId);
       if(!retry) phaseTrace.claimed({requestId,worker,subject,claimId:claimed.claim_id,handoff:String(a.acquisition_id??'').startsWith(HANDOFF_ACQUISITION_PREFIX),createdAt:store.db.prepare('SELECT created_at FROM assignments WHERE request_id=?').get(requestId)?.created_at});
       const {free_lanes,queued}=store.laneState(subject,worker,redeliveryLimits.laneCapacity,claimCapacity);
@@ -1047,7 +1071,13 @@ async function dispatchTool(name,a,principal,notifyMeta,signal) {
       if(!strictJob) throw new Error('renew_claim requires a protocol job');
       return store.renewClaim(id(a.request_id),id(a.claim_id,'claim_id'),a.lease_ms,commandContext('renew',{leaseMs:a.lease_ms}),subject,worker,connectionId);
     }
-    case 'get': { const requestId=id(a.request_id); if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)}; store.markNotesSeenByHolder(requestId,subject,worker,connectionId); return {...publicWorkerGet(withAvailableChecks(store.get(requestId),true,worker,subject)),guidance:store.guidanceFor(worker)}; }
+    case 'get': {
+      const requestId=id(a.request_id);
+      if(!store.hasAssignment(requestId)) return {kind:'message',message:store.getMessage(requestId,worker)};
+      store.markNotesSeenByHolder(requestId,subject,worker,connectionId);
+      const row=store.get(requestId);
+      return {...publicWorkerGet(withAvailableChecks(row,true,worker,subject)),...store.workerGetHeartbeat(row,worker,subject,a.claim_id),guidance:store.guidanceFor(worker)};
+    }
     case 'ack_message': {const message=store.ackMessage(id(a.message_id,'message_id'),worker);log({kind:'message_acknowledged',message_id:message.message_id});return {kind:'message',message};}
     case 'progress': {
       const requestId=id(a.request_id),note=str(a.note,'note',4096),claimId=id(a.claim_id,'claim_id');

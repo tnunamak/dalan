@@ -197,6 +197,10 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(value.worker_claim_lease_ms===null||typeof workerClaimLeaseMs!=='object'||Array.isArray(workerClaimLeaseMs)||
     Object.entries(workerClaimLeaseMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<60000||ms>604800000))
     throw new Error('invalid worker_claim_lease_ms');
+  const workerHeartbeatMs=value.worker_heartbeat_ms??{};
+  if(value.worker_heartbeat_ms===null||typeof workerHeartbeatMs!=='object'||Array.isArray(workerHeartbeatMs)||
+    Object.entries(workerHeartbeatMs).some(([worker,ms])=>!/^[a-z][a-z0-9_-]{0,31}$/.test(worker)||!Number.isInteger(ms)||ms<60000||ms>604800000))
+    throw new Error('invalid worker_heartbeat_ms');
   // After a bridge start the sweep holds a claim idle since before the start for its whole lease. This map shortens that hold for a worker.
   const workerPostStartHoldMs=value.worker_post_start_hold_ms??{};
   if(value.worker_post_start_hold_ms===null||typeof workerPostStartHoldMs!=='object'||Array.isArray(workerPostStartHoldMs)||
@@ -246,7 +250,7 @@ export function loadRedeliveryLimits(file=defaultPath(os.homedir(),'.config/dot-
   if(!Number.isInteger(maxResponseBytesPerHour)||maxResponseBytesPerHour<100000||maxResponseBytesPerHour>1000000000) throw new Error('invalid max_response_bytes_per_hour');
   const maxResponseBytesPer24h=value.max_response_bytes_per_24h??defaultRedeliveryLimits.maxResponseBytesPer24h;
   if(!Number.isInteger(maxResponseBytesPer24h)||maxResponseBytesPer24h<1000000||maxResponseBytesPer24h>10000000000) throw new Error('invalid max_response_bytes_per_24h');
-  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,workerPostStartHoldMs,workerClaimHint,...(Object.keys(workerMaxClaims).length?{workerMaxClaims}:{}),workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
+  return {intervalMs,maxCount,silenceMs,claimIdleWarningMs,leaseMs,workerClaimLeaseMs,...(Object.keys(workerHeartbeatMs).length?{workerHeartbeatMs}:{}),workerPostStartHoldMs,workerClaimHint,...(Object.keys(workerMaxClaims).length?{workerMaxClaims}:{}),workerClaimMinGapMs,laneCapacity,rewakeMs,rewakeWindowMs,rewakeStaleMs,breakSilenceMs,breakProbeMs,maxClaimsPerHour,maxToolCallsPerHour,maxToolCallsPer24h,maxResponseBytesPer24h,maxResponseBytesPerHour};
 }
 
 // Gates that cap one rolling hour. They hold background work before agent-requested work (see rollingUsage).
@@ -2562,9 +2566,30 @@ export class Store {
     const gaps=this.limits.workerClaimMinGapMs??{};
     return Object.hasOwn(gaps,worker)?gaps[worker]:0;
   }
+  workerHeartbeatMs(worker) {
+    const intervals=this.limits.workerHeartbeatMs??{};
+    return Object.hasOwn(intervals,worker)?intervals[worker]:null;
+  }
+  // The due time is reply guidance only; it never renews or fences a grant.
+  workerHeartbeatFields(worker,claim) {
+    const ms=this.workerHeartbeatMs(worker);
+    if(ms===null||!claim) return {};
+    const activity=Date.parse(claim.last_claim_activity_at??claim.claimed_at);
+    return {progress_due_at:iso(Math.min(activity+ms,Date.parse(this.leaseExpiresAt(claim))))};
+  }
+  workerGetHeartbeat(row,worker,subject,claimId) {
+    const c=row.claim;
+    return row.status==='claimed'&&!row.cancellation_requested&&c?.state==='active'&&c.worker===worker&&c.subject===subject&&(claimId===undefined||c.claim_id===claimId)&&!this.leaseExpired(c)?this.workerHeartbeatFields(worker,c):{};
+  }
+  heartbeatForHeldClaim(id,claimId,worker) {
+    if(this.workerHeartbeatMs(worker)===null||!claimId) return {};
+    return this.workerHeartbeatFields(worker,this.db.prepare("SELECT * FROM claims WHERE request_id=? AND claim_id=? AND worker=? AND state='active'").get(id,claimId,worker));
+  }
   guidanceFor(worker) {
     const base=this.workers.workers.get(worker)?.guidance==='resume'?`${workerGuidance} ${resumeNudge(this.resumeIdleMs()||defaultResumeIdleMs)}`:workerGuidance;
-    return this.workerClaimGapMs(worker)?`${base} Work this claim and report it before you claim another.`:base;
+    const gap=this.workerClaimGapMs(worker)?`${base} Work this claim and report it before you claim another.`:base;
+    const heartbeat=this.workerHeartbeatMs(worker);
+    return heartbeat===null?gap:`${gap} Call progress with a short note at least every ${heartbeat/1000} seconds while you work, even when nothing changed.`;
   }
   assertClaimGap(id,subject,worker,active) {
     const gap=this.workerClaimGapMs(worker);
@@ -2585,7 +2610,50 @@ export class Store {
   }
   // Wake bit: queued work, or an expired own claim ready for regrant.
   hasWakeFor(worker) { return this.hasQueuedFor([worker])||this.idleClaims(worker).length>0; }
-  listPending(worker='dot') {
+  // Persist the selected IDs before any asynchronous preflight. An exact retry
+  // may recover existing live grants but must never consume new queue entries,
+  // even after a process restart or an interrupted/partly refused first call.
+  async claimBatch({next,available,worker,subject,connectionId,claimant,acquisitionId,leaseMs},grant) {
+    if(!Number.isInteger(next)||next<1||next>8) throw new Error('invalid next');
+    if(typeof acquisitionId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(acquisitionId)) throw new Error('batch claim requires acquisition_id');
+    if(this.paused()) throw new Error(pausedClaimMessage);
+    const hash=(...values)=>createHash('sha256').update(JSON.stringify(values)).digest('hex');
+    const key='claim_batch_v1_'+hash(worker,subject,acquisitionId);
+    const parameters=hash(connectionId,claimant,next,leaseMs??null);
+    const plan=this.transaction(()=>{
+      const previous=this.db.prepare('SELECT value FROM bridge_state WHERE key=?').get(key);
+      if(previous) {
+        const saved=JSON.parse(previous.value);
+        if(saved.parameters!==parameters) throw new Error('batch acquisition parameters changed');
+        return {ids:saved.ids,retry:true};
+      }
+      const ids=available>0?this.listPending(worker,{batch:true}).filter(item=>!item.blocked)
+        .slice(0,Math.min(next,available)).map(item=>item.request_id):[];
+      this.db.prepare('INSERT INTO bridge_state(key,value) VALUES(?,?)').run(key,JSON.stringify({parameters,ids}));
+      return {ids,retry:false};
+    });
+    const replies=[];
+    for(const id of plan.ids) {
+      const perJob='batch_'+hash(key,id);
+      if(plan.retry) {
+        const held=this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id);
+        if(held?.worker!==worker||!this.isExactClaimRetry(held,claimant,subject,perJob)) continue;
+      }
+      try {
+        const reply=await grant(id,perJob,plan.retry?'retry':'queued');
+        if(!reply?.claim_id||reply.error)break;
+        replies.push(reply);
+      } catch {
+        // A later refusal cannot erase the successful prefix of the batch.
+        break;
+      }
+    }
+    // A reused acquisition_id names a batch that is over: say so instead of answering with an empty batch forever.
+    if(plan.retry&&!replies.length) throw new Error('acquisition_id was already used for a batch whose claims have all ended; call claim again with a fresh acquisition_id');
+    return {claims:replies,retry:plan.retry};
+  }
+
+  listPending(worker='dot',{batch=false}={}) {
     // Recheck historical refusals against one lazily loaded configuration per listing.
     // Listing is read-only: it neither deletes audit evidence nor grants approval.
     let loaded=false,failed=false,profile,loadError;
@@ -2611,7 +2679,8 @@ export class Store {
         return !(!approval&&!current||approval&&current?.revision===approval.revision&&current.policy.allowed);
       } catch { return true; }
     };
-    const assignments=this.db.prepare(`SELECT request_id,payload,created_at,priority,review,EXISTS(SELECT 1 FROM destination_blocks b WHERE b.request_id=assignments.request_id) blocked FROM assignments WHERE status='queued' AND ${live(this.nowMs())} ORDER BY ${LIST_ORDER}`).all().filter(a=>this.mayAct(worker,a.request_id)&&this.protocolListingLive(a.request_id)).map(a=>({...a,blocked:!!a.blocked&&blocked(a.request_id)})).sort((a,b)=>Number(a.blocked)-Number(b.blocked)).slice(0,50).map(a=>({kind:'assignment',request_id:a.request_id,title:JSON.parse(a.payload).brief.slice(0,160),created_at:a.created_at,...(a.blocked?{blocked:true}:triageFields(JSON.parse(a.payload),a))}));
+    const assignments=this.db.prepare(`SELECT request_id,payload,created_at,priority,review,EXISTS(SELECT 1 FROM destination_blocks b WHERE b.request_id=assignments.request_id) blocked FROM assignments WHERE status='queued' AND ${live(this.nowMs())}${batch?' AND skipped_at IS NULL':''} ORDER BY ${LIST_ORDER}`).all().filter(a=>this.mayAct(worker,a.request_id)&&this.protocolListingLive(a.request_id)&&(!batch||!this.isProtocolJob(a.request_id)&&!this.pullQueue.row(a.request_id))).map(a=>({...a,blocked:!!a.blocked&&blocked(a.request_id)})).sort((a,b)=>Number(a.blocked)-Number(b.blocked)).slice(0,50).map(a=>({kind:'assignment',request_id:a.request_id,title:JSON.parse(a.payload).brief.slice(0,160),created_at:a.created_at,...(a.blocked?{blocked:true}:triageFields(JSON.parse(a.payload),a))}));
+    if(batch) return assignments;
     const messages=this.listMessages(worker).map(m=>({kind:'message',request_id:m.message_id,message_id:m.message_id,title:m.preview,created_at:m.created_at})).sort((a,b)=>a.created_at.localeCompare(b.created_at));
     const resumes=this.idleClaims(worker).filter(c=>this.protocolListingLive(c.request_id)).map(c=>({kind:'assignment',request_id:c.request_id,resume:true,idle_seconds:Math.floor(this.claimIdleMs(c)/1000),previous_epoch:c.epoch,
       ...(this.db.prepare('SELECT 1 FROM destination_blocks WHERE request_id=?').get(c.request_id)&&blocked(c.request_id)?{blocked:true}:{}),
@@ -2704,11 +2773,19 @@ export class Store {
     } catch(error) { throw this.destinationConfigurationError(id,error); }
     if(digest!==approval.snapshot.connections_digest)throw refuse('Claim retry refused: the approved connection set changed.');
   }
-  claim(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,ctx=null,connectionId=null) {
+  claim(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,ctx=null,connectionId=null,batchMode=null) {
     const requestedLeaseMs=arguments[7]??null;
-    return nonterminalOutcome(id,this.destinationOutcome(this.transaction(()=>this.isProtocolJob(id)
-      ?this.protocolClaimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,ctx?{...ctx,requestedLeaseMs}:ctx,connectionId)
-      :this.claimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,connectionId))));
+    const claim=this.destinationOutcome(this.transaction(()=>{
+      if(batchMode==='queued') {
+        const selected=this.db.prepare('SELECT status,skipped_at FROM assignments WHERE request_id=?').get(id);
+        if(selected?.status!=='queued'||selected.skipped_at!==null) throw new Error('batch assignment no longer eligible');
+      }
+      if(batchMode==='retry'&&!this.isExactClaimRetry(this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id),claimant,subject,acquisitionId)) throw new Error('batch grant no longer live');
+      return this.isProtocolJob(id)
+        ?this.protocolClaimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,ctx?{...ctx,requestedLeaseMs}:ctx,connectionId)
+        :this.claimInTransaction(id,claimant,subject,capacity,preflight,worker,acquisitionId,leaseMs,connectionId);
+    }));
+    return nonterminalOutcome(id,{...claim,...this.heartbeatForHeldClaim(id,claim.claim_id,worker)});
   }
   claimInTransaction(id,claimant,subject='local-principal',capacity=1,preflight=null,worker='dot',acquisitionId=null,leaseMs=this.limits.leaseMs,connectionId=null) {
     if(!this.db.isTransaction)protocolError('transaction_required');
@@ -2969,7 +3046,7 @@ export class Store {
       return {...receipt.value,revision:receipt.revision};
     });
     // Decorate after replay validation too, including receipts stored before this field existed.
-    return question?result:nonterminalOutcome(id,result);
+    return question?result:nonterminalOutcome(id,{...result,...this.heartbeatForHeldClaim(id,claimId,worker)});
   }
   progressInTransaction(id,claimId,note,subject='local-principal',blocker=false,worker='dot',question=null) {
     if(!this.db.isTransaction) throw new Error('progress requires a caller-owned transaction');
@@ -3577,7 +3654,7 @@ export class Store {
       const workerCounts=this.db.prepare(`SELECT status,count(*) count FROM assignments WHERE target_worker=? AND (status<>'queued' OR ${live(this.nowMs())}) GROUP BY status`).all(worker).filter(row=>row.count>0);
       const liveQueued=this.queuedRows().filter(row=>row.target_worker===worker);
       const queuedNormal=liveQueued.filter(row=>row.priority==='normal').length;
-      return [worker,{scope:'worker',counts:workerCounts,queued_expired:expired,queued_expired_requeued:requeued,active_claims:liveness.claimed_outer_count,queued_live:liveQueued.length,queued_normal:queuedNormal,subscriptions_active:workerSubscriptions.length,capacity:this.workerCapacityEvidence(worker,workerSubscriptions,limits,capacity),last_call_at:liveness.last_worker_call_at,last_list_pending_at:liveness.last_list_pending_at,stale_claims:liveness.stale_claims,queue_classes:liveness.queue_classes,unclaimed_after_reannounce:liveness.unclaimed_after_reannounce,oldest_claim_age_ms:liveness.oldest_claim_age_ms,oldest_claim_progress_age_ms:liveness.oldest_claim_progress_age_ms,oldest_unclaimed_event_2xx_age_ms:liveness.oldest_unclaimed_event_2xx_age_ms,silence_ms:liveness.worker_silence_ms}];
+      return [worker,{scope:'worker',...(Object.hasOwn(limits.workerHeartbeatMs??{},worker)?{heartbeat_ms:limits.workerHeartbeatMs[worker]}:{}),counts:workerCounts,queued_expired:expired,queued_expired_requeued:requeued,active_claims:liveness.claimed_outer_count,queued_live:liveQueued.length,queued_normal:queuedNormal,subscriptions_active:workerSubscriptions.length,capacity:this.workerCapacityEvidence(worker,workerSubscriptions,limits,capacity),last_call_at:liveness.last_worker_call_at,last_list_pending_at:liveness.last_list_pending_at,stale_claims:liveness.stale_claims,queue_classes:liveness.queue_classes,unclaimed_after_reannounce:liveness.unclaimed_after_reannounce,oldest_claim_age_ms:liveness.oldest_claim_age_ms,oldest_claim_progress_age_ms:liveness.oldest_claim_progress_age_ms,oldest_unclaimed_event_2xx_age_ms:liveness.oldest_unclaimed_event_2xx_age_ms,silence_ms:liveness.worker_silence_ms}];
     }));
     const queuedByWorker=new Map(this.db.prepare(`SELECT target_worker worker,count(*) n,min(created_at) oldest FROM assignments
       WHERE status='queued' AND cancelled_at IS NULL AND skipped_at IS NULL AND ${live(this.nowMs())} GROUP BY target_worker`).all().map(r=>[r.worker,r]));
