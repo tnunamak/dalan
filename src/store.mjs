@@ -3543,7 +3543,12 @@ export class Store {
     const lastClaim=this.db.prepare("SELECT max(claimed_at) last_claim FROM claims WHERE worker='dot'").get().last_claim;
     const uncertain=this.db.prepare("SELECT count(*) n FROM notifications WHERE state='uncertain' AND kind IN ('t3','watch','blocker','break','event')").get().n;
     const pause=this.db.prepare('SELECT paused_at,reason FROM operator_state WHERE id=1').get();
-    const {n:queued,oldest:oldestUnskipped}=this.db.prepare(`SELECT count(*) n,min(created_at) oldest FROM assignments WHERE target_worker='dot' AND status='queued' AND cancelled_at IS NULL AND skipped_at IS NULL AND ${live(this.nowMs())}`).get();
+    const queuedByWorker=new Map(this.db.prepare(`WITH live_queue AS (
+      SELECT target_worker worker,request_id,created_at,
+        count(*) OVER (PARTITION BY target_worker) n,
+        row_number() OVER (PARTITION BY target_worker ORDER BY created_at,request_id) rank
+      FROM assignments WHERE status='queued' AND cancelled_at IS NULL AND skipped_at IS NULL AND ${live(this.nowMs())})
+      SELECT worker,n,created_at oldest,request_id FROM live_queue WHERE rank=1`).all().map(r=>[r.worker,r]));
     const dotQueuedWithoutSubscription=active.length===0&&!!this.db.prepare(`SELECT 1 FROM assignments WHERE target_worker='dot' AND status='queued' AND ${live(this.nowMs())} LIMIT 1`).get();
     const subscription={state:!sub?'absent':sub.state==='revoked'?'revoked':sub.rotation_blocked?'rotation_blocked':sub.auth_failures>=3?'callback_blocked':sub.expires_at<=this.stamp()?'expired':'active',expires_at:sub?.expires_at||null,last_verified_at:sub?.verified_at||null,last_event_2xx_at:sub?.last_event_2xx_at||null,last_claim_at:lastClaim,principal:sub?.principal||null,auth_failures:sub?.auth_failures||0};
     const priority_counts=Object.fromEntries(['normal','background'].map(priority=>[priority,Object.fromEntries(['queued','claimed'].map(status=>[status,this.db.prepare(`SELECT count(*) n FROM assignments WHERE priority=? AND status=? AND (status<>'queued' OR ${live(this.nowMs())})`).get(priority,status).n]))]));
@@ -3555,11 +3560,12 @@ export class Store {
     const dotCapacity=this.workerCapacityEvidence('dot',active,limits,capacity);
     const freeLanes=dotCapacity.free_lanes;
     const legacyScope=this.workers.legacy===true||this.workers.workers.has('dot')?'dot':'none';
-    const dispatchState=(free,liveCount,first)=>({
-      state:pause.paused_at?'paused':free===null?'unknown':free<=0?'full':liveCount>0?'dispatch_gap':'supply_gap',
-      free_lanes:free,queued_live:liveCount,oldest_unclaimed_age_ms:first?this.nowMs()-Date.parse(first):null
+    const dispatchState=(free,first)=>({
+      state:pause.paused_at?'paused':free===null?'unknown':free<=0?'full':(first?.n??0)>0?'dispatch_gap':'supply_gap',
+      free_lanes:free,queued_live:first?.n??0,oldest_unclaimed_age_ms:first?.oldest?this.nowMs()-Date.parse(first.oldest):null,
+      oldest_unclaimed_request_id:first?.request_id??null
     });
-    const dispatch={scope:legacyScope,...dispatchState(freeLanes,queued,oldestUnskipped)};
+    const dispatch={scope:legacyScope,...dispatchState(freeLanes,queuedByWorker.get('dot'))};
     const workerNames=new Set([...this.workers.workers.keys(),...this.db.prepare('SELECT DISTINCT target_worker worker FROM assignments').all().map(r=>r.worker),...this.db.prepare('SELECT DISTINCT worker FROM claims').all().map(r=>r.worker)]);
     const by_worker=Object.fromEntries([...workerNames].sort().map(worker=>{
       const workerSubscriptions=worker==='dot'?active:this.activeSubscriptions().filter(row=>row.worker===worker);
@@ -3570,12 +3576,9 @@ export class Store {
       const queuedNormal=liveQueued.filter(row=>row.priority==='normal').length;
       return [worker,{scope:'worker',counts:workerCounts,queued_expired:expired,queued_expired_requeued:requeued,active_claims:liveness.claimed_outer_count,queued_live:liveQueued.length,queued_normal:queuedNormal,subscriptions_active:workerSubscriptions.length,capacity:this.workerCapacityEvidence(worker,workerSubscriptions,limits,capacity),last_call_at:liveness.last_worker_call_at,last_list_pending_at:liveness.last_list_pending_at,stale_claims:liveness.stale_claims,queue_classes:liveness.queue_classes,unclaimed_after_reannounce:liveness.unclaimed_after_reannounce,oldest_claim_age_ms:liveness.oldest_claim_age_ms,oldest_claim_progress_age_ms:liveness.oldest_claim_progress_age_ms,oldest_unclaimed_event_2xx_age_ms:liveness.oldest_unclaimed_event_2xx_age_ms,silence_ms:liveness.worker_silence_ms}];
     }));
-    const queuedByWorker=new Map(this.db.prepare(`SELECT target_worker worker,count(*) n,min(created_at) oldest FROM assignments
-      WHERE status='queued' AND cancelled_at IS NULL AND skipped_at IS NULL AND ${live(this.nowMs())} GROUP BY target_worker`).all().map(r=>[r.worker,r]));
     dispatch.by_worker=Object.fromEntries([...this.workers.workers.keys()].sort().map(worker=>{
-      const {n=0,oldest=null}=queuedByWorker.get(worker)??{};
       const evidence=by_worker[worker].capacity;
-      return [worker,{...dispatchState(evidence.free_lanes,n,oldest),...(evidence.worker_max_claims===undefined?{}:{worker_max_claims:evidence.worker_max_claims})}];
+      return [worker,{...dispatchState(evidence.free_lanes,queuedByWorker.get(worker)),...(evidence.worker_max_claims===undefined?{}:{worker_max_claims:evidence.worker_max_claims})}];
     }));
     const released=this.db.prepare("SELECT id,id notice_id,request_id,message_id,subscription_id,attempt_id,attempt_started_at,terminal_at,terminal_reason FROM notifications WHERE state='uncertain_terminal' ORDER BY terminal_at DESC LIMIT 20").all();
     return {held_wakes:this.db.prepare("SELECT count(*) n FROM notifications WHERE held_kind IS NOT NULL AND state IN ('pending','quiet')").get().n,dispatch,liveness_scope:legacyScope,counts,counts_scope:'global',by_worker,priority_counts,priority_counts_scope:'global',background_max_in_flight:backgroundMaxInFlight,skipped_by_worker:(skipped=>({count:skipped.length,request_ids:skipped.slice(0,20).map(x=>x.request_id)}))(this.skippedByDot()),claim_denied:{count:denied.length,request_ids:denied.map(d=>d.request_id).slice(0,20),capacity_hold_until:this.capacityHoldUntil()},subscriptions_active:active.length,last_verified:sub?.verified_at||null,oldest_pending:oldest,last_claim:lastClaim,last_claim_at:lastClaim,subscription,queued_without_active_subscription:dotQueuedWithoutSubscription,oldest_queue_age_ms:oldest?this.nowMs()-Date.parse(oldest):null,uncertain_deliveries:uncertain,uncertain_terminal_deliveries:released,queued_expired:queuedExpired,queued_expired_requeued:queuedExpiredRequeued,paused:!!pause.paused_at,pause_reason:pause.reason,...(({items,...rest})=>rest)(this.liveness(limits,capacity)),worker_break:this.breakState(),throttle,budget,...statusEvidence(this)};
